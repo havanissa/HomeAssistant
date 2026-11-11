@@ -10,13 +10,18 @@
  * Simple by default: one mood, one light type, one thing at a time.
  * Everything else (inheritance, raw values, diagnostics) is under Advanced.
  *
+ * 0.3.2: brightness and colour temperature can follow the existing global
+ * adjustment (Follow global / Global + offset / Fixed / Ignore), "Every mood"
+ * entries attach that to light types and single lights, and Main Mood =
+ * Manual pauses all automatic lighting (shown as a banner).
+ *
  * The cards are editors only: the integration owns the configuration
  * (websocket API, admin-only writes). The cards never call a light service and
  * a preview never changes a light. They refetch only when the integration
  * reports a change.
  */
 
-const VERSION = "0.3.1";
+const VERSION = "0.3.2";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -63,6 +68,34 @@ const colourName = (rgb) => {
 };
 
 const ACTION_WORDS = { on: "On", off: "Off", ignore: "Leave unchanged", inherit: "Not set" };
+const ALL = "*";
+const MODE_WORDS = { global: "Follow global", offset: "Global + offset", fixed: "Fixed", ignore: "Ignore" };
+const MODES = ["global", "offset", "fixed", "ignore"];
+const MANUAL_TEXT = "Manual control — automatic lighting paused";
+const moodLabel = (m) => (m === ALL ? "Every mood" : m);
+const signed = (n, unit) => `${n > 0 ? "+" : n < 0 ? "−" : "±"}${Math.abs(n)}${unit}`;
+// Brightness / colour temperature mode of a resolved setting (a value without a mode is fixed).
+const bMode = (s) => (s ? s.brightness_mode || (s.brightness_pct != null ? "fixed" : null) : null);
+const kMode = (s) => (s ? s.color_temp_mode || (s.color_temp_kelvin != null ? "fixed" : null) : null);
+// "62 % global", "42 % global −20", "Global (no value)".
+const bText = (s) => {
+  const m = bMode(s);
+  if (m === "global" || m === "offset") {
+    const off = m === "offset" ? ` ${signed(s.brightness_offset || 0, "")}` : "";
+    return s.brightness_pct != null ? `${s.brightness_pct} % global${off}` : `global${off} (no value)`;
+  }
+  return s.brightness_pct != null ? `${s.brightness_pct} %` : null;
+};
+const kText = (s) => {
+  const m = kMode(s);
+  if (m === "global" || m === "offset") {
+    const off = m === "offset" ? ` ${signed(s.color_temp_offset || 0, " K")}` : "";
+    const sup = s.adaptive?.color_temp?.status === "suppressed";
+    if (sup) return null;
+    return s.color_temp_kelvin != null ? `${s.color_temp_kelvin} K global${off}` : `global${off} K (no value)`;
+  }
+  return s.color_temp_kelvin != null ? `${s.color_temp_kelvin} K` : null;
+};
 
 // Short, readable result: "Off", "40 % · 2700 K", "Amber · 30 %", "Not set".
 // A resolved setting nobody configured (no source for its action).
@@ -74,12 +107,34 @@ const summary = (s) => {
   const parts = [];
   if (s.rgb_color) parts.push(colourName(s.rgb_color));
   else if (s.hs_color) parts.push(colourName(hsToRgb(s.hs_color)));
-  if (s.brightness_pct != null) parts.push(`${s.brightness_pct} %`);
-  if (s.color_temp_kelvin != null) parts.push(`${s.color_temp_kelvin} K`);
+  const b = bText(s); const k = kText(s);
+  if (b) parts.push(b);
+  if (k) parts.push(k);
   if (s.effect) parts.push(s.effect);
   return parts.length ? parts.join(" · ") : "On";
 };
+// Settings of an "every mood" entry, which has no action: "Brightness global · Temperature ignore".
+const modesSummary = (s) => {
+  if (!s) return "Not set";
+  const parts = [];
+  if (bMode(s)) parts.push(`Brightness ${bMode(s) === "offset" ? `global ${signed(s.brightness_offset || 0, "")}` : bMode(s) === "fixed" ? `${s.brightness_pct} %` : bMode(s)}`);
+  if (s.rgb_color || s.hs_color) parts.push(colourName(s.rgb_color || hsToRgb(s.hs_color)));
+  else if (kMode(s)) parts.push(`Temperature ${kMode(s) === "offset" ? `global ${signed(s.color_temp_offset || 0, " K")}` : kMode(s) === "fixed" ? `${s.color_temp_kelvin} K` : kMode(s)}`);
+  return parts.length ? parts.join(" · ") : "Not set";
+};
+const manualBanner = (m) => (m && m.manual_mode ? `<div class="note warn" role="status"><b>${MANUAL_TEXT}</b>
+  <div class="sub">Main Mood is Manual. Nothing is switched or adjusted automatically; occupancy and diagnostics continue. Choose another mood to resume.</div></div>` : "");
+const globalNow = (a) => {
+  if (!a || a.status === "not_configured") return "Not configured";
+  const v = a.values || {};
+  const parts = [];
+  if (v.brightness?.status !== "not_configured") parts.push(v.brightness?.value != null ? `${Math.round(v.brightness.value)} %` : "— %");
+  if (v.color_temp?.status !== "not_configured") parts.push(v.color_temp?.value != null ? `${Math.round(v.color_temp.value)} K` : "— K");
+  return parts.join(" · ");
+};
+const STATUS_WORDS = { connected: "Connected", unavailable: "Unavailable", not_configured: "Not configured", stale: "Unavailable (last value used)" };
 const dot = (s) => {
+  if (s && s.action !== "on" && s.action !== "off" && (bMode(s) || kMode(s))) return `<span class="dot none"></span>`;
   if (!s || s.action !== "on") return `<span class="dot ${s && s.action === "off" ? "off" : "none"}"></span>`;
   const c = s.rgb_color ? rgbCss(s.rgb_color) : s.hs_color ? rgbCss(hsToRgb(s.hs_color)) : kelvinCss(s.color_temp_kelvin);
   return `<span class="dot" style="background:${c}"></span>`;
@@ -234,8 +289,13 @@ class SoLightingBase extends HTMLElement {
     const inh = ctx.inherited || {};
     const eff = { ...inh, ...Object.fromEntries(Object.entries(own).filter(([, v]) => v != null)) };
     if (own.action === "inherit" || !own.action) eff.action = inh.action || "ignore";
-    if (own.rgb_color || own.hs_color) delete eff.color_temp_kelvin;
-    if (own.color_temp_kelvin) { delete eff.rgb_color; delete eff.hs_color; }
+    if (own.rgb_color || own.hs_color) { delete eff.color_temp_kelvin; delete eff.color_temp_mode; delete eff.color_temp_offset; }
+    if (own.color_temp_kelvin || ["global", "offset", "fixed"].includes(own.color_temp_mode)) { delete eff.rgb_color; delete eff.hs_color; }
+    if (own.brightness_pct != null && !own.brightness_mode) eff.brightness_mode = "fixed";
+    if (own.color_temp_kelvin != null && !own.color_temp_mode) eff.color_temp_mode = "fixed";
+    const every = ctx.mood === ALL;
+    const glob = (this._model && this._model.adaptive) || {};
+    const gv = glob.values || {};
     const ro = !this._canEdit ? "disabled" : "";
     const caps = ctx.caps || {};
     const k = esc(key);
@@ -254,25 +314,66 @@ class SoLightingBase extends HTMLElement {
       html += `<label class="switch rgbtoggle"><input type="checkbox" data-ed="${k}" data-rgb-toggle ${ctx.target.endsWith("+rgb") ? "checked" : ""}>
         Only the RGB-tagged lights of this type (${ctx.rgbToggle} light${ctx.rgbToggle === 1 ? "" : "s"})</label>`;
     }
-    html += `<div class="segs">
+    if (every) {
+      html += `<div class="hint">Applies in every mood unless a mood sets its own value. It never switches lights on or off.</div>`;
+    } else {
+      html += `<div class="segs">
       ${room || inheritedLabel ? seg("inherit", room ? `Follow ${ctx.scope === "light" ? "room" : "global"}${inheritedLabel ? ` (${inheritedLabel})` : ""}` : `Not set${inheritedLabel ? ` (${inheritedLabel})` : ""}`, !ownAction) : ""}
       ${seg("on", "On", ownAction === "on")}${seg("off", "Off", ownAction === "off")}
       ${seg("ignore", "Leave unchanged", ownAction === "ignore")}</div>`;
-    if (eff.action === "on") {
+    }
+    // Brightness / colour temperature: Follow global · Global + offset · Fixed · Ignore.
+    const modeSegs = (attr, current) => `<div class="segs small">${MODES.map((m) => `<button class="seg ${current === m ? "on" : ""}"
+      data-ed="${k}" data-${attr}="${m}" ${ro}>${esc(MODE_WORDS[m])}</button>`).join("")}</div>`;
+    const srcNote = (kind, word) => {
+      const src = gv[kind] || {};
+      if (!src.entity_id) return `<span class="sub warn">No global ${word} source yet: set it under Global light adjustment.</span>`;
+      if (src.value == null) return `<span class="sub warn">Global ${word} is unavailable: left unchanged.</span>`;
+      return "";
+    };
+    if (eff.action === "on" || every) {
       if (caps.brightness !== false) {
-        const b = eff.brightness_pct ?? 100;
-        html += `<div class="frow"><label>Brightness ${from("brightness_pct")}</label><div class="fval">
+        const m = bMode(eff);
+        const gb = gv.brightness?.value != null ? Math.round(gv.brightness.value) : null;
+        html += `<div class="frow"><label>Brightness ${m && !own.brightness_mode && own.brightness_pct == null ? from(eff.brightness_mode ? "brightness_mode" : "brightness_pct") : ""}</label><div class="fval">${modeSegs("bmode", m)}</div></div>`;
+        if (m === "fixed") {
+          const b = eff.brightness_pct ?? 100;
+          html += `<div class="frow"><label></label><div class="fval">
           <input type="range" min="1" max="100" value="${esc(b)}" data-ed="${k}" data-field="brightness_pct" ${ro}>
           <b class="val" data-out="${k}">${esc(b)} %</b></div></div>`;
+        } else if (m === "offset") {
+          const o = eff.brightness_offset ?? 0;
+          html += `<div class="frow"><label></label><div class="fval">
+          <input type="range" min="-50" max="50" step="1" value="${esc(o)}" data-ed="${k}" data-field="brightness_offset" ${ro}>
+          <b class="val" data-out-bo="${k}">${esc(signed(o, " %"))}</b><span class="sub">${gb != null ? `now ${Math.max(1, Math.min(100, gb + o))} %` : ""}</span>${srcNote("brightness", "brightness")}</div></div>`;
+        } else if (m === "global") {
+          html += `<div class="frow"><label></label><div class="fval"><span class="sub">${gb != null ? `Now ${gb} %` : ""}</span>${srcNote("brightness", "brightness")}</div></div>`;
+        }
       }
-      const colourMode = eff.rgb_color || eff.hs_color ? "colour" : eff.color_temp_kelvin != null ? "white" : "none";
-      if (caps.color_temp || caps.color) {
+      const colourMode = eff.rgb_color || eff.hs_color ? "colour" : kMode(eff) ? "white" : "none";
+      if (caps.color_temp || caps.color || every) {
         const lo = caps.min_kelvin || 2200; const hi = caps.max_kelvin || 6500;
-        html += `<div class="frow"><label>White ${colourMode === "white" ? from("color_temp_kelvin") : ""}</label><div class="fval">
-          ${WHITES.filter(([, kv]) => kv >= lo - 100 && kv <= hi + 100).map(([n, kv]) => `<button class="chip ${colourMode === "white" && Math.abs(eff.color_temp_kelvin - kv) < 60 ? "on" : ""}" data-ed="${k}" data-kelvin="${kv}" ${ro}>
+        const m = colourMode === "colour" ? null : kMode(eff);
+        const gk = gv.color_temp?.value != null ? Math.round(gv.color_temp.value) : null;
+        html += `<div class="frow"><label>Temperature ${m && !own.color_temp_mode && own.color_temp_kelvin == null ? from(eff.color_temp_mode ? "color_temp_mode" : "color_temp_kelvin") : ""}</label><div class="fval">${modeSegs("kmode", m)}
+          ${colourMode === "colour" ? `<span class="sub">A colour is set, so the temperature is not used.</span>` : ""}</div></div>`;
+        if (m === "fixed") {
+          html += `<div class="frow"><label></label><div class="fval">
+          ${WHITES.filter(([, kv]) => kv >= lo - 100 && kv <= hi + 100).map(([n, kv]) => `<button class="chip ${Math.abs((eff.color_temp_kelvin ?? 0) - kv) < 60 ? "on" : ""}" data-ed="${k}" data-kelvin="${kv}" ${ro}>
             <span class="dot" style="background:${kelvinCss(kv)}"></span>${n}</button>`).join("")}
-          ${colourMode === "white" ? `<input type="range" min="${lo}" max="${hi}" step="50" value="${esc(eff.color_temp_kelvin)}" data-ed="${k}" data-field="color_temp_kelvin" ${ro}>
+          ${eff.color_temp_kelvin != null ? `<input type="range" min="${lo}" max="${hi}" step="50" value="${esc(eff.color_temp_kelvin)}" data-ed="${k}" data-field="color_temp_kelvin" ${ro}>
             <b class="val" data-out-k="${k}">${esc(eff.color_temp_kelvin)} K</b>` : ""}</div></div>`;
+        } else if (m === "offset") {
+          const o = eff.color_temp_offset ?? 0;
+          html += `<div class="frow"><label></label><div class="fval">
+          <input type="range" min="-1500" max="1500" step="50" value="${esc(o)}" data-ed="${k}" data-field="color_temp_offset" ${ro}>
+          <b class="val" data-out-ko="${k}">${esc(signed(o, " K"))}</b><span class="sub">${gk != null ? `now ${gk + o} K` : ""}</span>${srcNote("color_temp", "temperature")}</div></div>`;
+        } else if (m === "global") {
+          html += `<div class="frow"><label></label><div class="fval"><span class="sub">${gk != null ? `Now ${gk} K` : ""}</span>${srcNote("color_temp", "temperature")}</div></div>`;
+        }
+        if (caps.known && !caps.color_temp && (m === "global" || m === "offset")) {
+          html += `<div class="hint">These lights have no white temperature mode; they follow the global brightness only.</div>`;
+        }
       }
       if (caps.color) {
         const current = eff.rgb_color || (eff.hs_color ? hsToRgb(eff.hs_color) : null);
@@ -281,7 +382,7 @@ class SoLightingBase extends HTMLElement {
             style="background:${rgbCss(c)}" data-ed="${k}" data-rgb="${c.join(",")}" ${ro}></button>`).join("")}
           <input type="color" title="Any colour" value="#${(current || [255, 150, 40]).map((x) => x.toString(16).padStart(2, "0")).join("")}" data-ed="${k}" data-field="rgb_color" ${ro}></div></div>`;
       }
-      if ((caps.effects || []).length) {
+      if ((caps.effects || []).length && !every) {
         html += `<div class="frow"><label>Effect ${from("effect")}</label><div class="fval"><select data-ed="${k}" data-field="effect" ${ro}>
           <option value="">None</option>${caps.effects.map((e) => `<option ${e === eff.effect ? "selected" : ""}>${esc(e)}</option>`).join("")}</select></div></div>`;
       }
@@ -292,18 +393,19 @@ class SoLightingBase extends HTMLElement {
     // Advanced: transition, ambient, inheritance details, per-field reset.
     const adv = this._ui.editorAdv;
     html += `<details class="eadv" ${adv ? "open" : ""}><summary data-action="toggle-editor-adv">Advanced</summary>
-      <div class="frow"><label>Transition</label><div class="fval"><input type="number" class="num" min="0" max="300" step="0.5"
+      ${every ? "" : `<div class="frow"><label>Transition</label><div class="fval"><input type="number" class="num" min="0" max="300" step="0.5"
         value="${esc(own.transition ?? "")}" placeholder="${esc(inh.transition ?? "–")}" data-ed="${k}" data-field="transition" ${ro}> s</div></div>
       <div class="frow"><label>Ambient</label><div class="fval"><select data-ed="${k}" data-field="persistent" ${ro}>
         <option value="inherit" ${own.persistent == null ? "selected" : ""}>Inherit (${inh.persistent ? "yes" : "no"})</option>
         <option value="yes" ${own.persistent === true ? "selected" : ""}>Yes: follow the mood even when the room is empty</option>
-        <option value="no" ${own.persistent === false ? "selected" : ""}>No: only while occupied</option></select></div></div>
-      <div class="kvlist">${["action", "brightness_pct", "color_temp_kelvin", "rgb_color", "hs_color", "effect", "transition", "persistent"]
+        <option value="no" ${own.persistent === false ? "selected" : ""}>No: only while occupied</option></select></div></div>`}
+      <div class="sub">Reset a value to inherit it again.</div>
+      <div class="kvlist">${["action", "brightness_mode", "brightness_pct", "brightness_offset", "color_temp_mode", "color_temp_kelvin", "color_temp_offset", "rgb_color", "hs_color", "effect", "transition", "persistent"]
         .filter((f) => own[f] != null || inh[f] != null).map((f) => `<div><span>${esc(f)}</span>
           <b>${esc(JSON.stringify(own[f] ?? inh[f]))}</b> <span class="sub">${own[f] != null ? "set here" : `inherited · ${esc(sourceText((inh.sources || {})[f], ctx.mood))}`}</span>
           ${own[f] != null && f !== "action" && !ro ? `<button class="link" data-ed="${k}" data-clear="${f}">reset</button>` : ""}</div>`).join("")}</div>
     </details>
-    <div class="erow"><span class="sub">Result: <b>${esc(summary(ctx.effective))}</b></span>
+    <div class="erow"><span class="sub">Result: <b>${esc(every ? modesSummary(ctx.effective) : summary(ctx.effective))}</b></span>
       ${ctx.own && !ro ? `<button class="link" data-action="reset" data-key="${k}">${room ? "Remove override" : `Remove from ${esc(ctx.mood)}`}</button>` : ""}
       ${this._statusHtml(key)}${ro ? `<span class="muted">Read only (administrator required)</span>` : ""}</div>
     </div>`;
@@ -315,7 +417,8 @@ class SoLightingBase extends HTMLElement {
     if (!ctx) return;
     const own = { ...(ctx.own || { action: "inherit" }) };
     change(own, ctx);
-    if (own.action === "off") ["brightness_pct", "color_temp_kelvin", "rgb_color", "hs_color", "effect"].forEach((f) => delete own[f]);
+    if (own.action === "off") ["brightness_pct", "color_temp_kelvin", "rgb_color", "hs_color", "effect", "brightness_mode",
+      "brightness_offset", "color_temp_mode", "color_temp_offset"].forEach((f) => delete own[f]);
     Object.keys(own).forEach((f) => (own[f] === undefined || own[f] === "") && delete own[f]);
     if (!own.action) own.action = "inherit";
     ctx.own = own;
@@ -337,6 +440,10 @@ class SoLightingBase extends HTMLElement {
     } else if (el.dataset.field === "color_temp_kelvin") {
       const out = this.shadowRoot.querySelector(`[data-out-k="${CSS.escape(el.dataset.ed)}"]`);
       if (out) out.textContent = `${el.value} K`;
+    } else if (el.dataset.field === "brightness_offset" || el.dataset.field === "color_temp_offset") {
+      const kelvin = el.dataset.field === "color_temp_offset";
+      const out = this.shadowRoot.querySelector(`[data-out-${kelvin ? "ko" : "bo"}="${CSS.escape(el.dataset.ed)}"]`);
+      if (out) out.textContent = signed(Number(el.value), kelvin ? " K" : " %");
     }
   }
 
@@ -346,11 +453,14 @@ class SoLightingBase extends HTMLElement {
     if (key) {
       const f = el.dataset.field;
       if (el.dataset.rgbToggle !== undefined) { this._switchRgb(key, el.checked); return; }
-      if (f === "brightness_pct") this._editorUpdate(key, (o) => { o.brightness_pct = Math.round(Number(el.value)); if (!o.action || o.action === "inherit") o.action = "on"; }, false);
-      else if (f === "color_temp_kelvin") this._editorUpdate(key, (o) => { o.color_temp_kelvin = Math.round(Number(el.value)); delete o.rgb_color; delete o.hs_color; }, false);
+      const every = this._editorCtx[key]?.mood === ALL;
+      if (f === "brightness_pct") this._editorUpdate(key, (o) => { o.brightness_pct = Math.round(Number(el.value)); o.brightness_mode = "fixed"; delete o.brightness_offset; if (!every && (!o.action || o.action === "inherit")) o.action = "on"; }, false);
+      else if (f === "brightness_offset") this._editorUpdate(key, (o) => { o.brightness_offset = Math.round(Number(el.value)); o.brightness_mode = "offset"; }, false);
+      else if (f === "color_temp_offset") this._editorUpdate(key, (o) => { o.color_temp_offset = Math.round(Number(el.value)); o.color_temp_mode = "offset"; delete o.rgb_color; delete o.hs_color; }, false);
+      else if (f === "color_temp_kelvin") this._editorUpdate(key, (o) => { o.color_temp_kelvin = Math.round(Number(el.value)); o.color_temp_mode = "fixed"; delete o.color_temp_offset; delete o.rgb_color; delete o.hs_color; }, false);
       else if (f === "rgb_color") {
         const m = /^#(..)(..)(..)$/.exec(el.value);
-        if (m) this._editorUpdate(key, (o) => { o.rgb_color = [1, 2, 3].map((i) => parseInt(m[i], 16)); delete o.color_temp_kelvin; delete o.hs_color; });
+        if (m) this._editorUpdate(key, (o) => { o.rgb_color = [1, 2, 3].map((i) => parseInt(m[i], 16)); delete o.color_temp_kelvin; delete o.color_temp_mode; delete o.color_temp_offset; delete o.hs_color; });
       } else if (f === "effect") this._editorUpdate(key, (o) => { o.effect = el.value || undefined; });
       else if (f === "transition") this._editorUpdate(key, (o) => { o.transition = el.value === "" ? undefined : Number(el.value); }, false);
       else if (f === "persistent") this._editorUpdate(key, (o) => { o.persistent = el.value === "inherit" ? undefined : el.value === "yes"; });
@@ -360,9 +470,30 @@ class SoLightingBase extends HTMLElement {
   }
 
   _onClick(ev) {
-    const el = ev.target.closest("[data-action],[data-set-action],[data-kelvin],[data-rgb],[data-clear]");
+    const el = ev.target.closest("[data-action],[data-set-action],[data-kelvin],[data-rgb],[data-clear],[data-bmode],[data-kmode]");
     if (!el || el.disabled) return;
     const key = el.dataset.ed;
+    if (key && el.dataset.bmode) {
+      const m = el.dataset.bmode;
+      this._editorUpdate(key, (o, ctx) => {
+        const eff = ctx.effective || {};
+        o.brightness_mode = m;
+        if (m === "fixed") o.brightness_pct = o.brightness_pct ?? eff.brightness_pct ?? 70; else delete o.brightness_pct;
+        if (m === "offset") o.brightness_offset = o.brightness_offset ?? -10; else delete o.brightness_offset;
+      });
+      return;
+    }
+    if (key && el.dataset.kmode) {
+      const m = el.dataset.kmode;
+      this._editorUpdate(key, (o, ctx) => {
+        const eff = ctx.effective || {};
+        o.color_temp_mode = m;
+        if (m === "fixed") o.color_temp_kelvin = o.color_temp_kelvin ?? eff.color_temp_kelvin ?? 2700; else delete o.color_temp_kelvin;
+        if (m === "offset") o.color_temp_offset = o.color_temp_offset ?? -300; else delete o.color_temp_offset;
+        if (m !== "ignore") { delete o.rgb_color; delete o.hs_color; }
+      });
+      return;
+    }
     if (key && el.dataset.setAction) {
       this._editorUpdate(key, (o, ctx) => {
         o.action = el.dataset.setAction;
@@ -372,11 +503,11 @@ class SoLightingBase extends HTMLElement {
       return;
     }
     if (key && el.dataset.kelvin) {
-      this._editorUpdate(key, (o) => { o.color_temp_kelvin = Number(el.dataset.kelvin); delete o.rgb_color; delete o.hs_color; if (!o.action || o.action === "inherit") o.action = "on"; });
+      this._editorUpdate(key, (o, ctx) => { o.color_temp_kelvin = Number(el.dataset.kelvin); o.color_temp_mode = "fixed"; delete o.color_temp_offset; delete o.rgb_color; delete o.hs_color; if (ctx.mood !== ALL && (!o.action || o.action === "inherit")) o.action = "on"; });
       return;
     }
     if (key && el.dataset.rgb) {
-      this._editorUpdate(key, (o) => { o.rgb_color = el.dataset.rgb.split(",").map(Number); delete o.color_temp_kelvin; delete o.hs_color; if (!o.action || o.action === "inherit") o.action = "on"; });
+      this._editorUpdate(key, (o, ctx) => { o.rgb_color = el.dataset.rgb.split(",").map(Number); delete o.color_temp_kelvin; delete o.color_temp_mode; delete o.color_temp_offset; delete o.hs_color; if (ctx.mood !== ALL && (!o.action || o.action === "inherit")) o.action = "on"; });
       return;
     }
     if (key && el.dataset.clear) {
@@ -409,17 +540,22 @@ class SoLightingBase extends HTMLElement {
     if (!plans.length) return `<div class="muted">No enabled rooms.</div>`;
     return plans.map((p) => {
       const c = p.counts || {};
-      const items = p.items.filter((i) => detailed || i.decision === "change" || i.decision === "blocked");
+      const items = p.items.filter((i) => detailed || i.decision === "change" || i.decision === "blocked" || i.adaptive_update?.decision === "send");
       const rows = items.map((i) => {
         const tone = { change: "info", unchanged: "ok", blocked: "warn", skipped: "muted" }[i.decision];
         const word = { change: p.control_enabled ? "Will change" : "Would change", unchanged: "Already right", blocked: "Blocked", skipped: "Not controlled" }[i.decision];
         const st = this._hass?.states[i.entity_id];
+        const au = i.adaptive_update;
+        const auWord = au && { send: p.control_enabled ? "will follow" : "would follow", unchanged: "up to date", deferred: "queued",
+          blocked: "blocked", skipped: "not adjusted" }[au.decision];
+        const auHtml = au ? `<div class="why">↻ Global adjustment: <b>${esc(auWord)}</b>${au.decision === "send" ? ` (${esc(Object.entries(au.data).filter(([f]) => f !== "transition")
+          .map(([f, v]) => (f === "brightness_pct" ? `${v} %` : `${v} K`)).join(" · "))})` : ""}${detailed || ["blocked"].includes(au.decision) ? ` — ${esc(au.reason)}` : ""}</div>` : "";
         return `<div class="prow"><div class="pmain">${dot(i.resolved)}
           <b>${esc(i.name || i.entity_id)}</b> <span class="sub">${esc(st ? st.state : i.current?.state || "?")} → ${esc(summary(i.resolved))}</span></div>
           <span class="pill ${tone}">${esc(word)}</span>
-          ${detailed || i.decision === "blocked" ? `<div class="why">${esc(i.reason)}</div>` : ""}</div>`;
+          ${detailed || i.decision === "blocked" ? `<div class="why">${esc(i.reason)}</div>` : ""}${auHtml}</div>`;
       }).join("");
-      return `<div class="plan"><div class="plan-head"><b>${esc(p.room)}</b><span class="sub">${esc(p.mood || "no mood")} ·
+      return `<div class="plan"><div class="plan-head"><b>${esc(p.room)}</b><span class="sub">${esc(p.manual_mode ? "Manual" : p.mood || "no mood")} ·
         ${c.change || 0} change · ${c.unchanged || 0} already right · ${c.blocked || 0} blocked${p.control_enabled ? "" : " · Observe: nothing is sent"}</span></div>
         ${p.note ? `<div class="note">${esc(p.note)}</div>` : ""}${rows || `<div class="sub">Nothing to change.</div>`}</div>`;
     }).join("") + `<button class="link" data-action="preview-detail">${detailed ? "Fewer details" : "Show every light and why"}</button>`;
@@ -459,9 +595,62 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
 
   _request() { return { type: `${WS}/editor`, mood: this._mood || null }; }
 
+  // Compact "Global light adjustment" section: sources, live values, status.
+  _globalHtml() {
+    const a = this._model.adaptive || {};
+    const ui = this._ui;
+    const st = a.status || "not_configured";
+    const tone = { connected: "ok", unavailable: "warn", not_configured: "muted" }[st];
+    let html = `<button class="trow" data-action="toggle-global"><ha-icon icon="mdi:theme-light-dark"></ha-icon>
+      <span class="tname">Global light adjustment</span>
+      <span class="tval"><span class="${tone}">${esc(st === "not_configured" ? "Not configured" : `${globalNow(a)} · ${STATUS_WORDS[st]}`)}</span></span>
+      <ha-icon icon="mdi:chevron-${ui.global ? "up" : "down"}"></ha-icon></button>`;
+    if (!ui.global) return html;
+    const ro = !this._canEdit ? "disabled" : "";
+    const cfg = a.config || {};
+    const v = a.values || {};
+    const cand = a.candidates || { brightness: [], color_temp: [] };
+    const srcRow = (kind, label, unit) => {
+      const src = v[kind] || {};
+      const list = `so-${kind}-list`;
+      const value = src.value != null ? `${Math.round(src.value)}${unit}` : "—";
+      const likely = (cand[kind] || []).filter((c) => c.likely && c.entity_id !== cfg[`${kind}_entity`]).slice(0, 3);
+      return `<div class="frow"><label>${label} source</label><div class="fval">
+          <input type="text" list="${list}" placeholder="None (not followed)" value="${esc(cfg[`${kind}_entity`] || "")}" data-control="src-${kind}" ${ro}>
+          <datalist id="${list}">${(cand[kind] || []).map((c) => `<option value="${esc(c.entity_id)}">${esc(c.name)} · ${esc(c.value)}${kind === "brightness" ? " %" : " K"}</option>`).join("")}</datalist>
+          ${this._statusHtml(`src-${kind}`)}</div></div>
+        ${likely.length && !ro ? `<div class="frow"><label></label><div class="fval"><span class="sub">Suggested:</span>${likely.map((c) => `<button class="chip small" data-action="pick-src" data-kind="${kind}" data-entity="${esc(c.entity_id)}">${esc(c.name)} · ${esc(c.value)}${unit}</button>`).join("")}</div></div>` : ""}
+        <div class="frow"><label>Current ${label.toLowerCase()}</label><div class="fval"><b>${esc(src.entity_id ? value : "—")}</b>
+          <span class="sub ${src.status === "connected" ? "ok" : src.status === "not_configured" ? "" : "warn"}">${esc(STATUS_WORDS[src.status] || src.status || "")}${src.status && !["connected", "not_configured"].includes(src.status) ? ` · ${esc(src.detail)}` : ""}</span></div></div>`;
+    };
+    html += `<div class="section">
+      ${srcRow("brightness", "Brightness", " %")}${srcRow("color_temp", "Temperature", " K")}
+      <div class="sub">Smart Occupancy only reads these values from your existing adjustment; it does not calculate them. Choose per mood, light type or light whether to follow them.</div>`;
+    const conflicts = (a.controllers || []).filter((c) => c.active);
+    if (conflicts.length) {
+      html += `<div class="note warn">Your existing adjustment also commands lights itself: ${esc(conflicts.map((c) => c.name || c.entity_id).join(", "))}.
+        Smart Occupancy never sends global updates to the lights it controls, so the two don't compete.</div>`;
+    }
+    if (ui.advanced) {
+      html += `<div class="stitle">Global adjustment · Advanced</div>
+      <div class="frow"><label>Update at most every</label><div class="fval"><input type="number" class="num" min="0" max="3600" value="${esc(cfg.min_interval)}" data-control="ad-min_interval" ${ro}> s per light${this._statusHtml("ad-min_interval")}</div></div>
+      <div class="frow"><label>Smallest change</label><div class="fval"><input type="number" class="num" min="1" max="50" value="${esc(cfg.brightness_step)}" data-control="ad-brightness_step" ${ro}> %
+        <input type="number" class="num" min="10" max="2000" step="10" value="${esc(cfg.kelvin_step)}" data-control="ad-kelvin_step" ${ro}> K${this._statusHtml("ad-brightness_step")}${this._statusHtml("ad-kelvin_step")}</div></div>
+      <div class="frow"><label>Transition</label><div class="fval"><input type="number" class="num" min="0" max="300" step="1" value="${esc(cfg.transition)}" data-control="ad-transition" ${ro}> s
+        <span class="sub">0 if your adjustment already changes in small steps</span>${this._statusHtml("ad-transition")}</div></div>
+      <div class="frow"><label>Read attribute</label><div class="fval"><input type="text" placeholder="automatic" value="${esc(cfg.brightness_attribute || "")}" data-control="ad-brightness_attribute" ${ro}>
+        <input type="text" placeholder="automatic" value="${esc(cfg.color_temp_attribute || "")}" data-control="ad-color_temp_attribute" ${ro}></div></div>
+      <div class="frow"><label>Units</label><div class="fval"><select data-control="ad-brightness_scale" ${ro}>${[["auto", "Brightness: automatic"], ["percent", "0-100 %"], ["byte", "0-255"]].map(([x, l]) => `<option value="${x}" ${cfg.brightness_scale === x ? "selected" : ""}>${l}</option>`).join("")}</select>
+        <select data-control="ad-color_temp_scale" ${ro}>${[["auto", "Temperature: automatic"], ["kelvin", "Kelvin"], ["mired", "Mired"]].map(([x, l]) => `<option value="${x}" ${cfg.color_temp_scale === x ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
+      ${(a.controllers || []).length ? `<div class="sub">Parts of the existing system that command lights: ${esc(a.controllers.map((c) => `${c.name || c.entity_id} (${c.kind === "automation" ? "automation" : "Adaptive Lighting"}, ${c.active ? "active" : "off"})`).join("; "))}</div>` : ""}`;
+    }
+    return `${html}</div>`;
+  }
+
   // Shown as rows: types with a setting in this mood (own or inherited).
   _visibleTypes() {
     // "+ RGB" parts only when they have their own setting (otherwise they repeat their type).
+    if (this._mood === ALL) return this._model.types.filter((t) => t.configured);
     return this._model.types.filter((t) => t.configured || (!t.variant && (!isUnset(t.effective) || this._ui.showUnused)));
   }
 
@@ -473,10 +662,12 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
     const ui = this._ui;
     let body = `<div class="header"><ha-icon icon="mdi:palette-outline"></ha-icon><div class="titles">
         <div class="title">${esc(this._config.title || "Smart Lighting")}</div>
-        <div class="sub">Now: <b>${esc(status.mood || "no mood")}</b>${status.source && status.source !== "main" ? ` · ${esc(status.detail)}` : ""}</div></div></div>
-      <div class="pad"><div class="chips" role="tablist">${m.moods.filter((x) => x.in_main || x.has_profile || ui.allMoods || x.name === mood)
+        <div class="sub">Now: <b>${esc(status.manual_mode ? "Manual" : status.mood || "no mood")}</b>${status.source && !["main", "manual"].includes(status.source) ? ` · ${esc(status.detail)}` : ""}</div></div></div>
+      <div class="pad">${manualBanner(m)}${this._globalHtml()}<div class="chips" role="tablist">${m.moods.filter((x) => x.in_main || x.has_profile || ui.allMoods || x.name === mood)
         .map((x) => `<button class="chip ${x.name === mood ? "on" : ""}" role="tab" data-action="mood" data-mood="${esc(x.name)}">${esc(x.name)}${x.name === status.mood ? " •" : ""}</button>`).join("")}
+        <button class="chip ${mood === ALL ? "on" : ""}" role="tab" data-action="mood" data-mood="${ALL}" title="Settings for every mood, e.g. follow the global brightness">Every mood</button>
         ${m.moods.some((x) => !x.in_main && !x.has_profile && x.name !== mood) ? `<button class="link" data-action="all-moods">${ui.allMoods ? "fewer" : "more…"}</button>` : ""}</div>`;
+    if (mood === ALL) body += `<div class="sub">Every mood: what light types follow from the global adjustment unless a mood sets its own value. Never switches lights on or off.</div>`;
     if (info.name && !info.in_main) {
       body += `<div class="note warn">${esc(mood)} is not an option of Main Mood yet, so it can't become the active mood. Add it to the Main Mood helper to use it.</div>`;
     }
@@ -487,7 +678,7 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
       const rgbCount = base && base.kind !== "rgb" ? base.rgb_lights : 0;
       this._editorCtx[key] = {
         scope: "global", mood, target: t.target, own: t.own, inherited: t.inherited, effective: t.effective,
-        caps: t.variant || t.rgb ? { ...t.caps, color: true } : t.caps, title: `${mood} · ${t.name}`,
+        caps: t.variant || t.rgb ? { ...t.caps, color: true } : t.caps, title: `${moodLabel(mood)} · ${t.name}`,
         lightsText: `${t.lights.length} light${t.lights.length === 1 ? "" : "s"}${t.lights.length ? `: ${t.lights.slice(0, 4).map((l) => l.name || l.entity_id).join(", ")}${t.lights.length > 4 ? " …" : ""}` : ""}`,
         rgbToggle: rgbCount,
       };
@@ -499,16 +690,16 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
     const hidden = m.types.filter((t) => !types.includes(t) && !t.variant && !t.lights.length).length;
     body += `<div class="rows">${types.map((t) => `<button class="trow" data-action="edit" data-target="${esc(t.target)}">
         ${dot(t.effective)}<span class="tname">${esc(t.name)}<span class="sub"> · ${t.lights.length} light${t.lights.length === 1 ? "" : "s"}</span></span>
-        <span class="tval ${t.effective?.action && !["inherit", "ignore"].includes(t.effective.action) ? "" : "muted"}">${esc(summary(t.effective))}${!t.configured && t.effective?.action && t.effective.action !== "ignore" ? ` <span class="from">${esc(sourceText(t.effective.sources?.action, mood))}</span>` : ""}</span>
+        <span class="tval ${mood === ALL || (t.effective?.action && !["inherit", "ignore"].includes(t.effective.action)) ? "" : "muted"}">${esc(mood === ALL ? modesSummary(t.effective) : summary(t.effective))}${!t.configured && t.effective?.action && t.effective.action !== "ignore" ? ` <span class="from">${esc(sourceText(t.effective.sources?.action, mood))}</span>` : ""}</span>
         <ha-icon icon="mdi:chevron-right"></ha-icon></button>`).join("") || (unset.length ? "" : `<div class="note">No light types yet. Add one under Advanced → Light types.</div>`)}</div>
       ${unset.length ? `<div class="unset"><span class="sub">${types.length ? "Not set" : `Nothing set for ${esc(mood)} yet`} — tap to set:</span>
         ${unset.map((t) => `<button class="chip small" data-action="edit" data-target="${esc(t.target)}">${esc(t.name)}</button>`).join("")}</div>` : ""}
       ${hidden ? `<button class="link" data-action="unused">${ui.showUnused ? "Hide unused light types" : `Show ${hidden} unused light type${hidden === 1 ? "" : "s"}`}</button>` : ""}
       ${(m.label_suggestions || []).length && this._canEdit ? `<div class="note">${m.label_suggestions.map((s) => `Label <b>${esc(s.name)}</b> found:
         <button class="link" data-action="add-suggested" data-label="${esc(s.label_id)}" data-name="${esc(s.name)}" data-kind="${esc(s.kind)}">use it as ${s.kind === "rgb" ? "the RGB tag" : "a light function"}</button>`).join("<br>")}${this._statusHtml("suggest")}</div>` : ""}
-      <div class="actions"><button class="btn" data-action="preview">${ui.preview ? "Hide preview" : "Preview"}</button>
+      <div class="actions">${mood === ALL ? "" : `<button class="btn" data-action="preview">${ui.preview ? "Hide preview" : "Preview"}</button>`}
         <button class="btn ghost" data-action="advanced">${ui.advanced ? "Hide advanced" : "Advanced"}</button></div>`;
-    if (ui.preview) {
+    if (ui.preview && mood !== ALL) {
       body += `<div class="section"><div class="stitle">Preview · ${esc(mood)}</div>
         <div class="sub">What each room would do in this mood. A preview never changes a light.</div>
         ${ui.previewData?.error ? `<div class="bad">${esc(ui.previewData.error)}</div>` : this._previewHtml(ui.previewData?.plans, ui.previewDetail)}</div>`;
@@ -559,6 +750,8 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
         ${m.labels.map((l) => `<option value="${esc(l.label_id)}" ${l.label_id === s.exclude_label ? "selected" : ""}>${esc(l.name)}</option>`).join("")}</select>${this._statusHtml("exclude")}</div></div>
       <div class="frow"><label>Respect manual changes</label><div class="fval"><input type="number" class="num" min="0" max="1440" value="${esc(s.manual_override_minutes)}" data-control="override-minutes" ${ro}> min
         <span class="sub">0 = until the room is empty</span>${this._statusHtml("override-minutes")}</div></div>
+      <div class="frow"><label>Manual option</label><div class="fval"><input type="text" class="num" style="width:8em" value="${esc(s.manual_option || "Manual")}" data-control="manual-option" ${ro}>
+        <span class="sub">Main Mood option that pauses all automatic lighting</span>${this._statusHtml("manual-option")}</div></div>
       <div class="frow"><label>Changes without a source</label><div class="fval"><select data-control="unattributed" ${ro}>
         <option value="ignore" ${s.unattributed === "ignore" ? "selected" : ""}>Not a manual change</option>
         <option value="manual" ${s.unattributed === "manual" ? "selected" : ""}>Treat as a manual change</option></select>${this._statusHtml("unattributed")}</div></div>
@@ -572,6 +765,8 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
     else if (a === "all-moods") { ui.allMoods = !ui.allMoods; this._render(); }
     else if (a === "edit") { ui.edit = { scope: "global", target: el.dataset.target }; this._render(); }
     else if (a === "unused") { ui.showUnused = !ui.showUnused; this._render(); }
+    else if (a === "toggle-global") { ui.global = !ui.global; this._render(); }
+    else if (a === "pick-src") this._save(`src-${el.dataset.kind}`, { type: `${WS}/adaptive/set`, [`${el.dataset.kind}_entity`]: el.dataset.entity });
     else if (a === "advanced") { ui.advanced = !ui.advanced; this._render(); }
     else if (a === "preview") { ui.preview = !ui.preview; if (ui.preview) this._loadPreview(); this._render(); }
     else if (a === "preview-detail") { ui.previewDetail = !ui.previewDetail; this._render(); }
@@ -607,6 +802,16 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
     else if (c === "exclude") this._save("exclude", { type: `${WS}/settings/set`, exclude_label: el.value || null });
     else if (c === "override-minutes") this._save("override-minutes", { type: `${WS}/settings/set`, manual_override_minutes: Number(el.value) });
     else if (c === "unattributed") this._save("unattributed", { type: `${WS}/settings/set`, unattributed: el.value });
+    else if (c === "manual-option" && el.value.trim()) this._save("manual-option", { type: `${WS}/settings/set`, manual_option: el.value.trim() });
+    else if (c === "src-brightness" || c === "src-color_temp") {
+      const kind = c.slice(4);
+      this._save(c, { type: `${WS}/adaptive/set`, [`${kind}_entity`]: el.value.trim() || null });
+    } else if (c && c.startsWith("ad-")) {
+      const key = c.slice(3);
+      const text = ["brightness_attribute", "color_temp_attribute", "brightness_scale", "color_temp_scale"].includes(key);
+      if (!text && el.value === "") return;
+      this._save(c, { type: `${WS}/adaptive/set`, [key]: text ? (el.value.trim() || null) : Number(el.value) });
+    }
     else if (c === "cat-kind" || c === "cat-label") {
       const x = cat(el.dataset.key);
       this._save("cat", { type: `${WS}/category/set`, key: x.key, name: x.name, kind: c === "cat-kind" ? el.value : x.kind,
@@ -649,9 +854,24 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     return `<div class="header"><ha-icon icon="${active ? "mdi:lightbulb-auto" : "mdi:lightbulb-outline"}" class="${active ? "lit" : ""}"></ha-icon>
         <div class="titles"><div class="title">${esc(this._config.title || r.name)}</div>
         <div class="sub">${esc(OCC[r.occupancy.state] || "Occupancy unknown")}</div></div>
-        <span class="badge ${active ? "ok" : d.control_mode === "blocked" ? "warn" : ""}">${active ? "Active" : d.control_mode === "blocked" ? "Blocked" : "Observe"}</span></div>
+        <span class="badge ${active ? "ok" : ["blocked", "paused"].includes(d.control_mode) ? "warn" : ""}">${active ? "Active" : d.control_mode === "blocked" ? "Blocked" : d.control_mode === "paused" ? "Paused" : "Observe"}</span></div>
       <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" class="tab ${k === tab ? "on" : ""}" data-action="tab" data-tab="${k}">${l}</button>`).join("")}</div>
-      <div class="pad">${content}</div>`;
+      <div class="pad">${manualBanner(this._model)}${content}</div>`;
+  }
+
+  // "Brightness: Global · Temperature: Global · Effective now: 62 % / 3200 K"
+  _adaptiveLine(l) {
+    const n = l.now;
+    if (!n || !(n.adaptive || bMode(n) || kMode(n))) return "";
+    const word = (m) => ({ global: "Global", offset: "Global + offset", fixed: "Fixed", ignore: "Ignore" }[m] || "—");
+    const ad = n.adaptive || {};
+    const parts = [`Brightness: ${word(bMode(n))}${bMode(n) === "offset" ? ` ${signed(n.brightness_offset || 0, "")}` : ""}`];
+    if (n.rgb_color || n.hs_color) parts.push(`Colour: ${colourName(n.rgb_color || hsToRgb(n.hs_color))}`);
+    else parts.push(`Temperature: ${ad.color_temp?.status === "suppressed" ? "colour/effect" : word(kMode(n))}${kMode(n) === "offset" ? ` ${signed(n.color_temp_offset || 0, " K")}` : ""}`);
+    const now = [n.brightness_pct != null ? `${n.brightness_pct} %` : null, n.color_temp_kelvin != null ? `${n.color_temp_kelvin} K` : null].filter(Boolean);
+    if (n.action === "on" && now.length) parts.push(`Effective now: ${now.join(" / ")}`);
+    else if (n.action === "off") parts.push("Off in this mood");
+    return `<div class="sub adl">${esc(parts.join(" · "))}</div>`;
   }
 
   _name(r, entity) {
@@ -699,6 +919,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         <div><span>Lighting</span><b>${hv(h.lighting, nConf ? ` <span class="sub">(${nConf} conflict${nConf === 1 ? "" : "s"})</span>` : "")}</b></div>
         <div><span>Managed lights</span><b>${d.managed_lights}</b></div>
         <div><span>Last applied</span><b>${d.last_applied_profile ? `${esc(d.last_applied_profile)} · ${fmtTime(d.last_applied_at)}` : "never"}</b></div>
+        ${this._model.adaptive?.status && this._model.adaptive.status !== "not_configured" ? `<div><span>Global adjustment</span><b>${esc(globalNow(this._model.adaptive))}
+          <span class="sub ${this._model.adaptive.status === "connected" ? "" : "warn"}">${esc(STATUS_WORDS[this._model.adaptive.status])}</span></b></div>` : ""}
       </div>
       ${issues ? `<div class="issues">${issues}</div>` : `<div class="note ok">No warnings.</div>`}
       ${this._statusHtml("group")}
@@ -733,15 +955,16 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
           (l.conflicts || []).some((c) => c.enabled && !c.acknowledged) ? "conflict" : "",
         ].filter(Boolean);
         return `<div class="lrow"><ha-icon icon="${l.is_group ? "mdi:lightbulb-group" : "mdi:lightbulb"}" class="${st?.state === "on" ? "lit" : ""}"></ha-icon>
-          <div class="lmain"><b>${esc(l.name || l.entity_id)}</b> <span class="sub">${esc(st ? st.state : "missing")}${badges.length ? ` · ${esc(badges.join(" · "))}` : ""}</span></div>
+          <div class="lmain"><b>${esc(l.name || l.entity_id)}</b> <span class="sub">${esc(st ? st.state : "missing")}${badges.length ? ` · ${esc(badges.join(" · "))}` : ""}</span>
+            ${l.excluded || l.covered_by ? "" : this._adaptiveLine(l)}</div>
           <label class="switch"><input type="checkbox" data-control="managed" data-entity="${esc(l.entity_id)}" ${(r.settings.excluded || []).includes(l.entity_id) ? "" : "checked"} ${ro || l.missing ? "disabled" : ""}> managed</label></div>`;
       }).join("")}</div>` : "";
       return `<div class="group"><button class="trow" data-action="open-group" data-group="${esc(name)}">${t ? dot(t.effective) : `<span class="dot none"></span>`}
         <span class="tname">${esc(name)}<span class="sub"> · ${managed} light${managed === 1 ? "" : "s"}${on ? ` · ${on} on` : ""}</span></span>
-        <span class="tval">${t ? `${t.follows_global ? "follows global" : "overridden"} · ${esc(summary(t.effective))}` : ""}</span>
+        <span class="tval">${t ? `${t.follows_global ? "default" : "overridden"} · ${esc(summary(t.effective))}` : ""}</span>
         <ha-icon icon="mdi:chevron-${open ? "up" : "down"}"></ha-icon></button>${list}</div>`;
     }).join("");
-    return `<div class="sub">Mood: ${esc(r.diagnostics.room_mood || "none")}</div><div class="rows">${rows || `<div class="note">No managed lights. Give lights in this area a light-type label.</div>`}</div>
+    return `<div class="sub">Mood: ${esc(r.diagnostics.manual_mode ? "Manual (paused)" : r.diagnostics.room_mood || "none")}</div><div class="rows">${rows || `<div class="note">No managed lights. Give lights in this area a light-type label.</div>`}</div>
       <label class="switch"><input type="checkbox" data-control="detailed" ${detailed ? "checked" : ""}> Show every light</label>${this._statusHtml("room")}`;
   }
 
@@ -754,7 +977,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const roomMood = `<div class="frow"><label>Room mood</label><div class="fval"><select data-control="room-mood" ${ro ? "disabled" : ""}>
         <option value="">Follow global (now ${esc(r.diagnostics.global_mood || "none")})</option>
         ${m.moods.map((x) => `<option ${x.name === s.mood_override ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>${this._statusHtml("room-mood")}</div></div>
-      <div class="frow"><label>Edit mood</label><div class="fval"><select data-control="edit-mood">${m.moods.map((x) => `<option ${x.name === mood ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></div></div>`;
+      <div class="frow"><label>Edit mood</label><div class="fval"><select data-control="edit-mood">${m.moods.map((x) => `<option ${x.name === mood ? "selected" : ""}>${esc(x.name)}</option>`).join("")}
+        <option value="${ALL}" ${mood === ALL ? "selected" : ""}>Every mood (global adjustment)</option></select></div></div>`;
     if (ui.edit && ui.edit.scope !== "global") {
       let ctx;
       if (ui.edit.scope === "room") {
@@ -763,14 +987,14 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
           const cat = m.categories.find((c) => c.key === t.key);
           const rgbCount = cat && cat.kind !== "rgb" ? r.lights.filter((l) => l.rgb && (l.labels || []).includes(cat.name) && !l.excluded).length : 0;
           ctx = { scope: "room", mood, target: t.target, area_id: r.area_id, own: t.own, inherited: t.inherited, effective: t.effective,
-            caps: t.variant || t.rgb ? { ...t.caps, color: true } : t.caps, title: `${mood} · ${t.name} in ${r.name}`,
+            caps: t.variant || t.rgb ? { ...t.caps, color: true } : t.caps, title: `${moodLabel(mood)} · ${t.name} in ${r.name}`,
             lightsText: `${t.lights.length} light${t.lights.length === 1 ? "" : "s"} in this room`, rgbToggle: rgbCount };
         }
       } else {
         const l = r.lights.find((x) => x.entity_id === ui.edit.target);
         if (l) {
           ctx = { scope: "light", mood, target: l.entity_id, area_id: r.area_id, own: l.own, inherited: l.inherited, effective: l.effective,
-            caps: { ...l.capabilities, known: l.capabilities?.known }, title: `${mood} · ${l.name || l.entity_id}`, lightsText: l.entity_id };
+            caps: { ...l.capabilities, known: l.capabilities?.known }, title: `${moodLabel(mood)} · ${l.name || l.entity_id}`, lightsText: l.entity_id };
         }
       }
       if (ctx) {
@@ -783,14 +1007,15 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const lightOverrides = r.lights.filter((l) => l.own);
     const choices = r.lights.filter((l) => !l.missing && !l.excluded && !l.covered_by && !l.own);
     return `${roomMood}
+      ${mood === ALL ? `<div class="sub">Every mood: whether these lights follow the global brightness and temperature, unless a mood sets its own value.</div>` : ""}
       <div class="stitle">Light types in ${esc(r.name)}</div>
       <div class="rows">${types.map((t) => `<button class="trow" data-action="edit-room" data-target="${esc(t.target)}">${dot(t.effective)}
         <span class="tname">${esc(t.name)}<span class="sub"> · ${t.lights.length}</span></span>
-        <span class="tval">${t.configured ? `<span class="pill info">overridden</span> ` : `<span class="from">follows global</span> `}${esc(summary(t.effective))}</span>
+        <span class="tval">${t.configured ? `<span class="pill info">overridden</span> ` : `<span class="from">default</span> `}${esc(mood === ALL ? modesSummary(t.effective) : summary(t.effective))}</span>
         <ha-icon icon="mdi:chevron-right"></ha-icon></button>`).join("") || `<div class="muted">No light types in this room.</div>`}</div>
       <div class="stitle">Single lights</div>
       <div class="rows">${lightOverrides.map((l) => `<button class="trow" data-action="edit-light" data-target="${esc(l.entity_id)}">${dot(l.effective)}
-        <span class="tname">${esc(l.name || l.entity_id)}</span><span class="tval">${esc(summary(l.effective))}</span><ha-icon icon="mdi:chevron-right"></ha-icon></button>`).join("")}</div>
+        <span class="tname">${esc(l.name || l.entity_id)}</span><span class="tval">${esc(mood === ALL ? modesSummary(l.effective) : summary(l.effective))}</span><ha-icon icon="mdi:chevron-right"></ha-icon></button>`).join("")}</div>
       ${ro || !choices.length ? "" : `<div class="fval"><select data-control="pick-light"><option value="">Override a single light…</option>
         ${choices.map((l) => `<option value="${esc(l.entity_id)}">${esc(l.name || l.entity_id)}</option>`).join("")}</select></div>`}`;
   }
@@ -1068,6 +1293,8 @@ const STYLE = `<style>
   .problem.pr-error { border-left: 4px solid var(--error-color, #db4437); }
   .rgbtoggle { padding: 4px 0; }
   .unset { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .segs.small .seg { padding: 4px 10px; font-size: 0.9em; }
+  .adl { margin-top: 2px; }
   .chip.small { padding: 2px 10px; font-size: 0.88em; }
   @container (max-width: 480px) {
     .kvs { grid-template-columns: 1fr; }

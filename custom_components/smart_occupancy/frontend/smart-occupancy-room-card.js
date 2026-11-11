@@ -13,7 +13,7 @@
  */
 
 const CARD_TYPE = "smart-occupancy-room-card";
-const CARD_VERSION = "0.3.1";
+const CARD_VERSION = "0.3.2";
 
 const STATE_LABELS = {
   vacant: "Vacant",
@@ -193,6 +193,7 @@ class SmartOccupancyRoomCard extends HTMLElement {
             <div class="state">${escapeHtml(stateLabel)}</div>
           </div>
           ${a.observe_only ? `<span class="badge" title="No light is controlled in this room">Observe</span>`
+            : a.lighting_paused ? `<span class="badge" title="Manual control — automatic lighting paused">Paused (Manual)</span>`
             : `<span class="badge active" title="Mood lighting is enabled for this room">Mood lighting</span>`}
         </div>
         <div class="body">

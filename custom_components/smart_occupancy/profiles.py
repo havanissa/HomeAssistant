@@ -26,6 +26,19 @@ Field rules:
 * Colour temperature, RGB and HS are one setting: a more specific level that
   sets one of them replaces an inherited one of the others.
 * ``Off`` drops brightness, colour and effect.
+
+Global adjustment (0.3.2):
+
+* Brightness and colour temperature each have a mode: fixed, global,
+  global + offset, ignore; not set = inherit. A value without a mode is
+  fixed, so a fixed entry still overrides a "follow global" entry below it.
+* A "follow global" colour temperature belongs to the colour setting: a more
+  specific RGB/HS colour replaces it, and it replaces an inherited RGB/HS.
+* Entries for the pseudo mood ``*`` apply in every mood, below the entries
+  of the mood itself, at each level: global ``*`` < global mood chain <
+  room ``*`` < room mood < light ``*`` < light mood. They cannot set an
+  action, so they never switch a light on or off by themselves.
+* The global values are filled in afterwards (``adaptive.apply_global``).
 """
 
 from __future__ import annotations
@@ -35,12 +48,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .const import (
+    ALL_MOODS,
     BRIGHTNESS_MAX,
+    BRIGHTNESS_OFFSET_MAX,
+    KELVIN_OFFSET_MAX,
     BRIGHTNESS_MIN,
     KELVIN_MAX,
     KELVIN_MIN,
     TRANSITION_MAX,
     TRANSITION_MIN,
+    AdjustMode,
     LightAction,
 )
 from .lighting_config import LightingConfig, table_get
@@ -48,8 +65,12 @@ from .models import ProfileSetting
 
 COLOR_FIELDS = ("color_temp_kelvin", "rgb_color", "hs_color")
 VALUE_FIELDS = ("brightness_pct", *COLOR_FIELDS, "effect", "transition", "persistent")
+MODE_FIELDS = ("brightness_mode", "brightness_offset", "color_temp_mode", "color_temp_offset")
+_CT_FIELDS = ("color_temp_kelvin", "color_temp_mode", "color_temp_offset")
 # Dropped when the action is Off.
-_ON_ONLY = ("brightness_pct", *COLOR_FIELDS, "effect")
+_ON_ONLY = ("brightness_pct", *COLOR_FIELDS, "effect", *MODE_FIELDS)
+# Not allowed in "every mood" entries.
+_NOT_FOR_ALL_MOODS = ("effect", "persistent")
 
 LEVELS = ("global", "room", "light")
 
@@ -62,9 +83,19 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def validate_setting(setting: ProfileSetting) -> dict[str, str]:
+def validate_setting(setting: ProfileSetting, mood: str | None = None) -> dict[str, str]:
     """Validate one profile entry. Returns {field: error_key}."""
     errors: dict[str, str] = {}
+    for f, limit in (("brightness_offset", BRIGHTNESS_OFFSET_MAX), ("color_temp_offset", KELVIN_OFFSET_MAX)):
+        v = getattr(setting, f)
+        if v is not None and (not _is_int(v) or not -limit <= v <= limit):
+            errors[f] = "invalid_brightness_offset" if f == "brightness_offset" else "invalid_kelvin_offset"
+    if mood == ALL_MOODS:
+        if setting.action not in (LightAction.INHERIT,):
+            errors["action"] = "all_moods_action"
+        for f in _NOT_FOR_ALL_MOODS:
+            if getattr(setting, f) is not None:
+                errors[f] = "all_moods_field"
     b = setting.brightness_pct
     if b is not None and (not _is_int(b) or not BRIGHTNESS_MIN <= b <= BRIGHTNESS_MAX):
         errors["brightness_pct"] = "invalid_brightness"
@@ -84,6 +115,9 @@ def validate_setting(setting: ProfileSetting) -> dict[str, str]:
     ):
         errors["hs_color"] = "invalid_hs"
     colours = [f for f in COLOR_FIELDS if getattr(setting, f) is not None]
+    if setting.color_temp_mode in (AdjustMode.GLOBAL, AdjustMode.OFFSET, AdjustMode.FIXED) \
+            and "color_temp_kelvin" not in colours and len(colours) == 1:
+        colours.insert(0, "color_temp_mode")
     if len(colours) > 1 and not any(f in errors for f in colours):
         # light.turn_on accepts only one colour parameter per call.
         errors[colours[-1]] = "several_colors"
@@ -105,6 +139,7 @@ def setting_from_form(data: dict[str, Any]) -> ProfileSetting:
 
     rgb = data.get("rgb_color")
     transition = data.get("transition")
+    modes = {f: AdjustMode(data[f]) for f in ("brightness_mode", "color_temp_mode") if data.get(f)}
     persistent = data.get("persistent")
     return ProfileSetting(
         action=LightAction(data.get("action", LightAction.INHERIT)),
@@ -114,6 +149,9 @@ def setting_from_form(data: dict[str, Any]) -> ProfileSetting:
         effect=(data.get("effect") or "").strip() or None,
         transition=None if transition in (None, "") else float(transition),
         persistent={"yes": True, "no": False}.get(persistent) if isinstance(persistent, str) else None,
+        brightness_offset=_int("brightness_offset"),
+        color_temp_offset=_int("color_temp_offset"),
+        **modes,
     )
 
 
@@ -146,8 +184,14 @@ class ResolvedSetting:
     effect: str | None = None
     transition: float | None = None
     persistent: bool | None = None
+    brightness_mode: AdjustMode | None = None
+    brightness_offset: int | None = None
+    color_temp_mode: AdjustMode | None = None
+    color_temp_offset: int | None = None
     # field -> {"level": "global" | "room" | "light", "mood": mood}
     sources: dict[str, dict[str, str]] = field(default_factory=dict)
+    # How the global adjustment was applied (``adaptive.apply_global``); None before.
+    adaptive: dict[str, Any] | None = None
 
     @property
     def is_persistent(self) -> bool:
@@ -155,18 +199,33 @@ class ResolvedSetting:
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"action": self.action.value}
-        for f in VALUE_FIELDS:
+        for f in (*VALUE_FIELDS, *MODE_FIELDS):
             v = getattr(self, f)
             if v is not None:
-                out[f] = list(v) if isinstance(v, tuple) else v
+                out[f] = list(v) if isinstance(v, tuple) else v.value if isinstance(v, AdjustMode) else v
         out["sources"] = {k: dict(v) for k, v in self.sources.items()}
+        if self.adaptive is not None:
+            out["adaptive"] = {k: dict(v) for k, v in self.adaptive.items()}
         return out
+
+
+def _set(result: ResolvedSetting, f: str, value: Any, source: dict[str, str]) -> None:
+    setattr(result, f, value)
+    if value is None:
+        result.sources.pop(f, None)
+    else:
+        result.sources[f] = source
 
 
 def _apply(result: ResolvedSetting, layer: ProfileSetting, source: dict[str, str]) -> None:
     if layer.action != LightAction.INHERIT:
         result.action = layer.action
         result.sources["action"] = source
+    # A white mode (fixed or following) is a colour choice: it replaces an inherited RGB/HS.
+    white = layer.color_temp_mode in (AdjustMode.FIXED, AdjustMode.GLOBAL, AdjustMode.OFFSET)
+    if white:
+        for other in ("rgb_color", "hs_color"):
+            _set(result, other, None, source)
     for f in VALUE_FIELDS:
         v = getattr(layer, f)
         if v is None:
@@ -174,10 +233,26 @@ def _apply(result: ResolvedSetting, layer: ProfileSetting, source: dict[str, str
         if f in COLOR_FIELDS:
             for other in COLOR_FIELDS:
                 if other != f:
-                    setattr(result, other, None)
-                    result.sources.pop(other, None)
-        setattr(result, f, v)
-        result.sources[f] = source
+                    _set(result, other, None, source)
+            if f != "color_temp_kelvin":  # RGB/HS replaces any white setting, following or not
+                for ct in ("color_temp_mode", "color_temp_offset"):
+                    _set(result, ct, None, source)
+        _set(result, f, v, source)
+    # Modes: an explicit mode wins; a value without a mode is fixed (pre-0.3.2 behaviour).
+    # (An implied fixed mode has no source of its own: it comes with the value.)
+    if layer.brightness_mode is not None:
+        _set(result, "brightness_mode", layer.brightness_mode, source)
+    elif layer.brightness_pct is not None:
+        result.brightness_mode = AdjustMode.FIXED
+        result.sources.pop("brightness_mode", None)
+    if layer.color_temp_mode is not None:
+        _set(result, "color_temp_mode", layer.color_temp_mode, source)
+    elif layer.color_temp_kelvin is not None:
+        result.color_temp_mode = AdjustMode.FIXED
+        result.sources.pop("color_temp_mode", None)
+    for f in ("brightness_offset", "color_temp_offset"):
+        if (v := getattr(layer, f)) is not None:
+            _set(result, f, v, source)
 
 
 Targets = str | list[str] | tuple[str, ...] | None
@@ -207,20 +282,31 @@ def layers(
     """
     keys = _targets(targets)
     out: list[tuple[dict[str, str], ProfileSetting]] = []
+    every = mood != ALL_MOODS  # resolving "*" itself: only the "*" entries
+
+    def add_all(level: str, table, target_keys: list[str]) -> None:
+        entries = table.get(ALL_MOODS, {})
+        for key in target_keys:
+            if (entry := entries.get(key)) is not None:
+                out.append(({"level": level, "mood": ALL_MOODS, "target": key}, entry))
+
     if "global" in levels and keys:
-        for m in reversed(mood_chain(config, mood)):
+        add_all("global", config.global_profiles, keys)
+        for m in reversed(mood_chain(config, mood) if every else []):
             entries = table_get(config.global_profiles, m)
             for key in keys:
                 if (entry := entries.get(key)) is not None:
                     out.append(({"level": "global", "mood": m, "target": key}, entry))
     room = config.room(area_id) if area_id else None
     if room is not None and "room" in levels and keys:
-        entries = table_get(room.mood_overrides, mood)
+        add_all("room", room.mood_overrides, keys)
+        entries = table_get(room.mood_overrides, mood) if every else {}
         for key in keys:
             if (entry := entries.get(key)) is not None:
                 out.append(({"level": "room", "mood": mood, "target": key}, entry))
     if room is not None and "light" in levels and light_entity_id:
-        if (entry := table_get(room.light_overrides, mood).get(light_entity_id)) is not None:
+        add_all("light", room.light_overrides, [light_entity_id])
+        if every and (entry := table_get(room.light_overrides, mood).get(light_entity_id)) is not None:
             out.append(({"level": "light", "mood": mood, "target": light_entity_id}, entry))
     return out
 
@@ -246,6 +332,10 @@ def resolve(
         for f in _ON_ONLY:
             setattr(result, f, None)
             result.sources.pop(f, None)
+    if result.brightness_mode != AdjustMode.OFFSET:
+        _set(result, "brightness_offset", None, {})
+    if result.color_temp_mode != AdjustMode.OFFSET:
+        _set(result, "color_temp_offset", None, {})
     return result
 
 

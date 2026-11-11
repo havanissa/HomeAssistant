@@ -14,6 +14,11 @@ Persisted shape (store version 1)::
       "exclude_label": "label_id" | null,
       "manual_override_minutes": 60,
       "unattributed": "ignore",
+      "manual_option": "Manual",                    # 0.3.2: Main Mood option that pauses lighting
+      "adaptive": {                                 # 0.3.2: existing global adjustment sources
+          "brightness_entity": null, "brightness_attribute": null, "brightness_scale": "auto",
+          "color_temp_entity": null, "color_temp_attribute": null, "color_temp_scale": "auto",
+          "min_interval": 60, "brightness_step": 3, "kelvin_step": 100, "transition": 10},
       "rooms": {area_id: {
           "control_enabled": false, "activated_at": iso | null, "activated_by": user_id | null,
           "acknowledged": [automation entity ids],
@@ -27,9 +32,15 @@ Persisted shape (store version 1)::
           "dismissed": [problem subjects]}}
     }
 
+Profile tables may contain the pseudo mood ``"*"`` (every mood, 0.3.2).
+
 On first start the profiles are copied from the Phase 0.2 options (which are
 left untouched, so a downgrade still finds them). Every room starts with
 lighting control disabled (Observe).
+
+0.3.2 only adds keys (``manual_option``, ``adaptive``, the adjustment modes
+of profile entries), so the store version is unchanged: a 0.3.1 store loads
+as is, keeps every fixed value fixed, and has no global source configured.
 """
 
 from __future__ import annotations
@@ -43,11 +54,21 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.storage import Store
 
 from .const import (
+    ADAPTIVE_BRIGHTNESS_STEP_MAX,
+    ADAPTIVE_KELVIN_STEP_MAX,
+    ADAPTIVE_MIN_INTERVAL_MAX,
+    DEFAULT_ADAPTIVE_BRIGHTNESS_STEP,
+    DEFAULT_ADAPTIVE_KELVIN_STEP,
+    DEFAULT_ADAPTIVE_MIN_INTERVAL,
+    DEFAULT_ADAPTIVE_TRANSITION,
+    DEFAULT_MANUAL_OPTION,
     DEFAULT_MANUAL_OVERRIDE_MINUTES,
     LIGHTING_SAVE_DELAY_SECONDS,
     LIGHTING_STORE_KEY,
     LIGHTING_STORE_VERSION,
     MANUAL_OVERRIDE_MAX_MINUTES,
+    TRANSITION_MAX,
+    SourceScale,
     UnattributedPolicy,
     UnrepresentableMode,
 )
@@ -101,6 +122,76 @@ def _ids(value: Any) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         return ()
     return tuple(dict.fromkeys(v for v in value if isinstance(v, str) and v))
+
+
+def _bounded(value: Any, default: float, low: float, high: float, cast: type = int) -> Any:
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        return cast(min(max(float(value), low), high))
+    except (TypeError, ValueError):
+        return default
+
+
+def _entity_id(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and "." in value.strip() else None
+
+
+@dataclass(frozen=True, slots=True)
+class AdaptiveConfig:
+    """Bindings to the existing global brightness / colour temperature system.
+
+    Each source is optional and independent. ``*_attribute`` reads an
+    attribute instead of the state (e.g. ``brightness_pct`` of an Adaptive
+    Lighting switch); ``None`` picks it automatically.
+    """
+
+    brightness_entity: str | None = None
+    brightness_attribute: str | None = None
+    brightness_scale: SourceScale = SourceScale.AUTO
+    color_temp_entity: str | None = None
+    color_temp_attribute: str | None = None
+    color_temp_scale: SourceScale = SourceScale.AUTO
+    min_interval: int = DEFAULT_ADAPTIVE_MIN_INTERVAL
+    brightness_step: int = DEFAULT_ADAPTIVE_BRIGHTNESS_STEP
+    kelvin_step: int = DEFAULT_ADAPTIVE_KELVIN_STEP
+    transition: float = DEFAULT_ADAPTIVE_TRANSITION
+
+    @classmethod
+    def from_dict(cls, data: Any) -> AdaptiveConfig:
+        data = data if isinstance(data, dict) else {}
+        return cls(
+            brightness_entity=_entity_id(data.get("brightness_entity")),
+            brightness_attribute=data.get("brightness_attribute") or None,
+            brightness_scale=_enum_or(SourceScale, data.get("brightness_scale"), SourceScale.AUTO),
+            color_temp_entity=_entity_id(data.get("color_temp_entity")),
+            color_temp_attribute=data.get("color_temp_attribute") or None,
+            color_temp_scale=_enum_or(SourceScale, data.get("color_temp_scale"), SourceScale.AUTO),
+            min_interval=_bounded(data.get("min_interval"), DEFAULT_ADAPTIVE_MIN_INTERVAL, 0,
+                                  ADAPTIVE_MIN_INTERVAL_MAX),
+            brightness_step=_bounded(data.get("brightness_step"), DEFAULT_ADAPTIVE_BRIGHTNESS_STEP, 1,
+                                     ADAPTIVE_BRIGHTNESS_STEP_MAX),
+            kelvin_step=_bounded(data.get("kelvin_step"), DEFAULT_ADAPTIVE_KELVIN_STEP, 10, ADAPTIVE_KELVIN_STEP_MAX),
+            transition=_bounded(data.get("transition"), DEFAULT_ADAPTIVE_TRANSITION, 0, TRANSITION_MAX, float),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "brightness_entity": self.brightness_entity,
+            "brightness_attribute": self.brightness_attribute,
+            "brightness_scale": self.brightness_scale.value,
+            "color_temp_entity": self.color_temp_entity,
+            "color_temp_attribute": self.color_temp_attribute,
+            "color_temp_scale": self.color_temp_scale.value,
+            "min_interval": self.min_interval,
+            "brightness_step": self.brightness_step,
+            "kelvin_step": self.kelvin_step,
+            "transition": self.transition,
+        }
+
+    @property
+    def entities(self) -> tuple[str, ...]:
+        return tuple(e for e in (self.brightness_entity, self.color_temp_entity) if e)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +284,9 @@ class LightingConfig:
     manual_override_minutes: int = DEFAULT_MANUAL_OVERRIDE_MINUTES
     unattributed: UnattributedPolicy = UnattributedPolicy.IGNORE
     rooms: dict[str, RoomLighting] = field(default_factory=dict)
+    # Main Mood option that pauses all automatic lighting (not a mood).
+    manual_option: str = DEFAULT_MANUAL_OPTION
+    adaptive: AdaptiveConfig = field(default_factory=AdaptiveConfig)
 
     @classmethod
     def from_dict(cls, data: Any) -> LightingConfig:
@@ -211,6 +305,8 @@ class LightingConfig:
             ) or 0,
             unattributed=_enum_or(UnattributedPolicy, data.get("unattributed"), UnattributedPolicy.IGNORE),
             rooms={str(a): RoomLighting.from_dict(r) for a, r in rooms.items()},
+            manual_option=str(data.get("manual_option") or DEFAULT_MANUAL_OPTION).strip() or DEFAULT_MANUAL_OPTION,
+            adaptive=AdaptiveConfig.from_dict(data.get("adaptive")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -223,6 +319,8 @@ class LightingConfig:
             "manual_override_minutes": self.manual_override_minutes,
             "unattributed": self.unattributed.value,
             "rooms": {a: r.as_dict() for a, r in self.rooms.items()},
+            "manual_option": self.manual_option,
+            "adaptive": self.adaptive.as_dict(),
         }
 
     def room(self, area_id: str) -> RoomLighting:
@@ -230,6 +328,10 @@ class LightingConfig:
 
     def with_room(self, area_id: str, room: RoomLighting) -> LightingConfig:
         return replace(self, rooms={**self.rooms, area_id: room})
+
+    def is_manual(self, mood: str | None) -> bool:
+        """The Main Mood value is the Manual option (pauses lighting)."""
+        return bool(mood) and _norm(mood) == _norm(self.manual_option)
 
     def parent_of(self, mood: str) -> str | None:
         if mood in self.parents:
@@ -357,7 +459,12 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
         )
         for area_id, room in config.rooms.items()
     }
-    return replace(config, rooms=rooms) if changed else None
+    adaptive = config.adaptive
+    for key in ("brightness_entity", "color_temp_entity"):
+        if getattr(adaptive, key) == old:
+            adaptive = replace(adaptive, **{key: new})
+            changed = True
+    return replace(config, rooms=rooms, adaptive=adaptive) if changed else None
 
 
 class LightingStore:

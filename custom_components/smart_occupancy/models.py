@@ -47,6 +47,7 @@ from .const import (
     CONFIG_VERSION,
     FUNCTION_CATEGORY_NAMES,
     RGB_CATEGORY_NAMES,
+    AdjustMode,
     CategoryKind,
     DEFAULT_AUTO_OPTION,
     DEFAULT_CATEGORIES,
@@ -240,6 +241,12 @@ class ProfileSetting:
     At most one colour field (``color_temp_kelvin``, ``rgb_color``,
     ``hs_color``) is set per entry. ``persistent`` marks ambient lighting
     that follows the mood whether or not the room is occupied.
+
+    ``brightness_mode`` / ``color_temp_mode`` (0.3.2) choose between the
+    profile's own value (fixed), the existing global adjustment (global),
+    the global value plus ``brightness_offset`` (percentage points) or
+    ``color_temp_offset`` (K), or leaving the property unchanged (ignore).
+    Not set means inherit; a value without a mode is fixed.
     """
 
     action: LightAction = LightAction.INHERIT
@@ -250,6 +257,10 @@ class ProfileSetting:
     effect: str | None = None
     transition: float | None = None
     persistent: bool | None = None
+    brightness_mode: AdjustMode | None = None
+    brightness_offset: int | None = None
+    color_temp_mode: AdjustMode | None = None
+    color_temp_offset: int | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ProfileSetting:
@@ -263,13 +274,21 @@ class ProfileSetting:
             effect=data.get("effect") or None,
             transition=_number(data.get("transition")),
             persistent=persistent if isinstance(persistent, bool) else None,
+            brightness_mode=_enum_or(AdjustMode, data.get("brightness_mode"), None),
+            brightness_offset=_number(data.get("brightness_offset")),
+            color_temp_mode=_enum_or(AdjustMode, data.get("color_temp_mode"), None),
+            color_temp_offset=_number(data.get("color_temp_offset")),
         )
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"action": self.action.value}
-        for key in ("brightness_pct", "color_temp_kelvin", "effect", "transition", "persistent"):
+        for key in ("brightness_pct", "color_temp_kelvin", "effect", "transition", "persistent",
+                    "brightness_offset", "color_temp_offset"):
             if (value := getattr(self, key)) is not None:
                 out[key] = value
+        for key in ("brightness_mode", "color_temp_mode"):
+            if (value := getattr(self, key)) is not None:
+                out[key] = value.value
         for key in ("rgb_color", "hs_color"):
             if (value := getattr(self, key)) is not None:
                 out[key] = list(value)

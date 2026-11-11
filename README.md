@@ -2,7 +2,7 @@
 
 A Home Assistant custom integration that will eventually provide intelligent occupancy detection, predictive room occupancy, mood-based lighting and lighting supervision.
 
-**This is Phase 0.3.1: mood-based lighting with simple dashboard cards (Smart Lighting Profiles, Smart Room Lighting, Room Status), on top of the Phase 0.2 occupancy engine (see [CHANGELOG.md](CHANGELOG.md)).** Phase 0.3.1 makes the 0.3 interface simple by default: one mood, one light type, one thing at a time; everything else is under *Advanced*.
+**This is Phase 0.3.2: mood-based lighting with simple dashboard cards (Smart Lighting Profiles, Smart Room Lighting, Room Status), on top of the Phase 0.2 occupancy engine (see [CHANGELOG.md](CHANGELOG.md)).** Phase 0.3.2 lets moods, light types and single lights follow your **existing global brightness and colour temperature adjustment**, and adds the **Manual** pause. The interface stays simple by default; everything else is under *Advanced*.
 
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
@@ -10,6 +10,9 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - changes the mood selectors or any other helper (they are only *read*)
 - controls lights in a room that was not explicitly activated
 - switches lights off because a room became vacant (that is Phase 0.4)
+- switches a light on because the global brightness or colour temperature changed
+- sends any automatic lighting command while Main Mood is **Manual**
+- calculates its own adaptive lighting: it only reads the values your existing system publishes
 - polls, uses the internet, or writes to the Recorder database directly
 
 ## Requirements
@@ -257,7 +260,7 @@ Opening a dashboard never applies anything.
 
 ### Diagnostics
 
-`sensor.smart_occupancy_<room>_mood_lighting` has the state `observe`, `active` or `blocked`. Its attributes (not recorded) are:
+`sensor.smart_occupancy_<room>_mood_lighting` has the state `observe`, `active`, `blocked` or `paused` (Main Mood is Manual). Its attributes (not recorded) are:
 - the effective global mood and room mood, and whether the room follows the global mood
 - control mode and reason
 - managed, discovered and excluded lights, and lights controlled through a group
@@ -265,6 +268,7 @@ Opening a dashboard never applies anything.
 - automation conflicts, with which ones block
 - active manual overrides
 - the last applied profile and time, the last trigger, result and reason, and errors
+- `manual_mode`, `global_adjustment` (connected / unavailable / not_configured), the last global-adjustment update, and lights the existing adjustment system also controls (`adaptive_conflicts`)
 
 The room cards show the same information as three health rows:
 - **Occupancy health** is affected by sensors only.
@@ -272,6 +276,116 @@ The room cards show the same information as three health rows:
 - **Configuration health** covers the configuration.
 
 An unplugged light warns under *Lighting* without making occupancy look degraded.
+
+## Global light adjustment (Phase 0.3.2)
+
+You probably already have something that calculates a brightness and a colour temperature for the time of day (an Adaptive Lighting switch, template sensors, `input_number` helpers set by automations, …). Smart Occupancy **does not calculate these values**. It reads them, and each mood, light type or light decides how to use them.
+
+### Connect the sources
+
+In **Smart Lighting → Global light adjustment** choose:
+
+- **Brightness source**: an entity with the target brightness, for example a `sensor`, `number` or `input_number` in % or 0–255. A `switch` with a `brightness_pct` attribute (Adaptive Lighting) or a light also work.
+- **Temperature source**: an entity with the target colour temperature in K or mired. A `switch` with `color_temp_kelvin` / `color_temp_mired` attributes also works.
+
+Each source is optional and independent. The section shows the live values, for example *62 % · 3200 K · Connected*. Likely entities are suggested; your own measurement sensors (battery, humidity, …) are not. Under **Advanced** you can choose:
+- the attribute to read
+- the unit (automatic, % or 0–255; automatic, K or mired)
+- the update settings (see below)
+
+The values come from state-change events, not polling. If a source is unavailable, unknown or not a number, its value is **never taken as 0**. The last good value is used (status *Unavailable (last value used)*), and it survives restarts. Without any earlier value, that property is left unchanged and a *Global source unavailable* warning is shown.
+
+### Per mood: Follow global · Global + offset · Fixed · Ignore
+
+In the focused editor (one mood, one light type), **Brightness** and **Temperature** each have four choices. The two are completely independent.
+
+| Choice | Brightness | Colour temperature |
+|---|---|---|
+| Follow global | the global brightness | the global temperature |
+| Global + offset | global ± percentage points (slider) | global ± K (slider) |
+| Fixed | the mood's own value (slider) | the mood's own value (white presets / slider) |
+| Ignore | left as it is | left as it is |
+
+Inheritance (reset a value so it comes from the parent mood, the global profile or the room) is under the editor's *Advanced*. Results are clamped:
+- brightness to 1–100 %, so a global value never switches a light off
+- colour temperature to 1000–10000 K, and then to the light's own range
+
+Examples:
+- **Dagur**: follow both.
+- **Kvøld**: global −20 points and −300 K. This gives a continuous evening gradient without separate *Morning/Evening* moods.
+- **Hygge**: fixed warm.
+- **Arbeiði**: fixed 100 % with the global temperature.
+- **Veistla**: an effect or RGB colour with the global brightness.
+
+**Colour and effects win over the global temperature.** While an RGB/HS colour or an effect sets a light's colour, the global white temperature is not sent. Colour and temperature are never sent together. An RGB light can still follow the global brightness.
+
+**Capabilities come from the light's `supported_color_modes`:**
+- A brightness-only LED strip follows the brightness only.
+- A colour-only light without a white mode does not get the global temperature.
+- An on/off light gets neither.
+
+These cases are listed as information, not as warnings.
+
+### Every mood: attach the adjustment to types and single lights
+
+Choose **Every mood** (the chip after the moods, or *Edit mood → Every mood* in the room card). Settings made there apply in every mood unless a mood sets its own value. They work for:
+- a light type for all rooms
+- a light type in one room
+- a single light or group (Home Assistant or Zigbee2MQTT group)
+
+Order, most specific last:
+- global *every mood*, then the global mood (with its parent and fallback moods)
+- room *every mood*, then the room mood
+- light *every mood*, then the light's mood entry
+
+*Every mood* entries never switch lights on or off: they have no On/Off, effect or ambient setting. Examples:
+- *Kamar Norður · Spottar*: brightness and temperature follow global.
+- *Living room · Pendant (Uppljós + RGB)*: brightness global −20, fixed amber colour.
+- *Bedroom · LED strip*: brightness follows global, temperature *Ignore*.
+
+The room card shows one line per light, for example: *Brightness: Global · Temperature: Global · Effective now: 62 % / 3200 K*.
+
+### Smooth updates, never a light on
+
+When a source value changes, lights that follow it get a **gradual update**:
+- only lights that are **already on**: a global change never switches a light on
+- in activated (Active) rooms only, through the same rules as mood lighting: manual overrides, exclusions, group de-duplication, availability, occupancy, automation conflicts
+- only when the change is meaningful (default 3 percentage points or 100 K, compared with what was last sent or with the light's state)
+- at most once per light per interval (default 60 s); rapid changes are coalesced and **the newest value wins**
+- only the properties that follow the global value are sent, with a transition (default 10 s) where the light supports one; set the transition to 0 if your adjustment already changes in small steps
+- a light whose current colour mode is RGB/HS, or that runs an effect, keeps its colour
+
+A light switched on later by something other than a person (another automation, an unattributed change) gets the current global values right away. A light switched on by a person is a manual override and is left alone. Mood changes, arrivals and activation are not throttled: they use the current global values immediately. Nothing is sent on start-up or reload.
+
+### Existing controllers
+
+Smart Occupancy finds parts of your existing system that already command lights:
+- an Adaptive Lighting switch used as a source (while it is on, its `configuration.lights` are its own)
+- enabled automations (directly, or through a script) that use a source entity and control lights
+
+Smart Occupancy never sends global updates to those lights. A warning (*Existing adjustment also controls this light*) and the preview explain why. To let Smart Occupancy follow the global values for such a light, stop the other system from commanding it. Nothing is changed or disabled automatically. The usual automation-conflict rules still apply to mood changes.
+
+### Preview
+
+The preview lists every light, its current state, the mood's result (for example *55 % global · 5000 K global*), and a **Global adjustment** line for the next gradual update:
+- *will/would follow* with the values
+- *up to date*, *queued* (throttled), *blocked* (with the reason) or *not adjusted*
+
+A preview never changes a light.
+
+## Manual mode
+
+When **Main Mood** is `Manual`, all automatic lighting is paused. `Manual` is an operating mode, not a mood:
+- **No automatic light command at all.** Mood changes, arrivals, room activation, profile edits, global adjustment updates, reconnecting lights: nothing is sent in any room.
+- **Queued applications and updates are dropped** and never replayed.
+- **Manual light changes are not corrected** and are not recorded as overrides.
+- **Occupancy, diagnostics and editing continue.**
+- The cards show **Manual control — automatic lighting paused**. Active rooms report `paused`, and the Room Status card shows *Paused (Manual)*.
+- `Manual` needs no lighting profile, and it is not listed as a mood.
+
+Manual takes precedence over every mood, room mood, profile and global adjustment setting. When Main Mood changes to anything else, automatic lighting resumes only in explicitly activated rooms, with the newly selected mood and the current sensor and global values.
+
+The option name is configurable under *Smart Lighting → Advanced → Manual option* (default `Manual`). The selectors, their options and your automations are not changed. `Auto` stays a Manual Mood option as before.
 
 ## Occupancy engine
 
@@ -498,6 +612,9 @@ A light belongs to a category when the category's label is on the light entity o
 - Managed lights that moved to another area, groups that hide their members, a group and its member in different rooms
 - Existing automations that appear to control managed lights
 - Failed light commands
+- Profiles that follow a global source that is not configured, and global sources that are unavailable (with the last value in use)
+- Lights that the existing adjustment system (an Adaptive Lighting switch, or an automation using a source) also adjusts
+- Manual mode active (information)
 
 ### Recorder and logging
 
@@ -562,11 +679,22 @@ The suite covers:
   - command planning per light capability (pure tests)
   - execution in a running Home Assistant with mocked light services: three-selector resolution, `Onki`, new moods, labels and custom categories, group de-duplication, overrides, vacancy and ambient lights, manual overrides, automation conflicts, offline lights, restart, unload
   - websocket permissions and validation
+- global light adjustment (0.3.2):
+  - source normalisation (%, 0–255, K, mired, Adaptive Lighting attributes, unavailable values)
+  - modes, offsets, clamping, every-mood entries and colour/effect precedence (pure tests)
+  - gradual updates with simulated lights: thresholds, throttling, coalescing, transitions, never switching on, group de-duplication, RGB, brightness-only and colour-only lights, manual overrides, Observe, competing automations and Adaptive Lighting switches, restart and persistence, upgrade from a 0.3.1 store
+- Manual mode: no command during occupancy changes, global updates, profile and room edits, reloads and start-up; queued commands dropped; resume without replay
 - card serving through the real frontend component
 
 Observe rooms are asserted never to call a light service. Any test that logs an ERROR, or in which Home Assistant reports deprecated usage, fails. CI (`.github/workflows/validate.yml`) runs hassfest, HACS validation and the tests on Home Assistant 2026.10.4 and 2026.11.1.
 
 ## Upgrading
+
+**From 0.3.1.** Nothing to do, and nothing is applied by the upgrade:
+- The lighting store keeps its version. New keys (`adaptive`, `manual_option`, the adjustment modes) are added only when you change something.
+- Every existing profile value stays **fixed**: a stored brightness or colour temperature without a mode is fixed, and is never converted to "follow global".
+- No global source is configured until you choose one. Until then, everything behaves as in 0.3.1.
+- If Main Mood already offers `Manual`, selecting it now pauses all automatic lighting. Before, it was treated as an ordinary mood: with no profile it changed nothing, but a configured fallback mood was applied.
 
 **From 0.3.0.** Nothing to do. Profiles, room settings, activation, acknowledgements and overrides are kept. Light categories get a kind derived from their name (*Rgb* → RGB tag; *Uppljós*, *Decorative*, *Task*, *Path*, *Outdoor* → function; others → light type); the options are not rewritten until you change a light type. Existing dashboards keep working: the card types are unchanged, only their layout is new.
 
@@ -578,7 +706,14 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 
 **From 0.1.x.** Configuration version 1.1 is migrated to 1.2 on the first start, keeping everything you configured; then the 0.2 step above applies.
 
-## Known limitations (Phase 0.3.1)
+## Known limitations (Phase 0.3.2)
+
+- **The existing adjustment system was not inspected on the production Home Assistant** (no access during development). Choose its output entities yourself in *Global light adjustment*. Competing controllers are found only through the configured source entities: an Adaptive Lighting switch used as a source, or automations/scripts that mention a source entity. Systems that command lights some other way (Node-RED, AppDaemon, a script with no reference to the source) are not detected.
+- **Gradual updates follow the room's mood plan**: lights in a room that is vacant or whose occupancy is uncertain are not adjusted (ambient settings excepted) until the room is occupied again.
+- **Throttling is per light or group**, in memory: after a restart the first update may follow sooner than the interval.
+- **Manual mode is recognised on Main Mood only.** While Manual Mood is `Manual` but Main Mood has not followed yet, lighting still follows Main Mood.
+
+### From Phase 0.3.1
 
 - **No vacancy shutdown and no periodic correction.** A room's lights are not switched off when it becomes vacant, and lights changed by other automations are not corrected. That is Phase 0.4.
 - **Conflict detection reads automation actions.** It sees direct, group, device, area, floor and label targets, scenes and scripts (three levels). Templated targets, blueprints with templated inputs, Node-RED and AppDaemon are invisible.

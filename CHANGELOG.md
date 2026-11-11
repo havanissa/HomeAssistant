@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.3.2 — Global light adjustment and Manual mode
+
+Moods, light types and single lights can follow your **existing** adaptive brightness and colour-temperature system. Smart Occupancy has no adaptive-lighting engine of its own: it reads the values your system publishes. The upgrade changes no setting and sends no command. Every room keeps its Observe/Active state.
+
+### Added
+
+- **Global light adjustment** (Smart Lighting → *Global light adjustment*):
+  - an optional brightness source and an optional colour-temperature source, chosen independently
+  - live values and a status: *Connected*, *Unavailable* or *Not configured*
+  - supported sources: sensors, `number` and `input_number` helpers, lights, and Adaptive Lighting switches (`brightness_pct`, `color_temp_kelvin` / `color_temp_mired` attributes)
+  - unit handling: % or 0–255, and K or mired, detected automatically or chosen under *Advanced*
+  - values arrive through state-change subscriptions, not polling
+  - an unavailable source is never read as 0: the last good value is used (it is persisted), or the property is skipped and reported
+- **Per-profile modes for brightness and for colour temperature**, independent of each other: *Follow global*, *Global + offset* (percentage points / K), *Fixed*, *Ignore*. Not set means inherit. Results are clamped to 1–100 % and 1000–10000 K, then to the light's own range.
+- **Every mood** entries (pseudo mood `*`), for global light types, room light types and single lights or groups. They apply in every mood unless a mood sets its own value, and they never switch lights on or off.
+- **Colour and effect precedence**: an RGB/HS colour or an effect is never overwritten by the global white temperature. RGB lights can follow the global brightness. Colour and temperature are never sent together.
+- **Capability awareness**: from `supported_color_modes`, brightness-only strips follow brightness only, colour-only lights get no global temperature, and on/off lights get neither (reported as information).
+- **Gradual updates** when a global value changes:
+  - only for lights that are already on; a global change never switches a light on
+  - only meaningful changes (default 3 % / 100 K)
+  - at most one command per light per interval (default 60 s), with coalescing so the newest value wins
+  - optional transition (default 10 s) where supported
+  - only the properties that follow the global value are sent
+  - the usual protections apply: manual overrides, exclusions, groups, availability, occupancy, conflicts, Observe
+  - a light switched on later by something other than a person gets the current values right away
+- **Competing controllers**: an Adaptive Lighting switch used as a source, and enabled automations or scripts that use a source entity and command lights, are detected. Their lights get no global updates from Smart Occupancy, and a warning explains why. Nothing is disabled or changed.
+- **Manual mode**: Main Mood = `Manual` (configurable) pauses all automatic lighting.
+  - No command is sent for moods, occupancy, activation, profile edits or global updates.
+  - Queued applications and updates are dropped and never replayed.
+  - Manual light changes are not corrected or recorded.
+  - Occupancy, diagnostics and editing continue.
+  - Leaving Manual applies the newly selected mood with the current values, in activated rooms only.
+  - Manual beats every mood, room mood and adjustment setting. It needs no profile and is not listed as a mood.
+- **Preview**: each light shows its global-adjustment state (*will/would follow*, *up to date*, *queued*, *blocked* with the reason, *not adjusted*).
+- **Room card**: one line per light, *Brightness: Global · Temperature: Global · Effective now: 62 % / 3200 K*, and a *Global adjustment* line in the Overview.
+- Websocket command `smart_occupancy/lighting/adaptive/set` (admin only), and `manual_option` in `lighting/settings/set`.
+- Room lighting sensor state `paused`; attributes `manual_mode`, `global_adjustment`, `last_adaptive(_at)`, `adaptive_conflicts`. The room status sensor has `lighting_paused`.
+- Problems:
+  - `global_source_not_configured`
+  - `global_source_unavailable`
+  - `adaptive_controller_conflict`
+  - `lighting_manual_mode` (info)
+
+### Changed
+
+- The room card says *default* (instead of *follows global*) for light types without a room override, so it can't be confused with *Follow global* brightness.
+- A light's own-change window now includes the transition time, so a light still fading after our command is not mistaken for a manual change.
+
+### Configuration
+
+- **Store**: `.storage/smart_occupancy.lighting` keeps version 1.
+  - New keys: `adaptive`, `manual_option`.
+  - Profile entries can have `brightness_mode`, `brightness_offset`, `color_temp_mode`, `color_temp_offset`.
+  - A value without a mode stays fixed, so every 0.3.1 profile behaves exactly as before.
+- **State store**: the last good global values.
+
 ## 0.3.1 — Simple dashboards
 
 A usability redesign of the 0.3 cards: simple by default, advanced on request. No lighting behaviour changes; Observe stays the default and nothing is applied by the upgrade.

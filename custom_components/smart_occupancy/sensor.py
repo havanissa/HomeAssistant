@@ -307,7 +307,7 @@ class RoomStateSensor(RoomOccupancyEntity, SensorEntity):
         "recent_door_movement", "stuck_sensors", "unavailable_sensors", "pending_vacancy",
         "vacancy_confirm_at", "quiet_since", "required_quiet_seconds", "vacancy_evidence",
         "starting_up", "last_activity", "last_activity_source", "signals", "health",
-        "occupancy_usable", "observe_only", "operating_mode", "lighting_control", "comparison",
+        "occupancy_usable", "observe_only", "operating_mode", "lighting_control", "lighting_paused", "comparison",
         "entities", "timing", "adjacent_rooms",
     })
 
@@ -375,6 +375,8 @@ class RoomStateSensor(RoomOccupancyEntity, SensorEntity):
             # Per room: Observe unless mood lighting was explicitly enabled here.
             "observe_only": not lighting_active,
             "lighting_control": lighting_active,
+            # Main Mood is Manual: automatic lighting is paused (also in this room).
+            "lighting_paused": lighting_active and coordinator.lighting.manual_mode,
             "comparison": (
                 {"helper": room_config.reference_occupancy_entity, **comparison.as_dict()}
                 if comparison else None
@@ -501,7 +503,7 @@ class RoomMoodLightingSensor(RoomOccupancyEntity, SensorEntity):
         "opaque_groups", "offline_lights", "unsupported", "conflicts", "blocking_automations",
         "manual_overrides", "manual_override_minutes", "last_applied_profile", "last_applied_at",
         "last_trigger", "last_result", "last_reason", "last_counts", "last_errors", "last_decision_at",
-        "integration",
+        "integration", "manual_mode", "global_adjustment", "last_adaptive_at", "last_adaptive", "adaptive_conflicts",
     })
 
     async def async_added_to_hass(self) -> None:
