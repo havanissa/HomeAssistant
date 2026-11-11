@@ -1,0 +1,14 @@
+{
+  "domain": "smart_occupancy",
+  "name": "Smart Occupancy & Lighting",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/OWNER/smart-occupancy",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/OWNER/smart-occupancy/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

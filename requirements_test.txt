@@ -1,0 +1,2 @@
+# Matches Home Assistant 2026.10.x
+pytest-homeassistant-custom-component==0.13.375

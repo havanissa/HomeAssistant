@@ -1,0 +1,273 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Mood system",
+        "description": "Select the existing mood helpers. They are only read, never changed. Rule observed: if Manual Mood equals the Auto option, Main Mood follows Auto Mood; otherwise Main Mood follows Manual Mood.",
+        "data": {
+          "auto_mood_entity": "Auto Mood",
+          "manual_mood_entity": "Manual Mood",
+          "main_mood_entity": "Main Mood",
+          "auto_option": "Manual Mood option meaning \"Auto\"",
+          "mismatch_grace_seconds": "Mismatch grace period"
+        },
+        "data_description": {
+          "mismatch_grace_seconds": "Your automations need a moment to copy the mood. A mismatch is reported only if it lasts longer than this."
+        }
+      },
+      "categories": {
+        "title": "Light categories",
+        "description": "Map each category to a Home Assistant label. Lights are classified only by the labels applied to them (or their device). Categories can be added, renamed or removed later in the options.",
+        "data": {
+          "downlights": "Downlights",
+          "lamps": "Lamps",
+          "led_strips": "LED strips",
+          "decorative": "Decorative lighting",
+          "task": "Task lighting",
+          "path": "Path lighting",
+          "outdoor": "Outdoor lighting",
+          "create_missing_labels": "Create labels for categories left empty"
+        },
+        "data_description": {
+          "create_missing_labels": "Only creates the labels. No label is applied to any light; you assign them yourself."
+        }
+      },
+      "rooms": {
+        "title": "Rooms",
+        "description": "Select the areas to enable as rooms. Rooms can be enabled, disabled or reset later.",
+        "data": { "rooms": "Enabled rooms" }
+      },
+      "room_assign": {
+        "title": "Room: {room}",
+        "description": "Assign signals and managed lights. Pre-filled from devices discovered in this area (by device class, not by name) - please check them. Many Zigbee PIR and bed sensors report \"occupancy\" like radars and are suggested as radar.\n\nDiscovered:\n{discovered}",
+        "data": {
+          "pir": "PIR sensors",
+          "radar": "Radar / presence sensors",
+          "door": "Door contacts",
+          "pc_activity": "PC activity sensors",
+          "bed": "Bed occupancy sensors",
+          "other": "Other activity signals",
+          "lights": "Managed lights or groups",
+          "reference_occupancy_entity": "Existing occupancy helper (reference, read only)"
+        },
+        "data_description": {
+          "lights": "Select either a group or its member lights, not both.",
+          "reference_occupancy_entity": "Optional. Your existing room occupancy helper, observed for comparison in later phases."
+        }
+      },
+      "room_roles": {
+        "title": "Signal roles: {room}",
+        "description": "Choose how each signal will be used once occupancy logic exists (a later phase). Nothing is evaluated now.\n\n{sensors}"
+      }
+    },
+    "error": {
+      "entity_not_found": "Entity not found.",
+      "mood_entities_not_distinct": "Auto, Manual and Main Mood must be three different entities.",
+      "auto_option_not_found": "This option does not exist on the Manual Mood entity.",
+      "duplicate_assignment": "An entity can only be assigned once per room."
+    },
+    "abort": {
+      "single_instance_allowed": "Already configured. Use the options to add rooms."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Smart Occupancy & Lighting",
+        "menu_options": {
+          "general": "Mood helpers and operating mode",
+          "rooms": "Rooms",
+          "categories": "Light categories",
+          "profiles": "Mood profiles"
+        }
+      },
+      "general": {
+        "title": "Mood helpers and operating mode",
+        "description": "Phase 0.1 runs in Observe mode only. Supervise and Full Control become available in later phases.",
+        "data": {
+          "auto_mood_entity": "Auto Mood",
+          "manual_mood_entity": "Manual Mood",
+          "main_mood_entity": "Main Mood",
+          "auto_option": "Manual Mood option meaning \"Auto\"",
+          "mismatch_grace_seconds": "Mismatch grace period",
+          "operating_mode": "Operating mode"
+        }
+      },
+      "rooms": {
+        "title": "Rooms",
+        "description": "Choose an area to configure. ✓ marks enabled rooms.",
+        "data": { "area": "Area" }
+      },
+      "room_edit": {
+        "title": "Room: {room}",
+        "description": "Discovered in this area:\n{discovered}",
+        "data": {
+          "enabled": "Room enabled",
+          "pir": "PIR sensors",
+          "radar": "Radar / presence sensors",
+          "door": "Door contacts",
+          "pc_activity": "PC activity sensors",
+          "bed": "Bed occupancy sensors",
+          "other": "Other activity signals",
+          "lights": "Managed lights or groups",
+          "reference_occupancy_entity": "Existing occupancy helper (reference, read only)",
+          "reset": "Remove this room's configuration"
+        },
+        "data_description": {
+          "enabled": "Disabling keeps the configuration so the room can be re-enabled later.",
+          "reset": "Deletes this room's stored assignments and overrides. Your Home Assistant entities are not affected."
+        }
+      },
+      "room_roles": {
+        "title": "Signal roles: {room}",
+        "description": "Choose how each signal will be used once occupancy logic exists (a later phase). Nothing is evaluated now.\n\n{sensors}"
+      },
+      "categories": {
+        "title": "Light categories",
+        "menu_options": {
+          "category_add": "Add category",
+          "category_select": "Edit category",
+          "category_remove": "Remove categories",
+          "category_create_labels": "Create missing labels"
+        }
+      },
+      "category_add": {
+        "title": "Add category",
+        "data": { "name": "Name", "label": "Label" }
+      },
+      "category_select": {
+        "title": "Edit category",
+        "data": { "category": "Category" }
+      },
+      "category_edit": {
+        "title": "Edit category: {category}",
+        "data": { "name": "Name", "label": "Label" }
+      },
+      "category_remove": {
+        "title": "Remove categories",
+        "description": "Profile entries for removed categories are removed too. Labels in Home Assistant are kept.",
+        "data": { "categories": "Categories to remove" }
+      },
+      "category_create_labels": {
+        "title": "Create missing labels",
+        "description": "Create Home Assistant labels for: {categories}. No label is applied to any entity."
+      },
+      "profiles": {
+        "title": "Mood profiles",
+        "description": "Prepare profile settings. Inheritance: Global → Room override → Individual light override. Profiles are stored and validated only; no light is controlled in this phase.",
+        "data": { "scope": "Level", "mood": "Mood" }
+      },
+      "profile_room": {
+        "title": "Mood profile: room",
+        "data": { "room": "Room" }
+      },
+      "profile_target": {
+        "title": "Mood profile: target",
+        "data": { "category": "Light category", "light": "Light" }
+      },
+      "profile_edit": {
+        "title": "{scope} profile: {mood} / {target}",
+        "description": "Room: {room}. Leave a field empty to inherit it from the less specific level.",
+        "data": {
+          "action": "Action",
+          "brightness_pct": "Brightness",
+          "color_temp_kelvin": "Colour temperature",
+          "rgb_color": "RGB colour (where supported)",
+          "effect": "Effect (where supported)",
+          "transition": "Transition",
+          "remove": "Remove this entry"
+        }
+      }
+    },
+    "error": {
+      "entity_not_found": "Entity not found.",
+      "mood_entities_not_distinct": "Auto, Manual and Main Mood must be three different entities.",
+      "auto_option_not_found": "This option does not exist on the Manual Mood entity.",
+      "duplicate_assignment": "An entity can only be assigned once per room.",
+      "mode_not_available": "Only Observe mode is available in Phase 0.1.",
+      "name_required": "A name is required.",
+      "category_exists": "A category with this name already exists.",
+      "invalid_profile": "Invalid profile values.",
+      "invalid_brightness": "Brightness must be 0-100 %.",
+      "invalid_kelvin": "Colour temperature must be 1000-10000 K.",
+      "invalid_rgb": "RGB values must be 0-255.",
+      "kelvin_and_rgb": "Choose either colour temperature or RGB colour, not both.",
+      "invalid_transition": "Transition must be 0-300 seconds.",
+      "invalid_effect": "Effect name is empty.",
+      "off_with_attributes": "Action Off cannot have brightness, colour or effect."
+    },
+    "abort": {
+      "no_categories": "No light categories are configured.",
+      "all_categories_labelled": "Every category already has a label.",
+      "no_rooms": "No rooms are enabled.",
+      "no_lights": "This room has no managed lights."
+    }
+  },
+  "selector": {
+    "operating_mode": {
+      "options": {
+        "observe": "Observe (diagnostics only)",
+        "supervise": "Supervise (future phase)",
+        "full_control": "Full Control (future phase)"
+      }
+    },
+    "sensor_role": {
+      "options": {
+        "trigger": "Trigger occupancy",
+        "maintain": "Maintain occupancy",
+        "confirm_vacancy": "Confirm vacancy",
+        "ignore": "Ignore"
+      }
+    },
+    "profile_scope": {
+      "options": {
+        "global": "Global (per light category)",
+        "room": "Room override (per light category)",
+        "light": "Individual light override"
+      }
+    },
+    "light_action": {
+      "options": {
+        "on": "On",
+        "off": "Off",
+        "inherit": "Inherit",
+        "ignore": "Ignore"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": { "ok": "OK", "warning": "Warning", "error": "Error" }
+      },
+      "operating_mode": {
+        "name": "Operating mode",
+        "state": {
+          "observe": "Observe",
+          "supervise": "Supervise",
+          "full_control": "Full Control"
+        }
+      },
+      "effective_mood": { "name": "Effective mood" },
+      "configured_rooms": { "name": "Configured rooms" },
+      "light_categories": { "name": "Light categories" },
+      "discovered_sensors": { "name": "Discovered sensors" },
+      "missing_entities": { "name": "Missing entities" },
+      "unavailable_entities": { "name": "Unavailable entities" },
+      "config_problems": { "name": "Configuration problems" },
+      "room_observation": {
+        "name": "{room} observation",
+        "state": {
+          "ok": "OK",
+          "degraded": "Degraded",
+          "not_configured": "Not configured",
+          "area_missing": "Area missing"
+        }
+      }
+    },
+    "binary_sensor": {
+      "mood_mismatch": { "name": "Mood mismatch" }
+    }
+  }
+}
