@@ -1,8 +1,13 @@
 """Diagnostic sensors.
 
+Problem details are exposed as attributes so they can be read in the UI
+(entity → Attributes, or Developer tools → States) without opening logs.
+
 Recorder load is kept low: states change only when the observed situation
-changes, and list-valued attributes are excluded from the Recorder. No
-sensor has a state_class, so no long-term statistics are written.
+changes, list-valued attributes and timestamps are excluded from the
+Recorder, and "last checked" is republished at most every
+LAST_CHECKED_REFRESH_MINUTES while problems exist. No sensor has a
+state_class, so no long-term statistics are written.
 """
 
 from __future__ import annotations
@@ -20,34 +25,51 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import PHASE, OperatingMode, Severity
+from .const import PHASE, Classification, OperatingMode, ProblemCategory, Severity
 from .coordinator import (
-    ROOM_AREA_MISSING,
-    ROOM_DEGRADED,
-    ROOM_NOT_CONFIGURED,
-    ROOM_OK,
-    STATUS_ERROR,
-    STATUS_OK,
-    STATUS_WARNING,
+    CONFIGURATION_INVALID,
+    OPERATIONAL_UNAVAILABLE,
+    STATUS_OPTIONS,
     Snapshot,
     SmartOccupancyConfigEntry,
     SmartOccupancyCoordinator,
 )
 from .discovery import area_name
 from .entity import SmartOccupancyEntity, global_unique_id, room_unique_id
+from .occupancy import AVAILABLE, PENDING
 
 PARALLEL_UPDATES = 0
 
+# Never recorded: lists of details and timestamps that change with every check.
+UNRECORDED = frozenset({
+    "rooms", "categories", "sensors", "entities", "items", "problems", "notes", "last_checked",
+})
 
-def _count(sev: Severity, s: Snapshot) -> int:
-    return sum(1 for p in s.problems if p.severity == sev)
+
+def _issues(s: Snapshot, healths: frozenset[str]) -> dict[str, Any]:
+    entities = s.entity_issues(healths)
+    return {
+        "items": [Snapshot.issue_line(i) for i in entities],
+        "entities": entities,
+        "last_checked": s.last_checked,
+    }
+
+
+def _config_problems(s: Snapshot) -> dict[str, Any]:
+    config = s.problems_where(category=ProblemCategory.CONFIGURATION, include_info=True)
+    return {
+        "errors": sum(1 for p in config if p.severity == Severity.ERROR),
+        "warnings": sum(1 for p in config if p.severity == Severity.WARNING),
+        "problems": [s.problem_dict(p) for p in config if p.severity != Severity.INFO],
+        "notes": [s.problem_dict(p) for p in config if p.severity == Severity.INFO],
+        "last_checked": s.last_checked,
+    }
 
 
 @dataclass(frozen=True, kw_only=True)
 class SmartSensorDescription(SensorEntityDescription):
     value_fn: Callable[[Snapshot], Any]
     attrs_fn: Callable[[Snapshot], dict[str, Any]] | None = None
-    unrecorded: frozenset[str] = frozenset()
 
 
 SENSORS: tuple[SmartSensorDescription, ...] = (
@@ -55,15 +77,18 @@ SENSORS: tuple[SmartSensorDescription, ...] = (
         key="status",
         translation_key="status",
         device_class=SensorDeviceClass.ENUM,
-        options=[STATUS_OK, STATUS_WARNING, STATUS_ERROR],
+        options=STATUS_OPTIONS,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: s.status,
+        value_fn=lambda s: s.status.value,
         attrs_fn=lambda s: {
+            "summary": s.summary(),
             "phase": PHASE,
             "effective_mode": s.effective_mode.value,
-            "errors": _count(Severity.ERROR, s),
-            "warnings": _count(Severity.WARNING, s),
-            "info": _count(Severity.INFO, s),
+            "config_errors": s.count(Classification.CONFIG_ERROR),
+            "unavailable": s.count(Classification.UNAVAILABLE),
+            "warnings": s.count(Classification.WARNING),
+            "problems": [s.problem_dict(p) for p in s.problems_where()],
+            "last_checked": s.last_checked,
         },
     ),
     SmartSensorDescription(
@@ -95,8 +120,7 @@ SENSORS: tuple[SmartSensorDescription, ...] = (
         translation_key="configured_rooms",
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda s: len(s.rooms),
-        attrs_fn=lambda s: {"rooms": {r.name: r.status for r in s.rooms}},
-        unrecorded=frozenset({"rooms"}),
+        attrs_fn=lambda s: {"rooms": {r.name: r.status.value for r in s.rooms}},
     ),
     SmartSensorDescription(
         key="light_categories",
@@ -109,7 +133,6 @@ SENSORS: tuple[SmartSensorDescription, ...] = (
                 for c in s.categories
             }
         },
-        unrecorded=frozenset({"categories"}),
     ),
     SmartSensorDescription(
         key="discovered_sensors",
@@ -122,31 +145,27 @@ SENSORS: tuple[SmartSensorDescription, ...] = (
                 for a, e, k in s.discovered_signals
             ]
         },
-        unrecorded=frozenset({"sensors"}),
     ),
     SmartSensorDescription(
         key="missing_entities",
         translation_key="missing_entities",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: len(s.missing_entities),
-        attrs_fn=lambda s: {"entities": list(s.missing_entities)},
-        unrecorded=frozenset({"entities"}),
+        value_fn=lambda s: len(s.entity_issues(CONFIGURATION_INVALID)),
+        attrs_fn=lambda s: _issues(s, CONFIGURATION_INVALID),
     ),
     SmartSensorDescription(
         key="unavailable_entities",
         translation_key="unavailable_entities",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: len(s.unavailable_entities),
-        attrs_fn=lambda s: {"entities": list(s.unavailable_entities)},
-        unrecorded=frozenset({"entities"}),
+        value_fn=lambda s: len(s.entity_issues(OPERATIONAL_UNAVAILABLE)),
+        attrs_fn=lambda s: _issues(s, OPERATIONAL_UNAVAILABLE),
     ),
     SmartSensorDescription(
         key="config_problems",
         translation_key="config_problems",
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: sum(1 for p in s.problems if p.severity != Severity.INFO),
-        attrs_fn=lambda s: {"problems": [p.as_dict() for p in s.problems]},
-        unrecorded=frozenset({"problems"}),
+        value_fn=lambda s: len(s.problems_where(category=ProblemCategory.CONFIGURATION)),
+        attrs_fn=_config_problems,
     ),
 )
 
@@ -167,9 +186,8 @@ async def async_setup_entry(
 
 class SmartSensor(SmartOccupancyEntity, SensorEntity):
     entity_description: SmartSensorDescription
-    # Home Assistant reads unrecorded attributes at class level, so the union of
-    # every description's list-valued attributes is declared here.
-    _unrecorded_attributes = frozenset().union(*(d.unrecorded for d in SENSORS))
+    # Home Assistant reads unrecorded attributes at class level.
+    _unrecorded_attributes = UNRECORDED
 
     def __init__(self, coordinator: SmartOccupancyCoordinator, description: SmartSensorDescription) -> None:
         super().__init__(coordinator, global_unique_id(description.key))
@@ -187,13 +205,16 @@ class SmartSensor(SmartOccupancyEntity, SensorEntity):
 
 
 class RoomObservationSensor(SmartOccupancyEntity, SensorEntity):
-    """Health of a room's configured signals and lights. Not an occupancy state."""
+    """Diagnostic health of one room. Not an occupancy state."""
 
     _attr_translation_key = "room_observation"
     _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = [ROOM_OK, ROOM_DEGRADED, ROOM_NOT_CONFIGURED, ROOM_AREA_MISSING]
+    _attr_options = STATUS_OPTIONS
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _unrecorded_attributes = frozenset({"signals", "lights"})
+    _unrecorded_attributes = frozenset({
+        "reasons", "sensors_available", "sensors_unavailable", "lights_available",
+        "lights_unavailable", "pending", "problems", "last_checked",
+    })
 
     def __init__(self, coordinator: SmartOccupancyCoordinator, area_id: str) -> None:
         super().__init__(coordinator, room_unique_id(area_id))
@@ -208,19 +229,34 @@ class RoomObservationSensor(SmartOccupancyEntity, SensorEntity):
     @property
     def native_value(self) -> str | None:
         room = self._room()
-        return room.status if room else None
+        return room.status.value if room else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         room = self._room()
         if room is None:
             return None
+        data = self.coordinator.data
+
+        def split(items):
+            ok = [i.as_dict() for i in items if i.health == AVAILABLE]
+            bad = [i.as_dict() for i in items if i.health not in (AVAILABLE, PENDING)]
+            return ok, bad
+
+        sensors_ok, sensors_bad = split(room.sensors)
+        lights_ok, lights_bad = split(room.lights)
         return {
             "area_id": room.area_id,
-            "problems": room.problem_count,
-            "signals": [s.as_dict() for s in room.signals],
-            "lights": [
-                {"entity_id": e, "health": h, "categories": list(c)} for e, h, c in room.lights
-            ],
-            "reference_occupancy": room.reference_occupancy[0] if room.reference_occupancy else None,
+            "operating_mode": data.effective_mode.value,
+            "configuration_valid": room.configuration_valid,
+            "usable": room.usable,
+            "reasons": list(room.reasons),
+            "sensors_available": sensors_ok,
+            "sensors_unavailable": sensors_bad,
+            "lights_available": lights_ok,
+            "lights_unavailable": lights_bad,
+            "pending": [i.entity_id for i in (*room.sensors, *room.lights) if i.health == PENDING],
+            "reference_occupancy": room.reference_occupancy.as_dict() if room.reference_occupancy else None,
+            "problems": [data.problem_dict(p) for p in data.problems_where(area_id=room.area_id)],
+            "last_checked": data.last_checked,
         }

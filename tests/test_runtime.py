@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import timedelta
 import logging
 
-import pytest
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from homeassistant.config_entries import ConfigEntryState
@@ -14,7 +13,7 @@ from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.helpers import entity_registry as er, label_registry as lr
 from homeassistant.util import dt as dt_util
 
-from custom_components.smart_occupancy.const import DOMAIN
+from custom_components.smart_occupancy.const import DOMAIN, STARTUP_GRACE_SECONDS
 from custom_components.smart_occupancy.diagnostics import async_get_config_entry_diagnostics
 
 from .conftest import Home, base_options, set_moods, setup_entry
@@ -37,12 +36,12 @@ async def test_entities_created_with_stable_unique_ids(hass: HomeAssistant, home
         f"{DOMAIN}_{k}" for k in (
             "status", "operating_mode", "effective_mood", "configured_rooms", "light_categories",
             "discovered_sensors", "missing_entities", "unavailable_entities", "config_problems",
-            "mood_mismatch",
+            "mood_mismatch", "recheck",
         )
     } | {f"{DOMAIN}_room_{home.pilot_area}_observation"}
     assert state(hass, "sensor", "operating_mode").state == "observe"
     room = hass.states.get(eid(hass, "sensor", f"{DOMAIN}_room_{home.pilot_area}_observation"))
-    assert room.state == "ok"
+    assert room.state == "healthy"
     assert room.name.endswith("Kamar Norður observation")
 
 
@@ -103,7 +102,9 @@ async def test_mood_helper_unavailable(hass: HomeAssistant, home: Home) -> None:
     await hass.async_block_till_done()
     # Cannot judge -> unknown, never a false "problem".
     assert state(hass, "binary_sensor", "mood_mismatch").state == "unknown"
-    assert "input_select.mood" in state(hass, "sensor", "unavailable_entities").attributes["entities"]
+    items = state(hass, "sensor", "unavailable_entities").attributes["entities"]
+    assert [(i["entity_id"], i["title"]) for i in items] == [("input_select.mood", "Mood helper unavailable")]
+    assert items[0]["rooms"] == []
 
 
 async def test_light_categories_from_labels(hass: HomeAssistant, home: Home) -> None:
@@ -131,14 +132,14 @@ async def test_deleted_label_reported(hass: HomeAssistant, home: Home) -> None:
     await hass.async_block_till_done()
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=3))
     await hass.async_block_till_done()
-    codes = [p["code"] for p in state(hass, "sensor", "config_problems").attributes["problems"]]
+    codes = [p["type"] for p in state(hass, "sensor", "config_problems").attributes["problems"]]
     assert "category_label_missing" in codes
 
 
 async def test_group_and_member_conflict(hass: HomeAssistant, home: Home) -> None:
     await setup_entry(hass, base_options(home, lights=[home.group, home.member_a]))
     problems = state(hass, "sensor", "config_problems").attributes["problems"]
-    conflict = [p for p in problems if p["code"] == "group_member_conflict"]
+    conflict = [p for p in problems if p["type"] == "group_member_conflict"]
     assert len(conflict) == 1 and conflict[0]["entity_id"] == home.member_a
     assert state(hass, "sensor", "status").state == "warning"
 
@@ -150,26 +151,30 @@ async def test_missing_and_unavailable_entities(hass: HomeAssistant, home: Home,
     )
     await setup_entry(hass, opts)
     room_id = eid(hass, "sensor", f"{DOMAIN}_room_{home.pilot_area}_observation")
-    assert state(hass, "sensor", "missing_entities").attributes["entities"] == ["binary_sensor.removed_sensor"]
-    assert hass.states.get(room_id).state == "degraded"
+    missing = state(hass, "sensor", "missing_entities").attributes["entities"]
+    assert [m["entity_id"] for m in missing] == ["binary_sensor.removed_sensor"]
+    assert hass.states.get(room_id).state == "config_error"
 
     # A configured sensor going unavailable is handled safely.
     hass.states.async_set(home.radar, STATE_UNAVAILABLE)
     await hass.async_block_till_done()
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=2))
     await hass.async_block_till_done()
-    assert home.radar in state(hass, "sensor", "unavailable_entities").attributes["entities"]
-    signals = {s["entity_id"]: s["health"] for s in hass.states.get(room_id).attributes["signals"]}
-    assert signals[home.radar] == "unavailable"
-    assert signals["binary_sensor.removed_sensor"] == "missing"
+    unavailable = state(hass, "sensor", "unavailable_entities").attributes["entities"]
+    assert [u["entity_id"] for u in unavailable] == [home.radar]
+    attrs = hass.states.get(room_id).attributes
+    bad = {s["entity_id"]: s["health"] for s in attrs["sensors_unavailable"]}
+    assert bad == {home.radar: "unavailable", "binary_sensor.removed_sensor": "missing"}
+    assert attrs["usable"] is True  # PIR and door still observe the room
     assert service_calls == []
 
 
 async def test_registered_but_not_loaded_is_not_missing(hass: HomeAssistant, home: Home) -> None:
-    hass.states.async_remove(home.pir)  # integration not loaded yet
+    hass.states.async_remove(home.pir)  # registered, but its integration provides no state
     await setup_entry(hass, base_options(home))
     assert state(hass, "sensor", "missing_entities").state == "0"
-    assert home.pir in state(hass, "sensor", "unavailable_entities").attributes["entities"]
+    items = state(hass, "sensor", "unavailable_entities").attributes["entities"]
+    assert [(i["entity_id"], i["type"]) for i in items] == [(home.pir, "entity_not_provided")]
 
 
 async def test_entity_rename_updates_configuration(hass: HomeAssistant, home: Home) -> None:
@@ -210,8 +215,11 @@ async def test_quiet_during_startup(hass: HomeAssistant, home: Home, caplog) -> 
 
     await hass.async_start()
     await hass.async_block_till_done()
+    assert "problem_detected" not in caplog.text  # start-up grace period
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=STARTUP_GRACE_SECONDS + 1))
+    await hass.async_block_till_done()
     assert "observe_summary" in caplog.text
-    assert "problem_detected severity=warning code=missing_entity" in caplog.text
+    assert "problem_detected classification=config_error type=entity_missing" in caplog.text
 
 
 async def test_unload_before_and_after_startup(hass: HomeAssistant, home: Home) -> None:
@@ -244,7 +252,8 @@ async def test_area_missing(hass: HomeAssistant, home: Home) -> None:
     opts["rooms"]["deleted_area"] = {"enabled": True, "sensors": [], "lights": []}
     await setup_entry(hass, opts)
     room = hass.states.get(eid(hass, "sensor", f"{DOMAIN}_room_deleted_area_observation"))
-    assert room.state == "area_missing"
+    assert room.state == "config_error"
+    assert room.attributes["reasons"][0] == "Area deleted"
 
 
 async def test_mode_forced_to_observe(hass: HomeAssistant, home: Home) -> None:
@@ -255,7 +264,7 @@ async def test_mode_forced_to_observe(hass: HomeAssistant, home: Home) -> None:
     mode = state(hass, "sensor", "operating_mode")
     assert mode.state == "observe"
     assert mode.attributes["configured_mode"] == "full_control"
-    assert state(hass, "sensor", "status").state == "error"
+    assert state(hass, "sensor", "status").state == "config_error"
 
 
 async def test_no_service_calls_while_observing(hass: HomeAssistant, home: Home, service_calls) -> None:
@@ -277,7 +286,7 @@ async def test_diagnostics(hass: HomeAssistant, home: Home) -> None:
     entry = await setup_entry(hass, opts)
     hass.states.async_set(home.radar, "on")
     diag = await async_get_config_entry_diagnostics(hass, entry)
-    assert diag["phase"] == "0.1"
+    assert diag["phase"] == "0.1.1"
     room = diag["rooms"][home.pilot_area]
     assert room["active_signals_now"] == {"maintain": [home.radar]}
     assert sorted(room["group_members"][home.group]) == sorted([home.member_a, home.member_b])
@@ -292,7 +301,10 @@ def test_list_attributes_excluded_from_recorder() -> None:
     from custom_components.smart_occupancy.sensor import SENSORS, RoomObservationSensor, SmartSensor
 
     combined = SmartSensor._Entity__combined_unrecorded_attributes
-    assert {"rooms", "categories", "sensors", "entities", "problems"} <= combined
-    assert {"signals", "lights"} <= RoomObservationSensor._Entity__combined_unrecorded_attributes
+    assert {"rooms", "categories", "sensors", "entities", "items", "problems", "notes", "last_checked"} <= combined
+    assert {
+        "reasons", "sensors_available", "sensors_unavailable", "lights_available",
+        "lights_unavailable", "problems", "last_checked",
+    } <= RoomObservationSensor._Entity__combined_unrecorded_attributes
     # No long-term statistics are generated.
     assert all(d.state_class is None for d in SENSORS)

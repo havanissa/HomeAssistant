@@ -4,11 +4,11 @@
   "codeowners": [],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/OWNER/smart-occupancy",
+  "documentation": "https://github.com/havanissa/HomeAssistant",
   "integration_type": "service",
   "iot_class": "calculated",
-  "issue_tracker": "https://github.com/OWNER/smart-occupancy/issues",
+  "issue_tracker": "https://github.com/havanissa/HomeAssistant/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.1.0"
+  "version": "0.1.1"
 }

@@ -21,6 +21,7 @@ GLOBAL_SENSOR_KEYS = (
     "config_problems",
 )
 GLOBAL_BINARY_SENSOR_KEYS = ("mood_mismatch",)
+GLOBAL_BUTTON_KEYS = ("recheck",)
 
 
 def global_unique_id(key: str) -> str:
@@ -34,7 +35,10 @@ def room_unique_id(area_id: str) -> str:
 
 
 def expected_unique_ids(config: IntegrationConfig) -> set[str]:
-    ids = {global_unique_id(k) for k in GLOBAL_SENSOR_KEYS + GLOBAL_BINARY_SENSOR_KEYS}
+    ids = {
+        global_unique_id(k)
+        for k in GLOBAL_SENSOR_KEYS + GLOBAL_BINARY_SENSOR_KEYS + GLOBAL_BUTTON_KEYS
+    }
     ids |= {room_unique_id(a) for a in config.enabled_rooms}
     return ids
 

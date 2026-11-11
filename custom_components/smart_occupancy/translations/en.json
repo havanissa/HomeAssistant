@@ -35,7 +35,9 @@
       "rooms": {
         "title": "Rooms",
         "description": "Select the areas to enable as rooms. Rooms can be enabled, disabled or reset later.",
-        "data": { "rooms": "Enabled rooms" }
+        "data": {
+          "rooms": "Enabled rooms"
+        }
       },
       "room_assign": {
         "title": "Room: {room}",
@@ -96,7 +98,9 @@
       "rooms": {
         "title": "Rooms",
         "description": "Choose an area to configure. ✓ marks enabled rooms.",
-        "data": { "area": "Area" }
+        "data": {
+          "area": "Area"
+        }
       },
       "room_edit": {
         "title": "Room: {room}",
@@ -133,20 +137,30 @@
       },
       "category_add": {
         "title": "Add category",
-        "data": { "name": "Name", "label": "Label" }
+        "data": {
+          "name": "Name",
+          "label": "Label"
+        }
       },
       "category_select": {
         "title": "Edit category",
-        "data": { "category": "Category" }
+        "data": {
+          "category": "Category"
+        }
       },
       "category_edit": {
         "title": "Edit category: {category}",
-        "data": { "name": "Name", "label": "Label" }
+        "data": {
+          "name": "Name",
+          "label": "Label"
+        }
       },
       "category_remove": {
         "title": "Remove categories",
         "description": "Profile entries for removed categories are removed too. Labels in Home Assistant are kept.",
-        "data": { "categories": "Categories to remove" }
+        "data": {
+          "categories": "Categories to remove"
+        }
       },
       "category_create_labels": {
         "title": "Create missing labels",
@@ -155,15 +169,23 @@
       "profiles": {
         "title": "Mood profiles",
         "description": "Prepare profile settings. Inheritance: Global → Room override → Individual light override. Profiles are stored and validated only; no light is controlled in this phase.",
-        "data": { "scope": "Level", "mood": "Mood" }
+        "data": {
+          "scope": "Level",
+          "mood": "Mood"
+        }
       },
       "profile_room": {
         "title": "Mood profile: room",
-        "data": { "room": "Room" }
+        "data": {
+          "room": "Room"
+        }
       },
       "profile_target": {
         "title": "Mood profile: target",
-        "data": { "category": "Light category", "light": "Light" }
+        "data": {
+          "category": "Light category",
+          "light": "Light"
+        }
       },
       "profile_edit": {
         "title": "{scope} profile: {mood} / {target}",
@@ -239,7 +261,12 @@
     "sensor": {
       "status": {
         "name": "Status",
-        "state": { "ok": "OK", "warning": "Warning", "error": "Error" }
+        "state": {
+          "healthy": "Healthy",
+          "warning": "Warning",
+          "config_error": "Configuration error",
+          "unavailable": "Unavailable"
+        }
       },
       "operating_mode": {
         "name": "Operating mode",
@@ -249,25 +276,46 @@
           "full_control": "Full Control"
         }
       },
-      "effective_mood": { "name": "Effective mood" },
-      "configured_rooms": { "name": "Configured rooms" },
-      "light_categories": { "name": "Light categories" },
-      "discovered_sensors": { "name": "Discovered sensors" },
-      "missing_entities": { "name": "Missing entities" },
-      "unavailable_entities": { "name": "Unavailable entities" },
-      "config_problems": { "name": "Configuration problems" },
+      "effective_mood": {
+        "name": "Effective mood"
+      },
+      "configured_rooms": {
+        "name": "Configured rooms"
+      },
+      "light_categories": {
+        "name": "Light categories"
+      },
+      "discovered_sensors": {
+        "name": "Discovered sensors"
+      },
+      "missing_entities": {
+        "name": "Missing entities"
+      },
+      "unavailable_entities": {
+        "name": "Unavailable entities"
+      },
+      "config_problems": {
+        "name": "Configuration problems"
+      },
       "room_observation": {
         "name": "{room} observation",
         "state": {
-          "ok": "OK",
-          "degraded": "Degraded",
-          "not_configured": "Not configured",
-          "area_missing": "Area missing"
+          "healthy": "Healthy",
+          "warning": "Warning",
+          "config_error": "Configuration error",
+          "unavailable": "Unavailable"
         }
       }
     },
     "binary_sensor": {
-      "mood_mismatch": { "name": "Mood mismatch" }
+      "mood_mismatch": {
+        "name": "Mood mismatch"
+      }
+    },
+    "button": {
+      "recheck": {
+        "name": "Re-check diagnostics"
+      }
     }
   }
 }

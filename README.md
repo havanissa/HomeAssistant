@@ -2,7 +2,7 @@
 
 A Home Assistant custom integration that will eventually provide intelligent occupancy detection, predictive room occupancy, mood-based lighting and lighting supervision.
 
-**This is Phase 0.1: the foundation. It runs in Observe mode only.** It reads states and registries and exposes diagnostics. It never:
+**This is Phase 0.1.1: the foundation plus diagnostic improvements (see [CHANGELOG.md](CHANGELOG.md)). It runs in Observe mode only.** It reads states and registries and exposes diagnostics. It never:
 
 - calls a light service (or any other service)
 - changes automations, scripts, scenes, helpers or the mood system
@@ -79,17 +79,79 @@ All entities belong to one service device, *Smart Occupancy & Lighting*. Unique 
 
 | Entity | State | Notes |
 |---|---|---|
-| Status | ok / warning / error | Error and warning counts, effective mode |
+| Status | healthy / warning / config_error / unavailable | One-line `summary`, counts per classification, every problem with details |
 | Operating mode | observe | `configured_mode` attribute; lighting control always false |
 | Effective mood | Main Mood value | Attributes: `auto_mood`, `manual_mood`, `expected_main_mood`, `follows` (auto/manual), `consistent` |
 | Mood mismatch | on / off / unknown | On only if Main Mood disagrees with the rule for longer than the grace period. Unknown when a helper is unavailable. |
 | Configured rooms | count | Room → status |
 | Light categories | count | Per category: label and number of classified lights |
 | Discovered sensors | count | Candidate signals found in enabled rooms |
-| Missing entities | count | Configured entities that don't exist |
-| Unavailable entities | count | Configured entities that are unavailable, unknown or not loaded yet |
-| Configuration problems | count (warnings + errors) | Full structured problem list |
-| *Room* observation | ok / degraded / not_configured / area_missing | Health of the room's signals and lights. **Not** an occupancy state. |
+| Missing entities | count | Configured entities that are deleted or disabled. `items` and `entities` hold the details. |
+| Unavailable entities | count | Configured entities that are unavailable, have no value, or are not provided by their integration. `items` and `entities` hold the details. |
+| Configuration problems | count (configuration errors + warnings) | `problems` (actionable) and `notes` (informational). Offline devices are **not** counted here. |
+| *Room* observation | healthy / warning / config_error / unavailable | Health of the room's signals and lights. **Not** an occupancy state. |
+| Re-check diagnostics (button) | — | Re-evaluates immediately; reads states only |
+
+### Reading problems in the UI
+
+Open any diagnostic entity and expand **Attributes**, or go to **Developer tools → States**. You don't need the log.
+
+- **`items`** has one line per affected entity, for example `light.x (Spot 3) — Kamar Norður — Light unavailable`.
+- **`entities`**, `problems` and `notes` hold structured details for each problem:
+
+  | Field | What it holds |
+  |---|---|
+  | `type`, `title` | Problem type and its short name |
+  | `classification` | `config_error`, `unavailable`, `warning` or `info` |
+  | `severity` | How serious it is |
+  | `category` | `configuration` or `operational` |
+  | `explanation` | What is wrong, in plain language |
+  | `action` | What to do about it |
+  | `room`, `entity_id`, `name` | Where it is, and the entity's friendly name |
+  | `first_detected`, `last_checked` | When it was first seen and last re-evaluated |
+
+**Room observation attributes**
+
+| Attribute | Meaning |
+|---|---|
+| `configuration_valid` | No configuration error in this room |
+| `usable` | At least one Trigger/Maintain signal is available |
+| `reasons` | Why the room is not healthy |
+| `sensors_available` / `sensors_unavailable` | Sensors by health |
+| `lights_available` / `lights_unavailable` | Lights by health |
+| `pending` | Entities still loading during start-up |
+| `operating_mode` | The mode the integration is running in |
+
+**Room status**
+
+| Status | When |
+|---|---|
+| `config_error` | The room's configuration points at something unusable: a deleted area, a deleted or disabled entity, or something that isn't a light |
+| `unavailable` | Every Trigger/Maintain signal is unavailable, so occupancy can't be observed |
+| `warning` | Anything else that needs attention. An offline optional light only makes the room a warning. |
+| `healthy` | No problems |
+
+**Entity health**
+
+| Health | Meaning | Clears by itself? |
+|---|---|---|
+| `unavailable` | The device is offline | Yes, when it reconnects |
+| `unknown` | No value reported yet | Yes, on the next report |
+| `not_provided` | Registered, but its integration doesn't provide it (integration not loaded, or device removed) | No |
+| `disabled` | Disabled in Home Assistant | No: enable it or remove it from the room |
+| `missing` | Deleted | No: select its replacement or remove it |
+| `pending` | Still loading during start-up. It gets a 120 s grace period after start-up and is not reported. | — |
+
+**When problems clear**
+
+Problems clear automatically: every evaluation rebuilds the full picture. An evaluation runs on each of these events:
+- a configured entity changes state
+- an area, device, entity or label registry change, such as an entity being added, removed, renamed or disabled
+- an options change
+- a reload
+- Home Assistant start-up
+
+`first_detected` survives reloads and restarts.
 
 ### Classification
 
@@ -113,15 +175,17 @@ A light belongs to a category when the category's label is on the light entity o
 ### Recorder and logging
 
 - No sensor has a `state_class`, so no long-term statistics are created.
-- List-valued attributes are excluded from the Recorder.
+- List-valued attributes and `last_checked` are excluded from the Recorder.
+- While problems exist, `last_checked` is republished at most every 15 minutes.
+- Problem history is kept in `.storage`, not in the Recorder.
 - States change only when the observed situation changes. Live signal activity (which sensor is currently on) is only in the diagnostics download, never in entity state.
-- Logs are structured `key=value` lines:
+- Logs are structured `key=value` lines (problem details are in entity attributes, so the log is optional):
   - `problem_detected` (warning, once per problem)
   - `problem_resolved` (info)
   - `entity_renamed` (info)
-  - `observe_summary` (info, once after start-up)
+  - `observe_summary` (info, once after the start-up grace period)
   - `observe_snapshot` (debug)
-- While Home Assistant is starting, no problems are logged. Integrations that are still loading would otherwise look like missing entities.
+- No problems are logged until the start-up grace period has passed. Integrations that are still loading would otherwise look like missing entities.
 
 To see debug logs:
 

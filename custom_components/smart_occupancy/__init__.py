@@ -20,7 +20,7 @@ from .models import IntegrationConfig, rename_entity_references
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntry) -> bool:
@@ -29,6 +29,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntr
 
     _remove_stale_own_entities(hass, entry, coordinator.config)
 
+    # Restore "first detected" timestamps before the first evaluation.
+    await coordinator.tracker.async_load()
     await coordinator.async_config_entry_first_refresh()
     coordinator.async_start()
     entry.async_on_unload(coordinator.async_stop)
@@ -46,7 +48,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntr
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntry) -> bool:
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        await entry.runtime_data.tracker.async_flush()
+    return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntry) -> None:
+    """Delete this integration's own problem history when it is removed."""
+    from .problems import ProblemTracker
+
+    await ProblemTracker(hass).async_remove()
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntry) -> bool:

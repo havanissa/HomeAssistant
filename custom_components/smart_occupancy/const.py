@@ -7,7 +7,7 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.1"
+PHASE: Final = "0.1.1"
 
 # Version of the options payload stored in the config entry.
 CONFIG_VERSION: Final = 1
@@ -75,6 +75,44 @@ class Severity(StrEnum):
     ERROR = "error"
     WARNING = "warning"
     INFO = "info"
+
+
+class ProblemCategory(StrEnum):
+    """Whether a problem is in the configuration or in the running system."""
+
+    CONFIGURATION = "configuration"
+    OPERATIONAL = "operational"
+
+
+class Classification(StrEnum):
+    """User-facing classification of rooms, the integration and problems."""
+
+    HEALTHY = "healthy"
+    WARNING = "warning"
+    CONFIG_ERROR = "config_error"
+    UNAVAILABLE = "unavailable"
+    INFO = "info"  # problems only: informational note, never degrades status
+
+
+# Status precedence, worst first.
+STATUS_ORDER: Final = (
+    Classification.CONFIG_ERROR,
+    Classification.UNAVAILABLE,
+    Classification.WARNING,
+    Classification.HEALTHY,
+)
+
+# After Home Assistant has started, entities that are registered but not yet
+# provided by their integration are given this long to appear before they are
+# reported (slow integrations such as MQTT finish loading after start).
+STARTUP_GRACE_SECONDS: Final = 120
+
+# Entity attributes carry a "last_checked" timestamp. While problems exist it
+# is republished at most this often, which bounds Recorder writes.
+LAST_CHECKED_REFRESH_MINUTES: Final = 15
+
+PROBLEM_STORE_VERSION: Final = 1
+PROBLEM_STORE_KEY: Final = "smart_occupancy.problem_history"
 
 
 DEFAULT_ROLE_FOR_KIND: Final[dict[SensorKind, SensorRole]] = {
