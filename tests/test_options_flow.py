@@ -55,6 +55,8 @@ async def test_enable_disable_and_reset_room(hass: HomeAssistant, home: Home) ->
         result["flow_id"], {"enabled": False, "radar": [home.radar], "reset": False}
     )
     result = await hass.config_entries.options.async_configure(result["flow_id"], {home.radar: "maintain"})
+    assert result["step_id"] == "room_occupancy"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     assert result["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
     pilot = entry.options["rooms"][home.pilot_area]

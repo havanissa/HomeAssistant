@@ -13,6 +13,7 @@ from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.helpers import area_registry as ar, entity_registry as er
 
 from custom_components.smart_occupancy.const import DOMAIN, PROBLEM_STORE_KEY, STARTUP_GRACE_SECONDS
+from custom_components.smart_occupancy.models import migrate_options
 
 from .conftest import Home, base_options, setup_entry
 from .test_runtime import eid, state
@@ -342,9 +343,11 @@ async def test_last_checked_refresh_is_bounded(hass: HomeAssistant, home: Home, 
         await settle(hass, freezer)
     assert hass.states.get(status_id).last_updated == written
 
-    # ...but "last checked" moves on at most every 15 minutes.
+    # ...(motion is handled by the occupancy engine and never rebuilds the
+    # diagnostics), but "last checked" moves on at most every 15 minutes when
+    # a diagnostics-relevant event (here: a renamed sensor) re-evaluates.
     freezer.tick(timedelta(minutes=15))
-    hass.states.async_set(home.pir, "on")
+    hass.states.async_set(home.pir, "on", {"friendly_name": "North PIR"})
     await settle(hass, freezer)
     assert hass.states.get(status_id).last_updated > written
 
@@ -365,8 +368,10 @@ async def test_recheck_button(hass: HomeAssistant, home: Home, freezer, service_
 
 
 async def test_existing_configuration_preserved(hass: HomeAssistant, home: Home) -> None:
-    """Phase 0.1 options load unchanged; only entity states/attributes are new."""
+    """Phase 0.1.1 options are migrated, keeping every existing value."""
     opts = labelled_options(home)
     entry = await setup_entry(hass, opts)
-    assert entry.options == opts
-    assert entry.version == 1
+    assert entry.options == migrate_options(opts)
+    for key in ("mood", "categories", "global_profiles", "operating_mode"):
+        assert entry.options[key] == opts[key]
+    assert entry.version == 1 and entry.minor_version == 2

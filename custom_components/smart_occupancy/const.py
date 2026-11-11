@@ -7,10 +7,12 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.1.1"
+PHASE: Final = "0.2"
+VERSION: Final = "0.2.0"
 
 # Version of the options payload stored in the config entry.
-CONFIG_VERSION: Final = 1
+# 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
+CONFIG_VERSION: Final = 2
 
 # Debounce windows (seconds). All updates are event driven; these only
 # coalesce bursts of events into a single recomputation.
@@ -52,7 +54,7 @@ class SensorKind(StrEnum):
 
 
 class SensorRole(StrEnum):
-    """How a room signal contributes to occupancy (used from a later phase)."""
+    """How a room signal contributes to occupancy."""
 
     TRIGGER = "trigger"
     MAINTAIN = "maintain"
@@ -142,3 +144,36 @@ KELVIN_MIN: Final = 1000
 KELVIN_MAX: Final = 10000
 TRANSITION_MIN: Final = 0.0
 TRANSITION_MAX: Final = 300.0
+
+
+class OccupancyState(StrEnum):
+    """Internal occupancy state of a room (see engine.py for transitions)."""
+
+    VACANT = "vacant"
+    POSSIBLE_OCCUPANCY = "possible_occupancy"
+    CONFIRMED_OCCUPANCY = "confirmed_occupancy"
+    POSSIBLE_VACANCY = "possible_vacancy"
+    UNCERTAIN = "uncertain"
+
+
+# Occupancy timing parameters: key -> (default seconds, min, max).
+# All are configurable globally (Configure -> Occupancy timing) and can be
+# overridden per room. A value of 0 disables the two "stuck" detections.
+TIMING_PARAMETERS: Final[dict[str, tuple[int, int, int]]] = {
+    "correlation_window": (10, 1, 120),
+    "exit_confirmation": (300, 0, 3600),
+    "inactivity_timeout": (600, 30, 14400),
+    "dropout_grace": (30, 0, 600),
+    "trigger_stuck_after": (1800, 0, 86400),
+    "presence_stuck_after": (0, 0, 172800),
+    "startup_hold": (120, 0, 3600),
+}
+
+OCCUPANCY_STORE_VERSION: Final = 1
+OCCUPANCY_STORE_KEY: Final = "smart_occupancy.occupancy_state"
+# Engine state is written on occupancy transitions only, coalesced this long.
+OCCUPANCY_SAVE_DELAY_SECONDS: Final = 15
+
+# Dashboard card served by this integration.
+CARD_URL_BASE: Final = "/smart_occupancy_static"
+CARD_FILENAME: Final = "smart-occupancy-room-card.js"

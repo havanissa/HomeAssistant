@@ -1,8 +1,9 @@
-"""Smart Occupancy & Lighting - Phase 0.1 (Observe only).
+"""Smart Occupancy & Lighting - Phase 0.2 (Observe only).
 
-This integration reads states and registries and exposes diagnostics. It
-does not call any light service, does not modify automations, helpers or
-other integrations' entities, and does not poll.
+This integration reads states and registries, computes its own occupancy
+per room and exposes diagnostics. It does not call any light service, does
+not modify automations, helpers or other integrations' entities, and does
+not poll.
 """
 
 from __future__ import annotations
@@ -11,16 +12,30 @@ import logging
 
 from homeassistant.const import Platform
 from homeassistant.core import Event, HomeAssistant, callback
-from homeassistant.helpers import area_registry as ar, entity_registry as er
+from homeassistant.helpers import area_registry as ar, config_validation as cv, entity_registry as er
+from homeassistant.helpers.typing import ConfigType
 
-from .const import CONFIG_VERSION, DOMAIN
+from .card import async_register_card
+from .const import DOMAIN
 from .coordinator import SmartOccupancyConfigEntry, SmartOccupancyCoordinator
 from .entity import expected_unique_ids
-from .models import IntegrationConfig, rename_entity_references
+from .models import IntegrationConfig, migrate_options, rename_entity_references
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
+
+# Config entry major/minor version. Minor 2 = options payload CONFIG_VERSION 2.
+ENTRY_VERSION = 1
+ENTRY_MINOR_VERSION = 2
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Serve the Room Status dashboard card (once per Home Assistant run)."""
+    await async_register_card(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntry) -> bool:
@@ -29,11 +44,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntr
 
     _remove_stale_own_entities(hass, entry, coordinator.config)
 
-    # Restore "first detected" timestamps before the first evaluation.
+    # Restore "first detected" timestamps and the previous occupancy decisions
+    # before the first evaluation.
     await coordinator.tracker.async_load()
+    await coordinator.occupancy.async_load()
     await coordinator.async_config_entry_first_refresh()
     coordinator.async_start()
+    coordinator.occupancy.async_start()
     entry.async_on_unload(coordinator.async_stop)
+    entry.async_on_unload(coordinator.occupancy.async_stop)
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     entry.async_on_unload(
@@ -51,25 +70,41 @@ async def async_unload_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         await entry.runtime_data.tracker.async_flush()
+        await entry.runtime_data.occupancy.async_flush()
     return unloaded
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntry) -> None:
     """Delete this integration's own problem history when it is removed."""
+    from .occupancy_manager import OccupancyManager
     from .problems import ProblemTracker
 
     await ProblemTracker(hass).async_remove()
+    await OccupancyManager(hass, IntegrationConfig()).async_remove()
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntry) -> bool:
-    """Migrate stored configuration between versions."""
-    if entry.version > CONFIG_VERSION:
-        # Downgrade from a newer release: refuse rather than corrupt.
+    """Migrate stored configuration between versions.
+
+    1.1 -> 1.2 (Phase 0.1.x -> 0.2): adds occupancy timing, adjacent rooms and
+    inverted signals with defaults. Everything already configured is kept.
+    Minor versions are backwards compatible, so 0.1.1 can still load a 1.2
+    entry after a downgrade (it ignores the new keys).
+    """
+    if entry.version > ENTRY_VERSION:
+        # Downgrade from a newer major release: refuse rather than corrupt.
         _LOGGER.error(
             "Configuration version %s is newer than supported version %s",
-            entry.version, CONFIG_VERSION,
+            entry.version, ENTRY_VERSION,
         )
         return False
+    if (old_minor := entry.minor_version) < ENTRY_MINOR_VERSION:
+        options = migrate_options(dict(entry.options))
+        hass.config_entries.async_update_entry(entry, options=options, minor_version=ENTRY_MINOR_VERSION)
+        _LOGGER.info(
+            "migrated_configuration from=%s.%s to=%s.%s rooms=%d",
+            entry.version, old_minor, ENTRY_VERSION, ENTRY_MINOR_VERSION, len(options.get("rooms", {})),
+        )
     return True
 
 

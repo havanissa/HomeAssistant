@@ -1,0 +1,125 @@
+"""Per-room health, split into occupancy, lighting and configuration.
+
+Built from the structured problems of the Phase 0.1.1 validation engine
+(nothing is validated twice) plus the occupancy engine's live view of its
+signals (unavailable or stuck sensors). The split keeps an offline light
+from making occupancy detection look degraded:
+
+* **occupancy** - can presence and vacancy be determined? Only signals.
+* **lighting** - are the configured lights available? Only lights.
+* **configuration** - are the room's assignments and settings valid?
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from .const import Classification, ProblemCategory, Severity
+from .coordinator import RoomSnapshot, Snapshot
+from .engine import RoomResult, SignalStatus
+from .occupancy import AVAILABLE, PENDING
+
+HEALTHY = Classification.HEALTHY.value
+WARNING = Classification.WARNING.value
+UNAVAILABLE = Classification.UNAVAILABLE.value
+CONFIG_ERROR = Classification.CONFIG_ERROR.value
+
+_HEALTH_WORDS = {
+    "unavailable": "unavailable",
+    "unknown": "has not reported a value",
+    "not_provided": "not provided by its integration",
+    "missing": "deleted",
+    "disabled": "disabled",
+    "pending": "still loading",
+}
+
+
+def _label(name: str | None, entity_id: str) -> str:
+    return f"{name} ({entity_id})" if name and name != entity_id else entity_id
+
+
+def _room(snapshot: Snapshot, area_id: str) -> RoomSnapshot | None:
+    return next((r for r in snapshot.rooms if r.area_id == area_id), None)
+
+
+def room_health(snapshot: Snapshot | None, area_id: str, result: RoomResult | None) -> dict[str, Any]:
+    room = _room(snapshot, area_id) if snapshot else None
+    problems = [
+        p for p in (snapshot.problems if snapshot else ())
+        if p.area_id == area_id and p.severity != Severity.INFO
+    ]
+    health_of = {s.entity_id: s.health for s in room.sensors} if room else {}
+
+    # Occupancy -------------------------------------------------------------
+    occ_reasons: list[str] = []
+    unavailable_sensors: list[dict[str, Any]] = []
+    if result is not None:
+        for view in result.signals:
+            t = view.track
+            if view.status == SignalStatus.UNKNOWN:
+                health = health_of.get(t.entity_id) or "unknown"
+                if health == AVAILABLE:
+                    health = "unrecognised_state"
+                word = _HEALTH_WORDS.get(health, "reports a state that is not understood")
+                unavailable_sensors.append({"entity_id": t.entity_id, "name": t.name, "health": health})
+                if health != PENDING:
+                    occ_reasons.append(f"{_label(t.name, t.entity_id)} {word}; not used as evidence")
+            elif view.status == SignalStatus.STUCK:
+                occ_reasons.append(
+                    f"{_label(t.name, t.entity_id)} has been active too long; ignored as stuck"
+                )
+        if not result.usable:
+            occ_status = UNAVAILABLE
+            occ_reasons.insert(0, "No occupancy sensor is usable; the last state is kept")
+        elif occ_reasons:
+            occ_status = WARNING
+        else:
+            occ_status = HEALTHY
+        usable = result.usable
+    else:
+        occ_status, usable = UNAVAILABLE, False
+        occ_reasons.append("Occupancy engine not running")
+
+    # Lighting --------------------------------------------------------------
+    light_ids = {li.entity_id for li in room.lights} if room else set()
+    unavailable_lights = [
+        {"entity_id": li.entity_id, "name": li.name, "health": li.health}
+        for li in (room.lights if room else ())
+        if li.health not in (AVAILABLE, PENDING)
+    ]
+    light_reasons = [
+        f"Light {_label(li['name'], li['entity_id'])} {_HEALTH_WORDS.get(li['health'], li['health'])}"
+        for li in unavailable_lights
+    ]
+
+    # Configuration ---------------------------------------------------------
+    config_problems = [p for p in problems if p.category == ProblemCategory.CONFIGURATION]
+    if any(p.severity == Severity.ERROR for p in config_problems):
+        config_status = CONFIG_ERROR
+    elif config_problems:
+        config_status = WARNING
+    else:
+        config_status = HEALTHY
+    config_reasons = [
+        f"{p.title}: {_label(p.name, p.entity_id)}" if p.entity_id else f"{p.title}: {p.explanation}"
+        for p in config_problems
+    ]
+
+    return {
+        "occupancy": {
+            "status": occ_status,
+            "usable": usable,
+            "reasons": occ_reasons,
+            "unavailable_sensors": unavailable_sensors,
+        },
+        "lighting": {
+            "status": WARNING if unavailable_lights else HEALTHY,
+            "reasons": light_reasons,
+            "unavailable_lights": unavailable_lights,
+            "lights": len(light_ids),
+        },
+        "configuration": {
+            "status": config_status,
+            "reasons": config_reasons,
+        },
+    }

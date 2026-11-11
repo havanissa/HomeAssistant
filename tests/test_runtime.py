@@ -15,6 +15,7 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.smart_occupancy.const import DOMAIN, STARTUP_GRACE_SECONDS
 from custom_components.smart_occupancy.diagnostics import async_get_config_entry_diagnostics
+from custom_components.smart_occupancy.models import migrate_options
 
 from .conftest import Home, base_options, set_moods, setup_entry
 
@@ -38,7 +39,10 @@ async def test_entities_created_with_stable_unique_ids(hass: HomeAssistant, home
             "discovered_sensors", "missing_entities", "unavailable_entities", "config_problems",
             "mood_mismatch", "recheck",
         )
-    } | {f"{DOMAIN}_room_{home.pilot_area}_observation"}
+    } | {
+        f"{DOMAIN}_room_{home.pilot_area}_{k}"
+        for k in ("observation", "occupied", "state", "confidence", "last_activity", "reason")
+    }
     assert state(hass, "sensor", "operating_mode").state == "observe"
     room = hass.states.get(eid(hass, "sensor", f"{DOMAIN}_room_{home.pilot_area}_observation"))
     assert room.state == "healthy"
@@ -198,7 +202,7 @@ async def test_persistence_across_restart(hass: HomeAssistant, home: Home) -> No
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
 
-    assert entry.options == opts
+    assert entry.options == migrate_options(opts)
     after = {e.unique_id: e.entity_id for e in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)}
     assert after == before
     assert state(hass, "sensor", "effective_mood").state == "Dagur"
@@ -286,7 +290,8 @@ async def test_diagnostics(hass: HomeAssistant, home: Home) -> None:
     entry = await setup_entry(hass, opts)
     hass.states.async_set(home.radar, "on")
     diag = await async_get_config_entry_diagnostics(hass, entry)
-    assert diag["phase"] == "0.1.1"
+    assert diag["phase"] == "0.2"
+    assert diag["occupancy"][home.pilot_area]["timing"]["inactivity_timeout"] == 600
     room = diag["rooms"][home.pilot_area]
     assert room["active_signals_now"] == {"maintain": [home.radar]}
     assert sorted(room["group_members"][home.group]) == sorted([home.member_a, home.member_b])

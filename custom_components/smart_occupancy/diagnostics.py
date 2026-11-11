@@ -64,4 +64,5 @@ async def async_get_config_entry_diagnostics(
             for area in discovery.list_areas(hass)
         ],
         "tracked_entities": coordinator.tracked_entities,
+        "occupancy": coordinator.occupancy.diagnostics(),
     }

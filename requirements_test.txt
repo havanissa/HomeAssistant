@@ -1,2 +1,4 @@
-# Matches Home Assistant 2026.10.x
+# Test harness. 0.13.375 ships Home Assistant 2026.10.4 (the newest harness at
+# the time of Phase 0.2). CI also installs homeassistant==2026.11.1 and the
+# matching frontend over it and runs scripts/run_tests.py (see validate.yml).
 pytest-homeassistant-custom-component==0.13.375

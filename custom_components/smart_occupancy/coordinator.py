@@ -1,9 +1,14 @@
 """Observe-mode runtime.
 
-Event driven: recomputes only when a configured entity changes state or a
-relevant registry (areas, devices, entities, labels) changes, when the
+Event driven: recomputes only when a configured entity changes in a way that
+matters for diagnostics (availability, name, mood value, light capabilities)
+or a relevant registry (areas, devices, entities, labels) changes, when the
 integration (re)loads, and once Home Assistant has finished starting. There
 is no polling interval. Bursts of events are coalesced by a debouncer.
+
+Plain on/off changes of occupancy signals are handled by the occupancy
+engine (occupancy_manager.py), not here, so motion does not rebuild the
+diagnostics snapshot.
 
 Every evaluation is complete: the snapshot is rebuilt from scratch, so a
 problem disappears as soon as its cause is gone.
@@ -17,8 +22,8 @@ import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
-from homeassistant.core import CALLBACK_TYPE, CoreState, Event, HomeAssistant, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.core import CALLBACK_TYPE, CoreState, Event, HomeAssistant, State, callback
 from homeassistant.helpers import (
     area_registry as ar,
     device_registry as dr,
@@ -53,6 +58,7 @@ from .occupancy import (
     friendly_name,
     signal_health,
 )
+from .occupancy_manager import OccupancyManager
 from .prediction import NullPredictor
 from .problems import ProblemTracker
 from .supervision import effective_mode
@@ -65,6 +71,27 @@ WARNING = Classification.WARNING
 CONFIG_ERROR = Classification.CONFIG_ERROR
 UNAVAILABLE = Classification.UNAVAILABLE
 STATUS_OPTIONS = [HEALTHY.value, WARNING.value, CONFIG_ERROR.value, UNAVAILABLE.value]
+
+# Light attributes the diagnostics depend on (group membership, capabilities).
+_LIGHT_ATTRIBUTES = ("entity_id", "supported_color_modes", "effect_list", "is_hue_group")
+
+
+def _availability(state: State) -> tuple[str, bool]:
+    value = state.state if state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN) else "known"
+    return value, bool(state.attributes.get("restored"))
+
+
+def diagnostics_relevant(old: State | None, new: State | None, *, value_matters: bool) -> bool:
+    """Does this state change affect the diagnostics snapshot?"""
+    if old is None or new is None or value_matters:
+        return True
+    if _availability(old) != _availability(new):
+        return True
+    if old.attributes.get("friendly_name") != new.attributes.get("friendly_name"):
+        return True
+    if new.domain == "light":
+        return any(old.attributes.get(k) != new.attributes.get(k) for k in _LIGHT_ATTRIBUTES)
+    return False
 
 
 @dataclass(slots=True, frozen=True)
@@ -243,6 +270,7 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         )
         self.config = IntegrationConfig.from_dict(dict(entry.options))
         self.predictor = NullPredictor()
+        self.occupancy = OccupancyManager(hass, self.config)
         self.tracker = ProblemTracker(hass)
         self._unsubs: list[CALLBACK_TYPE] = []
         self._started_unsub: CALLBACK_TYPE | None = None
@@ -309,6 +337,12 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
 
     @callback
     def _on_state_event(self, event: Event) -> None:
+        data = event.data
+        if not diagnostics_relevant(
+            data["old_state"], data["new_state"],
+            value_matters=data["entity_id"] in self.config.mood.entity_ids,
+        ):
+            return
         self.hass.async_create_task(self.async_request_refresh(), eager_start=True)
 
     @callback

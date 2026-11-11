@@ -8,13 +8,22 @@ from pathlib import Path
 import re
 
 from custom_components.smart_occupancy import config_flow
-from custom_components.smart_occupancy.const import LightAction, OperatingMode, SensorRole
+from custom_components.smart_occupancy.const import (
+    TIMING_PARAMETERS,
+    LightAction,
+    OccupancyState,
+    OperatingMode,
+    SensorRole,
+)
 from custom_components.smart_occupancy.coordinator import STATUS_OPTIONS
 from custom_components.smart_occupancy.entity import (
     GLOBAL_BINARY_SENSOR_KEYS,
     GLOBAL_BUTTON_KEYS,
     GLOBAL_SENSOR_KEYS,
+    ROOM_COMPARISON_ENTITY,
+    ROOM_OCCUPANCY_ENTITIES,
 )
+from custom_components.smart_occupancy.sensor import COMPARISON_OPTIONS
 
 ROOT = Path(config_flow.__file__).parent
 STRINGS = json.loads((ROOT / "strings.json").read_text(encoding="utf-8"))
@@ -63,8 +72,16 @@ def test_selectors_and_entities_translated() -> None:
     assert set(sel["sensor_role"]["options"]) == {r.value for r in SensorRole}
     assert set(sel["light_action"]["options"]) == {a.value for a in LightAction}
     assert set(sel["profile_scope"]["options"]) == {"global", "room", "light"}
-    assert set(GLOBAL_SENSOR_KEYS) | {"room_observation"} == set(STRINGS["entity"]["sensor"])
-    assert set(GLOBAL_BINARY_SENSOR_KEYS) == set(STRINGS["entity"]["binary_sensor"])
+    room_keys = {tk for platform, tk in ROOM_OCCUPANCY_ENTITIES.values() if platform == "sensor"}
+    room_keys |= {ROOM_COMPARISON_ENTITY[2], "room_observation"}
+    assert set(GLOBAL_SENSOR_KEYS) | room_keys == set(STRINGS["entity"]["sensor"])
+    room_binary = {tk for platform, tk in ROOM_OCCUPANCY_ENTITIES.values() if platform == "binary_sensor"}
+    assert set(GLOBAL_BINARY_SENSOR_KEYS) | room_binary == set(STRINGS["entity"]["binary_sensor"])
+    assert set(STRINGS["entity"]["sensor"]["room_state"]["state"]) == {s.value for s in OccupancyState}
+    assert set(STRINGS["entity"]["sensor"]["room_helper_comparison"]["state"]) == set(COMPARISON_OPTIONS)
+    timing_steps = (STRINGS["options"]["step"]["occupancy"], STRINGS["options"]["step"]["room_occupancy"])
+    for step in timing_steps:
+        assert set(TIMING_PARAMETERS) <= set(step["data"])
     assert set(GLOBAL_BUTTON_KEYS) == set(STRINGS["entity"]["button"])
     for key in ("status", "room_observation"):
         assert set(STRINGS["entity"]["sensor"][key]["state"]) == set(STATUS_OPTIONS)

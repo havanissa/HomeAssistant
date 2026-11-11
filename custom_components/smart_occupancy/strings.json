@@ -54,12 +54,15 @@
         },
         "data_description": {
           "lights": "Select either a group or its member lights, not both.",
-          "reference_occupancy_entity": "Optional. Your existing room occupancy helper, observed for comparison in later phases."
+          "reference_occupancy_entity": "Optional. Your existing room occupancy helper. It is only read, to compare it with this integration's occupancy."
         }
       },
       "room_roles": {
         "title": "Signal roles: {room}",
-        "description": "Choose how each signal will be used once occupancy logic exists (a later phase). Nothing is evaluated now.\n\n{sensors}"
+        "description": "Choose how each signal contributes to occupancy.\n\n- Trigger occupancy: activity (e.g. PIR motion) gives immediate occupancy, but a trigger that stays on too long is ignored as stuck.\n- Maintain occupancy: while active (radar presence, PC activity, bed), vacancy cannot be confirmed.\n- Confirm vacancy: like Maintain, and its cleared state also counts as evidence that the room is empty (faster vacancy).\n- Ignore: kept but not used.\n\nDoor contacts only count as movement and never prove on their own that someone is inside. Mark a signal as inverted if it means activity when it is off (e.g. a \"PC idle\" sensor).\n\n{sensors}",
+        "data": {
+          "inverted_signals": "Inverted signals (active when off)"
+        }
       }
     },
     "error": {
@@ -78,6 +81,7 @@
         "title": "Smart Occupancy & Lighting",
         "menu_options": {
           "general": "Mood helpers and operating mode",
+          "occupancy": "Occupancy timing",
           "rooms": "Rooms",
           "categories": "Light categories",
           "profiles": "Mood profiles"
@@ -85,7 +89,7 @@
       },
       "general": {
         "title": "Mood helpers and operating mode",
-        "description": "Phase 0.1 runs in Observe mode only. Supervise and Full Control become available in later phases.",
+        "description": "Phase 0.2 runs in Observe mode only: occupancy is computed and shown, no light is controlled. Supervise and Full Control become available in later phases.",
         "data": {
           "auto_mood_entity": "Auto Mood",
           "manual_mood_entity": "Manual Mood",
@@ -119,12 +123,16 @@
         },
         "data_description": {
           "enabled": "Disabling keeps the configuration so the room can be re-enabled later.",
-          "reset": "Deletes this room's stored assignments and overrides. Your Home Assistant entities are not affected."
+          "reset": "Deletes this room's stored assignments and overrides. Your Home Assistant entities are not affected.",
+          "reference_occupancy_entity": "Optional. Only read, to compare it with this integration's occupancy."
         }
       },
       "room_roles": {
         "title": "Signal roles: {room}",
-        "description": "Choose how each signal will be used once occupancy logic exists (a later phase). Nothing is evaluated now.\n\n{sensors}"
+        "description": "Choose how each signal contributes to occupancy.\n\n- Trigger occupancy: activity (e.g. PIR motion) gives immediate occupancy, but a trigger that stays on too long is ignored as stuck.\n- Maintain occupancy: while active (radar presence, PC activity, bed), vacancy cannot be confirmed.\n- Confirm vacancy: like Maintain, and its cleared state also counts as evidence that the room is empty (faster vacancy).\n- Ignore: kept but not used.\n\nDoor contacts only count as movement and never prove on their own that someone is inside. Mark a signal as inverted if it means activity when it is off (e.g. a \"PC idle\" sensor).\n\n{sensors}",
+        "data": {
+          "inverted_signals": "Inverted signals (active when off)"
+        }
       },
       "categories": {
         "title": "Light categories",
@@ -199,6 +207,45 @@
           "transition": "Transition",
           "remove": "Remove this entry"
         }
+      },
+      "occupancy": {
+        "title": "Occupancy timing",
+        "description": "Defaults for every room, in seconds. Each room can override them under Rooms.",
+        "data": {
+          "correlation_window": "Movement correlation window",
+          "exit_confirmation": "Exit confirmation",
+          "inactivity_timeout": "Normal inactivity timeout",
+          "dropout_grace": "Radar dropout grace period",
+          "trigger_stuck_after": "Trigger stuck after",
+          "presence_stuck_after": "Presence sensor stuck after",
+          "startup_hold": "Start-up hold"
+        },
+        "data_description": {
+          "correlation_window": "Signals within this window corroborate each other (e.g. door, then motion). Also how long a new signal must last to confirm occupancy on its own.",
+          "exit_confirmation": "Quiet time needed before vacancy when there is positive evidence (a Confirm-vacancy sensor cleared, a door exit, or occupancy was never confirmed).",
+          "inactivity_timeout": "Quiet time needed before vacancy without positive evidence.",
+          "dropout_grace": "A Maintain or Confirm-vacancy signal that clears for less than this is ignored.",
+          "trigger_stuck_after": "A Trigger signal active longer than this is ignored as stuck. 0 disables.",
+          "presence_stuck_after": "A Maintain or Confirm-vacancy signal active longer than this is ignored as stuck. 0 disables (default; people can sit still for hours).",
+          "startup_hold": "After start-up or reload, the previous occupancy is kept at least this long. Vacancy is never confirmed earlier."
+        }
+      },
+      "room_occupancy": {
+        "title": "Occupancy: {room}",
+        "description": "Leave a field empty to use the global value.\n\nGlobal: {global}",
+        "data": {
+          "correlation_window": "Movement correlation window",
+          "exit_confirmation": "Exit confirmation",
+          "inactivity_timeout": "Normal inactivity timeout",
+          "dropout_grace": "Radar dropout grace period",
+          "trigger_stuck_after": "Trigger stuck after",
+          "presence_stuck_after": "Presence sensor stuck after",
+          "startup_hold": "Start-up hold",
+          "adjacent_rooms": "Adjacent rooms"
+        },
+        "data_description": {
+          "adjacent_rooms": "Rooms you can walk into from here. Movement there right after a door movement here is evidence that someone left."
+        }
       }
     },
     "error": {
@@ -206,7 +253,7 @@
       "mood_entities_not_distinct": "Auto, Manual and Main Mood must be three different entities.",
       "auto_option_not_found": "This option does not exist on the Manual Mood entity.",
       "duplicate_assignment": "An entity can only be assigned once per room.",
-      "mode_not_available": "Only Observe mode is available in Phase 0.1.",
+      "mode_not_available": "Only Observe mode is available in this phase.",
       "name_required": "A name is required.",
       "category_exists": "A category with this name already exists.",
       "invalid_profile": "Invalid profile values.",
@@ -216,7 +263,8 @@
       "kelvin_and_rgb": "Choose either colour temperature or RGB colour, not both.",
       "invalid_transition": "Transition must be 0-300 seconds.",
       "invalid_effect": "Effect name is empty.",
-      "off_with_attributes": "Action Off cannot have brightness, colour or effect."
+      "off_with_attributes": "Action Off cannot have brightness, colour or effect.",
+      "stuck_too_short": "Must be 0 (off) or at least 60 seconds."
     },
     "abort": {
       "no_categories": "No light categories are configured.",
@@ -305,11 +353,46 @@
           "config_error": "Configuration error",
           "unavailable": "Unavailable"
         }
+      },
+      "room_state": {
+        "name": "{room} occupancy state",
+        "state": {
+          "vacant": "Vacant",
+          "possible_occupancy": "Possible occupancy",
+          "confirmed_occupancy": "Confirmed occupancy",
+          "possible_vacancy": "Possible vacancy",
+          "uncertain": "Uncertain"
+        },
+        "state_attributes": {
+          "pending_vacancy": {
+            "name": "Vacancy pending"
+          }
+        }
+      },
+      "room_confidence": {
+        "name": "{room} occupancy confidence"
+      },
+      "room_last_activity": {
+        "name": "{room} last activity"
+      },
+      "room_reason": {
+        "name": "{room} occupancy reason"
+      },
+      "room_helper_comparison": {
+        "name": "{room} helper comparison",
+        "state": {
+          "agree": "Agrees",
+          "disagree": "Disagrees",
+          "unknown": "Unknown"
+        }
       }
     },
     "binary_sensor": {
       "mood_mismatch": {
         "name": "Mood mismatch"
+      },
+      "room_occupied": {
+        "name": "{room} occupied"
       }
     },
     "button": {
