@@ -2,7 +2,7 @@
 
 A Home Assistant custom integration that will eventually provide intelligent occupancy detection, predictive room occupancy, mood-based lighting and lighting supervision.
 
-**This is Phase 0.3.2: mood-based lighting with simple dashboard cards (Smart Lighting Profiles, Smart Room Lighting, Room Status), on top of the Phase 0.2 occupancy engine (see [CHANGELOG.md](CHANGELOG.md)).** Phase 0.3.2 lets moods, light types and single lights follow your **existing global brightness and colour temperature adjustment**, and adds the **Manual** pause. The interface stays simple by default; everything else is under *Advanced*.
+**This is Phase 0.3.3: mood-based lighting with simple dashboard cards (Smart Lighting Profiles, Smart Room Lighting, Room Status), on top of the Phase 0.2 occupancy engine (see [CHANGELOG.md](CHANGELOG.md)).** Phase 0.3.3 switches a room's mood lighting on when someone arrives **and it is dark**: indoor light sensors (protected against being lit by the room's own lamps), an optional outdoor sensor and the sun decide whether artificial light is needed. Phase 0.3.2 lets moods, light types and single lights follow your **existing global brightness and colour temperature adjustment**, and adds the **Manual** pause. The interface stays simple by default; everything else is under *Advanced*.
 
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
@@ -10,6 +10,7 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - changes the mood selectors or any other helper (they are only *read*)
 - controls lights in a room that was not explicitly activated
 - switches lights off because a room became vacant (that is Phase 0.4)
+- switches lights off, or changes their brightness or colour, because of daylight or a lux reading
 - switches a light on because the global brightness or colour temperature changed
 - sends any automatic lighting command while Main Mood is **Manual**
 - calculates its own adaptive lighting: it only reads the values your existing system publishes
@@ -387,6 +388,67 @@ Manual takes precedence over every mood, room mood, profile and global adjustmen
 
 The option name is configurable under *Smart Lighting → Advanced → Manual option* (default `Manual`). The selectors, their options and your automations are not changed. `Auto` stays a Manual Mood option as before.
 
+## Daylight-aware automatic lighting (Phase 0.3.3)
+
+When a room becomes occupied, its mood lights are switched on only if **artificial light is needed**. The daylight decision says *whether* lights are switched on; the mood profile still says *what they look like* (brightness, colour temperature, colour, global adjustment). Smart Occupancy does not calculate brightness or colour from lux.
+
+### In the Smart Room Lighting card (Overview → Automatic lighting)
+
+- **Turn on when occupied and dark**: on by default.
+- **Indoor light sensor**: pick any illuminance sensor (the room's own are listed first). No sensor: outdoor light and the sun decide.
+- **Outdoor light**: the global outdoor sensor, shown as inherited.
+- **Darkness threshold**: lights turn on below this (default 50 lx).
+- **Daylight now**: *Dark*, *Bright* or *Uncertain*, with a short reason and how natural light was determined, for example:
+  - *Natural light: 35 lx — measured indoors, lights off*
+  - *Natural light: at most 10 lx — measured indoors with lights on*
+  - *Natural light: Low — estimated from outdoor darkness*
+  - *Natural light: ≈ 80 lx — estimated from outdoor light (… learned factor)* (an estimate, not a measured value)
+  - *Natural light: Uncertain — no trustworthy reading*
+- **Last decision**: what the last arrival (or darkness change) did and why.
+
+Values are rounded (1 lx below 10, 5 lx below 100, then two significant digits); sensors are not more precise than that.
+
+### When lights are switched on
+
+- **A new visit**: the first motion of a *Trigger* sensor (PIR) switches on at once, without waiting for confirmation. Radar, PC activity and other *Maintain* sensors keep the room occupied but never start a visit alone. Under *Advanced → Switch on at*, choose *Confirmed occupancy* for fewer false triggers.
+- **The room becomes dark while occupied** (after the stability period, default 90 s).
+- **A mood change**, room activation, profile change or a light coming back: off lights are switched on only if it is dark.
+
+Only **off** lights the mood switches **on** are gated. Lights that are already on still follow the mood, *Off* is never affected, *Leave unchanged* lights are not touched, and **ambient** settings (window lamps, decorative lighting that follows the mood whether or not the room is occupied) are never gated. Nothing is switched off because daylight became sufficient (that may become a separate option later).
+
+All existing protections still apply first: exclusions, groups (one command per group), offline lights, manual overrides, unacknowledged automation conflicts, occupancy (vacant/uncertain rooms), Observe and Manual. Commands are batched, an identical command is not repeated, and noise around the threshold causes no repeated commands (hysteresis plus the stability period).
+
+*Advanced → Automatic switch-on* offers: *When occupied and dark* (default), *When occupied, regardless of daylight* (the behaviour before 0.3.3), *Never automatically*. *When uncertain*: *Turn lights on* (default, as before 0.3.3) or *Leave lights off*.
+
+### How natural light is determined
+
+Evidence, strongest first:
+1. **After civil dusk** (sun more than 6° below the horizon) there is no natural light, whatever a sensor reads.
+2. **An indoor reading with the lights off**: taken at least the settling time (default 60 s) after the last influencing light turned off, with none on. Only these readings are trusted as natural light, and the last one is kept (with its time) while lights are on.
+3. **An indoor reading with lights on that is still below the threshold**: lamps only add light, so natural light is *at most* that much. It is dark. A bright reading with lights on is **never** used: it may be the lamp itself.
+4. **Outdoor darkness** (outdoor sensor at or below 50 lx, smoothed).
+5. **The most recent indoor evidence** (default up to 30 min old), scaled by the change in outdoor light if both are known.
+6. **Outdoor light × the room's daylight factor.** Outside being bright never makes every room bright: the factor is learned from trusted indoor/outdoor pairs (at least 3, outdoor ≥ 200 lx, 10 min apart; the median is used), or set under *Advanced → Calibration*.
+7. **After sunset** (twilight): low natural light, medium confidence.
+
+Otherwise daylight is *Uncertain* and the room's fallback applies. `unknown`, `unavailable` and non-numeric readings are never treated as 0 lx.
+
+**Contamination by the room's own lights.** Every managed light (and every member of a managed group) counts as influencing the sensor, plus every light in the area (*Every light in this area*, on by default) and lights you add (*Also*: window lamps, lights of an adjacent open-plan area; lights or switches). While one is on, readings are not used as daylight. After they all turn off, a reading counts only if it was taken after the settling time. With the default *New measurement: changed value*, a sensor that re-publishes its cached value (common with Zigbee PIR sensors) does not produce a "fresh" measurement just because the lamp went off; choose *every report* for sensors that report often (e.g. FP2). An unavailable influencing light lowers the confidence instead of being ignored.
+
+**Freshness and reliability** per sensor (*Advanced → Light sensors*): a maximum age (default none: a stable value is not a failed sensor), what counts as a new measurement, and *Reliable* / *Less reliable* (lower confidence). The first sensor is preferred; the others are fallbacks, in order.
+
+**Outdoor sensor** (optional, global, *Advanced → Outdoor light (all rooms)*): smoothed with a time-weighted median over 5 minutes, so short spikes or shadows do not change decisions.
+
+**Darkness decision.** Below the turn-on threshold (default 50 lx) it is *Dark*; at or above the light-not-needed threshold (default 100 lx) it is *Bright*; in between the previous decision stays (hysteresis). An arrival uses the latest evidence at once; a change while the room is occupied counts only after it held for the stability period.
+
+**Extension point.** Blinds and curtains are not read yet; the estimator has a shading input reserved for them.
+
+### Entities and diagnostics
+
+- `sensor.smart_occupancy_<room>_daylight`: `dark` / `bright` / `uncertain`, with `natural_light`, `lux` (rounded), `estimated`, `confidence`, `basis`, `contaminated`, `sensor`, `outdoor_lux`, `sun_elevation`, `reason`, `last_activation_at` and `activation` (why the last arrival did or did not switch lights on). Attributes are not recorded, and the entity is written only when the rounded summary changes.
+- The room card's *Advanced → Daylight diagnostics*: chosen sensor, last trustworthy reading, whether indoor readings are affected by lights, outdoor value, sun, confidence, last switch-on and errors.
+- Daylight sensing has its own health (*Daylight*), separate from occupancy and lighting: an unavailable light sensor never makes occupancy look degraded.
+
 ## Occupancy engine
 
 Each enabled room has its own state machine, fed by state-change events of its signals. There is no polling, and timers run only while something is pending.
@@ -520,6 +582,7 @@ All entities belong to one service device, *Smart Occupancy & Lighting*. Unique 
 | `sensor.smart_occupancy_<room>_last_activity` | timestamp | Start of the latest motion, presence or door movement. `source` is the entity. |
 | `sensor.smart_occupancy_<room>_reason` | text | Why the room has its current state |
 | `sensor.smart_occupancy_<room>_mood_lighting` | `observe` / `active` / `blocked` | Phase 0.3. Mood lighting state and diagnostics of the room (see [Diagnostics](#diagnostics)). Attributes are not recorded. |
+| `sensor.smart_occupancy_<room>_daylight` | `dark` / `bright` / `uncertain` | Phase 0.3.3. Whether occupancy may switch lights on, and how natural light was determined (see [Daylight](#daylight-aware-automatic-lighting-phase-033)). Attributes are not recorded. |
 | `sensor.smart_occupancy_<room>_helper_comparison` | agree / disagree / unknown | Only with an existing occupancy helper. Attributes: `disagreements`, `disagreement_since`, `total_disagreement_seconds`, `helper_cleared_prematurely`, `engine_possibly_retained_too_long`, `over_retention_total_seconds` / `_max_seconds`, `helper_only_occupied`, `statistics_since`. A disagreement counts only after it has lasted longer than the correlation window. |
 
 **How the comparison counts.** When the helper turns off while the engine still says occupied, an episode starts. It ends in one of two ways:
@@ -615,6 +678,7 @@ A light belongs to a category when the category's label is on the light entity o
 - Profiles that follow a global source that is not configured, and global sources that are unavailable (with the last value in use)
 - Lights that the existing adjustment system (an Adaptive Lighting switch, or an automation using a source) also adjusts
 - Manual mode active (information)
+- Light sensors that are missing, unavailable, invalid or stale (with the fallback in use), a missing or unusable outdoor sensor, missing influencing lights, and a light sensor that reads bright after dusk with the lights off (a light not listed as influencing)
 
 ### Recorder and logging
 
@@ -684,11 +748,21 @@ The suite covers:
   - modes, offsets, clamping, every-mood entries and colour/effect precedence (pure tests)
   - gradual updates with simulated lights: thresholds, throttling, coalescing, transitions, never switching on, group de-duplication, RGB, brightness-only and colour-only lights, manual overrides, Observe, competing automations and Adaptive Lighting switches, restart and persistence, upgrade from a 0.3.1 store
 - Manual mode: no command during occupancy changes, global updates, profile and room edits, reloads and start-up; queued commands dropped; resume without replay
+- daylight (0.3.3):
+  - pure tests: readings (`unknown`/`unavailable` never 0 lx, freshness, report modes), contamination and settling, re-published PIR values, every estimation step, outdoor spike smoothing, calibration, hysteresis, stability, the gate and the store migration
+  - in Home Assistant with simulated lights: dark and bright arrivals, prompt PIR and conservative confirmation, radar holding, lamp-lit readings rejected, settling and fresh samples, outdoor darkness, bright outside with a dark room, frequent and infrequent sensors, stale/unknown/unavailable and mixed sensors, outdoor spikes, hysteresis and becoming dark, occupancy uncertainty, On/Off/Ignore per mood, global brightness/temperature, Manual, Observe, manual overrides, automation conflicts, ambient lighting, groups, websocket persistence, reload/restart, and the upgrade from a 0.3.2 store
 - card serving through the real frontend component
 
 Observe rooms are asserted never to call a light service. Any test that logs an ERROR, or in which Home Assistant reports deprecated usage, fails. CI (`.github/workflows/validate.yml`) runs hassfest, HACS validation and the tests on Home Assistant 2026.10.4 and 2026.11.1.
 
 ## Upgrading
+
+**From 0.3.2.** Nothing to do, and nothing is applied by the upgrade:
+- The lighting store is migrated from 1.1 to 1.2. Every setting is kept.
+- **Rooms where mood lighting was already enabled keep their timing**: they switch on at confirmed occupancy, as in 0.3.2 (*Advanced → Switch on at*). Every other room switches on at the first motion of a PIR.
+- Every room uses *When occupied and dark*, with *Turn lights on* when uncertain. Until you choose a light sensor (or an outdoor sensor and a daylight factor), daylight is usually uncertain or dark by the sun, so lights switch on as before.
+- A `…_daylight` sensor is added per room.
+- 0.3.2 can still read the store after a downgrade (same major version); it ignores the daylight settings and drops them the next time it saves.
 
 **From 0.3.1.** Nothing to do, and nothing is applied by the upgrade:
 - The lighting store keeps its version. New keys (`adaptive`, `manual_option`, the adjustment modes) are added only when you change something.
@@ -706,7 +780,17 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 
 **From 0.1.x.** Configuration version 1.1 is migrated to 1.2 on the first start, keeping everything you configured; then the 0.2 step above applies.
 
-## Known limitations (Phase 0.3.2)
+## Known limitations (Phase 0.3.3)
+
+- **Not verified on the production Home Assistant.** Tested with the automated suite on 2026.10.4 and 2026.11.1, and on an isolated 2026.11.1 instance with simulated light sensors and demo lights.
+- **Lights not listed as influencing** (a lamp in another area that reaches the sensor, a TV) can make a reading look like daylight. After dusk this is detected and reported; during the day add such lights under *Advanced → Lights that reach the sensors*.
+- **After a restart**, every light and sensor state is new, so indoor readings count again only after a new value arrives (or a report, for *every report* sensors). Until then the last trusted reading (kept across restarts, up to 30 min), the outdoor light and the sun are used.
+- **The sun thresholds are fixed**: dark after civil dusk (−6°), low light after sunset. In Faroese summer nights the sun does not reach −6°, so an outdoor or indoor sensor decides then.
+- **The daylight factor needs an outdoor sensor** and at least three trusted samples in daylight (outdoor ≥ 200 lx). It is a single number per room: it does not model the sun's direction or blinds.
+- **A manual change while the room is empty** is respected for the override time, as since 0.3.0, so a person switching lights off from the app in an empty room also keeps them off at the next arrival within that time.
+- **No automatic switch-off when it gets bright**, and no vacancy shutdown: Phase 0.4.
+
+### From Phase 0.3.2
 
 - **The existing adjustment system was not inspected on the production Home Assistant** (no access during development). Choose its output entities yourself in *Global light adjustment*. Competing controllers are found only through the configured source entities: an Adaptive Lighting switch used as a source, or automations/scripts that mention a source entity. Systems that command lights some other way (Node-RED, AppDaemon, a script with no reference to the source) are not detected.
 - **Gradual updates follow the room's mood plan**: lights in a room that is vacant or whose occupancy is uncertain are not adjusted (ambient settings excepted) until the room is occupied again.
@@ -744,7 +828,7 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 | Area | Ready now | Next step (Phase 0.4) |
 |---|---|---|
 | Occupancy | Engine per room with explainable states, evidence and helper comparison | Vacancy-based shutdown, using the same results |
-| Lighting | Plans per room with a reason for every light; per-room activation; manual overrides with expiry; conflict detection | Light supervision: compare plans with actual states periodically, correct misfires, expand override handling |
+| Lighting | Plans per room with a reason for every light; per-room activation; manual overrides with expiry; conflict detection; daylight-aware switch-on with recorded reasons | Light supervision: compare plans with actual states periodically, correct misfires, expand override handling |
 | Configuration | Lighting store (versioned) owned by the integration; websocket API with admin-only writes | Add fields with defaults and a store migration |
 | Dashboard | Smart Lighting Profiles, Smart Room Lighting and Room Status cards (simple by default, Advanced on request) | Supervision views |
 | Prediction | `OccupancyHistory` receives every transition (`NullHistory`) | Phase 0.5 learning |

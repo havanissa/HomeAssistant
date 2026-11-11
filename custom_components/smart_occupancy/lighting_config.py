@@ -29,7 +29,9 @@ Persisted shape (store version 1)::
           "light_overrides": {mood: {light entity id: setting}},
           "manual_override_minutes": null,
           "manual_switches": [entity ids],
-          "dismissed": [problem subjects]}}
+          "dismissed": [problem subjects],
+          "daylight": {...}}},                         # 0.3.3: daylight-aware switch-on (daylight.RoomDaylight)
+      "daylight": {"outdoor_entity": null, ...}      # 0.3.3: global daylight settings (daylight.DaylightConfig)
     }
 
 Profile tables may contain the pseudo mood ``"*"`` (every mood, 0.3.2).
@@ -41,6 +43,12 @@ lighting control disabled (Observe).
 0.3.2 only adds keys (``manual_option``, ``adaptive``, the adjustment modes
 of profile entries), so the store version is unchanged: a 0.3.1 store loads
 as is, keeps every fixed value fixed, and has no global source configured.
+
+Store 1.2 (0.3.3) adds ``daylight`` (global and per room). The migration from
+1.1 keeps the switch-on timing of rooms that were already activated: they wait
+for confirmed occupancy as before (``on_first_motion: false``); every other
+room gets the new defaults. All other values are kept. A 0.3.2 install reads a
+1.2 store as is (same major version) and ignores the new keys.
 """
 
 from __future__ import annotations
@@ -72,6 +80,8 @@ from .const import (
     UnattributedPolicy,
     UnrepresentableMode,
 )
+from .const import LIGHTING_STORE_MINOR_VERSION
+from .daylight import DaylightConfig, RoomDaylight
 from .models import IntegrationConfig, ProfileSetting, ProfileTable, _enum_or
 
 _LOGGER = logging.getLogger(__name__)
@@ -236,6 +246,8 @@ class RoomLighting:
     manual_switches: tuple[str, ...] = ()
     # Warnings the user chose to ignore ("Ignore warning for now"); shown as notes.
     dismissed: tuple[str, ...] = ()
+    # Daylight-aware automatic switch-on (0.3.3).
+    daylight: RoomDaylight = field(default_factory=RoomDaylight)
 
     @classmethod
     def from_dict(cls, data: Any) -> RoomLighting:
@@ -253,6 +265,7 @@ class RoomLighting:
             manual_override_minutes=_minutes(data.get("manual_override_minutes"), None),
             manual_switches=_ids(data.get("manual_switches")),
             dismissed=_ids(data.get("dismissed")),
+            daylight=RoomDaylight.from_dict(data.get("daylight")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -269,6 +282,7 @@ class RoomLighting:
             "manual_override_minutes": self.manual_override_minutes,
             "manual_switches": list(self.manual_switches),
             "dismissed": list(self.dismissed),
+            "daylight": self.daylight.as_dict(),
         }
 
 
@@ -287,6 +301,7 @@ class LightingConfig:
     # Main Mood option that pauses all automatic lighting (not a mood).
     manual_option: str = DEFAULT_MANUAL_OPTION
     adaptive: AdaptiveConfig = field(default_factory=AdaptiveConfig)
+    daylight: DaylightConfig = field(default_factory=DaylightConfig)
 
     @classmethod
     def from_dict(cls, data: Any) -> LightingConfig:
@@ -307,6 +322,7 @@ class LightingConfig:
             rooms={str(a): RoomLighting.from_dict(r) for a, r in rooms.items()},
             manual_option=str(data.get("manual_option") or DEFAULT_MANUAL_OPTION).strip() or DEFAULT_MANUAL_OPTION,
             adaptive=AdaptiveConfig.from_dict(data.get("adaptive")),
+            daylight=DaylightConfig.from_dict(data.get("daylight")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -321,6 +337,7 @@ class LightingConfig:
             "rooms": {a: r.as_dict() for a, r in self.rooms.items()},
             "manual_option": self.manual_option,
             "adaptive": self.adaptive.as_dict(),
+            "daylight": self.daylight.as_dict(),
         }
 
     def room(self, area_id: str) -> RoomLighting:
@@ -449,6 +466,14 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
             out[mood] = {(new if t == old else t): s for t, s in targets.items()}
         return out
 
+    def sub_daylight(daylight: RoomDaylight) -> RoomDaylight:
+        nonlocal changed
+        sensors = daylight.sensors
+        if any(s.entity_id == old for s in sensors):
+            changed = True
+            sensors = tuple(replace(s, entity_id=new) if s.entity_id == old else s for s in sensors)
+        return replace(daylight, sensors=sensors, influencing=sub_ids(daylight.influencing))
+
     rooms = {
         area_id: replace(
             room,
@@ -456,6 +481,7 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
             excluded=sub_ids(room.excluded),
             manual_switches=sub_ids(room.manual_switches),
             light_overrides=sub_table(room.light_overrides),
+            daylight=sub_daylight(room.daylight),
         )
         for area_id, room in config.rooms.items()
     }
@@ -464,7 +490,38 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
         if getattr(adaptive, key) == old:
             adaptive = replace(adaptive, **{key: new})
             changed = True
-    return replace(config, rooms=rooms, adaptive=adaptive) if changed else None
+    daylight = config.daylight
+    if daylight.outdoor_entity == old:
+        daylight = replace(daylight, outdoor_entity=new)
+        changed = True
+    return replace(config, rooms=rooms, adaptive=adaptive, daylight=daylight) if changed else None
+
+
+def migrate_store(old_major: int, old_minor: int, data: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade the stored lighting configuration (pure function)."""
+    if old_major != LIGHTING_STORE_VERSION:
+        raise NotImplementedError
+    data = dict(data or {})
+    if old_minor < 2:
+        rooms = {}
+        for area_id, room in (data.get("rooms") or {}).items():
+            room = dict(room) if isinstance(room, dict) else {}
+            if "daylight" not in room:
+                # Activated rooms keep their accepted timing: switch on at confirmed occupancy.
+                room["daylight"] = {"on_first_motion": not bool(room.get("control_enabled"))}
+            rooms[area_id] = room
+        data["rooms"] = rooms
+    return data
+
+
+class _Store(Store[dict[str, Any]]):
+    async def _async_migrate_func(self, old_major_version: int, old_minor_version: int,
+                                  old_data: dict[str, Any]) -> dict[str, Any]:
+        migrated = migrate_store(old_major_version, old_minor_version, old_data)
+        _LOGGER.info("lighting_config_migrated from=%s.%s to=%s.%s rooms=%d", old_major_version,
+                     old_minor_version, LIGHTING_STORE_VERSION, LIGHTING_STORE_MINOR_VERSION,
+                     len(migrated.get("rooms") or {}))
+        return migrated
 
 
 class LightingStore:
@@ -472,7 +529,8 @@ class LightingStore:
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
-        self._store: Store[dict[str, Any]] = Store(hass, LIGHTING_STORE_VERSION, LIGHTING_STORE_KEY)
+        self._store: Store[dict[str, Any]] = _Store(
+            hass, LIGHTING_STORE_VERSION, LIGHTING_STORE_KEY, minor_version=LIGHTING_STORE_MINOR_VERSION)
         self.config = LightingConfig()
         # Bumped on every change; used to invalidate cached resolutions.
         self.revision = 0

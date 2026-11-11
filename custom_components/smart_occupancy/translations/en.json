@@ -425,6 +425,14 @@
           "blocked": "Blocked",
           "paused": "Paused (Manual)"
         }
+      },
+      "room_daylight": {
+        "name": "{room} daylight",
+        "state": {
+          "dark": "Dark",
+          "bright": "Bright",
+          "uncertain": "Uncertain"
+        }
       }
     },
     "binary_sensor": {
