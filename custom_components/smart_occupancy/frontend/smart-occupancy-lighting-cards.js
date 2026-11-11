@@ -22,13 +22,20 @@
  * settings". The outdoor sensor is one global setting (Smart Lighting →
  * Advanced → Settings, or "change for all rooms").
  *
+ * 0.3.5: the room card's Switches tab assigns wall switches and remotes
+ * (Zigbee2MQTT, MQTT device triggers, event entities) to the room: Learn
+ * buttons, assign each button's action, Listen only or Smart Occupancy
+ * control, and diagnostics; source, topic, dimming and conflicts are under
+ * "Advanced switch settings". Switch commands are executed by the
+ * integration, never by the card.
+ *
  * The cards are editors only: the integration owns the configuration
  * (websocket API, admin-only writes). The cards never call a light service and
  * a preview never changes a light. They refetch only when the integration
  * reports a change.
  */
 
-const VERSION = "0.3.4";
+const VERSION = "0.3.5";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -880,10 +887,11 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const d = r.diagnostics;
     const active = d.control_mode === "active";
     const tab = this._ui.tab || "overview";
-    const tabs = [["overview", "Overview"], ["lights", "Lights"], ["automatic", "Automatic"], ["overrides", "Overrides"],
-      ["preview", "Preview"], ["advanced", "Advanced"]];
+    const tabs = [["overview", "Overview"], ["lights", "Lights"], ["automatic", "Automatic"], ["switches", "Switches"],
+      ["overrides", "Overrides"], ["preview", "Preview"], ["advanced", "Advanced"]];
     const content = { overview: () => this._overview(r), lights: () => this._lights(r), automatic: () => this._automatic(r),
-      overrides: () => this._overrides(r), preview: () => this._preview(r), advanced: () => this._advanced(r) }[tab]();
+      switches: () => this._switches(r), overrides: () => this._overrides(r), preview: () => this._preview(r),
+      advanced: () => this._advanced(r) }[tab]();
     return `<div class="header"><ha-icon icon="${active ? "mdi:lightbulb-auto" : "mdi:lightbulb-outline"}" class="${active ? "lit" : ""}"></ha-icon>
         <div class="titles"><div class="title">${esc(this._config.title || r.name)}</div>
         <div class="sub">${esc(OCC[r.occupancy.state] || "Occupancy unknown")}</div></div>
@@ -955,6 +963,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         ${this._model.adaptive?.status && this._model.adaptive.status !== "not_configured" ? `<div><span>Global adjustment</span><b>${esc(globalNow(this._model.adaptive))}
           <span class="sub ${this._model.adaptive.status === "connected" ? "" : "warn"}">${esc(STATUS_WORDS[this._model.adaptive.status])}</span></b></div>` : ""}
         ${this._daylightSummary(r)}
+        ${(r.switches?.items || []).length ? `<div><span>Wall switches</span><b>${r.switches.items.length} · ${esc([...new Set(r.switches.items.map((x) => this._swModeWord(x)))].join(", "))}</b></div>` : ""}
       </div>
       ${issues ? `<div class="issues">${issues}</div>` : `<div class="note ok">No warnings.</div>`}
       ${this._statusHtml("group")}`;
@@ -1197,6 +1206,306 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       .finally(() => { this._ui.previewLoading = false; this._requestRender(); });
   }
 
+  // ------------------------------------------------------------ Switches tab
+  // Assigned wall switches / remotes: what they did last, their buttons and what each one does.
+  _switches(r) {
+    const sw = r.switches || { items: [] };
+    const ui = this._ui;
+    const s = ui.swEdit && sw.items.find((x) => x.id === ui.swEdit);
+    if (s) return this._switchEditor(r, sw, s);
+    const ro = !this._canEdit;
+    const mqttNote = !sw.mqtt_configured ? `<div class="note">MQTT is not set up in Home Assistant: Zigbee2MQTT switches need it. Event entities still work.</div>`
+      : sw.mqtt === "disconnected" ? `<div class="note warn">MQTT is disconnected: switch presses are not received until it reconnects.</div>` : "";
+    const cards = sw.items.map((x) => this._switchCard(r, sw, x)).join("");
+    return `${mqttNote}<div class="stitle">Assigned switches</div>
+      ${cards || `<div class="muted">No switch assigned to this room yet.</div>`}
+      ${ro ? "" : ui.swAdd ? this._switchAddHtml(r, sw) : `<div><button class="btn ghost" data-action="sw-add-open">Add a switch or remote</button></div>`}
+      ${this._statusHtml("sw")}
+      ${(sw.legacy_entities || []).length ? `<div class="sub">Also listening (wall switch entities, Advanced): ${esc(sw.legacy_entities.join(", "))}</div>` : ""}`;
+  }
+
+  _swModeWord(x) { return x.mode === "control" ? "Smart Occupancy control" : "Listen only"; }
+
+  _switchCard(r, sw, x) {
+    const ro = !this._canEdit;
+    const st = x.status || {};
+    const ev = st.last_event;
+    const mapped = (x.buttons_list || []).filter((b) => b.mapping && b.mapping.action !== "none").length;
+    const learning = x.learning;
+    const what = [x.manufacturer, x.model].filter(Boolean).join(" ") || x.description || "";
+    const avail = st.availability === "offline" || st.availability === "unavailable" ? ` · <span class="warn">${esc(st.availability)}</span>` : st.availability === "online" ? " · online" : "";
+    const controls = new Set((x.buttons_list || []).filter((b) => b.mapping && b.mapping.action !== "none").map((b) => (b.mapping.target === "room" ? "Room lights" : this._name(r, b.mapping.target))));
+    return `<div class="section swc"><div><b>${esc(x.name)}</b> <span class="pill ${x.mode === "control" ? "ok" : "muted"}">${esc(this._swModeWord(x))}</span>
+        ${what ? `<div class="sub">${esc(what)}</div>` : ""}</div>
+      <div class="kvs">
+        <div><span>Connection</span><b>${esc(x.connection)}${avail}</b></div>
+        <div><span>Last button</span><b>${ev ? `${esc(ev.label)} · ${fmtTime(ev.at)}` : "—"}</b></div>
+        ${st.last_result ? `<div><span>Result</span><b class="${st.last_result_ok === false ? "warn" : ""}">${esc(st.last_result)}</b></div>` : ""}
+        <div><span>Controls</span><b>${controls.size ? esc([...controls].join(", ")) : "nothing assigned"}</b></div>
+        <div><span>Buttons configured</span><b>${mapped} of ${(x.buttons_list || []).length}</b></div>
+        ${st.override ? `<div><span>Manual override</span><b>Active</b></div>` : ""}
+      </div>
+      ${(x.warnings || []).map((w) => `<div class="note warn">${esc(w.text)}</div>`).join("")}
+      ${learning ? this._learningHtml(x) : ""}
+      ${ro ? "" : `<div class="ibtns"><button class="btn small" data-action="sw-configure" data-switch="${esc(x.id)}">Configure</button>
+        ${learning ? "" : `<button class="btn small ghost" data-action="sw-learn" data-switch="${esc(x.id)}">Learn buttons</button>`}
+        <button class="link" data-action="sw-remove" data-switch="${esc(x.id)}">Remove</button></div>`}
+      ${this._statusHtml(`sw-${x.id}`)}</div>`;
+  }
+
+  _learningHtml(x) {
+    const l = x.learning;
+    const last = (l.captured || []).slice(-1)[0];
+    return `<div class="note ok" role="status"><b>Learn buttons:</b> press a button on ${esc(x.name)} now. Learning never switches a light.
+      <div class="sub">Until ${fmtTime(l.until)}${last ? ` · Detected: <b>${esc(last.label)}</b> <code>${esc(last.raw)}</code>${last.new ? " (new)" : " (known)"}` : " · waiting for a press…"}</div>
+      ${(l.captured || []).length > 1 ? `<div class="sub">Captured: ${esc([...new Set(l.captured.map((c) => c.label))].join(", "))}</div>` : ""}
+      ${this._canEdit ? `<div><button class="btn small" data-action="sw-learn-stop" data-switch="${esc(x.id)}">Done</button></div>` : ""}</div>`;
+  }
+
+  _switchAddHtml(r, sw) {
+    const ui = this._ui;
+    const c = ui.swCands;
+    if (!c && !ui.swCandsLoading) this._loadCandidates();
+    const list = c?.error ? `<div class="bad">${esc(c.error)}</div>` : !c ? `<div class="muted">Looking for switches…</div>`
+      : (c.candidates || []).map((d) => `<div class="li"><b>${esc(d.name)}</b> <span class="sub">${esc([d.manufacturer, d.model].filter(Boolean).join(" "))}
+          · ${esc(d.sources.map((x) => ({ zigbee2mqtt: "Zigbee2MQTT", device_trigger: "device triggers", event_entity: "event entity" }[x] || x)).join(", "))}
+          · ${d.actions.length} button action${d.actions.length === 1 ? "" : "s"} known${d.available === false ? " · unavailable" : ""}${d.bindings ? ` · ${d.bindings} direct binding${d.bindings === 1 ? "" : "s"}` : ""}</span>
+          ${d.assigned_room ? `<span class="sub"> · assigned${d.assigned_room === r.area_id ? " here" : ""}</span>` : `<button class="link" data-action="sw-add" data-device="${esc(d.device_id || "")}" data-ieee="${esc(d.ieee || "")}">Assign to ${esc(r.name)}</button>`}</div>`).join("")
+        || `<div class="muted">No switch or remote found${c.mqtt_configured ? (c.bridge_seen_at ? "" : " yet (reading Zigbee2MQTT…)") : " (MQTT is not set up)"}.</div>`;
+    return `<div class="global"><div class="stitle">Add a switch</div><div class="sub">It starts in Listen only: Smart Occupancy recognises its presses as manual changes and sends nothing until you activate control.</div>
+      ${list}
+      <details class="dladv" ${ui.swAddAdv ? "open" : ""}><summary data-action="sw-add-adv">Advanced: add by MQTT topic or event entity</summary>
+        <div class="frow"><label>MQTT topic</label><div class="fval"><input type="text" placeholder="${esc((c?.base_topic || sw.settings?.mqtt_base_topic || "zigbee2mqtt") + "/avb_ksu")}" data-control="sw-new-topic"></div></div>
+        <div class="frow"><label>or event entity</label><div class="fval"><input type="text" placeholder="event.avb_ksu_action" data-control="sw-new-event"></div></div>
+        <div><button class="btn small" data-action="sw-add-manual">Add</button></div></details>
+      <div><button class="link" data-action="sw-add-close">Close</button> <button class="link" data-action="sw-refresh">Refresh</button></div></div>`;
+  }
+
+  async _loadCandidates() {
+    this._ui.swCandsLoading = true;
+    try { this._ui.swCands = await this._ws({ type: `${WS}/switch/candidates`, area_id: this._config.area }); }
+    catch (err) { this._ui.swCands = { error: err?.message || String(err) }; }
+    this._ui.swCandsLoading = false;
+    this._requestRender();
+  }
+
+  _switchEditor(r, sw, x) {
+    const ro = !this._canEdit;
+    const dis = ro ? "disabled" : "";
+    const ui = this._ui;
+    const buttons = x.buttons_list || [];
+    const rows = buttons.map((b) => this._mappingRow(r, sw, x, b)).join("");
+    const open = (x.competing || []).filter((a) => a.enabled && !(x.acknowledged || []).includes(a.entity_id));
+    const mode = x.mode === "control"
+      ? `<div class="note ok">Smart Occupancy control since ${fmtTime(x.activated_at)}: the assigned actions are executed and count as manual changes.</div>
+         ${ro ? "" : `<div><button class="btn ghost small" data-action="sw-mode-listen" data-switch="${esc(x.id)}">Return to Listen only</button></div>`}`
+      : `<div class="note">Listen only: presses are recognised as manual changes (e.g. a switch bound directly to its lights); nothing is sent.</div>
+         ${ro ? "" : !x.can_control ? `<div class="sub warn">Smart Occupancy control is not possible while the switch is bound directly to lights.</div>`
+           : ui.swConfirm === x.id ? `<div class="global"><b>Activate Smart Occupancy control?</b>
+               <div class="sub">Make sure nothing else also acts on this switch (direct Zigbee binding, automations), or a press may be executed twice.</div>
+               ${open.map((a) => `<label class="auto warn"><input type="checkbox" data-control="sw-ack" data-automation="${esc(a.entity_id)}" ${(ui.swAck || []).includes(a.entity_id) ? "checked" : ""}>
+                 <div><b>${esc(a.name || a.entity_id)}</b> <span class="sub">${esc(a.via)}${a.buttons.length ? `: ${esc(a.buttons.join(", "))}` : ""}</span>
+                 <div class="sub">Tick if both may act (otherwise disable or change the automation first).</div></div></label>`).join("")}
+               <div><button class="btn primary small" data-action="sw-mode-confirm" data-switch="${esc(x.id)}">Confirm: activate</button> <button class="link" data-action="sw-mode-cancel">Cancel</button></div></div>`
+           : `<div><button class="btn primary small" data-action="sw-mode-ask" data-switch="${esc(x.id)}">Activate Smart Occupancy control</button></div>`}`;
+    return `<div><button class="link" data-action="sw-back">← All switches</button></div>
+      <div class="frow"><label>Name</label><div class="fval"><input type="text" value="${esc(x.name)}" data-control="sw-name" data-switch="${esc(x.id)}" ${dis}>${this._statusHtml(`sw-${x.id}`)}</div></div>
+      <div class="sub">${esc([x.manufacturer, x.model, x.description].filter(Boolean).join(" · "))}${x.connection ? ` · ${esc(x.connection)}` : ""}</div>
+      ${(x.warnings || []).map((w) => `<div class="note warn">${esc(w.text)}</div>`).join("")}
+      <div class="stitle">Mode</div>${mode}
+      <div class="stitle">Buttons</div>
+      ${x.learning ? this._learningHtml(x) : ro ? "" : `<div><button class="btn small ghost" data-action="sw-learn" data-switch="${esc(x.id)}">Learn buttons</button> <span class="sub">press each button once; unassigned buttons do nothing</span></div>`}
+      <div class="rows">${rows || `<div class="muted">No buttons known yet. Use Learn buttons and press each button.</div>`}</div>
+      ${(x.declared || []).length && !ro ? `<div class="sub">Also declared by the device: ${x.declared.map((a) => `<button class="link" data-action="sw-add-declared" data-switch="${esc(x.id)}" data-raw="${esc(a)}">${esc(a)}</button>`).join(" ")}</div>` : ""}
+      <details class="dladv" ${ui.swAdv ? "open" : ""}><summary data-action="sw-adv">Advanced switch settings</summary>
+        <div class="section">${this._switchAdvanced(r, sw, x)}</div></details>`;
+  }
+
+  _mappingRow(r, sw, x, b) {
+    const ro = !this._canEdit;
+    const m = b.mapping || { action: "none", target: "room" };
+    const opts = (sw.actions || []).map((a) => `<option value="${a.value}" ${a.value === m.action ? "selected" : ""}>${esc(a.label)}</option>`).join("");
+    return `<div class="erow swrow"><div class="lmain"><b>${esc(b.label)}</b> <span class="sub"><code>${esc(b.raw)}</code>${b.press && b.press !== "single" ? ` · ${esc(b.press)}` : ""}${b.source === "discovered" ? " · declared by the device" : ""}</span></div>
+      <div class="fval"><select data-control="sw-map-action" data-switch="${esc(x.id)}" data-raw="${esc(b.raw)}" ${ro ? "disabled" : ""}>${opts}</select>
+        ${this._mappingExtra(r, sw, x, b.raw, m)}
+        ${ro ? "" : `<button class="link" data-action="sw-forget" data-switch="${esc(x.id)}" data-raw="${esc(b.raw)}">forget</button>`}
+        ${this._statusHtml(`map-${x.id}-${b.raw}`)}</div></div>`;
+  }
+
+  _mappingExtra(r, sw, x, raw, m) {
+    const dis = this._canEdit ? "" : "disabled";
+    const at = `data-switch="${esc(x.id)}" data-raw="${esc(raw)}" ${dis}`;
+    const field = (f, v, min, max, unit, step = 1) => `<input type="number" class="num" min="${min}" max="${max}" step="${step}" value="${esc(v ?? "")}" data-control="sw-map-field" data-field="${f}" ${at}> ${unit}`;
+    const sel = (f, items, value) => `<select data-control="sw-map-field" data-field="${f}" ${at}>${items.map(([v, l]) => `<option value="${esc(v)}" ${v === value ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+    const lightActions = ["on", "off", "toggle", "brightness_up", "brightness_down", "dim_up", "dim_down", "dim_stop", "set_brightness", "set_color_temp"];
+    const parts = [];
+    if (lightActions.includes(m.action) && m.action !== "dim_stop") {
+      parts.push(sel("target", [["room", "Room lights"], ...(sw.targets || []).map((t) => [t.entity_id, t.name || t.entity_id]),
+        ...(m.target && m.target !== "room" && !(sw.targets || []).some((t) => t.entity_id === m.target) ? [[m.target, m.target]] : [])], m.target || "room"));
+    }
+    if (m.action === "on") {
+      parts.push(sel("on_values", [["mood", "Current mood"], ["last", "Last used"], ["fixed", "Fixed"]], m.on_values || "mood"));
+      if (m.on_values === "fixed") parts.push(field("brightness", m.brightness, 1, 100, "%"), field("color_temp", m.color_temp, 1000, 10000, "K", 50));
+    }
+    if (m.action === "set_brightness") parts.push(field("brightness", m.brightness, 1, 100, "%"));
+    if (m.action === "set_color_temp") parts.push(field("color_temp", m.color_temp, 1000, 10000, "K", 50));
+    if (m.action === "mood" || m.action === "mood_auto") {
+      if (m.action === "mood") {
+        const moods = m.scope === "global" ? (sw.global_mood_options || []).filter((o) => o !== "Auto") : (this._model.moods || []).map((x) => x.name);
+        parts.push(sel("mood", [["", "Choose…"], ...moods.map((n) => [n, n])], m.mood || ""));
+      }
+      parts.push(sel("scope", [["room", "This room"], ["global", "All rooms (mood selector)"]], m.scope || "room"));
+      if (m.action === "mood" && m.scope !== "global") parts.push(field("minutes", m.minutes, 1, 1440, "min (empty: until changed)"));
+    }
+    if (m.action === "scene") parts.push(sel("entity", [["", "Choose a scene…"], ...(sw.scenes || []).map((x) => [x.entity_id, x.name])], m.entity || ""));
+    if (m.action === "script") parts.push(sel("entity", [["", "Choose a script…"], ...(sw.scripts || []).map((x) => [x.entity_id, x.name])], m.entity || ""));
+    if (m.action === "wled_preset") {
+      const presets = sw.wled_presets || [];
+      if (!presets.length) parts.push(`<span class="sub">No WLED preset selector found (WLED integration)</span>`);
+      else {
+        parts.push(sel("entity", [["", "WLED device…"], ...presets.map((p) => [p.entity_id, p.name])], m.entity || ""));
+        const p = presets.find((x) => x.entity_id === m.entity);
+        if (p) parts.push(sel("option", [["", "Preset…"], ...p.options.map((o) => [o, o])], m.option || ""));
+      }
+    }
+    return parts.join(" ");
+  }
+
+  _switchAdvanced(r, sw, x) {
+    const dis = this._canEdit ? "" : "disabled";
+    const at = `data-switch="${esc(x.id)}" ${dis}`;
+    const st = x.status || {};
+    const dm = x.dimming || {};
+    const num = (key, v, min, max, unit, step = 1) => `<input type="number" class="num" min="${min}" max="${max}" step="${step}" value="${esc(v ?? "")}" data-control="sw-dim" data-key="${key}" ${at}> ${unit}`;
+    const sources = [["auto", "Automatic (best available)"], ["zigbee2mqtt", "Zigbee2MQTT (raw MQTT)"], ["device_trigger", "MQTT device triggers"], ["event_entity", "Event entity"]];
+    const hist = (st.history || []).slice().reverse().map((h) => `<div class="li"><span class="sub">${fmtTime(h.at)} · ${esc(h.source || "")}</span> <b>${esc(h.label)}</b> <span class="sub">${esc(h.result)}</span></div>`).join("");
+    return `<div class="frow"><label>Input source</label><div class="fval"><select data-control="sw-source" ${at}>${sources.map(([v, l]) => `<option value="${v}" ${x.source === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+        <span class="sub">listening now: ${esc((st.sources || []).join(", ") || "nothing")}</span></div></div>
+      <div class="frow"><label>MQTT topic</label><div class="fval"><input type="text" value="${esc(x.topic || "")}" placeholder="${esc(x.topic_now || `${sw.settings?.mqtt_base_topic || "zigbee2mqtt"}/…`)}" data-control="sw-topic" ${at}><span class="sub">empty: derived from the Zigbee2MQTT name (follows renames)</span></div></div>
+      <div class="frow"><label>Event entity</label><div class="fval"><input type="text" value="${esc(x.event_entity || "")}" placeholder="${esc(x.event_entity_now || "event.…")}" data-control="sw-event" ${at}></div></div>
+      <div class="frow"><label>Manual override</label><div class="fval"><input type="number" class="num" min="0" max="1440" placeholder="${esc(r.diagnostics.manual_override_minutes)}" value="${x.override_minutes ?? ""}" data-control="sw-minutes" ${at}> min <span class="sub">empty: the room's setting; 0: until the room is empty</span></div></div>
+      <div class="stitle">Dimming</div>
+      <div class="frow"><label>Step per press</label><div class="fval">${num("step", dm.step, 1, 50, "%")}</div></div>
+      <div class="frow"><label>Hold-to-dim</label><div class="fval">${num("hold_step", dm.hold_step, 1, 50, "%")} every ${num("interval", dm.interval, 0.2, 2, "s", 0.1)}</div></div>
+      <div class="frow"><label>Brightness range</label><div class="fval">${num("min_brightness", dm.min_brightness, 1, 100, "%")} – ${num("max_brightness", dm.max_brightness, 1, 100, "%")}</div></div>
+      <div class="frow"><label>Stop after</label><div class="fval">${num("timeout", dm.timeout, 1, 60, "s")} <span class="sub">if no STOP / release arrives</span></div></div>
+      <div class="stitle">Input</div>
+      <div class="frow"><label>Debounce</label><div class="fval"><input type="number" class="num" min="0" max="2000" value="${esc(x.debounce_ms)}" data-control="sw-debounce" ${at}> ms <span class="sub">repeats of the same button faster than this count once</span></div></div>
+      <label class="switch"><input type="checkbox" data-control="sw-evidence" ${x.activity_evidence ? "checked" : ""} ${at}> A press counts as activity in the room (keeps an occupied room occupied a little longer; never occupies an empty room)</label>
+      <div class="frow"><label>Base topic</label><div class="fval"><input type="text" value="${esc(sw.settings?.mqtt_base_topic || "zigbee2mqtt")}" data-control="sw-base-topic" ${dis}><span class="sub">Zigbee2MQTT base topic, for every switch</span></div></div>
+      <div class="stitle">Conflicts</div>
+      ${(x.bindings || []).length ? x.bindings.map((b) => `<div class="li warn">Direct binding: ${esc(b.cluster)} → ${esc(b.target)} (endpoint ${esc(b.endpoint)})</div>`).join("") : `<div class="muted">No direct Zigbee binding known.</div>`}
+      ${(x.competing || []).length ? x.competing.map((a) => `<div class="li">${esc(a.name || a.entity_id)} <span class="sub">${a.enabled ? "enabled" : "disabled"} · ${esc(a.via)}${a.buttons.length ? `: ${esc(a.buttons.join(", "))}` : ""}${(x.acknowledged || []).includes(a.entity_id) ? " · acknowledged" : ""}</span></div>`).join("") : `<div class="muted">No automation reacts to this switch.</div>`}
+      <div class="stitle">Listener diagnostics</div>
+      <div class="kvs">
+        <div><span>MQTT</span><b>${esc(sw.mqtt)}</b></div>
+        <div><span>Authoritative input</span><b>${esc(st.authoritative || "none")}</b></div>
+        <div><span>Available inputs</span><b>${esc((st.available_sources || []).join(", ") || "none")}</b></div>
+        <div><span>Topic</span><b>${esc(st.topic || "—")}</b></div>
+        <div><span>Last command</span><b>${esc(st.last_command || "—")}</b></div>
+        <div><span>Last ignored</span><b>${st.last_ignored ? `${esc(st.last_ignored.text)} · ${fmtTime(st.last_ignored.at)}` : "—"}</b></div>
+        <div><span>Status updates ignored</span><b>${esc(st.ignored_updates || 0)} <span class="sub">(battery, link quality)</span></b></div>
+      </div>
+      ${st.problem ? `<div class="sub warn">${esc(st.problem)}</div>` : ""}
+      <div class="stitle">Recent presses</div>${hist || `<div class="muted">None yet.</div>`}`;
+  }
+
+  _swItem(id) { return (this._model.room.switches?.items || []).find((x) => x.id === id); }
+
+  _saveMapping(id, raw, change) {
+    const x = this._swItem(id);
+    const b = (x?.buttons_list || []).find((y) => y.raw === raw);
+    const current = { ...(b?.mapping || { action: "none", target: "room" }) };
+    const m = { ...current, ...change };
+    const sw = this._model.room.switches || {};
+    if (change.action) {
+      // Sensible defaults, so a new choice can be saved at once.
+      if (m.action === "set_brightness" && !m.brightness) m.brightness = 50;
+      if (m.action === "set_color_temp" && !m.color_temp) m.color_temp = 3000;
+      if (m.action === "mood" && !m.mood) m.mood = m.scope === "global" ? (sw.global_mood_options || []).find((o) => o !== "Auto") : (this._model.moods || [])[0]?.name;
+      if (m.action === "scene" && !String(m.entity || "").startsWith("scene.")) m.entity = sw.scenes?.[0]?.entity_id;
+      if (m.action === "script" && !String(m.entity || "").startsWith("script.")) m.entity = sw.scripts?.[0]?.entity_id;
+      if (m.action === "wled_preset" && !(sw.wled_presets || []).some((p) => p.entity_id === m.entity)) {
+        m.entity = sw.wled_presets?.[0]?.entity_id; m.option = sw.wled_presets?.[0]?.options?.[0];
+      }
+    }
+    if (change.scope && m.action === "mood") m.mood = change.scope === "global" ? (sw.global_mood_options || []).find((o) => o === m.mood) || (sw.global_mood_options || []).find((o) => o !== "Auto") : m.mood;
+    if (m.on_values === "fixed" && !m.brightness && !m.color_temp) m.brightness = 100;
+    const clean = Object.fromEntries(Object.entries(m).filter(([, v]) => v !== null && v !== undefined && v !== ""));
+    this._save(`map-${id}-${raw}`, { type: `${WS}/switch/mapping`, area_id: this._config.area, switch_id: id, raw,
+      mapping: clean.action === "none" ? null : clean });
+  }
+
+  _onSwitchAction(a, el) {
+    const ui = this._ui;
+    const area = this._config.area;
+    const id = el.dataset.switch;
+    if (a === "sw-add-open") { ui.swAdd = true; ui.swCands = null; this._render(); }
+    else if (a === "sw-add-close") { ui.swAdd = false; this._render(); }
+    else if (a === "sw-refresh") { ui.swCands = null; this._render(); }
+    else if (a === "sw-add-adv") { ui.swAddAdv = !el.parentElement.open; }
+    else if (a === "sw-adv") { ui.swAdv = !el.parentElement.open; }
+    else if (a === "sw-add") {
+      const msg = { type: `${WS}/switch/add`, area_id: area };
+      if (el.dataset.device) msg.device_id = el.dataset.device;
+      if (el.dataset.ieee) msg.ieee = el.dataset.ieee;
+      ui.swAdd = false;
+      this._save("sw", msg, "Switch assigned (Listen only)");
+    } else if (a === "sw-add-manual") {
+      const topic = this.shadowRoot.querySelector('[data-control="sw-new-topic"]')?.value.trim();
+      const event = this.shadowRoot.querySelector('[data-control="sw-new-event"]')?.value.trim();
+      const msg = { type: `${WS}/switch/add`, area_id: area };
+      if (topic) msg.topic = topic;
+      if (event) msg.event_entity = event;
+      this._save("sw", msg, "Switch assigned (Listen only)").then(() => { if (!this._status.sw?.error) { ui.swAdd = false; this._requestRender(); } });
+    } else if (a === "sw-configure") { ui.swEdit = id; ui.swConfirm = null; this._render(); }
+    else if (a === "sw-back") { ui.swEdit = null; this._render(); }
+    else if (a === "sw-learn") this._save(`sw-${id}`, { type: `${WS}/switch/learn`, area_id: area, switch_id: id, action: "start", seconds: 60 }, "Listening…");
+    else if (a === "sw-learn-stop") this._save(`sw-${id}`, { type: `${WS}/switch/learn`, area_id: area, switch_id: id, action: "stop" }, "Learning finished");
+    else if (a === "sw-remove") {
+      const x = this._swItem(id);
+      if (confirm(`Remove ${x?.name || "this switch"} from this room? Its learned buttons and assignments are deleted. Direct Zigbee bindings and automations are not changed.`)) {
+        if (ui.swEdit === id) ui.swEdit = null;
+        this._save("sw", { type: `${WS}/switch/remove`, area_id: area, switch_id: id }, "Removed");
+      }
+    } else if (a === "sw-mode-listen") this._save(`sw-${id}`, { type: `${WS}/switch/mode`, area_id: area, switch_id: id, mode: "listen" }, "Listen only");
+    else if (a === "sw-mode-ask") { ui.swConfirm = id; ui.swAck = []; this._render(); }
+    else if (a === "sw-mode-cancel") { ui.swConfirm = null; this._render(); }
+    else if (a === "sw-mode-confirm") {
+      ui.swConfirm = null;
+      this._save(`sw-${id}`, { type: `${WS}/switch/mode`, area_id: area, switch_id: id, mode: "control", confirm: true, acknowledge: ui.swAck || [] }, "Smart Occupancy control active");
+    } else if (a === "sw-forget") this._save(`map-${id}-${el.dataset.raw}`, { type: `${WS}/switch/mapping`, area_id: area, switch_id: id, raw: el.dataset.raw, forget: true }, "Forgotten");
+    else if (a === "sw-add-declared") this._save(`sw-${id}`, { type: `${WS}/switch/mapping`, area_id: area, switch_id: id, raw: el.dataset.raw, add: true }, "Added");
+    else return false;
+    return true;
+  }
+
+  _onSwitchControl(c, el) {
+    const area = this._config.area;
+    const id = el.dataset.switch;
+    const set = (change, ok) => this._save(`sw-${id}`, { type: `${WS}/switch/set`, area_id: area, switch_id: id, ...change }, ok);
+    if (c === "sw-map-action") this._saveMapping(id, el.dataset.raw, { action: el.value });
+    else if (c === "sw-map-field") {
+      const f = el.dataset.field;
+      const numeric = ["brightness", "color_temp", "minutes"].includes(f);
+      this._saveMapping(id, el.dataset.raw, { [f]: numeric ? (el.value === "" ? null : Number(el.value)) : (el.value || null) });
+    } else if (c === "sw-name" && el.value.trim()) set({ name: el.value.trim() });
+    else if (c === "sw-source") set({ source: el.value });
+    else if (c === "sw-topic") set({ topic: el.value.trim() || null });
+    else if (c === "sw-event") set({ event_entity: el.value.trim() || null });
+    else if (c === "sw-minutes") set({ override_minutes: el.value === "" ? null : Number(el.value) });
+    else if (c === "sw-dim" && el.value !== "") set({ dimming: { [el.dataset.key]: Number(el.value) } });
+    else if (c === "sw-debounce" && el.value !== "") set({ debounce_ms: Number(el.value) });
+    else if (c === "sw-evidence") set({ activity_evidence: el.checked });
+    else if (c === "sw-base-topic" && el.value.trim()) this._save("sw", { type: `${WS}/switch/settings`, mqtt_base_topic: el.value.trim() });
+    else if (c === "sw-ack") {
+      const acks = new Set(this._ui.swAck || []);
+      if (el.checked) acks.add(el.dataset.automation); else acks.delete(el.dataset.automation);
+      this._ui.swAck = [...acks];
+    } else return false;
+    return true;
+  }
+
   _advanced(r) {
     const ro = !this._canEdit;
     const d = r.diagnostics;
@@ -1226,10 +1535,10 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       ${(s.excluded || []).length ? `<div class="sub">Not managed: ${esc(s.excluded.map((e) => this._name(r, e)).join(", "))}</div>` : ""}
       ${this._statusHtml("group")}
       <div class="stitle">Manual overrides</div>
-      ${(d.manual_overrides || []).length ? d.manual_overrides.map((o) => `<div class="li">${esc(this._name(r, o.entity_id))} <span class="sub">${esc(o.source)} · ${o.until ? `until ${fmtTime(o.until)}` : "until the room is empty"}</span>
+      ${(d.manual_overrides || []).length ? d.manual_overrides.map((o) => `<div class="li">${esc(this._name(r, o.entity_id))} <span class="sub">${esc(o.switch ? `wall switch ${o.switch}: ${o.reason || o.action}` : o.source)} · ${o.until ? `until ${fmtTime(o.until)}` : "until the room is empty"}</span>
         ${ro ? "" : `<button class="link" data-action="clear-override" data-entity="${esc(o.entity_id)}">clear</button>`}</div>`).join("") : `<div class="muted">None.</div>`}
       <div class="frow"><label>Respect manual changes</label><div class="fval"><input type="number" class="num" min="0" max="1440" placeholder="${esc(this._model.settings.manual_override_minutes)}" value="${s.manual_override_minutes ?? ""}" data-control="room-minutes" ${ro ? "disabled" : ""}> min${this._statusHtml("room-minutes")}</div></div>
-      <div class="frow"><label>Wall switch entities</label><div class="fval"><input type="text" value="${esc((s.manual_switches || []).join(", "))}" placeholder="event.switch_action" data-control="switches" ${ro ? "disabled" : ""}>${this._statusHtml("switches")}</div></div>
+      <div class="frow"><label>Wall switch entities</label><div class="fval"><input type="text" value="${esc((s.manual_switches || []).join(", "))}" placeholder="event.switch_action" data-control="switches" ${ro ? "disabled" : ""}>${this._statusHtml("switches")}<span class="sub">listen only (earlier versions); assign switches and remotes in the Switches tab</span></div></div>
       <label class="switch"><input type="checkbox" data-control="auto-discover" ${s.auto_discover ? "checked" : ""} ${ro ? "disabled" : ""}> Manage labelled lights in this area automatically</label>${this._statusHtml("room")}
       <div class="stitle">Last decision</div>
       <div class="sub">${esc(d.last_reason || d.control_mode_reason)}${d.last_errors?.length ? ` · ${esc(d.last_errors.join("; "))}` : ""}</div>
@@ -1247,7 +1556,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
   _onAction(a, el) {
     const area = this._config.area;
     const ui = this._ui;
-    if (a === "tab") { ui.tab = el.dataset.tab; ui.edit = null; if (ui.tab === "preview") ui.previewData = null; if (ui.tab === "advanced") ui.review = null; this._render(); }
+    if (a.startsWith("sw-")) { this._onSwitchAction(a, el); return; }
+    if (a === "tab") { ui.tab = el.dataset.tab; ui.edit = null; ui.swEdit = null; ui.swAdd = false; if (ui.tab === "preview") ui.previewData = null; if (ui.tab === "advanced") ui.review = null; this._render(); }
     else if (a === "open-group") { ui.openGroup = ui.openGroup === el.dataset.group ? null : el.dataset.group; this._render(); }
     else if (a === "edit-room") { ui.edit = { scope: "room", target: el.dataset.target }; this._render(); }
     else if (a === "edit-light") { ui.edit = { scope: "light", target: el.dataset.target }; this._render(); }
@@ -1278,6 +1588,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const area = this._config.area;
     const c = el.dataset.control;
     const s = this._model.room.settings;
+    if (c && c.startsWith("sw-")) { this._onSwitchControl(c, el); return; }
     if (c === "edit-mood") { this._mood = el.value; this._ui.edit = null; this._fetch(); }
     else if (c === "room-mood") this._save("room-mood", { type: `${WS}/room/set`, area_id: area, mood_override: el.value || null });
     else if (c === "pick-light" && el.value) { this._ui.edit = { scope: "light", target: el.value }; this._render(); }
@@ -1488,6 +1799,10 @@ const STYLE = `<style>
   .auto { display: flex; gap: 8px; align-items: flex-start; padding: 6px; border-radius: 8px; border: 1px solid var(--divider-color); }
   .auto.warn { border-color: var(--warning-color, #ff9800); color: var(--primary-text-color); }
   .li { padding: 2px 0; overflow-wrap: anywhere; }
+  .swc { border: 1px solid var(--divider-color); border-radius: 8px; padding: 8px; display: grid; gap: 6px; }
+  .swrow { display: grid; gap: 4px; padding: 6px 0; border-bottom: 1px solid var(--divider-color); }
+  .swrow .fval { flex-wrap: wrap; }
+  code { font-size: 0.85em; opacity: 0.8; }
   .problem { padding: 6px 8px; border-radius: 8px; border: 1px solid var(--divider-color); font-size: 0.88em; overflow-wrap: anywhere; }
   .problem.pr-warning { border-left: 4px solid var(--warning-color, #ff9800); }
   .problem.pr-error { border-left: 4px solid var(--error-color, #db4437); }

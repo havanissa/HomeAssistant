@@ -40,6 +40,14 @@ what it looks like. A visit starts on the first motion of a trigger sensor
 (PIR) when the room allows it, otherwise on confirmed occupancy; radar and
 other presence sensors hold occupancy. An occupied room that becomes dark is
 evaluated again. Nothing is switched off because of daylight.
+
+Wall switches (0.3.5): configured switches and remotes deliver button events
+(``switch_inputs.py``). Every press marks the next light changes in the room
+as a person's (manual override). Switches in Smart Occupancy control execute
+their button mappings (``switch_control.py``) through
+``async_switch_lights``: the room must be activated (Observe never sends),
+Manual mood does not pause them (a person's explicit request), and the lights
+they switch get a manual override, so automatic lighting does not undo it.
 """
 
 from __future__ import annotations
@@ -122,6 +130,9 @@ from .occupancy import friendly_name
 from .planner import BLOCKED, CHANGE, Plan, PlanItem, Target, build_plan
 from .profiles import resolve
 from .supervision import assert_room_control_permitted
+from .switch_control import SwitchControl
+from .switch_inputs import SwitchInputs
+from .switches import ButtonEvent, SwitchConfig
 
 if TYPE_CHECKING:
     from .coordinator import SmartOccupancyCoordinator
@@ -212,6 +223,8 @@ class RoomRuntime:
     # Why occupancy did or did not switch lights on (latest visit or darkness change).
     activation: dict[str, Any] | None = None
     last_activation_at: str | None = None
+    # A temporary room mood set by a wall switch (0.3.5): {"mood", "until"}.
+    temp_mood: dict[str, Any] | None = None
 
     def persist(self) -> dict[str, Any]:
         return {
@@ -227,6 +240,7 @@ class RoomRuntime:
             "last_commands": {e: [s, d] for e, (s, d) in self.last_commands.items()},
             "activation": self.activation,
             "last_activation_at": self.last_activation_at,
+            "temp_mood": self.temp_mood,
         }
 
     @classmethod
@@ -250,6 +264,7 @@ class RoomRuntime:
             },
             activation=activation,
             last_activation_at=data.get("last_activation_at"),
+            temp_mood=data.get("temp_mood") if isinstance(data.get("temp_mood"), dict) else None,
             # Continue counting visits, so the next visit is never mistaken for the recorded one.
             visit=int(activation.get("visit") or 0) if activation else 0,
         )
@@ -309,6 +324,11 @@ class LightingController:
         self._source_controllers: tuple[list[SourceController], list[AutomationInfo]] | None = None
         self._adaptive_conflicts: dict[str, dict[str, list[dict[str, Any]]]] | None = None
         self.daylight = DaylightMonitor(hass, self)
+        # Contexts of commands sent for a wall switch press (their own state reports are not new overrides).
+        self._switch_commands: dict[str, float] = {}
+        self._restored_switches: dict[str, Any] = {}
+        self.switch_control = SwitchControl(hass, self)
+        self.switch_inputs = SwitchInputs(hass, self, self._on_button)
 
     # ------------------------------------------------------------ properties
     @property
@@ -354,6 +374,7 @@ class LightingController:
         self.adaptive.restore(data.get("adaptive"))
         self.adaptive.async_configure(self.lighting.adaptive)
         self.daylight.restore(data.get("daylight"))
+        self._restored_switches = data.get("switches") if isinstance(data.get("switches"), dict) else {}
         now = dt_util.utcnow()
         for area_id in self.config.enabled_rooms:
             rt = RoomRuntime.restore(rooms.get(area_id))
@@ -379,6 +400,8 @@ class LightingController:
         self._resubscribe()
         self.adaptive.async_start()
         self.daylight.async_start()
+        self.switch_inputs.async_start(self._restored_switches)
+        self.switch_control.async_start()
         if self.hass.state is CoreState.running:
             self._on_started()
         else:
@@ -428,6 +451,8 @@ class LightingController:
         self._cancel_adaptive()
         self.adaptive.async_stop()
         self.daylight.async_stop()
+        self.switch_control.async_stop()
+        self.switch_inputs.async_stop()
         for task in list(self._tasks):
             task.cancel()
         self._tasks.clear()
@@ -452,6 +477,7 @@ class LightingController:
         self._adaptive_conflicts = None
         self._resubscribe()
         self.daylight.async_config_changed()
+        self.switch_inputs.async_registry_changed()
         self._notify()
 
     def _invalidate_managed(self) -> None:
@@ -1055,7 +1081,7 @@ class LightingController:
 
     def _prune(self, now: float) -> None:
         horizon = now - max(OWN_CHANGE_WINDOW_SECONDS, 60)
-        for store in (self._switch_contexts, self._own_contexts):
+        for store in (self._switch_contexts, self._own_contexts, self._switch_commands):
             for key in [k for k, t in store.items() if t < horizon]:
                 del store[key]
         for key in [k for k, (until, _) in self._expected.items() if until < now]:
@@ -1065,6 +1091,8 @@ class LightingController:
         """Who changed a light: ui, wall_switch, ours (echo), automation or unattributed."""
         if ctx.user_id:
             return "ui"
+        if ctx.id in self._switch_contexts:
+            return "wall_switch"
         if ctx.parent_id and ctx.parent_id in self._switch_contexts:
             return "wall_switch"
         seen = self._switch_seen.get(area_id)
@@ -1102,6 +1130,8 @@ class LightingController:
         self._prune(now)
         if ctx.id in self._own_contexts or (ctx.parent_id and ctx.parent_id in self._own_contexts):
             return
+        if ctx.id in self._switch_commands:
+            return  # the report of a wall switch command: its override is already registered
         expected = self._expected.get(entity_id)
         # Our command reported back with a new context (e.g. MQTT): same direction, shortly after.
         echo = bool(expected and expected[0] >= now and (expected[1] == "turn_off") == (new.state == "off"))
@@ -1122,6 +1152,10 @@ class LightingController:
             if not manual and switched_on and target == entity_id:
                 # Switched on by something else: give it the current global values right away.
                 self._schedule_adaptive(area_id, ADAPTIVE_DEBOUNCE_SECONDS, {target})
+            existing = rt.overrides.get(target)
+            if source == "wall_switch" and existing and existing.get("switch_id") and \
+                    existing.get("state") == new.state:
+                manual = False  # a wall switch command reported back: keep its (more detailed) override
             if manual and self.room_active(area_id) and not self._manual:
                 # (In Manual mode a person's change is expected; nothing would be corrected anyway.)
                 minutes = self.lighting.override_minutes(area_id)
@@ -1302,6 +1336,9 @@ class LightingController:
         if old.adaptive != new.adaptive:
             self._source_controllers = None
             self.adaptive.async_configure(new.adaptive)
+        if old.switch_settings != new.switch_settings or any(
+                old.room(a).switches != new.room(a).switches for a in {*old.rooms, *new.rooms}):
+            self.switch_inputs.async_config_changed()
         if self._running and (old.unrepresentable != new.unrepresentable or old.manual_option != new.manual_option):
             # The handling of a mood Main Mood cannot represent changes the effective mood.
             self._on_mood_event()
@@ -1469,7 +1506,7 @@ class LightingController:
     def _state_data(self) -> dict[str, Any]:
         self._dirty = False
         return {"rooms": {a: rt.persist() for a, rt in self.runtime.items()}, "adaptive": self.adaptive.persist(),
-                "daylight": self.daylight.persist()}
+                "daylight": self.daylight.persist(), "switches": self.switch_inputs.persist()}
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -1480,10 +1517,110 @@ class LightingController:
             "rooms": {a: self.room_diagnostics(a) for a in sorted(self.config.enabled_rooms)},
             "tracked_entities": list(self._tracked),
             "daylight": self.daylight.diagnostics(),
+            "switches": {
+                "mqtt": self.switch_inputs.mqtt_state,
+                "bridge_devices": len(self.switch_inputs.bridge_devices),
+                "rooms": {f"{a}/{s}": st.as_dict() for (a, s), st in self.switch_inputs.status.items()},
+            },
         }
 
     def with_room(self, area_id: str, **changes: Any) -> LightingConfig:
         return self.lighting.with_room(area_id, replace(self.lighting.room(area_id), **changes))
+
+    # ---------------------------------------------------------- wall switches
+    @callback
+    def notify(self) -> None:
+        self._notify()
+
+    @callback
+    def mark_dirty(self) -> None:
+        self._mark_dirty()
+
+    def runtime_for(self, area_id: str) -> RoomRuntime:
+        return self.runtime.setdefault(area_id, RoomRuntime())
+
+    @callback
+    def _on_button(self, event: ButtonEvent) -> None:
+        self.switch_control.async_handle(event)
+
+    @callback
+    def note_switch_press(self, area_id: str) -> Context:
+        """A physical switch of this room was pressed: light changes right after it are a person's.
+
+        Returns the context for the commands this press may send (their light
+        changes are attributed to the wall switch, and scenes or scripts it
+        starts too).
+        """
+        context = Context()
+        now = time.monotonic()
+        self._switch_contexts[context.id] = now
+        self._switch_seen[area_id] = (now, context.id)
+        self._prune(now)
+        return context
+
+    async def async_switch_lights(self, area_id: str, service: str, data_by_entity: dict[str, dict[str, Any]],
+                                  context: Context) -> dict[str, str]:
+        """Send a light command for a wall switch press. Returns {entity: error}.
+
+        Only in activated rooms (Observe never sends). Unlike automatic
+        lighting it is not paused by Manual mood: it is a person's request.
+        """
+        assert_room_control_permitted(self.room_active(area_id), area_id)
+        if self._stopped:
+            return {e: "stopped" for e in data_by_entity}
+        batches: dict[str, list[str]] = {}
+        for entity_id, data in data_by_entity.items():
+            batches.setdefault(json.dumps(data, sort_keys=True), []).append(entity_id)
+        now = time.monotonic()
+        self._switch_commands[context.id] = now
+        errors: dict[str, str] = {}
+        for data_json, entity_ids in batches.items():
+            payload = json.loads(data_json)
+            window = OWN_CHANGE_WINDOW_SECONDS + float(payload.get("transition") or 0)
+            for entity_id in entity_ids:
+                self._expected[entity_id] = (now + window, service)
+            try:
+                async with asyncio.timeout(COMMAND_TIMEOUT_SECONDS):
+                    await self.hass.services.async_call(
+                        "light", service, {**payload, "entity_id": entity_ids}, blocking=True, context=context)
+            except TimeoutError:
+                errors.update({e: "no response within timeout" for e in entity_ids})
+            except (HomeAssistantError, ValueError) as err:
+                errors.update({e: str(err) or type(err).__name__ for e in entity_ids})
+            _LOGGER.debug("switch_light_command area=%s service=light.%s entities=%s data=%s", area_id, service,
+                          entity_ids, payload)
+        return errors
+
+    @callback
+    def register_switch_override(self, area_id: str, entities: list[str], state: str, *, switch: SwitchConfig,
+                                 raw: str, reason: str) -> list[str]:
+        """Manual override for the managed lights (or their managed groups) a switch press changed."""
+        targets: list[str] = []
+        for entity_id in entities:
+            for area, target in self._light_targets.get(entity_id, ()):
+                if area == area_id and target not in targets:
+                    targets.append(target)
+        if not targets:
+            return []
+        rt = self.runtime_for(area_id)
+        minutes = switch.override_minutes if switch.override_minutes is not None else \
+            self.lighting.override_minutes(area_id)
+        now_dt = dt_util.utcnow()
+        for target in targets:
+            rt.last_commands.pop(target, None)
+            rt.adaptive_sent.pop(target, None)
+            rt.overrides[target] = {
+                "entity_id": target, "source": "wall_switch", "since": _iso(now_dt),
+                "until": _iso(now_dt + timedelta(minutes=minutes)) if minutes else None,
+                "user_id": None, "state": state, "switch": switch.name, "switch_id": switch.id,
+                "action": raw, "reason": reason,
+            }
+        _LOGGER.info("lighting_manual_override area=%s lights=%s source=wall_switch switch=%s action=%s",
+                     area_id, ",".join(targets), switch.id, raw)
+        self._mark_dirty()
+        self._schedule_override_expiry()
+        self._notify()
+        return targets
 
 
 def _summary(mood: str | None, items, trigger: str, *, failed: int = 0) -> str:

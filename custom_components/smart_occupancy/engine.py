@@ -338,6 +338,22 @@ class RoomEngine:
             if previous is None or at > previous:
                 self._neighbour_motion[area_id] = at
 
+    def note_activity_evidence(self, at: datetime, source: str) -> bool:
+        """Activity that is not a sensor signal (a wall switch press, 0.3.5).
+
+        Only refreshes an occupied room: its quiet period starts again from
+        ``at``, so it is vacated one inactivity timeout (or exit confirmation)
+        later. It never makes a vacant or uncertain room occupied and never
+        holds a room occupied by itself. Returns True if anything changed.
+        """
+        if not self.occupied or self.state == OccupancyState.UNCERTAIN:
+            return False
+        self._activity_floor = _later(self._activity_floor, at)
+        if self.last_activity is None or at >= self.last_activity:
+            self.last_activity = at
+            self.last_activity_source = source
+        return True
+
     def restore(self, data: dict[str, Any], now: datetime) -> None:
         """Conservative start: a room that was occupied stays occupied.
 

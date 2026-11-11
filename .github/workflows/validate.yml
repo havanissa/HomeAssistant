@@ -44,5 +44,7 @@ jobs:
       - run: pip install "homeassistant==${{ matrix.homeassistant }}"
       - if: matrix.frontend != ''
         run: pip install "home-assistant-frontend==${{ matrix.frontend }}"
+      # Libraries this Home Assistant release declares for the components the tests start (MQTT).
+      - run: pip install $(python scripts/component_requirements.py mqtt hassio)
       - run: python -c "import homeassistant.const as c; print('Home Assistant', c.__version__)"
       - run: python scripts/run_tests.py -p no:cacheprovider

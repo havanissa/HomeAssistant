@@ -412,6 +412,12 @@ def _group_issues(ctrl: LightingController, area_id: str) -> list[dict[str, Any]
     return out
 
 
+def switches_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> dict[str, Any]:
+    from .switch_websocket import switches_model as model
+
+    return model(hass, ctrl, area_id)
+
+
 def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood: str | None) -> dict[str, Any]:
     lighting = ctrl.lighting
     room_lighting = lighting.room(area_id)
@@ -482,6 +488,7 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
         "lights": lights,
         "group_issues": _group_issues(ctrl, area_id),
         "daylight": daylight_model(hass, ctrl, area_id) if area_id in ctrl.config.enabled_rooms else None,
+        "switches": switches_model(hass, ctrl, area_id),
         "occupancy": {
             "state": result.state.value if result else None,
             "occupied": result.occupied if result else None,
@@ -1082,6 +1089,10 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     if hass.data.get(_REGISTERED):
         return
     hass.data[_REGISTERED] = True
+    from .switch_websocket import SWITCH_HANDLERS
+
+    for handler in SWITCH_HANDLERS:
+        websocket_api.async_register_command(hass, handler)
     for handler in (
         ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_adaptive_set, ws_room_set,
         ws_activation, ws_activate, ws_deactivate, ws_acknowledge, ws_override_clear, ws_group_choice,

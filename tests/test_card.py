@@ -78,6 +78,9 @@ def test_lighting_cards_never_control_lights() -> None:
         "subscribe", "editor", "preview", "profile/set", "mood/set", "settings/set", "room/set", "room/activation",
         "room/activate", "room/deactivate", "room/acknowledge", "override/clear", "room/group_choice",
         "category/set", "category/remove", "adaptive/set", "room/daylight", "daylight/set",
+        # 0.3.5 Switches tab (configuration only; switch commands are executed by the integration)
+        "switch/candidates", "switch/add", "switch/set", "switch/mapping", "switch/mode", "switch/learn",
+        "switch/remove", "switch/settings",
     }, commands
 
 
@@ -88,11 +91,14 @@ def test_card_javascript_parses(path: Path) -> None:
 
 
 def test_room_card_layout() -> None:
-    """Tabs are the single navigation; daylight settings live in the Automatic tab only; one outdoor editor."""
+    """Tabs are the single navigation; daylight settings live in the Automatic tab only; one outdoor editor.
+
+    0.3.5 adds the Switches tab after Automatic; everything else of the 0.3.4 layout is unchanged.
+    """
     source = LIGHTING_FILE.read_text(encoding="utf-8")
     tabs = re.search(r"const tabs = (\[.*?\]);", source, re.S).group(1)
     order = re.findall(r'\["([a-z]+)", "([A-Za-z]+)"\]', tabs)
-    assert [k for k, _ in order] == ["overview", "lights", "automatic", "overrides", "preview", "advanced"]
+    assert [k for k, _ in order] == ["overview", "lights", "automatic", "switches", "overrides", "preview", "advanced"]
     # No duplicate navigation buttons at the bottom of Overview.
     for label in ("Review lights", "Configure overrides", "Preview room"):
         assert label not in source
@@ -105,3 +111,10 @@ def test_room_card_layout() -> None:
     # One shared renderer for the global outdoor sensor, used by the global card and the room card.
     assert source.count('data-control="dl-outdoor"') == 1
     assert source.count("this._outdoorGlobalHtml(") == 2
+    # Switches tab: assigned switches with Configure / Learn buttons / Remove; details collapsed under Advanced.
+    switches = source[source.index("  _switches(r) {"):source.index("  _advanced(r) {")]
+    for text in ("Assigned switches", "Learn buttons", "Configure", "Remove", "Advanced switch settings",
+                 "Listen only", "Smart Occupancy control", "Listener diagnostics"):
+        assert text in switches, text
+    assert "callService" not in switches and "dl-" not in switches
+    assert source.count('data-action="tab"') == 2  # the tab bar and the conflicts "Review" link, as in 0.3.4

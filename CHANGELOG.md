@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.3.5 — Native wall switches, remotes and Zigbee2MQTT button control
+
+Wall switches and remotes become part of Smart Occupancy: assign a switch to a room, learn its buttons, give each button an action, and every press counts as a manual change that automatic lighting respects. The upgrade sends no command and keeps every setting; every new switch starts in **Listen only**. Tested with simulated Zigbee2MQTT messages, device triggers and event entities through Home Assistant's MQTT integration; **not tested with physical Wiser hardware**.
+
+### Added
+
+- **Switches tab** in Smart Room Lighting (Overview · Lights · Automatic · **Switches** · Overrides · Preview · Advanced): assigned switches with connection, availability, last button and result, what they control, buttons configured and an active manual override; *Configure*, *Learn buttons* and *Remove*. The button table lists the device's actual button events with an action each (unassigned buttons do nothing). *Advanced switch settings*: input source, MQTT topic, event entity, manual override time, dimming, debounce, activity evidence, the Zigbee2MQTT base topic, conflicts and listener diagnostics.
+- **Device selection** instead of typing entity IDs: Home Assistant devices with Zigbee2MQTT identities, MQTT device triggers or event entities, and Zigbee2MQTT devices from its device list, with name, manufacturer, model, sources, availability, known button actions, direct bindings and the room they are assigned to. Manual MQTT topics (exact topics only, no wildcards) or event entities under *Advanced*.
+- **Input sources** (`switch_inputs.py`), one authoritative per switch:
+  - **Zigbee2MQTT** through Home Assistant's MQTT integration: the `action` of the device topic (`zigbee2mqtt/avb_ksu`), base topic configurable (default `zigbee2mqtt`); retained messages, battery and link-quality updates, cleared actions and malformed or oversized payloads are ignored; the availability topic is read; Zigbee2MQTT's retained device list gives declared actions, bindings and renames (followed by IEEE address). Subscriptions to the assigned switches' topics only; subscribed again after an MQTT reconnect or reload; nothing is published.
+  - **MQTT device triggers**, attached like automation triggers (replays right after attaching are ignored).
+  - **Event entities**: the action is the `event_type` (or `button` + `event_type`); the state is a timestamp; restored and stale events are ignored.
+- **Normalised button events** (device, source, raw action, button, press type, time, reference) and **deduplication**: the same press through raw MQTT, a device trigger and an event entity is executed once; deliberate repeated presses are kept; repeats within the debounce time (default 100 ms) count once.
+- **Learn buttons**: listens on every available path for 60 s (cancel with *Done*), shows the detected action, saves learned buttons at once (persisted), and never executes anything while learning. Press types are taken from the device, never synthesised. Buttons the device declares are added when the switch is assigned; recognisable ON / OFF / toggle / brightness buttons get a suggested action.
+- **Button actions**: Turn lights on (current mood, last used or fixed values) · off · toggle · increase / decrease brightness · start dimming up / down · stop dimming · set brightness · set colour temperature · select mood (this room, optionally for N minutes, or all rooms) · return to Auto · activate scene · run script · activate WLED preset · no action. Targets: the room's managed lights (through managed groups) or one light or group. Capabilities are respected. Only these fixed actions on validated entities; no templates or arbitrary services.
+- **Listen only / Smart Occupancy control** per switch. Control is an explicit, confirmed activation; it is refused while Zigbee2MQTT reports a direct binding of the switch to lights or groups, and while an enabled automation that reacts to the switch (device trigger, event entity or MQTT topic) is not acknowledged. Bindings and automations are never changed.
+- **Manual overrides from switches** (`switch_control.py`): every press marks the room's next light changes as a person's (also for directly bound switches in Listen only); executed commands register the override directly (switch, action, reason) for the room's or the switch's override time, so occupancy, moods and the global adjustment do not undo the choice. ON is not gated by daylight. Overrides are shown in *Advanced → Manual overrides* and in the switch's card.
+- **Manual mood**: wall switches keep working while Main Mood is `Manual` (automatic lighting stays paused).
+- **Mood buttons**: a room mood uses the existing room mood override; *all rooms* selects the option on the Manual Mood selector and lets your Main Mood automation resolve it. Main Mood is never written. Moods are discovered from the selectors.
+- **Hold-to-dim**: start/stop dimming with one paced brightness command per interval (default 8 % every 0.4 s), waiting for each command, stopping on STOP/release, at the minimum or maximum brightness, or after a safety timeout (default 10 s); brightness steps per press for remotes that repeat messages. Dimmed brightness is kept as an override.
+- **Activity evidence** (optional, off by default): a press refreshes the activity of an occupied room in the existing occupancy engine; it never occupies an empty room.
+- **Websocket commands** (admin only): `smart_occupancy/lighting/switch/candidates`, `…/add`, `…/set`, `…/mapping`, `…/mode`, `…/learn`, `…/remove`, `…/settings`. The room model of `smart_occupancy/lighting/editor` has `switches`.
+- `scripts/component_requirements.py`: installs the libraries a Home Assistant release declares for the components the tests start (used by CI on 2026.11.1).
+
+### Changed
+
+- The integration now lists `mqtt` and `device_automation` as after-dependencies (optional: without MQTT, event entities still work).
+- Diagnostics include the switch inputs (MQTT state, sources, last events and results; never raw payloads).
+
+### Configuration
+
+- **Lighting store 1.2 → 1.3**: `switches` per room (empty after the migration) and the global `switch_settings` (base topic). Every other setting is kept unchanged. The wall switch entities of earlier versions (`manual_switches`) are kept and stay listen-only sources; none is converted into a command source. 0.3.4 can still read a 1.3 store.
+- **State store**: the last event and result of each switch and temporary room moods.
+
 ## 0.3.4 — Room lighting card cleanup
 
 A dashboard-only release. Lighting behaviour, the occupancy engine, the websocket API and every saved setting (including the chosen light sensors) are unchanged.
