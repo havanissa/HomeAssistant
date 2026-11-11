@@ -1,9 +1,11 @@
-"""Smart Occupancy & Lighting - Phase 0.2 (Observe only).
+"""Smart Occupancy & Lighting - Phase 0.3 (mood lighting, per-room activation).
 
 This integration reads states and registries, computes its own occupancy
-per room and exposes diagnostics. It does not call any light service, does
-not modify automations, helpers or other integrations' entities, and does
-not poll.
+per room, exposes diagnostics, and plans mood lighting for every room. Light
+commands are sent only in rooms where mood lighting was explicitly enabled;
+every other room stays in Observe mode. It never modifies automations,
+helpers (including the mood selectors) or other integrations' entities, and
+does not poll.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from homeassistant.helpers import area_registry as ar, config_validation as cv, 
 from homeassistant.helpers.typing import ConfigType
 
 from .card import async_register_card
+from .lighting_config import rename_entity
 from .const import DOMAIN
 from .coordinator import SmartOccupancyConfigEntry, SmartOccupancyCoordinator
 from .entity import expected_unique_ids
@@ -33,7 +36,10 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Serve the Room Status dashboard card (once per Home Assistant run)."""
+    """Serve the dashboard cards and register the websocket API (once per run)."""
+    from .websocket import async_register_websocket_commands
+
+    async_register_websocket_commands(hass)
     await async_register_card(hass)
     return True
 
@@ -48,11 +54,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntr
     # before the first evaluation.
     await coordinator.tracker.async_load()
     await coordinator.occupancy.async_load()
+    # Mood lighting configuration (seeded from the options on first start).
+    await coordinator.lighting.async_load()
     await coordinator.async_config_entry_first_refresh()
     coordinator.async_start()
     coordinator.occupancy.async_start()
+    coordinator.lighting.async_start()
     entry.async_on_unload(coordinator.async_stop)
     entry.async_on_unload(coordinator.occupancy.async_stop)
+    entry.async_on_unload(coordinator.lighting.async_stop)
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     entry.async_on_unload(
@@ -71,16 +81,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
     if unloaded:
         await entry.runtime_data.tracker.async_flush()
         await entry.runtime_data.occupancy.async_flush()
+        await entry.runtime_data.lighting.async_flush()
     return unloaded
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntry) -> None:
-    """Delete this integration's own problem history when it is removed."""
+    """Delete this integration's own stored data when it is removed."""
+    from homeassistant.helpers.storage import Store
+
+    from .const import LIGHTING_STATE_STORE_KEY, LIGHTING_STORE_KEY
+    from .lighting_config import LightingStore
     from .occupancy_manager import OccupancyManager
     from .problems import ProblemTracker
 
     await ProblemTracker(hass).async_remove()
     await OccupancyManager(hass, IntegrationConfig()).async_remove()
+    await LightingStore(hass).async_remove()
+    await Store(hass, 1, LIGHTING_STATE_STORE_KEY).async_remove()
+    _LOGGER.debug("removed_storage keys=%s,%s", LIGHTING_STORE_KEY, LIGHTING_STATE_STORE_KEY)
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntry) -> bool:
@@ -136,6 +154,10 @@ def _rename_listener(hass: HomeAssistant, entry: SmartOccupancyConfigEntry):
         if data["action"] != "update" or "old_entity_id" not in data:
             return
         old, new = data["old_entity_id"], data["entity_id"]
+        store = entry.runtime_data.lighting.store
+        if (lighting := rename_entity(store.config, old, new)) is not None:
+            _LOGGER.info("entity_renamed old=%s new=%s (lighting configuration updated)", old, new)
+            store.async_set(lighting)
         updated = rename_entity_references(dict(entry.options), old, new)
         if updated is None:
             return

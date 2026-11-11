@@ -41,6 +41,7 @@ from .models import (
     default_categories,
     unique_category_key,
 )
+from .lighting_config import LightingStore, set_profile, table_get, without_categories
 from .mood import mood_names
 from .profiles import setting_from_form, validate_setting
 from .supervision import mode_permitted
@@ -474,6 +475,11 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
     def _save(self) -> ConfigFlowResult:
         return self.async_create_entry(data=self._config.as_dict())
 
+    def _lighting_store(self) -> LightingStore | None:
+        """The mood lighting store of the loaded integration (profiles live there since 0.3)."""
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        return runtime.lighting.store if runtime is not None else None
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         self._config = IntegrationConfig.from_dict(dict(self.config_entry.options))
         return self.async_show_menu(
@@ -646,6 +652,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
         if user_input is not None:
             remove = set(user_input.get(CONF_CATEGORIES) or [])
             self._config = _without_categories(self._config, remove)
+            if (store := self._lighting_store()) is not None:
+                store.async_set(without_categories(store.config, remove))
             return self._save()
         return self.async_show_form(
             step_id="category_remove",
@@ -672,6 +680,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
 
     # profiles ------------------------------------------------------------
     async def async_step_profiles(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if (store := self._lighting_store()) is None:
+            return self.async_abort(reason="not_loaded")
         if user_input is not None:
             self._scope = user_input[CONF_SCOPE]
             self._mood = user_input[CONF_MOOD].strip()
@@ -679,8 +689,9 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
                 self._profile_area = None
                 return await self.async_step_profile_target()
             return await self.async_step_profile_room()
-        moods = mood_names(self.hass, self._config.mood)
-        moods += [m for m in self._config.global_profiles if m not in moods]
+        moods = [m["name"] for m in self.config_entry.runtime_data.lighting.discovered_moods()] or \
+            mood_names(self.hass, self._config.mood)
+        moods += [m for m in store.config.global_profiles if m not in moods]
         return self.async_show_form(
             step_id="profiles",
             data_schema=vol.Schema({
@@ -709,7 +720,7 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
 
     async def async_step_profile_target(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if self._scope == "light":
-            lights = list(self._config.room(self._profile_area or "").lights)
+            lights = list(self.config_entry.runtime_data.lighting.managed_room(self._profile_area or "").targets)
             if not lights:
                 return self.async_abort(reason="no_lights")
             field_key, options = CONF_LIGHT, lights
@@ -725,33 +736,28 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
             data_schema=vol.Schema({vol.Required(field_key): _select(options)}),
         )
 
-    def _profile_table(self, config: IntegrationConfig) -> dict[str, dict[str, ProfileSetting]]:
+    def _current_profile(self) -> ProfileSetting | None:
+        lighting = self.config_entry.runtime_data.lighting.lighting
         if self._scope == "global":
-            return config.global_profiles
-        room = config.room(self._profile_area or "")
-        return room.mood_overrides if self._scope == "room" else room.light_overrides
-
-    def _with_profile(self, setting: ProfileSetting | None) -> IntegrationConfig:
-        table = {m: dict(t) for m, t in self._profile_table(self._config).items()}
-        targets = table.setdefault(self._mood, {})
-        if setting is None:
-            targets.pop(self._target, None)
+            table = lighting.global_profiles
         else:
-            targets[self._target] = setting
-        table = {m: t for m, t in table.items() if t}
-        if self._scope == "global":
-            return replace(self._config, global_profiles=table)
-        room = self._config.room(self._profile_area or "")
-        field_name = "mood_overrides" if self._scope == "room" else "light_overrides"
-        return self._config.with_room(replace(room, **{field_name: table}))
+            room = lighting.room(self._profile_area or "")
+            table = room.mood_overrides if self._scope == "room" else room.light_overrides
+        return table_get(table, self._mood).get(self._target)
+
+    def _store_profile(self, setting: ProfileSetting | None) -> ConfigFlowResult:
+        """Save the entry in the lighting store, without reloading the integration."""
+        store = self.config_entry.runtime_data.lighting.store
+        store.async_set(set_profile(store.config, self._scope, self._mood, self._target, setting, self._profile_area))
+        # Unchanged options: the integration is not reloaded.
+        return self.async_create_entry(data=dict(self.config_entry.options))
 
     async def async_step_profile_edit(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        current = self._profile_table(self._config).get(self._mood, {}).get(self._target)
+        current = self._current_profile()
         errors: dict[str, str] = {}
         if user_input is not None:
             if user_input.get(CONF_REMOVE):
-                self._config = self._with_profile(None)
-                return self._save()
+                return self._store_profile(None)
             try:
                 setting = setting_from_form(user_input)
             except (TypeError, ValueError):
@@ -759,13 +765,13 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
             else:
                 errors = validate_setting(setting)
                 if not errors:
-                    self._config = self._with_profile(setting)
-                    return self._save()
+                    return self._store_profile(setting)
+        persistent = {True: "yes", False: "no"}.get(current.persistent if current else None, "inherit")
         schema = vol.Schema({
             vol.Required("action", default=(current.action if current else LightAction.INHERIT).value):
                 _select([a.value for a in LightAction], translation_key="light_action"),
             vol.Optional("brightness_pct"): sel.NumberSelector(sel.NumberSelectorConfig(
-                min=0, max=100, step=1, unit_of_measurement="%", mode=sel.NumberSelectorMode.SLIDER)),
+                min=1, max=100, step=1, unit_of_measurement="%", mode=sel.NumberSelectorMode.SLIDER)),
             vol.Optional("color_temp_kelvin"): sel.NumberSelector(sel.NumberSelectorConfig(
                 min=KELVIN_MIN, max=KELVIN_MAX, step=50, unit_of_measurement="K",
                 mode=sel.NumberSelectorMode.BOX)),
@@ -774,9 +780,13 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
             vol.Optional("transition"): sel.NumberSelector(sel.NumberSelectorConfig(
                 min=0, max=TRANSITION_MAX, step=0.1, unit_of_measurement="s",
                 mode=sel.NumberSelectorMode.BOX)),
+            vol.Required("persistent", default=persistent): _select(
+                ["inherit", "yes", "no"], translation_key="persistent"),
             vol.Required(CONF_REMOVE, default=False): sel.BooleanSelector(),
         })
-        suggested = user_input if user_input is not None else (current.as_dict() if current else {})
+        suggested = user_input if user_input is not None else {
+            k: v for k, v in (current.as_dict() if current else {}).items() if k not in ("persistent", "hs_color")
+        }
         target_name = self._target
         if self._scope != "light" and (cat := self._config.category(self._target)):
             target_name = cat.name

@@ -8,11 +8,12 @@
  *   entity: sensor.smart_occupancy_<room>_state
  *
  * Data comes from the attributes of the room's "occupancy state" sensor.
- * The card never calls a service.
+ * The card never calls a service. Mood lighting is configured with the
+ * Global Mood Editor and Room Mood Lighting cards (smart-occupancy-lighting-cards.js).
  */
 
 const CARD_TYPE = "smart-occupancy-room-card";
-const CARD_VERSION = "0.2.0";
+const CARD_VERSION = "0.3.0";
 
 const STATE_LABELS = {
   vacant: "Vacant",
@@ -191,7 +192,8 @@ class SmartOccupancyRoomCard extends HTMLElement {
             <div class="room">${escapeHtml(this._config.title || a.room)}</div>
             <div class="state">${escapeHtml(stateLabel)}</div>
           </div>
-          ${a.observe_only ? `<span class="badge" title="No light is controlled">Observe only</span>` : ""}
+          ${a.observe_only ? `<span class="badge" title="No light is controlled in this room">Observe only</span>`
+            : `<span class="badge active" title="Mood lighting is enabled for this room">Mood lighting</span>`}
         </div>
         <div class="body">
           <div class="row"><span class="label">Evidence quality</span>
@@ -288,6 +290,7 @@ const STYLE = `<style>
   .badge { font-size: 0.75em; padding: 2px 8px; border-radius: 12px; white-space: nowrap;
     background: var(--secondary-background-color); color: var(--secondary-text-color);
     border: 1px solid var(--divider-color); }
+  .badge.active { color: var(--success-color, #43a047); border-color: currentColor; }
   .body { padding: 0 16px 16px; display: grid; gap: 8px; color: var(--primary-text-color); }
   .body.missing { display: flex; gap: 8px; align-items: center; padding: 16px; }
   .row { display: grid; grid-template-columns: 9.5em 1fr; gap: 8px; align-items: start; }

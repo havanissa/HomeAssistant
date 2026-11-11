@@ -14,6 +14,7 @@ from custom_components.smart_occupancy.models import (
     rename_entity_references,
     unique_category_key,
 )
+from custom_components.smart_occupancy.lighting_config import LightingConfig, seed_from_options
 from custom_components.smart_occupancy.mood import expected_main_mood
 from custom_components.smart_occupancy.profiles import resolve, validate_setting
 from custom_components.smart_occupancy.supervision import (
@@ -108,26 +109,33 @@ def test_unique_category_key() -> None:
     assert unique_category_key("Ljós úti!", set()) == "ljós_úti"
 
 
+def _lighting(raw: dict) -> LightingConfig:
+    """Profiles of a Phase 0.2 options payload, as copied into the lighting store."""
+    return seed_from_options(IntegrationConfig.from_dict(raw))
+
+
 def test_inheritance_global_room_light() -> None:
-    cfg = IntegrationConfig.from_dict(RAW)
+    cfg = _lighting(RAW)
     r = resolve(cfg, "Kvøld", "room1", "light.l", "lamps")
     assert r.action is LightAction.ON
     assert r.brightness_pct == 50          # room overrides global
     assert r.rgb_color == (255, 0, 0)      # light override ...
     assert r.color_temp_kelvin is None     # ... clears the inherited colour temperature
     assert r.transition == 1.5             # inherited from global
-    assert r.sources == {"action": "light", "brightness_pct": "room", "rgb_color": "light", "transition": "global"}
+    assert {k: v["level"] for k, v in r.sources.items()} == {
+        "action": "light", "brightness_pct": "room", "rgb_color": "light", "transition": "global",
+    }
 
 
 def test_resolution_without_profiles_is_ignore() -> None:
-    cfg = IntegrationConfig.from_dict(RAW)
+    cfg = _lighting(RAW)
     assert resolve(cfg, "Dagur", "room1", "light.l", "lamps").action is LightAction.IGNORE
     assert resolve(cfg, "Kvøld", "room1", "light.other", None).action is LightAction.IGNORE
 
 
 def test_off_clears_attributes() -> None:
     raw = {**RAW, "rooms": {"room1": {**RAW["rooms"]["room1"], "light_overrides": {"Kvøld": {"light.l": {"action": "off"}}}}}}
-    r = resolve(IntegrationConfig.from_dict(raw), "Kvøld", "room1", "light.l", "lamps")
+    r = resolve(_lighting(raw), "Kvøld", "room1", "light.l", "lamps")
     assert r.action is LightAction.OFF and r.brightness_pct is None and r.color_temp_kelvin is None
     assert r.transition == 1.5
 
@@ -138,10 +146,14 @@ def test_off_clears_attributes() -> None:
         (ProfileSetting(LightAction.ON, brightness_pct=101), {"brightness_pct": "invalid_brightness"}),
         (ProfileSetting(LightAction.ON, color_temp_kelvin=500), {"color_temp_kelvin": "invalid_kelvin"}),
         (ProfileSetting(LightAction.ON, rgb_color=(0, 0, 256)), {"rgb_color": "invalid_rgb"}),
-        (ProfileSetting(LightAction.ON, color_temp_kelvin=3000, rgb_color=(1, 2, 3)), {"rgb_color": "kelvin_and_rgb"}),
+        (ProfileSetting(LightAction.ON, color_temp_kelvin=3000, rgb_color=(1, 2, 3)), {"rgb_color": "several_colors"}),
+        (ProfileSetting(LightAction.ON, rgb_color=(1, 2, 3), hs_color=(30, 50)), {"hs_color": "several_colors"}),
+        (ProfileSetting(LightAction.ON, hs_color=(400, 50)), {"hs_color": "invalid_hs"}),
+        (ProfileSetting(LightAction.ON, brightness_pct=0), {"brightness_pct": "invalid_brightness"}),
         (ProfileSetting(LightAction.ON, transition=-1), {"transition": "invalid_transition"}),
         (ProfileSetting(LightAction.OFF, brightness_pct=10), {"action": "off_with_attributes"}),
-        (ProfileSetting(LightAction.ON, brightness_pct=0, color_temp_kelvin=2700, transition=0), {}),
+        (ProfileSetting(LightAction.ON, brightness_pct=1, color_temp_kelvin=2700, transition=0), {}),
+        (ProfileSetting(LightAction.ON, hs_color=(30.5, 80), persistent=True), {}),
     ],
 )
 def test_validate_setting(setting: ProfileSetting, errors: dict) -> None:

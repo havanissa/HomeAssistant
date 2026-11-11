@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -11,12 +12,13 @@ import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 
-from custom_components.smart_occupancy.card import CARD_DIR, CARD_URL
-from custom_components.smart_occupancy.const import CARD_FILENAME, VERSION
+from custom_components.smart_occupancy.card import CARD_DIR, CARD_URL, LIGHTING_CARD_URL
+from custom_components.smart_occupancy.const import CARD_FILENAME, LIGHTING_CARD_FILENAME, VERSION
 
 from .conftest import Pilot, pilot_options, setup_entry
 
 CARD_FILE = CARD_DIR / CARD_FILENAME
+LIGHTING_FILE = CARD_DIR / LIGHTING_CARD_FILENAME
 
 try:
     import hass_frontend  # noqa: F401  (home-assistant-frontend package)
@@ -41,6 +43,14 @@ async def test_card_served_and_registered(hass: HomeAssistant, hass_client, pilo
     assert 'customElements.define(CARD_TYPE, SmartOccupancyRoomCard)' in body
     assert f'CARD_VERSION = "{VERSION}"' in body
 
+    assert f"{LIGHTING_CARD_URL}?v={VERSION}" in hass.data[DATA_EXTRA_MODULE_URL].urls
+    response = await client.get(LIGHTING_CARD_URL)
+    assert response.status == 200
+    body = await response.text()
+    assert "customElements.define(MOOD_CARD, SmartOccupancyMoodEditorCard)" in body
+    assert "customElements.define(ROOM_CARD, SmartOccupancyRoomLightingCard)" in body
+    assert f'const VERSION = "{VERSION}"' in body
+
 
 async def test_card_not_registered_without_frontend(hass: HomeAssistant, pilot: Pilot) -> None:
     """Minimal installations (no frontend) still load the integration."""
@@ -56,6 +66,21 @@ def test_card_is_self_contained() -> None:
     assert "http://" not in source and "https://cdn" not in source
 
 
+def test_lighting_cards_never_control_lights() -> None:
+    """The editors talk to the integration's websocket API only; they never call a service."""
+    source = LIGHTING_FILE.read_text(encoding="utf-8")
+    assert "import " not in source.split("*/", 1)[1]
+    assert "callService" not in source and "call_service" not in source
+    assert "http://" not in source and "https://cdn" not in source
+    commands = set(re.findall(r"type: `\$\{WS\}/([a-z_/]+)`", source))
+    assert len(commands) >= 10, commands
+    assert commands <= {
+        "subscribe", "editor", "preview", "profile/set", "mood/set", "settings/set", "room/set", "room/activation",
+        "room/activate", "room/deactivate", "room/acknowledge", "override/clear",
+    }, commands
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
-def test_card_javascript_parses() -> None:
-    subprocess.run(["node", "--check", str(CARD_FILE)], check=True, cwd=Path(__file__).parent)
+@pytest.mark.parametrize("path", [CARD_FILE, LIGHTING_FILE])
+def test_card_javascript_parses(path: Path) -> None:
+    subprocess.run(["node", "--check", str(path)], check=True, cwd=Path(__file__).parent)

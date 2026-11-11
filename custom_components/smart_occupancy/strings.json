@@ -176,7 +176,7 @@
       },
       "profiles": {
         "title": "Mood profiles",
-        "description": "Prepare profile settings. Inheritance: Global → Room override → Individual light override. Profiles are stored and validated only; no light is controlled in this phase.",
+        "description": "Edit one profile entry. Inheritance: Global → Room override → Individual light override (the most specific value wins). The Global Mood Editor and Room Mood Lighting dashboard cards offer the same settings with previews; changes made here are saved immediately and do not reload the integration.",
         "data": {
           "scope": "Level",
           "mood": "Mood"
@@ -197,7 +197,7 @@
       },
       "profile_edit": {
         "title": "{scope} profile: {mood} / {target}",
-        "description": "Room: {room}. Leave a field empty to inherit it from the less specific level.",
+        "description": "Room: {room}. Leave a field empty to inherit it from the less specific level. Ambient: follow the mood even while the room is vacant.",
         "data": {
           "action": "Action",
           "brightness_pct": "Brightness",
@@ -205,7 +205,8 @@
           "rgb_color": "RGB colour (where supported)",
           "effect": "Effect (where supported)",
           "transition": "Transition",
-          "remove": "Remove this entry"
+          "remove": "Remove this entry",
+          "persistent": "Ambient lighting (applies while vacant too)"
         }
       },
       "occupancy": {
@@ -253,24 +254,27 @@
       "mood_entities_not_distinct": "Auto, Manual and Main Mood must be three different entities.",
       "auto_option_not_found": "This option does not exist on the Manual Mood entity.",
       "duplicate_assignment": "An entity can only be assigned once per room.",
-      "mode_not_available": "Only Observe mode is available in this phase.",
+      "mode_not_available": "Only Observe is available as the integration-wide mode. Mood lighting is enabled per room in the Room Mood Lighting card.",
       "name_required": "A name is required.",
       "category_exists": "A category with this name already exists.",
       "invalid_profile": "Invalid profile values.",
-      "invalid_brightness": "Brightness must be 0-100 %.",
+      "invalid_brightness": "Brightness must be 1-100 %. Use the Off action to switch a light off.",
       "invalid_kelvin": "Colour temperature must be 1000-10000 K.",
       "invalid_rgb": "RGB values must be 0-255.",
       "kelvin_and_rgb": "Choose either colour temperature or RGB colour, not both.",
       "invalid_transition": "Transition must be 0-300 seconds.",
       "invalid_effect": "Effect name is empty.",
       "off_with_attributes": "Action Off cannot have brightness, colour or effect.",
-      "stuck_too_short": "Must be 0 (off) or at least 60 seconds."
+      "stuck_too_short": "Must be 0 (off) or at least 60 seconds.",
+      "several_colors": "Choose only one of colour temperature, RGB or HS colour.",
+      "invalid_hs": "HS colour must be hue 0-360 and saturation 0-100."
     },
     "abort": {
       "no_categories": "No light categories are configured.",
       "all_categories_labelled": "Every category already has a label.",
       "no_rooms": "No rooms are enabled.",
-      "no_lights": "This room has no managed lights."
+      "no_lights": "This room has no managed lights.",
+      "not_loaded": "The integration is not loaded. Fix its problems and try again."
     }
   },
   "selector": {
@@ -302,6 +306,13 @@
         "off": "Off",
         "inherit": "Inherit",
         "ignore": "Ignore"
+      }
+    },
+    "persistent": {
+      "options": {
+        "inherit": "Inherit",
+        "yes": "Yes",
+        "no": "No"
       }
     }
   },
@@ -384,6 +395,14 @@
           "agree": "Agrees",
           "disagree": "Disagrees",
           "unknown": "Unknown"
+        }
+      },
+      "room_mood_lighting": {
+        "name": "{room} mood lighting",
+        "state": {
+          "observe": "Observe",
+          "active": "Active",
+          "blocked": "Blocked"
         }
       }
     },

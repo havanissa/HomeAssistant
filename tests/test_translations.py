@@ -11,6 +11,7 @@ from custom_components.smart_occupancy import config_flow
 from custom_components.smart_occupancy.const import (
     TIMING_PARAMETERS,
     LightAction,
+    LightingMode,
     OccupancyState,
     OperatingMode,
     SensorRole,
@@ -21,6 +22,7 @@ from custom_components.smart_occupancy.entity import (
     GLOBAL_BUTTON_KEYS,
     GLOBAL_SENSOR_KEYS,
     ROOM_COMPARISON_ENTITY,
+    ROOM_LIGHTING_ENTITY,
     ROOM_OCCUPANCY_ENTITIES,
 )
 from custom_components.smart_occupancy.sensor import COMPARISON_OPTIONS
@@ -73,12 +75,14 @@ def test_selectors_and_entities_translated() -> None:
     assert set(sel["light_action"]["options"]) == {a.value for a in LightAction}
     assert set(sel["profile_scope"]["options"]) == {"global", "room", "light"}
     room_keys = {tk for platform, tk in ROOM_OCCUPANCY_ENTITIES.values() if platform == "sensor"}
-    room_keys |= {ROOM_COMPARISON_ENTITY[2], "room_observation"}
+    room_keys |= {ROOM_COMPARISON_ENTITY[2], ROOM_LIGHTING_ENTITY[2], "room_observation"}
     assert set(GLOBAL_SENSOR_KEYS) | room_keys == set(STRINGS["entity"]["sensor"])
     room_binary = {tk for platform, tk in ROOM_OCCUPANCY_ENTITIES.values() if platform == "binary_sensor"}
     assert set(GLOBAL_BINARY_SENSOR_KEYS) | room_binary == set(STRINGS["entity"]["binary_sensor"])
     assert set(STRINGS["entity"]["sensor"]["room_state"]["state"]) == {s.value for s in OccupancyState}
     assert set(STRINGS["entity"]["sensor"]["room_helper_comparison"]["state"]) == set(COMPARISON_OPTIONS)
+    assert set(STRINGS["entity"]["sensor"][ROOM_LIGHTING_ENTITY[2]]["state"]) == {m.value for m in LightingMode}
+    assert set(sel["persistent"]["options"]) == {"inherit", "yes", "no"}
     timing_steps = (STRINGS["options"]["step"]["occupancy"], STRINGS["options"]["step"]["room_occupancy"])
     for step in timing_steps:
         assert set(TIMING_PARAMETERS) <= set(step["data"])

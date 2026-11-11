@@ -1,17 +1,31 @@
 """Mood profiles: validation and inheritance resolution.
 
-Inheritance order (most specific wins, field by field)::
+Three configuration levels, merged field by field (the most specific
+configured value wins)::
 
-    global profile [mood][category]
-        -> room override [mood][category]
-            -> individual light override [mood][light entity]
+    global   [mood][category]        (lighting store: global_profiles)
+      -> room  [mood][category]      (rooms[area].mood_overrides)
+        -> light [mood][light/group] (rooms[area].light_overrides)
 
-Phase 0.1 only stores, validates and resolves profiles. Nothing here sends
-commands to lights.
+Moods can inherit too: a mood's global profile inherits every field it does
+not set from its *parent* mood, then from the *fallback* mood (for example
+``Default``). The chain is followed only at the global level; room and light
+overrides belong to one mood. Loops are refused when saved and cut off when
+resolving.
+
+Field rules:
+
+* ``Inherit`` (action) or an empty field takes the value of the less specific
+  level. If no level sets an action, the result is ``Ignore``.
+* ``Ignore`` means no command is sent to the light.
+* Colour temperature, RGB and HS are one setting: a more specific level that
+  sets one of them replaces an inherited one of the others.
+* ``Off`` drops brightness, colour and effect.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,45 +38,56 @@ from .const import (
     TRANSITION_MIN,
     LightAction,
 )
-from .models import IntegrationConfig, ProfileSetting
+from .lighting_config import LightingConfig, table_get
+from .models import ProfileSetting
 
-_FIELDS = ("brightness_pct", "color_temp_kelvin", "rgb_color", "effect", "transition")
+COLOR_FIELDS = ("color_temp_kelvin", "rgb_color", "hs_color")
+VALUE_FIELDS = ("brightness_pct", *COLOR_FIELDS, "effect", "transition", "persistent")
+# Dropped when the action is Off.
+_ON_ONLY = ("brightness_pct", *COLOR_FIELDS, "effect")
+
+LEVELS = ("global", "room", "light")
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def validate_setting(setting: ProfileSetting) -> dict[str, str]:
     """Validate one profile entry. Returns {field: error_key}."""
     errors: dict[str, str] = {}
     b = setting.brightness_pct
-    if b is not None and (
-        not isinstance(b, int) or isinstance(b, bool) or not BRIGHTNESS_MIN <= b <= BRIGHTNESS_MAX
-    ):
+    if b is not None and (not _is_int(b) or not BRIGHTNESS_MIN <= b <= BRIGHTNESS_MAX):
         errors["brightness_pct"] = "invalid_brightness"
     k = setting.color_temp_kelvin
-    if k is not None and (
-        not isinstance(k, int) or isinstance(k, bool) or not KELVIN_MIN <= k <= KELVIN_MAX
-    ):
+    if k is not None and (not _is_int(k) or not KELVIN_MIN <= k <= KELVIN_MAX):
         errors["color_temp_kelvin"] = "invalid_kelvin"
     rgb = setting.rgb_color
     if rgb is not None and (
-        len(rgb) != 3
-        or not all(isinstance(c, int) and not isinstance(c, bool) and 0 <= c <= 255 for c in rgb)
+        not isinstance(rgb, tuple) or len(rgb) != 3 or not all(_is_int(c) and 0 <= c <= 255 for c in rgb)
     ):
         errors["rgb_color"] = "invalid_rgb"
-    if k is not None and rgb is not None and "rgb_color" not in errors:
-        # light.turn_on rejects colour temperature and RGB in the same call.
-        errors["rgb_color"] = "kelvin_and_rgb"
+    hs = setting.hs_color
+    if hs is not None and (
+        not isinstance(hs, tuple) or len(hs) != 2
+        or not all(_is_number(c) for c in hs)
+        or not (0 <= hs[0] <= 360 and 0 <= hs[1] <= 100)
+    ):
+        errors["hs_color"] = "invalid_hs"
+    colours = [f for f in COLOR_FIELDS if getattr(setting, f) is not None]
+    if len(colours) > 1 and not any(f in errors for f in colours):
+        # light.turn_on accepts only one colour parameter per call.
+        errors[colours[-1]] = "several_colors"
     t = setting.transition
-    if t is not None and (
-        not isinstance(t, (int, float))
-        or isinstance(t, bool)
-        or not TRANSITION_MIN <= t <= TRANSITION_MAX
-    ):
+    if t is not None and (not _is_number(t) or not TRANSITION_MIN <= t <= TRANSITION_MAX):
         errors["transition"] = "invalid_transition"
-    if setting.effect is not None and not str(setting.effect).strip():
+    if setting.effect is not None and (not isinstance(setting.effect, str) or not setting.effect.strip()):
         errors["effect"] = "invalid_effect"
-    if setting.action == LightAction.OFF and any(
-        getattr(setting, f) is not None for f in ("brightness_pct", "color_temp_kelvin", "rgb_color", "effect")
-    ):
+    if setting.action == LightAction.OFF and any(getattr(setting, f) is not None for f in _ON_ONLY):
         errors["action"] = "off_with_attributes"
     return errors
 
@@ -75,6 +100,7 @@ def setting_from_form(data: dict[str, Any]) -> ProfileSetting:
 
     rgb = data.get("rgb_color")
     transition = data.get("transition")
+    persistent = data.get("persistent")
     return ProfileSetting(
         action=LightAction(data.get("action", LightAction.INHERIT)),
         brightness_pct=_int("brightness_pct"),
@@ -82,7 +108,25 @@ def setting_from_form(data: dict[str, Any]) -> ProfileSetting:
         rgb_color=tuple(int(c) for c in rgb) if rgb else None,  # type: ignore[arg-type]
         effect=(data.get("effect") or "").strip() or None,
         transition=None if transition in (None, "") else float(transition),
+        persistent={"yes": True, "no": False}.get(persistent) if isinstance(persistent, str) else None,
     )
+
+
+def mood_chain(config: LightingConfig, mood: str | None) -> list[str]:
+    """The mood, its parents, then the fallback mood. Loop safe."""
+    if not mood:
+        return []
+    chain: list[str] = []
+    seen: set[str] = set()
+    current: str | None = mood
+    while current and current.casefold() not in seen:
+        chain.append(current)
+        seen.add(current.casefold())
+        current = config.parent_of(current)
+    fallback = config.fallback_mood
+    if fallback and fallback.casefold() not in seen:
+        chain.append(fallback)
+    return chain
 
 
 @dataclass(slots=True)
@@ -93,64 +137,94 @@ class ResolvedSetting:
     brightness_pct: int | None = None
     color_temp_kelvin: int | None = None
     rgb_color: tuple[int, int, int] | None = None
+    hs_color: tuple[float, float] | None = None
     effect: str | None = None
     transition: float | None = None
-    # field -> "global" | "room" | "light"
-    sources: dict[str, str] = field(default_factory=dict)
+    persistent: bool | None = None
+    # field -> {"level": "global" | "room" | "light", "mood": mood}
+    sources: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    @property
+    def is_persistent(self) -> bool:
+        return bool(self.persistent)
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"action": self.action.value}
-        for f in _FIELDS:
+        for f in VALUE_FIELDS:
             v = getattr(self, f)
             if v is not None:
                 out[f] = list(v) if isinstance(v, tuple) else v
-        out["sources"] = dict(self.sources)
+        out["sources"] = {k: dict(v) for k, v in self.sources.items()}
         return out
 
 
-def resolve(
-    config: IntegrationConfig,
-    mood: str,
-    area_id: str,
-    light_entity_id: str,
-    category_key: str | None,
-) -> ResolvedSetting:
-    """Resolve the effective setting for a light through the inheritance chain."""
-    room = config.room(area_id)
-    layers: list[tuple[str, ProfileSetting | None]] = [
-        ("global", config.global_profiles.get(mood, {}).get(category_key) if category_key else None),
-        ("room", room.mood_overrides.get(mood, {}).get(category_key) if category_key else None),
-        ("light", room.light_overrides.get(mood, {}).get(light_entity_id)),
-    ]
-    result = ResolvedSetting()
-    for source, layer in layers:
-        if layer is None:
+def _apply(result: ResolvedSetting, layer: ProfileSetting, source: dict[str, str]) -> None:
+    if layer.action != LightAction.INHERIT:
+        result.action = layer.action
+        result.sources["action"] = source
+    for f in VALUE_FIELDS:
+        v = getattr(layer, f)
+        if v is None:
             continue
-        if layer.action != LightAction.INHERIT:
-            result.action = layer.action
-            result.sources["action"] = source
-        for f in _FIELDS:
-            v = getattr(layer, f)
-            if v is None:
-                continue
-            # Colour temperature and RGB are mutually exclusive; a more
-            # specific layer choosing one clears the other.
-            if f == "rgb_color":
-                result.color_temp_kelvin = None
-                result.sources.pop("color_temp_kelvin", None)
-            elif f == "color_temp_kelvin":
-                result.rgb_color = None
-                result.sources.pop("rgb_color", None)
-            setattr(result, f, v)
-            result.sources[f] = source
+        if f in COLOR_FIELDS:
+            for other in COLOR_FIELDS:
+                if other != f:
+                    setattr(result, other, None)
+                    result.sources.pop(other, None)
+        setattr(result, f, v)
+        result.sources[f] = source
+
+
+def layers(
+    config: LightingConfig,
+    mood: str,
+    area_id: str | None,
+    light_entity_id: str | None,
+    category_key: str | None,
+    *,
+    levels: tuple[str, ...] = LEVELS,
+) -> list[tuple[dict[str, str], ProfileSetting]]:
+    """The configured entries that apply, least specific first."""
+    out: list[tuple[dict[str, str], ProfileSetting]] = []
+    if "global" in levels and category_key:
+        for m in reversed(mood_chain(config, mood)):
+            if (entry := table_get(config.global_profiles, m).get(category_key)) is not None:
+                out.append(({"level": "global", "mood": m}, entry))
+    room = config.room(area_id) if area_id else None
+    if room is not None and "room" in levels and category_key:
+        if (entry := table_get(room.mood_overrides, mood).get(category_key)) is not None:
+            out.append(({"level": "room", "mood": mood}, entry))
+    if room is not None and "light" in levels and light_entity_id:
+        if (entry := table_get(room.light_overrides, mood).get(light_entity_id)) is not None:
+            out.append(({"level": "light", "mood": mood}, entry))
+    return out
+
+
+def resolve(
+    config: LightingConfig,
+    mood: str,
+    area_id: str | None,
+    light_entity_id: str | None,
+    category_key: str | None,
+    *,
+    levels: tuple[str, ...] = LEVELS,
+) -> ResolvedSetting:
+    """Resolve the effective setting through the inheritance chain.
+
+    ``levels`` limits the levels used, e.g. ``("global",)`` gives what a room
+    override would inherit.
+    """
+    result = ResolvedSetting()
+    for source, layer in layers(config, mood, area_id, light_entity_id, category_key, levels=levels):
+        _apply(result, layer, source)
     if result.action == LightAction.OFF:
-        for f in ("brightness_pct", "color_temp_kelvin", "rgb_color", "effect"):
+        for f in _ON_ONLY:
             setattr(result, f, None)
             result.sources.pop(f, None)
     return result
 
 
-def iter_profile_entries(config: IntegrationConfig):
+def iter_profile_entries(config: LightingConfig) -> Iterator[tuple[str, str | None, str, str, ProfileSetting]]:
     """Yield (scope, area_id|None, mood, target, setting) for every stored entry."""
     for mood, targets in config.global_profiles.items():
         for target, setting in targets.items():

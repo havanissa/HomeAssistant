@@ -6,7 +6,8 @@ signals (unavailable or stuck sensors). The split keeps an offline light
 from making occupancy detection look degraded:
 
 * **occupancy** - can presence and vacancy be determined? Only signals.
-* **lighting** - are the configured lights available? Only lights.
+* **lighting** - are the managed lights available, and can mood lighting
+  work (automation conflicts, unsupported settings, failed commands)?
 * **configuration** - are the room's assignments and settings valid?
 """
 
@@ -18,6 +19,7 @@ from .const import Classification, ProblemCategory, Severity
 from .coordinator import RoomSnapshot, Snapshot
 from .engine import RoomResult, SignalStatus
 from .occupancy import AVAILABLE, PENDING
+from .validation import ENTITY_PROBLEM_CODES
 
 HEALTHY = Classification.HEALTHY.value
 WARNING = Classification.WARNING.value
@@ -91,9 +93,16 @@ def room_health(snapshot: Snapshot | None, area_id: str, result: RoomResult | No
         f"Light {_label(li['name'], li['entity_id'])} {_HEALTH_WORDS.get(li['health'], li['health'])}"
         for li in unavailable_lights
     ]
+    # Mood lighting problems (conflicts, unsupported settings, failed commands).
+    lighting_problems = [p for p in problems if p.aspect == "lighting" and p.code not in ENTITY_PROBLEM_CODES]
+    light_reasons += [
+        f"{p.title}: {p.explanation}" for p in lighting_problems
+    ]
 
     # Configuration ---------------------------------------------------------
-    config_problems = [p for p in problems if p.category == ProblemCategory.CONFIGURATION]
+    config_problems = [
+        p for p in problems if p.category == ProblemCategory.CONFIGURATION and p.aspect != "lighting"
+    ]
     if any(p.severity == Severity.ERROR for p in config_problems):
         config_status = CONFIG_ERROR
     elif config_problems:
@@ -113,7 +122,7 @@ def room_health(snapshot: Snapshot | None, area_id: str, result: RoomResult | No
             "unavailable_sensors": unavailable_sensors,
         },
         "lighting": {
-            "status": WARNING if unavailable_lights else HEALTHY,
+            "status": WARNING if unavailable_lights or lighting_problems else HEALTHY,
             "reasons": light_reasons,
             "unavailable_lights": unavailable_lights,
             "lights": len(light_ids),
