@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import SmartOccupancyConfigEntry, SmartOccupancyCoordinator
-from .entity import SmartOccupancyEntity, global_unique_id
+from .entity import RoomOccupancyEntity, SmartOccupancyEntity, global_unique_id
 
 PARALLEL_UPDATES = 0
 
@@ -23,7 +23,10 @@ async def async_setup_entry(
     entry: SmartOccupancyConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    async_add_entities([MoodMismatchSensor(entry.runtime_data)])
+    coordinator = entry.runtime_data
+    entities: list[BinarySensorEntity] = [MoodMismatchSensor(coordinator)]
+    entities += [RoomOccupiedSensor(coordinator, a) for a in sorted(coordinator.config.enabled_rooms)]
+    async_add_entities(entities)
 
 
 class MoodMismatchSensor(SmartOccupancyEntity, BinarySensorEntity):
@@ -51,3 +54,22 @@ class MoodMismatchSensor(SmartOccupancyEntity, BinarySensorEntity):
             "expected_main_mood": mood.expected_main_mood,
             "grace_seconds": self.coordinator.config.mood.mismatch_grace_seconds,
         }
+
+
+class RoomOccupiedSensor(RoomOccupancyEntity, BinarySensorEntity):
+    """Occupancy computed by this integration's engine (Observe only: nothing acts on it here).
+
+    On for possible occupancy, confirmed occupancy and while vacancy is being
+    confirmed. Off when vacant. During an outage of every occupancy sensor it
+    keeps its last value; it is unknown only if nothing has ever been known.
+    """
+
+    _platform_domain = "binary_sensor"
+    _key = "occupied"
+    _attr_translation_key = "room_occupied"
+    _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
+
+    @property
+    def is_on(self) -> bool | None:
+        result = self.result
+        return result.occupied if result else None

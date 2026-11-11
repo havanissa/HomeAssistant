@@ -21,11 +21,11 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorEntityDescription,
 )
-from homeassistant.const import EntityCategory
+from homeassistant.const import PERCENTAGE, EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import PHASE, Classification, OperatingMode, ProblemCategory, Severity
+from .const import PHASE, Classification, OccupancyState, OperatingMode, ProblemCategory, Severity
 from .coordinator import (
     CONFIGURATION_INVALID,
     OPERATIONAL_UNAVAILABLE,
@@ -35,8 +35,19 @@ from .coordinator import (
     SmartOccupancyCoordinator,
 )
 from .discovery import area_name
-from .entity import SmartOccupancyEntity, global_unique_id, room_unique_id
+from .engine import SignalStatus
+from .entity import (
+    ROOM_COMPARISON_ENTITY,
+    ROOM_OCCUPANCY_ENTITIES,
+    RoomOccupancyEntity,
+    SmartOccupancyEntity,
+    global_unique_id,
+    room_entity_unique_id,
+    room_unique_id,
+)
+from .health import room_health
 from .occupancy import AVAILABLE, PENDING
+from .supervision import control_permitted
 
 PARALLEL_UPDATES = 0
 
@@ -177,10 +188,16 @@ async def async_setup_entry(
 ) -> None:
     coordinator = entry.runtime_data
     entities: list[SensorEntity] = [SmartSensor(coordinator, d) for d in SENSORS]
-    entities += [
-        RoomObservationSensor(coordinator, area_id)
-        for area_id in sorted(coordinator.config.enabled_rooms)
-    ]
+    for area_id, room in sorted(coordinator.config.enabled_rooms.items()):
+        entities += [
+            RoomObservationSensor(coordinator, area_id),
+            RoomStateSensor(coordinator, area_id),
+            RoomConfidenceSensor(coordinator, area_id),
+            RoomLastActivitySensor(coordinator, area_id),
+            RoomReasonSensor(coordinator, area_id),
+        ]
+        if room.reference_occupancy_entity:
+            entities.append(RoomHelperComparisonSensor(coordinator, area_id))
     async_add_entities(entities)
 
 
@@ -259,4 +276,200 @@ class RoomObservationSensor(SmartOccupancyEntity, SensorEntity):
             "reference_occupancy": room.reference_occupancy.as_dict() if room.reference_occupancy else None,
             "problems": [data.problem_dict(p) for p in data.problems_where(area_id=room.area_id)],
             "last_checked": data.last_checked,
+        }
+
+
+def _iso(value) -> str | None:
+    return value.isoformat(timespec="seconds") if value else None
+
+
+class RoomStateSensor(RoomOccupancyEntity, SensorEntity):
+    """Occupancy state of a room, with the evidence behind it.
+
+    The attributes are the data source of the Room Status dashboard card.
+    They change only when the evidence changes (never on a clock tick: the
+    card counts down to ``vacancy_confirm_at`` itself) and are excluded
+    from the Recorder.
+    """
+
+    _platform_domain = "sensor"
+    _key = "state"
+    _attr_translation_key = "room_state"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [s.value for s in OccupancyState]
+    _unrecorded_attributes = frozenset({
+        "room", "occupied", "state_since", "confidence", "reason", "reason_code", "active_sensors",
+        "recent_door_movement", "stuck_sensors", "unavailable_sensors", "pending_vacancy",
+        "vacancy_confirm_at", "quiet_since", "required_quiet_seconds", "vacancy_evidence",
+        "starting_up", "last_activity", "last_activity_source", "signals", "health",
+        "occupancy_usable", "observe_only", "operating_mode", "lighting_control", "comparison",
+        "entities", "timing", "adjacent_rooms",
+    })
+
+    @property
+    def native_value(self) -> str | None:
+        result = self.result
+        return result.state.value if result else None
+
+    def _entity_ids(self) -> dict[str, str | None]:
+        from homeassistant.helpers import entity_registry as er
+
+        reg = er.async_get(self.hass)
+        keys = dict(ROOM_OCCUPANCY_ENTITIES)
+        keys[ROOM_COMPARISON_ENTITY[0]] = ROOM_COMPARISON_ENTITY[1:]  # type: ignore[assignment]
+        return {
+            key: reg.async_get_entity_id(platform, "smart_occupancy", room_entity_unique_id(self._area_id, key))
+            for key, (platform, _) in keys.items()
+        }
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        result = self.result
+        if result is None:
+            return None
+        coordinator = self.coordinator
+        config = coordinator.config
+        room_config = config.room(self._area_id)
+        health = room_health(coordinator.data, self._area_id, result)
+        comparison = coordinator.occupancy.comparison(self._area_id)
+
+        def labels(*statuses: SignalStatus) -> list[str]:
+            return result.names(*statuses)
+
+        active = [
+            v.track.label() + (" (dropout grace)" if v.status == SignalStatus.GRACE else "")
+            for v in result.views(SignalStatus.ACTIVE, SignalStatus.GRACE)
+        ]
+        mode = coordinator.data.effective_mode if coordinator.data else OperatingMode.OBSERVE
+        return {
+            "integration": "smart_occupancy",
+            "area_id": self._area_id,
+            "room": area_name(self.hass, self._area_id) or self._area_id,
+            "occupied": result.occupied,
+            "state_since": _iso(result.state_since),
+            "confidence": result.confidence.score,
+            "reason": result.reason,
+            "reason_code": result.reason_code,
+            "active_sensors": active,
+            "recent_door_movement": labels(SignalStatus.RECENT),
+            "stuck_sensors": labels(SignalStatus.STUCK),
+            "unavailable_sensors": health["occupancy"]["unavailable_sensors"],
+            "pending_vacancy": result.state == OccupancyState.POSSIBLE_VACANCY,
+            "vacancy_confirm_at": _iso(result.vacancy_at),
+            "quiet_since": _iso(result.quiet_since),
+            "required_quiet_seconds": result.required_quiet,
+            "vacancy_evidence": list(result.vacancy_evidence),
+            "starting_up": result.starting_up,
+            "last_activity": _iso(result.last_activity),
+            "last_activity_source": result.last_activity_source,
+            "signals": [v.as_dict() for v in result.signals],
+            "health": health,
+            "occupancy_usable": health["occupancy"]["usable"],
+            "operating_mode": mode.value,
+            "observe_only": mode == OperatingMode.OBSERVE,
+            "lighting_control": control_permitted(mode),
+            "comparison": (
+                {"helper": room_config.reference_occupancy_entity, **comparison.as_dict()}
+                if comparison else None
+            ),
+            "entities": self._entity_ids(),
+            "timing": config.timing_for(self._area_id).as_dict(),
+            "adjacent_rooms": list(room_config.adjacent_rooms),
+        }
+
+
+class RoomConfidenceSensor(RoomOccupancyEntity, SensorEntity):
+    """Evidence quality (0-100 %). A transparent score, not a predicted probability."""
+
+    _platform_domain = "sensor"
+    _key = "confidence"
+    _attr_translation_key = "room_confidence"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_suggested_display_precision = 0
+
+    @property
+    def native_value(self) -> int | None:
+        result = self.result
+        return result.confidence.score if result else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        result = self.result
+        if result is None:
+            return None
+        return {**result.confidence.as_dict(), "meaning": "evidence quality, not predictive accuracy"}
+
+
+class RoomLastActivitySensor(RoomOccupancyEntity, SensorEntity):
+    """When the latest activity started (motion, presence or door movement)."""
+
+    _platform_domain = "sensor"
+    _key = "last_activity"
+    _attr_translation_key = "room_last_activity"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    @property
+    def native_value(self):
+        result = self.result
+        return result.last_activity if result else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        result = self.result
+        if result is None or result.last_activity_source is None:
+            return None
+        track = self.coordinator.occupancy.engines[self._area_id].tracks.get(result.last_activity_source)
+        return {
+            "source": result.last_activity_source,
+            "source_name": track.name if track else None,
+        }
+
+
+class RoomReasonSensor(RoomOccupancyEntity, SensorEntity):
+    """Plain-language reason for the current occupancy state."""
+
+    _platform_domain = "sensor"
+    _key = "reason"
+    _attr_translation_key = "room_reason"
+
+    @property
+    def native_value(self) -> str | None:
+        result = self.result
+        return result.reason if result else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        result = self.result
+        return {"reason_code": result.reason_code} if result else None
+
+
+COMPARISON_OPTIONS = ["agree", "disagree", "unknown"]
+
+
+class RoomHelperComparisonSensor(RoomOccupancyEntity, SensorEntity):
+    """Agreement with the existing occupancy helper (which is only read)."""
+
+    _platform_domain = "sensor"
+    _key = ROOM_COMPARISON_ENTITY[0]
+    _attr_translation_key = "room_helper_comparison"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = COMPARISON_OPTIONS
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _unrecorded_attributes = frozenset({"disagreement_since", "episode_open_since", "statistics_since"})
+
+    @property
+    def native_value(self) -> str | None:
+        tracker = self.coordinator.occupancy.comparison(self._area_id)
+        if tracker is None or tracker.reported_agreement is None:
+            return "unknown"
+        return "agree" if tracker.reported_agreement else "disagree"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        tracker = self.coordinator.occupancy.comparison(self._area_id)
+        if tracker is None:
+            return None
+        return {
+            "helper": self.coordinator.config.room(self._area_id).reference_occupancy_entity,
+            **tracker.as_dict(),
         }

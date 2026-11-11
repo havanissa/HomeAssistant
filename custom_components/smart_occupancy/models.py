@@ -6,10 +6,10 @@ deliberately independent of Home Assistant so the model can be validated and
 unit tested in isolation, and extended in later phases without touching the
 runtime modules.
 
-Persisted shape (CONFIG_VERSION 1)::
+Persisted shape (CONFIG_VERSION 2)::
 
     {
-      "config_version": 1,
+      "config_version": 2,
       "operating_mode": "observe",
       "mood": {"auto_mood_entity": ..., "manual_mood_entity": ...,
                "main_mood_entity": ..., "auto_option": "Auto",
@@ -17,13 +17,20 @@ Persisted shape (CONFIG_VERSION 1)::
       "categories": [{"key": "lamps", "name": "Lamps", "label_id": "lamps"}],
       "rooms": {"<area_id>": {"enabled": true,
                               "sensors": [{"entity_id": ..., "kind": "pir",
-                                           "role": "trigger"}],
+                                           "role": "trigger",
+                                           "inverted": false}],
                               "lights": ["light.x"],
                               "reference_occupancy_entity": null,
                               "mood_overrides": {mood: {category_key: setting}},
-                              "light_overrides": {mood: {entity_id: setting}}}},
-      "global_profiles": {mood: {category_key: setting}}
+                              "light_overrides": {mood: {entity_id: setting}},
+                              "timing": {"exit_confirmation": 120},
+                              "adjacent_rooms": ["<area_id>"]}},
+      "global_profiles": {mood: {category_key: setting}},
+      "occupancy": {"correlation_window": 10, "exit_confirmation": 300, ...}
     }
+
+Version 2 only adds keys, each with a default, so ``migrate_options`` is a
+pure function that keeps every existing value.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ from .const import (
     DEFAULT_CATEGORIES,
     DEFAULT_MISMATCH_GRACE_SECONDS,
     DEFAULT_ROLE_FOR_KIND,
+    TIMING_PARAMETERS,
     LightAction,
     OperatingMode,
     SensorKind,
@@ -119,19 +127,68 @@ class SensorAssignment:
     entity_id: str
     kind: SensorKind
     role: SensorRole
+    # The signal means "active" when it is off (e.g. a "PC idle" sensor).
+    inverted: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SensorAssignment:
         kind = _enum_or(SensorKind, data.get("kind"), SensorKind.OTHER)
         role = _enum_or(SensorRole, data.get("role"), DEFAULT_ROLE_FOR_KIND[kind])
-        return cls(entity_id=data["entity_id"], kind=kind, role=role)
+        return cls(
+            entity_id=data["entity_id"], kind=kind, role=role,
+            inverted=bool(data.get("inverted", False)),
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "entity_id": self.entity_id,
             "kind": self.kind.value,
             "role": self.role.value,
+            "inverted": self.inverted,
         }
+
+
+def _clean_timing(data: Any, *, fill_defaults: bool) -> dict[str, int]:
+    """Valid timing values only (unknown keys and bad values are dropped)."""
+    out: dict[str, int] = {}
+    data = data if isinstance(data, dict) else {}
+    for key, (default, low, high) in TIMING_PARAMETERS.items():
+        value = data.get(key)
+        if value is None or isinstance(value, bool):
+            if fill_defaults:
+                out[key] = default
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            if fill_defaults:
+                out[key] = default
+            continue
+        out[key] = min(max(number, low), high)
+    return out
+
+
+@dataclass(frozen=True, slots=True)
+class OccupancyTiming:
+    """Occupancy timing parameters, in seconds (see const.TIMING_PARAMETERS)."""
+
+    correlation_window: int = TIMING_PARAMETERS["correlation_window"][0]
+    exit_confirmation: int = TIMING_PARAMETERS["exit_confirmation"][0]
+    inactivity_timeout: int = TIMING_PARAMETERS["inactivity_timeout"][0]
+    dropout_grace: int = TIMING_PARAMETERS["dropout_grace"][0]
+    trigger_stuck_after: int = TIMING_PARAMETERS["trigger_stuck_after"][0]
+    presence_stuck_after: int = TIMING_PARAMETERS["presence_stuck_after"][0]
+    startup_hold: int = TIMING_PARAMETERS["startup_hold"][0]
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> OccupancyTiming:
+        return cls(**_clean_timing(data, fill_defaults=True))
+
+    def as_dict(self) -> dict[str, int]:
+        return {key: getattr(self, key) for key in TIMING_PARAMETERS}
+
+    def with_overrides(self, overrides: dict[str, int]) -> OccupancyTiming:
+        return replace(self, **_clean_timing(overrides, fill_defaults=False))
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +259,10 @@ class RoomConfig:
     reference_occupancy_entity: str | None = None
     mood_overrides: ProfileTable = field(default_factory=dict)
     light_overrides: ProfileTable = field(default_factory=dict)
+    # Per-room timing overrides (only the keys that differ from global).
+    timing: dict[str, int] = field(default_factory=dict)
+    # Neighbouring rooms, used to recognise movement out through a door.
+    adjacent_rooms: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, area_id: str, data: dict[str, Any]) -> RoomConfig:
@@ -213,6 +274,10 @@ class RoomConfig:
             reference_occupancy_entity=data.get("reference_occupancy_entity"),
             mood_overrides=_table_from_dict(data.get("mood_overrides")),
             light_overrides=_table_from_dict(data.get("light_overrides")),
+            timing=_clean_timing(data.get("timing"), fill_defaults=False),
+            adjacent_rooms=tuple(
+                a for a in data.get("adjacent_rooms") or [] if isinstance(a, str) and a != area_id
+            ),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -223,7 +288,14 @@ class RoomConfig:
             "reference_occupancy_entity": self.reference_occupancy_entity,
             "mood_overrides": _table_as_dict(self.mood_overrides),
             "light_overrides": _table_as_dict(self.light_overrides),
+            "timing": dict(self.timing),
+            "adjacent_rooms": list(self.adjacent_rooms),
         }
+
+    @property
+    def occupancy_sensors(self) -> tuple[SensorAssignment, ...]:
+        """Signals that take part in occupancy decisions (role is not Ignore)."""
+        return tuple(s for s in self.sensors if s.role != SensorRole.IGNORE)
 
     @property
     def referenced_entities(self) -> list[str]:
@@ -243,6 +315,7 @@ class IntegrationConfig:
     categories: tuple[LightCategory, ...] = ()
     rooms: dict[str, RoomConfig] = field(default_factory=dict)
     global_profiles: ProfileTable = field(default_factory=dict)
+    occupancy: OccupancyTiming = field(default_factory=OccupancyTiming)
     config_version: int = CONFIG_VERSION
 
     @classmethod
@@ -262,6 +335,7 @@ class IntegrationConfig:
                 for area_id, room in data.get("rooms", {}).items()
             },
             global_profiles=_table_from_dict(data.get("global_profiles")),
+            occupancy=OccupancyTiming.from_dict(data.get("occupancy")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -272,7 +346,12 @@ class IntegrationConfig:
             "categories": [c.as_dict() for c in self.categories],
             "rooms": {a: r.as_dict() for a, r in self.rooms.items()},
             "global_profiles": _table_as_dict(self.global_profiles),
+            "occupancy": self.occupancy.as_dict(),
         }
+
+    def timing_for(self, area_id: str) -> OccupancyTiming:
+        """Effective timing of a room: global values with its overrides applied."""
+        return self.occupancy.with_overrides(self.room(area_id).timing)
 
     @property
     def enabled_rooms(self) -> dict[str, RoomConfig]:
@@ -291,6 +370,18 @@ class IntegrationConfig:
         return replace(
             self, rooms={a: r for a, r in self.rooms.items() if a != area_id}
         )
+
+
+def migrate_options(data: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade a stored options payload to CONFIG_VERSION.
+
+    Version 1 -> 2 adds occupancy timing (global and per room), adjacent
+    rooms and the per-signal ``inverted`` flag, all with defaults. Every
+    existing value (mood helpers, categories, labels, lights, roles,
+    profiles, reference helpers) is carried over unchanged.
+    """
+    config = IntegrationConfig.from_dict(data)
+    return replace(config, config_version=CONFIG_VERSION).as_dict()
 
 
 def default_categories() -> tuple[LightCategory, ...]:

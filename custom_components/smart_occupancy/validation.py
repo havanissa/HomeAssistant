@@ -19,6 +19,7 @@ from .const import (
     MOOD_ENTITY_DOMAINS,
     Classification,
     ProblemCategory,
+    SensorKind,
     Severity,
 )
 from .discovery import area_name
@@ -308,10 +309,28 @@ def validate(hass: HomeAssistant, config: IntegrationConfig, *, settled: bool = 
         if not essential:
             add(Problem(
                 "room_without_signals", Severity.WARNING, CONFIG, "No occupancy signals",
-                f"{room_name} has no signal with the role Trigger or Maintain, so its occupancy cannot be observed.",
+                f"{room_name} has no signal with the role Trigger, Maintain or Confirm vacancy, so its "
+                "occupancy cannot be observed.",
                 f"Assign sensors and roles in Configure → Rooms → {room_name}.",
                 subject=area_id, **in_room,
             ))
+        elif all(s.kind == SensorKind.DOOR for s in essential):
+            add(Problem(
+                "room_only_doors", Severity.WARNING, CONFIG, "Only door contacts",
+                f"{room_name} has only door contacts as occupancy signals. A door shows movement but cannot "
+                "prove that someone is inside, so the room is never reported occupied.",
+                f"Add a PIR, radar or other presence sensor in Configure → Rooms → {room_name}.",
+                subject=area_id, **in_room,
+            ))
+        for neighbour in room.adjacent_rooms:
+            if neighbour not in config.enabled_rooms:
+                add(Problem(
+                    "adjacent_room_not_enabled", Severity.INFO, CONFIG, "Adjacent room not enabled",
+                    f"{room_name} lists {area_name(hass, neighbour) or neighbour} as adjacent, but that room is "
+                    "not enabled, so movement there is not seen.",
+                    f"Enable that room, or remove it from the adjacent rooms of {room_name}.",
+                    subject=f"adjacent:{neighbour}", **in_room,
+                ))
 
         essential_health: list[str] = []
         for s in room.sensors:

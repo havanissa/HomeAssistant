@@ -1,9 +1,8 @@
 """Occupancy signals and entity health.
 
-Phase 0.1 scope: describe which signals a room has and whether they are
-healthy. It does **not** derive an occupied/vacant state - the existing
-occupancy helpers and automations remain the source of truth, and no
-duplicate occupancy entity is created.
+Describes which signals a room has and whether they are healthy. The
+occupied/vacant decision itself is made by the engine (engine.py); the
+existing occupancy helpers are only read, for comparison.
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ OPERATIONAL_UNAVAILABLE = frozenset({UNAVAILABLE, UNKNOWN, NOT_PROVIDED})
 CONFIGURATION_INVALID = frozenset({MISSING, DISABLED})
 
 # Roles whose signals a room needs in order to be observable.
-ESSENTIAL_ROLES = frozenset({SensorRole.TRIGGER, SensorRole.MAINTAIN})
+ESSENTIAL_ROLES = frozenset({SensorRole.TRIGGER, SensorRole.MAINTAIN, SensorRole.CONFIRM_VACANCY})
 
 
 def entity_health(hass: HomeAssistant, entity_id: str, *, settled: bool = True) -> str:

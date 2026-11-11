@@ -23,6 +23,7 @@ from .const import (
     KELVIN_MIN,
     MOOD_ENTITY_DOMAINS,
     NAME,
+    TIMING_PARAMETERS,
     TRANSITION_MAX,
     LightAction,
     OperatingMode,
@@ -33,6 +34,7 @@ from .models import (
     IntegrationConfig,
     LightCategory,
     MoodConfig,
+    OccupancyTiming,
     ProfileSetting,
     RoomConfig,
     SensorAssignment,
@@ -65,6 +67,11 @@ CONF_MOOD = "mood"
 CONF_ROOM = "room"
 CONF_LIGHT = "light"
 CONF_REMOVE = "remove"
+CONF_INVERTED = "inverted_signals"
+CONF_ADJACENT = "adjacent_rooms"
+
+# A stuck detection shorter than this would flag normal sensors.
+MIN_STUCK_SECONDS = 60
 
 # Room form field -> (sensor kind, allowed domains or None for any)
 KIND_FIELDS: dict[str, tuple[SensorKind, list[str] | None]] = {
@@ -159,6 +166,41 @@ def mood_from_input(user_input: dict[str, Any]) -> MoodConfig:
         auto_option=user_input[CONF_AUTO_OPTION].strip(),
         mismatch_grace_seconds=int(user_input.get(CONF_GRACE, DEFAULT_MISMATCH_GRACE_SECONDS)),
     )
+
+
+# ---------------------------------------------------------------- occupancy
+def timing_schema(timing: OccupancyTiming | None) -> vol.Schema:
+    """Timing fields. With ``timing`` None every field is optional (= inherit)."""
+    fields: dict[Any, Any] = {}
+    for key, (_, low, high) in TIMING_PARAMETERS.items():
+        selector = sel.NumberSelector(sel.NumberSelectorConfig(
+            min=low, max=high, step=1, unit_of_measurement="s", mode=sel.NumberSelectorMode.BOX,
+        ))
+        if timing is None:
+            fields[vol.Optional(key)] = selector
+        else:
+            fields[vol.Required(key, default=getattr(timing, key))] = selector
+    return vol.Schema(fields)
+
+
+def timing_from_input(user_input: dict[str, Any]) -> dict[str, int]:
+    return {
+        key: int(value)
+        for key, value in user_input.items()
+        if key in TIMING_PARAMETERS and value is not None and value != ""
+    }
+
+
+def validate_timing(values: dict[str, int]) -> dict[str, str]:
+    errors: dict[str, str] = {}
+    for key in ("trigger_stuck_after", "presence_stuck_after"):
+        if (value := values.get(key)) and value < MIN_STUCK_SECONDS:
+            errors[key] = "stuck_too_short"
+    return errors
+
+
+def timing_text(timing: OccupancyTiming) -> str:
+    return ", ".join(f"{key.replace('_', ' ')} {value} s" for key, value in timing.as_dict().items())
 
 
 # --------------------------------------------------------------- categories
@@ -263,14 +305,17 @@ class RoomFlowMixin:
                 return await self._room_done()
             seen: set[str] = set()
             sensors: list[SensorAssignment] = []
-            previous = {(s.entity_id, s.kind): s.role for s in room.sensors}
+            previous = {(s.entity_id, s.kind): s for s in room.sensors}
             for key, (kind, _) in KIND_FIELDS.items():
                 for entity_id in user_input.get(key) or []:
                     if entity_id in seen:
                         errors[key] = "duplicate_assignment"
                     seen.add(entity_id)
+                    old = previous.get((entity_id, kind))
                     sensors.append(SensorAssignment(
-                        entity_id, kind, previous.get((entity_id, kind), DEFAULT_ROLE_FOR_KIND[kind])
+                        entity_id, kind,
+                        old.role if old else DEFAULT_ROLE_FOR_KIND[kind],
+                        old.inverted if old else False,
                     ))
             if not errors:
                 self._pending_room = replace(
@@ -296,21 +341,32 @@ class RoomFlowMixin:
             },
         )
 
+    async def _after_roles(self) -> ConfigFlowResult:
+        return await self._room_done()
+
     async def async_step_room_roles(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         room = self._pending_room
         if user_input is not None:
+            inverted = set(user_input.get(CONF_INVERTED) or [])
             sensors = tuple(
-                replace(s, role=SensorRole(user_input.get(s.entity_id, s.role)))
+                replace(
+                    s, role=SensorRole(user_input.get(s.entity_id, s.role)), inverted=s.entity_id in inverted
+                )
                 for s in room.sensors
             )
-            self._config = self._config.with_room(replace(room, sensors=sensors))
-            return await self._room_done()
-        schema = vol.Schema({
+            self._pending_room = replace(room, sensors=sensors)
+            self._config = self._config.with_room(self._pending_room)
+            return await self._after_roles()
+        fields: dict[Any, Any] = {
             vol.Required(s.entity_id, default=s.role.value): _select(
                 [r.value for r in SensorRole], translation_key="sensor_role"
             )
             for s in room.sensors
-        })
+        }
+        fields[vol.Optional(CONF_INVERTED, default=[s.entity_id for s in room.sensors if s.inverted])] = _select(
+            [s.entity_id for s in room.sensors], multiple=True
+        )
+        schema = vol.Schema(fields)
         return self.async_show_form(  # type: ignore[attr-defined]
             step_id="room_roles",
             data_schema=schema,
@@ -326,7 +382,7 @@ class SmartOccupancyConfigFlow(RoomFlowMixin, ConfigFlow, domain=DOMAIN):
     """Initial setup: mood helpers -> categories -> rooms -> per-room assignment."""
 
     VERSION = 1
-    MINOR_VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         self._config = IntegrationConfig(categories=default_categories())
@@ -421,7 +477,55 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         self._config = IntegrationConfig.from_dict(dict(self.config_entry.options))
         return self.async_show_menu(
-            step_id="init", menu_options=["general", "rooms", "categories", "profiles"]
+            step_id="init", menu_options=["general", "occupancy", "rooms", "categories", "profiles"]
+        )
+
+    # occupancy timing ----------------------------------------------------
+    async def async_step_occupancy(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            values = timing_from_input(user_input)
+            errors = validate_timing(values)
+            if not errors:
+                self._config = replace(self._config, occupancy=OccupancyTiming.from_dict(values))
+                return self._save()
+        return self.async_show_form(
+            step_id="occupancy",
+            data_schema=self.add_suggested_values_to_schema(
+                timing_schema(self._config.occupancy), user_input or self._config.occupancy.as_dict()
+            ),
+            errors=errors,
+        )
+
+    async def _after_roles(self) -> ConfigFlowResult:
+        return await self.async_step_room_occupancy()
+
+    async def async_step_room_occupancy(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        room = self._config.room(self._area_id)
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            overrides = timing_from_input(user_input)
+            errors = validate_timing(overrides)
+            if not errors:
+                adjacent = tuple(a for a in user_input.get(CONF_ADJACENT) or [] if a != self._area_id)
+                self._config = self._config.with_room(replace(room, timing=overrides, adjacent_rooms=adjacent))
+                return self._save()
+        schema = timing_schema(None).extend({
+            vol.Optional(CONF_ADJACENT): _select(
+                [o for o in area_options(self.hass, self._config) if o["value"] != self._area_id], multiple=True
+            ),
+        })
+        suggested = user_input if user_input is not None else {
+            **room.timing, CONF_ADJACENT: list(room.adjacent_rooms),
+        }
+        return self.async_show_form(
+            step_id="room_occupancy",
+            data_schema=self.add_suggested_values_to_schema(schema, suggested),
+            errors=errors,
+            description_placeholders={
+                "room": discovery.area_name(self.hass, self._area_id) or self._area_id,
+                "global": timing_text(self._config.occupancy),
+            },
         )
 
     # general -------------------------------------------------------------

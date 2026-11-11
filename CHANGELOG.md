@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.2.0 — Occupancy engine and Room Status card
+
+Still **Observe only**: no light is controlled, no automation or helper is changed, nothing acts on the new occupancy.
+
+### Added
+
+- **Occupancy engine** for every enabled room, using the configured sensors and their roles:
+  - *Trigger* (PIR): immediate occupancy; a trigger that stays on longer than *Trigger stuck after* (30 min) is ignored as stuck.
+  - *Maintain* (radar, PC activity, bed): while active, vacancy can't be confirmed. Clears shorter than the *dropout grace* (30 s) are bridged.
+  - *Confirm vacancy*: like Maintain, and its cleared state counts as vacancy evidence (vacancy after *exit confirmation* instead of the *inactivity timeout*).
+  - *Door contacts* count only as movement: never occupancy on their own, but a door movement followed by nothing (optionally with movement in an *adjacent room*) is exit evidence.
+  - `unknown` and `unavailable` are never treated as "off". A presence sensor that drops out while reporting presence holds the room for an extra inactivity timeout. If every sensor is unavailable the room is `uncertain` and keeps its last state.
+- **States:** `vacant`, `possible_occupancy`, `confirmed_occupancy`, `possible_vacancy`, `uncertain`. The full rules are in the README.
+- **Timing**, configurable globally (*Configure → Occupancy timing*) and per room (*Configure → Rooms → room → Occupancy*):
+  - correlation window: 10 s
+  - exit confirmation: 300 s
+  - inactivity timeout: 600 s
+  - dropout grace: 30 s
+  - trigger stuck after: 1800 s
+  - presence stuck after: off
+  - start-up hold: 120 s
+- **Per room entities:**
+  - `binary_sensor.smart_occupancy_<room>_occupied`
+  - `sensor.smart_occupancy_<room>_state`, with the evidence in its attributes
+  - `sensor.smart_occupancy_<room>_confidence`
+  - `sensor.smart_occupancy_<room>_last_activity`
+  - `sensor.smart_occupancy_<room>_reason`
+  - `sensor.smart_occupancy_<room>_helper_comparison`, when an existing occupancy helper is configured
+- **Comparison with the existing helper:**
+  - agreement
+  - the number and duration of disagreements, counted only when they last longer than the correlation window
+  - premature clears by the helper
+  - possible over-retention by the engine, with its duration
+  - helper-only occupancy
+
+  Counters are kept in `.storage`. The helper is only read.
+- **Health split** per room into *occupancy*, *lighting* and *configuration*, built on the Phase 0.1.1 problems. An offline light is a lighting warning; it does not make occupancy look degraded.
+- **Smart Occupancy Room Status card** (`custom:smart-occupancy-room-card`), served by the integration and loaded automatically. It is read only and responsive, and has a visual editor with room selection.
+- **Inverted signals**, for sensors that mean activity when they're off (e.g. a "PC idle" sensor).
+- `prediction.OccupancyHistory`: an interface that receives every occupancy transition, for the future learning engine. Phase 0.2 discards them.
+- Brand icon (`brand/icon.png`, `icon@2x.png`) and an MIT `LICENSE`.
+
+### Changed
+
+- **Configuration version 1.2** (options `config_version` 2). It is migrated automatically and every existing setting is kept: mood helpers, categories, labels, lights, roles, profiles and reference helpers. Version 0.1.1 can still load a 1.2 entry after a downgrade.
+- *Confirm vacancy* now counts as an occupancy role for room health.
+- New problems:
+  - *Only door contacts* (warning)
+  - *Adjacent room not enabled* (info)
+- Motion (plain on/off changes of sensors) no longer rebuilds the diagnostics snapshot. Only availability, name, mood and light-capability changes do.
+
+### Recorder and efficiency
+
+- No polling. There's one state subscription for all rooms and at most one timer per room, set only for a pending deadline. A pending vacancy is a single timer, not a countdown: the card counts down in the browser.
+- Entities write state only when their state or attributes change. Evidence attributes are excluded from the Recorder. There are no `state_class` values, so no statistics.
+- Engine state is kept in `.storage/smart_occupancy.occupancy_state` and is written only on transitions, coalesced over 15 s.
+
 ## 0.1.1 — Diagnostic improvements and automatic recovery
 
 Still Observe only. No lights are controlled. Existing configuration is used unchanged (`config_version` 1), and all entity unique IDs are kept.
