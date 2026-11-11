@@ -376,6 +376,7 @@ async def test_existing_configuration_preserved(hass: HomeAssistant, home: Home)
     opts = labelled_options(home)
     entry = await setup_entry(hass, opts)
     assert entry.options == migrate_options(opts)
-    for key in ("mood", "categories", "global_profiles", "operating_mode"):
+    for key in ("mood", "global_profiles", "operating_mode"):
         assert entry.options[key] == opts[key]
+    assert [{k: v for k, v in c.items() if k != "kind"} for c in entry.options["categories"]] == opts["categories"]
     assert entry.version == 1 and entry.minor_version == 2

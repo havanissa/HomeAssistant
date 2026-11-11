@@ -7,8 +7,8 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.3"
-VERSION: Final = "0.3.0"
+PHASE: Final = "0.3.1"
+VERSION: Final = "0.3.1"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -126,16 +126,39 @@ DEFAULT_ROLE_FOR_KIND: Final[dict[SensorKind, SensorRole]] = {
     SensorKind.OTHER: SensorRole.IGNORE,
 }
 
-# Initial light categories: (stable key, display name).
-DEFAULT_CATEGORIES: Final[list[tuple[str, str]]] = [
-    ("downlights", "Downlights"),
-    ("lamps", "Lamps"),
-    ("led_strips", "LED strips"),
-    ("decorative", "Decorative lighting"),
-    ("task", "Task lighting"),
-    ("path", "Path lighting"),
-    ("outdoor", "Outdoor lighting"),
+class CategoryKind(StrEnum):
+    """What a light category label describes (Phase 0.3.1).
+
+    A light can carry several labels at once, e.g. ``Spottar`` + ``Loft ljós``
+    + ``Rgb``. Source types say what the light is, functions what it is used
+    for, and the RGB tag marks lights that may get colour profiles.
+    """
+
+    SOURCE = "source"      # Spottar, Loft ljós, LED strips, Downlights, Lamps ...
+    FUNCTION = "function"  # Uppljós, Decorative, Task, Path, Outdoor ...
+    RGB = "rgb"            # eligibility tag for colour profiles (not a type)
+
+
+# Profile target for only the RGB-tagged lights of a category ("<key>+rgb").
+RGB_SUFFIX: Final = "+rgb"
+
+# Initial light categories: (stable key, display name, kind).
+DEFAULT_CATEGORIES: Final[list[tuple[str, str, CategoryKind]]] = [
+    ("downlights", "Downlights", CategoryKind.SOURCE),
+    ("lamps", "Lamps", CategoryKind.SOURCE),
+    ("led_strips", "LED strips", CategoryKind.SOURCE),
+    ("decorative", "Decorative lighting", CategoryKind.FUNCTION),
+    ("task", "Task lighting", CategoryKind.FUNCTION),
+    ("path", "Path lighting", CategoryKind.FUNCTION),
+    ("outdoor", "Outdoor lighting", CategoryKind.FUNCTION),
+    ("uplight", "Uppljós", CategoryKind.FUNCTION),
 ]
+# Categories created before 0.3.1 have no kind; it is derived from these names.
+FUNCTION_CATEGORY_NAMES: Final = frozenset({
+    "decorative", "task", "path", "outdoor", "uplight", "uplights", "uppljós", "uppljos",
+    "decorative lighting", "task lighting", "path lighting", "outdoor lighting", "pynt", "pyntiljós",
+})
+RGB_CATEGORY_NAMES: Final = frozenset({"rgb", "rgb lights", "rgbw", "rgbww", "rgb ljós", "litljós"})
 
 # Profile value limits. Brightness 0 is not a level: use the Off action.
 BRIGHTNESS_MIN: Final = 1

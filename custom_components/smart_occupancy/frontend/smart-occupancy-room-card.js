@@ -9,11 +9,11 @@
  *
  * Data comes from the attributes of the room's "occupancy state" sensor.
  * The card never calls a service. Mood lighting is configured with the
- * Global Mood Editor and Room Mood Lighting cards (smart-occupancy-lighting-cards.js).
+ * Smart Lighting Profiles and Smart Room Lighting cards (smart-occupancy-lighting-cards.js).
  */
 
 const CARD_TYPE = "smart-occupancy-room-card";
-const CARD_VERSION = "0.3.0";
+const CARD_VERSION = "0.3.1";
 
 const STATE_LABELS = {
   vacant: "Vacant",
@@ -66,6 +66,9 @@ class SmartOccupancyRoomCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
+    this.shadowRoot.addEventListener("click", (ev) => {
+      if (ev.target.closest("[data-details]")) { this._details = !this._details; this._render(); }
+    });
     this._timer = null;
     this._lastKey = null;
   }
@@ -134,7 +137,7 @@ class SmartOccupancyRoomCard extends HTMLElement {
     if (!this._config || !this._hass || !this.isConnected) return;
     const stateObj = this._stateObj();
     // Re-render only when the room data changed (hass updates on every state change in HA).
-    const key = stateObj ? `${stateObj.state}|${stateObj.last_updated}` : "missing";
+    const key = stateObj ? `${stateObj.state}|${stateObj.last_updated}|${this._details ? 1 : 0}` : "missing";
     if (key === this._lastKey) return;
     this._lastKey = key;
     this._stopTimer();
@@ -159,17 +162,6 @@ class SmartOccupancyRoomCard extends HTMLElement {
       ? items.map((i) => `<span class="chip">${escapeHtml(i)}</span>`).join("")
       : `<span class="muted">${escapeHtml(empty)}</span>`;
 
-    const healthRow = (title, h, extra = "") => {
-      const info = HEALTH[h?.status] || HEALTH.healthy;
-      const reasons = (h?.reasons || []).map((r) => `<li>${escapeHtml(r)}</li>`).join("");
-      return `<div class="health ${info.tone}">
-        <div class="health-head"><ha-icon icon="${info.icon}"></ha-icon>
-          <span class="health-title">${escapeHtml(title)}</span>
-          <span class="health-status">${escapeHtml(info.label)}</span>${extra}</div>
-        ${reasons ? `<ul>${reasons}</ul>` : ""}
-      </div>`;
-    };
-
     const usable = health.occupancy ? health.occupancy.usable : a.occupancy_usable;
     const pending = a.pending_vacancy && a.vacancy_confirm_at;
 
@@ -178,11 +170,19 @@ class SmartOccupancyRoomCard extends HTMLElement {
       const agree = comparison.agreement;
       const word = agree === true ? "agrees" : agree === false ? "disagrees" : "unknown";
       comparisonHtml = `<div class="row"><span class="label">Existing helper</span>
-        <span class="value">${escapeHtml(comparison.helper)}: <b>${word}</b>
-        <span class="muted"> · ${comparison.disagreements} disagreement(s),
-        cleared early ${comparison.helper_cleared_prematurely}×,
-        held longer ${comparison.engine_possibly_retained_too_long}×</span></span></div>`;
+        <span class="value"><b>${word}</b><span class="muted"> · ${comparison.disagreements} disagreement(s)</span></span></div>`;
     }
+    // One short line per warning; the full explanations behind "Details".
+    const warnings = [];
+    for (const [key, word] of [["occupancy", "Occupancy"], ["lighting", "Lighting"], ["configuration", "Configuration"]]) {
+      for (const r of health[key]?.reasons || []) warnings.push([word, r]);
+    }
+    const details = ["occupancy", "lighting", "configuration"].flatMap((k) => health[k]?.details || health[k]?.reasons || []);
+    const open = this._details;
+    const chip = (title, h) => {
+      const info = HEALTH[h?.status] || HEALTH.healthy;
+      return `<span class="hchip ${info.tone}"><ha-icon icon="${info.icon}"></ha-icon>${escapeHtml(title)}: ${escapeHtml(info.label)}</span>`;
+    };
 
     this.shadowRoot.innerHTML = `${STYLE}
       <ha-card>
@@ -192,7 +192,7 @@ class SmartOccupancyRoomCard extends HTMLElement {
             <div class="room">${escapeHtml(this._config.title || a.room)}</div>
             <div class="state">${escapeHtml(stateLabel)}</div>
           </div>
-          ${a.observe_only ? `<span class="badge" title="No light is controlled in this room">Observe only</span>`
+          ${a.observe_only ? `<span class="badge" title="No light is controlled in this room">Observe</span>`
             : `<span class="badge active" title="Mood lighting is enabled for this room">Mood lighting</span>`}
         </div>
         <div class="body">
@@ -207,14 +207,13 @@ class SmartOccupancyRoomCard extends HTMLElement {
           ${pending ? `<div class="row pending"><span class="label">Vacancy pending</span>
             <span class="value">confirmed in <b data-countdown="${escapeHtml(a.vacancy_confirm_at)}"></b>
             if nothing is detected</span></div>` : ""}
-          <div class="reason">${escapeHtml(a.reason || "")}</div>
-          <div class="healths">
-            ${healthRow("Occupancy detection", health.occupancy,
-              `<span class="usable ${usable ? "ok" : "bad"}">${usable ? "usable" : "not usable"}</span>`)}
-            ${healthRow("Lighting", health.lighting)}
-            ${healthRow("Configuration", health.configuration)}
-          </div>
+          <div class="hchips">${chip("Occupancy", health.occupancy)}${chip("Lighting", health.lighting)}${chip("Configuration", health.configuration)}
+            ${usable ? "" : `<span class="usable bad">occupancy not usable</span>`}</div>
+          ${warnings.length ? `<ul class="warnings">${warnings.slice(0, open ? 99 : 4).map(([w, r]) => `<li><span class="muted">${escapeHtml(w)}:</span> ${escapeHtml(r)}</li>`).join("")}</ul>
+            <button class="link" data-details>${open ? "Hide details" : warnings.length > 4 ? `Details (+${warnings.length - 4} more)` : "Details"}</button>
+            ${open ? `<ul class="details">${details.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}</ul>` : ""}` : ""}
           ${comparisonHtml}
+          <div class="reason">${escapeHtml(a.reason || "")}</div>
         </div>
       </ha-card>`;
 
@@ -307,6 +306,19 @@ const STYLE = `<style>
   .reason { font-size: 0.9em; color: var(--secondary-text-color); border-left: 3px solid var(--divider-color);
     padding-left: 8px; overflow-wrap: anywhere; }
   .healths { display: grid; gap: 6px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .hchips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .hchip { display: inline-flex; align-items: center; gap: 4px; font-size: 0.85em; padding: 2px 8px; border-radius: 12px;
+    border: 1px solid var(--divider-color); }
+  .hchip ha-icon { --mdc-icon-size: 16px; }
+  .hchip.ok ha-icon { color: var(--success-color, #43a047); }
+  .hchip.warn { border-color: var(--warning-color, #ff9800); }
+  .hchip.warn ha-icon { color: var(--warning-color, #ff9800); }
+  .hchip.bad { border-color: var(--error-color, #db4437); }
+  .hchip.bad ha-icon { color: var(--error-color, #db4437); }
+  .warnings, .details { margin: 0; padding-left: 18px; font-size: 0.9em; overflow-wrap: anywhere; }
+  .details { color: var(--secondary-text-color); font-size: 0.85em; }
+  .link { border: none; background: none; color: var(--primary-color); padding: 0; font: inherit; font-size: 0.85em;
+    text-decoration: underline; cursor: pointer; justify-self: start; }
   .health { border: 1px solid var(--divider-color); border-radius: 8px; padding: 6px 8px; min-width: 0; }
   .health-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .health-head ha-icon { --mdc-icon-size: 18px; }

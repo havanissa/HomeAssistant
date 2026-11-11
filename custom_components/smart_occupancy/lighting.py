@@ -23,6 +23,7 @@ from homeassistant.const import ATTR_ENTITY_ID, ATTR_SUPPORTED_FEATURES, STATE_U
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
+from .const import RGB_SUFFIX, CategoryKind
 from .models import LightCategory
 
 LIGHT_DOMAIN = "light"
@@ -133,9 +134,51 @@ class LightIndex:
     def info(self, entity_id: str) -> LightInfo | None:
         return self.lights.get(entity_id)
 
+    def _kind(self, key: str) -> CategoryKind:
+        cat = next((c for c in self.categories if c.key == key), None)
+        return cat.kind if cat else CategoryKind.SOURCE
+
     def category_of(self, entity_id: str) -> str | None:
-        cats = self.categories_of.get(entity_id)
-        return cats[0] if cats else None
+        """Primary category, for display: the first source type, else the first function."""
+        cats = self.categories_of.get(entity_id) or []
+        for kind in (CategoryKind.SOURCE, CategoryKind.FUNCTION):
+            if key := next((k for k in cats if self._kind(k) == kind), None):
+                return key
+        return None
+
+    @property
+    def rgb_keys(self) -> list[str]:
+        return [c.key for c in self.categories if c.kind == CategoryKind.RGB]
+
+    def rgb_eligible(self, entity_id: str) -> bool:
+        """May get colour profiles: carries the RGB tag (or, without an RGB tag configured, supports colour)."""
+        if rgb := self.rgb_keys:
+            return any(k in rgb for k in self.categories_of.get(entity_id, []))
+        return light_capabilities(self.hass, entity_id).color
+
+    def profile_targets(self, entity_id: str) -> list[str]:
+        """Profile targets of a light, least specific first.
+
+        Plain source types < plain functions < the RGB tag < "type + RGB" <
+        "function + RGB". Within a kind, the category listed first in the
+        configuration is the most specific. Entries of all of them are merged
+        field by field, so e.g. an "Uppljós + RGB" colour applies on top of the
+        "Loft ljós" brightness.
+        """
+        cats = self.categories_of.get(entity_id) or []
+        sources = [k for k in cats if self._kind(k) == CategoryKind.SOURCE]
+        functions = [k for k in cats if self._kind(k) == CategoryKind.FUNCTION]
+        out = [*reversed(sources), *reversed(functions)]
+        if self.rgb_eligible(entity_id):
+            out += [k for k in cats if self._kind(k) == CategoryKind.RGB][::-1]
+            out += [k + RGB_SUFFIX for k in reversed(sources)] + [k + RGB_SUFFIX for k in reversed(functions)]
+        return out
+
+    def target_lights(self, target: str) -> list[str]:
+        """Lights a profile target applies to (a category, or its RGB-tagged part)."""
+        key, rgb = (target[: -len(RGB_SUFFIX)], True) if target.endswith(RGB_SUFFIX) else (target, False)
+        lights = self.by_category.get(key, [])
+        return [e for e in lights if self.rgb_eligible(e)] if rgb else list(lights)
 
     def labelled_in_area(self, area_id: str, *, exclude_label: str | None = None) -> list[str]:
         """Lights in an area that carry a category label (automatic discovery)."""

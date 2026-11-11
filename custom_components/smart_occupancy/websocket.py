@@ -30,8 +30,10 @@ from homeassistant.util import dt as dt_util
 from .const import (
     DOMAIN,
     MANUAL_OVERRIDE_MAX_MINUTES,
+    RGB_SUFFIX,
     SIGNAL_LIGHTING_UPDATED,
     VERSION,
+    CategoryKind,
     UnattributedPolicy,
     UnrepresentableMode,
 )
@@ -39,8 +41,8 @@ from .controller import LightingController
 from .discovery import area_name
 from .health import room_health
 from .lighting import light_capabilities
-from .lighting_config import UnrepresentableHandling, parent_cycle, set_profile, table_get
-from .models import ProfileSetting
+from .lighting_config import UnrepresentableHandling, parent_cycle, set_profile, table_get, without_categories
+from .models import IntegrationConfig, LightCategory, ProfileSetting, guess_kind, unique_category_key
 from .occupancy import friendly_name
 from .profiles import resolve, validate_setting
 
@@ -77,6 +79,100 @@ def _resolved(ctrl: LightingController, mood: str, area_id: str | None, entity_i
     return resolve(config or ctrl.lighting, mood, area_id, entity_id, category, levels=levels).as_dict()
 
 
+def _caps(hass: HomeAssistant, entity_ids: list[str]) -> dict[str, Any]:
+    """What the lights of a target can do together (controls are shown only if some light can)."""
+    caps = [light_capabilities(hass, e) for e in entity_ids]
+    known = [c for c in caps if c.known]
+    effects = sorted({e for c in known for e in c.effects})
+    mins = [c.min_kelvin for c in known if c.color_temp and c.min_kelvin]
+    maxs = [c.max_kelvin for c in known if c.color_temp and c.max_kelvin]
+    if not known:  # no light reports yet: offer the common controls
+        return {"known": False, "brightness": True, "color_temp": True, "color": False, "effects": [],
+                "transition": False, "min_kelvin": None, "max_kelvin": None}
+    return {
+        "known": True,
+        "brightness": any(c.brightness for c in known),
+        "color_temp": any(c.color_temp for c in known),
+        # Colour only when every light can show it; mixed types use their "+ RGB" part.
+        "color": all(c.color for c in known),
+        "effects": effects,
+        "transition": any(c.transition for c in known),
+        "min_kelvin": min(mins) if mins else None,
+        "max_kelvin": max(maxs) if maxs else None,
+    }
+
+
+def target_name(config, target: str) -> str:
+    base = target.removesuffix(RGB_SUFFIX)
+    cat = config.category(base)
+    name = cat.name if cat else base
+    return f"{name} + RGB" if target.endswith(RGB_SUFFIX) else name
+
+
+def _target_keys(target: str) -> list[str]:
+    """What RGB-tagged lights of a "type + RGB" target get: the type, then the variant."""
+    return [target.removesuffix(RGB_SUFFIX), target] if target.endswith(RGB_SUFFIX) else [target]
+
+
+def _targets_for(ctrl: LightingController, mood: str | None, tables: list) -> list[str]:
+    """Every category, plus "type + RGB" variants that are configured or possible."""
+    out: list[str] = []
+    for cat in ctrl.config.categories:
+        out.append(cat.key)
+        if cat.kind == CategoryKind.RGB:
+            continue
+        variant = cat.key + RGB_SUFFIX
+        configured = any(variant in t for table in tables for m, t in table.items() if mood and m.casefold() == mood.casefold())
+        if configured or ctrl.index.target_lights(variant):
+            out.append(variant)
+    return out
+
+
+def _type_entry(hass, ctrl: LightingController, mood: str, target: str, area_id: str | None,
+                lights: list[str]) -> dict[str, Any]:
+    lighting = ctrl.lighting
+    config = ctrl.config
+    keys = _target_keys(target)
+    base = config.category(target.removesuffix(RGB_SUFFIX))
+    if area_id:
+        own = table_get(lighting.room(area_id).mood_overrides, mood).get(target)
+        inherited = _resolved(ctrl, mood, area_id, None, keys, ("global",))
+        effective = _resolved(ctrl, mood, area_id, None, keys, ("global", "room"))
+    else:
+        own = table_get(lighting.global_profiles, mood).get(target)
+        without = set_profile(lighting, "global", mood, target, None)
+        inherited = _resolved(ctrl, mood, None, None, keys, ("global",), without)
+        effective = _resolved(ctrl, mood, None, None, keys, ("global",))
+    return {
+        "target": target,
+        "key": target.removesuffix(RGB_SUFFIX),
+        "rgb": target.endswith(RGB_SUFFIX) or bool(base and base.kind == CategoryKind.RGB),
+        "variant": target.endswith(RGB_SUFFIX),
+        "name": target_name(config, target),
+        "kind": base.kind.value if base else "source",
+        "lights": [{"entity_id": e, "name": friendly_name(hass, e)} for e in lights],
+        "caps": _caps(hass, lights) | (
+            {"color": True} if target.endswith(RGB_SUFFIX) or (base and base.kind == CategoryKind.RGB) else {}),
+        "own": own.as_dict() if own else None,
+        "inherited": inherited,
+        "effective": effective,
+        "configured": own is not None,
+    }
+
+
+def label_suggestions(hass: HomeAssistant, ctrl: LightingController) -> list[dict[str, Any]]:
+    """Existing labels that look like a function or the RGB tag but are not used by a category yet."""
+    used = {c.label_id for c in ctrl.config.categories if c.label_id}
+    out = []
+    for label in lr.async_get(hass).async_list_labels():
+        if label.label_id in used:
+            continue
+        kind = guess_kind(label.label_id, label.name, label.label_id)
+        if kind != CategoryKind.SOURCE and ctrl.config.category(label.label_id) is None:
+            out.append({"label_id": label.label_id, "name": label.name, "kind": kind.value})
+    return out
+
+
 def editor_model(hass: HomeAssistant, ctrl: LightingController, mood: str | None, area_id: str | None,
                  is_admin: bool) -> dict[str, Any]:
     status = ctrl.mood_status()
@@ -91,23 +187,19 @@ def editor_model(hass: HomeAssistant, ctrl: LightingController, mood: str | None
     snapshot = ctrl.coordinator.data
 
     categories = []
-    global_entries: dict[str, Any] = {}
     for cat in config.categories:
         label = label_reg.async_get_label(cat.label_id) if cat.label_id else None
         lights = index.by_category.get(cat.key, [])
         categories.append({
-            "key": cat.key, "name": cat.name, "label_id": cat.label_id,
+            "key": cat.key, "name": cat.name, "kind": cat.kind.value, "label_id": cat.label_id,
             "label_name": label.name if label else None, "label_missing": bool(cat.label_id and not label),
             "lights": [{"entity_id": e, "name": friendly_name(hass, e)} for e in lights],
+            "rgb_lights": len(index.target_lights(cat.key + RGB_SUFFIX)) if cat.kind != CategoryKind.RGB else len(lights),
         })
-        if selected:
-            own = table_get(lighting.global_profiles, selected).get(cat.key)
-            without = set_profile(lighting, "global", selected, cat.key, None)
-            global_entries[cat.key] = {
-                "own": own.as_dict() if own else None,
-                "inherited": _resolved(ctrl, selected, None, None, cat.key, ("global",), without),
-                "effective": _resolved(ctrl, selected, None, None, cat.key, ("global",)),
-            }
+    types = [
+        _type_entry(hass, ctrl, selected, t, None, index.target_lights(t))
+        for t in _targets_for(ctrl, selected, [lighting.global_profiles])
+    ] if selected else []
 
     problems = []
     if snapshot is not None:
@@ -127,7 +219,9 @@ def editor_model(hass: HomeAssistant, ctrl: LightingController, mood: str | None
         "moods": moods,
         "selected_mood": selected,
         "categories": categories,
-        "global": global_entries,
+        "types": types,
+        "global": {t["target"]: t for t in types},
+        "label_suggestions": label_suggestions(hass, ctrl),
         "settings": {
             "fallback_mood": lighting.fallback_mood,
             "exclude_label": lighting.exclude_label,
@@ -151,34 +245,57 @@ def editor_model(hass: HomeAssistant, ctrl: LightingController, mood: str | None
     return model
 
 
+def _group_issues(ctrl: LightingController, area_id: str) -> list[dict[str, Any]]:
+    """Groups that need a decision: manage as group, individually, or ignore the warning."""
+    managed = ctrl.managed_room(area_id)
+    dismissed = set(ctrl.lighting.room(area_id).dismissed)
+    out = []
+    for group, members in managed.members.items():
+        both = sorted(m for m in members if m in managed.targets and m not in managed.excluded)
+        if group not in managed.excluded and both:
+            out.append({"group": group, "members": both, "members_known": True,
+                        "dismissed": group in dismissed})
+    index = ctrl.index
+    for group in managed.opaque_groups:
+        category = index.category_of(group)
+        same = [e for e in managed.controlled if e != group and category and index.category_of(e) == category]
+        if group not in managed.excluded and same:
+            out.append({"group": group, "members": same, "members_known": False,
+                        "dismissed": f"opaque:{group}" in dismissed})
+    return out
+
+
 def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood: str | None) -> dict[str, Any]:
     lighting = ctrl.lighting
     room_lighting = lighting.room(area_id)
     managed = ctrl.managed_room(area_id)
     rt = ctrl.runtime.get(area_id)
     result = ctrl.coordinator.occupancy.result(area_id)
-    categories: dict[str, Any] = {}
-    lights: list[dict[str, Any]] = []
+    index = ctrl.index
+    in_room = set(managed.controlled)
+    types: list[dict[str, Any]] = []
     if mood:
-        for cat in ctrl.config.categories:
-            own = table_get(room_lighting.mood_overrides, mood).get(cat.key)
-            categories[cat.key] = {
-                "own": own.as_dict() if own else None,
-                "inherited": _resolved(ctrl, mood, area_id, None, cat.key, ("global",)),
-                "effective": _resolved(ctrl, mood, area_id, None, cat.key, ("global", "room")),
-            }
+        for target in _targets_for(ctrl, mood, [lighting.global_profiles, room_lighting.mood_overrides]):
+            lights = [e for e in index.target_lights(target) if e in in_room]
+            entry = _type_entry(hass, ctrl, mood, target, area_id, lights)
+            entry["follows_global"] = entry["own"] is None
+            types.append(entry)
     conflicts = ctrl.conflicts(area_id)
     acknowledged = set(room_lighting.acknowledged)
+    cat_names = {c.key: c.name for c in ctrl.config.categories}
+    lights: list[dict[str, Any]] = []
     for entity_id in managed.targets:
         state = hass.states.get(entity_id)
-        category = ctrl.index.category_of(entity_id)
-        cat = ctrl.config.category(category) if category else None
+        category = index.category_of(entity_id)
+        targets = index.profile_targets(entity_id)
         own = table_get(room_lighting.light_overrides, mood).get(entity_id) if mood else None
         lights.append({
             "entity_id": entity_id,
             "name": friendly_name(hass, entity_id),
             "category": category,
-            "category_name": cat.name if cat else None,
+            "category_name": cat_names.get(category) if category else None,
+            "labels": [cat_names[k] for k in index.categories_of.get(entity_id, []) if k in cat_names],
+            "rgb": index.rgb_eligible(entity_id),
             "state": state.state if state else None,
             "capabilities": light_capabilities(hass, entity_id).as_dict(),
             "is_group": entity_id in managed.members or entity_id in managed.opaque_groups,
@@ -192,8 +309,8 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
             "conflicts": [{**c.as_dict(), "acknowledged": c.automation in acknowledged}
                           for c in conflicts.get(entity_id, [])],
             "own": own.as_dict() if own else None,
-            "inherited": _resolved(ctrl, mood, area_id, entity_id, category, ("global", "room")) if mood else None,
-            "effective": _resolved(ctrl, mood, area_id, entity_id, category, ("global", "room", "light"))
+            "inherited": _resolved(ctrl, mood, area_id, entity_id, targets, ("global", "room")) if mood else None,
+            "effective": _resolved(ctrl, mood, area_id, entity_id, targets, ("global", "room", "light"))
             if mood else None,
         })
     # Excluded lights stay listed, so they can be included again.
@@ -208,8 +325,10 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
         "enabled": area_id in ctrl.config.enabled_rooms,
         "diagnostics": ctrl.room_diagnostics(area_id),
         "settings": room_lighting.as_dict() | {"mood_overrides": None, "light_overrides": None},
-        "categories": categories,
+        "types": types,
+        "categories": {t["target"]: t for t in types},
         "lights": lights,
+        "group_issues": _group_issues(ctrl, area_id),
         "occupancy": {
             "state": result.state.value if result else None,
             "occupied": result.occupied if result else None,
@@ -309,9 +428,11 @@ def ws_profile_set(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
     if scope != "global" and area_id not in ctrl.config.rooms:
         connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, "A configured room is required")
         return
-    if scope in ("global", "room") and ctrl.config.category(target) is None:
-        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, f"Unknown category {target}")
-        return
+    if scope in ("global", "room"):
+        cat = ctrl.config.category(target.removesuffix(RGB_SUFFIX))
+        if cat is None or (target.endswith(RGB_SUFFIX) and cat.kind == CategoryKind.RGB):
+            connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, f"Unknown light type {target}")
+            return
     if scope == "light":
         try:
             cv.entity_domain("light")(target)
@@ -531,6 +652,114 @@ def ws_override_clear(hass: HomeAssistant, connection: websocket_api.ActiveConne
     connection.send_result(msg["id"], {"cleared": cleared})
 
 
+@websocket_api.websocket_command({
+    vol.Required("type"): "smart_occupancy/lighting/room/group_choice",
+    vol.Required("area_id"): str,
+    vol.Required("group"): cv.entity_id,
+    vol.Required("choice"): vol.In(["group", "individual", "dismiss", "restore"]),
+})
+@websocket_api.require_admin
+@callback
+def ws_group_choice(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Resolve a group/member overlap with one choice.
+
+    group: the group is controlled; its member lights in the room are excluded
+    (for groups that hide their members: the lights flagged as possible members).
+    individual: the group is excluded; its lights are controlled one by one.
+    dismiss: keep things as they are and stop warning. restore: undo all three.
+    """
+    if (ctrl := _controller(hass, connection, msg)) is None:
+        return
+    area_id, group, choice = msg["area_id"], msg["group"], msg["choice"]
+    if area_id not in ctrl.config.enabled_rooms:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Room is not enabled")
+        return
+    issue = next((i for i in _group_issues(ctrl, area_id) if i["group"] == group), None)
+    room = ctrl.lighting.room(area_id)
+    excluded = list(room.excluded)
+    dismissed = [d for d in room.dismissed if d not in (group, f"opaque:{group}")]
+    if choice == "restore":
+        excluded = [e for e in excluded if e != group]
+    elif issue is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"No open question about {group}")
+        return
+    elif choice == "group":
+        excluded += [m for m in issue["members"] if m not in excluded]
+        dismissed.append(group if issue["members_known"] else f"opaque:{group}")
+    elif choice == "individual":
+        excluded = [*[e for e in excluded if e != group], group]
+        excluded = [e for e in excluded if e not in issue["members"]]
+    else:
+        dismissed.append(group if issue["members_known"] else f"opaque:{group}")
+    ctrl.store.async_set(ctrl.with_room(area_id, excluded=tuple(dict.fromkeys(excluded)),
+                                        dismissed=tuple(dict.fromkeys(dismissed))))
+    connection.send_result(msg["id"], {"revision": ctrl.store.revision})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "smart_occupancy/lighting/category/set",
+    vol.Optional("key"): vol.Any(str, None),
+    vol.Required("name"): vol.All(str, vol.Length(min=1, max=60)),
+    vol.Optional("label_id"): vol.Any(str, None),
+    vol.Required("kind"): vol.In([k.value for k in CategoryKind]),
+})
+@websocket_api.require_admin
+@callback
+def ws_category_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Add or change a light type / function / RGB tag. Saved in the options (the integration reloads)."""
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    if not entries:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, "Smart Occupancy & Lighting is not loaded")
+        return
+    entry = entries[0]
+    config = IntegrationConfig.from_dict(dict(entry.options))
+    name = msg["name"].strip()
+    label = msg.get("label_id") or None
+    if label and lr.async_get(hass).async_get_label(label) is None:
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, f"Label {label} does not exist")
+        return
+    key = msg.get("key")
+    others = [c for c in config.categories if c.key != key]
+    if name.casefold() in {c.name.casefold() for c in others}:
+        connection.send_error(msg["id"], "category_exists", f"A light type named {name} already exists")
+        return
+    if key and config.category(key) is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"Unknown light type {key}")
+        return
+    if not key:
+        key = unique_category_key(name, {c.key for c in config.categories})
+        categories = (*config.categories, LightCategory(key, name, label, CategoryKind(msg["kind"])))
+    else:
+        categories = tuple(
+            replace(c, name=name, label_id=label, kind=CategoryKind(msg["kind"])) if c.key == key else c
+            for c in config.categories
+        )
+    hass.config_entries.async_update_entry(entry, options=replace(config, categories=categories).as_dict())
+    connection.send_result(msg["id"], {"key": key})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "smart_occupancy/lighting/category/remove",
+    vol.Required("key"): str,
+})
+@websocket_api.require_admin
+@callback
+def ws_category_remove(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Remove a light type and its profile entries."""
+    if (ctrl := _controller(hass, connection, msg)) is None:
+        return
+    entry = hass.config_entries.async_loaded_entries(DOMAIN)[0]
+    config = IntegrationConfig.from_dict(dict(entry.options))
+    key = msg["key"]
+    if config.category(key) is None:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"Unknown light type {key}")
+        return
+    ctrl.store.async_set(without_categories(ctrl.lighting, {key, key + RGB_SUFFIX}))
+    hass.config_entries.async_update_entry(entry, options=replace(
+        config, categories=tuple(c for c in config.categories if c.key != key)).as_dict())
+    connection.send_result(msg["id"], {"removed": key})
+
+
 @callback
 def async_register_websocket_commands(hass: HomeAssistant) -> None:
     if hass.data.get(_REGISTERED):
@@ -538,6 +767,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     hass.data[_REGISTERED] = True
     for handler in (
         ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_room_set,
-        ws_activation, ws_activate, ws_deactivate, ws_acknowledge, ws_override_clear,
+        ws_activation, ws_activate, ws_deactivate, ws_acknowledge, ws_override_clear, ws_group_choice,
+        ws_category_set, ws_category_remove,
     ):
         websocket_api.async_register_command(hass, handler)

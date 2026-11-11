@@ -26,7 +26,8 @@
           "task": "Task lighting",
           "path": "Path lighting",
           "outdoor": "Outdoor lighting",
-          "create_missing_labels": "Create labels for categories left empty"
+          "create_missing_labels": "Create labels for categories left empty",
+          "uplight": "Uppljós"
         },
         "data_description": {
           "create_missing_labels": "Only creates the labels. No label is applied to any light; you assign them yourself."
@@ -147,7 +148,11 @@
         "title": "Add category",
         "data": {
           "name": "Name",
-          "label": "Label"
+          "label": "Label",
+          "kind": "Kind"
+        },
+        "data_description": {
+          "kind": "Light source type (Spottar, Loft ljós, LED strips), function (Uppljós, decorative, task) or the RGB tag (lights that may get colours)."
         }
       },
       "category_select": {
@@ -160,7 +165,11 @@
         "title": "Edit category: {category}",
         "data": {
           "name": "Name",
-          "label": "Label"
+          "label": "Label",
+          "kind": "Kind"
+        },
+        "data_description": {
+          "kind": "Light source type (Spottar, Loft ljós, LED strips), function (Uppljós, decorative, task) or the RGB tag (lights that may get colours)."
         }
       },
       "category_remove": {
@@ -176,7 +185,7 @@
       },
       "profiles": {
         "title": "Mood profiles",
-        "description": "Edit one profile entry. Inheritance: Global → Room override → Individual light override (the most specific value wins). The Global Mood Editor and Room Mood Lighting dashboard cards offer the same settings with previews; changes made here are saved immediately and do not reload the integration.",
+        "description": "Edit one profile entry. Inheritance: Global → Room override → Individual light override (the most specific value wins). The Smart Lighting and Smart Room Lighting dashboard cards offer the same settings with previews; changes made here are saved immediately and do not reload the integration.",
         "data": {
           "scope": "Level",
           "mood": "Mood"
@@ -254,7 +263,7 @@
       "mood_entities_not_distinct": "Auto, Manual and Main Mood must be three different entities.",
       "auto_option_not_found": "This option does not exist on the Manual Mood entity.",
       "duplicate_assignment": "An entity can only be assigned once per room.",
-      "mode_not_available": "Only Observe is available as the integration-wide mode. Mood lighting is enabled per room in the Room Mood Lighting card.",
+      "mode_not_available": "Only Observe is available as the integration-wide mode. Mood lighting is enabled per room in the Smart Room Lighting card.",
       "name_required": "A name is required.",
       "category_exists": "A category with this name already exists.",
       "invalid_profile": "Invalid profile values.",
@@ -313,6 +322,13 @@
         "inherit": "Inherit",
         "yes": "Yes",
         "no": "No"
+      }
+    },
+    "category_kind": {
+      "options": {
+        "source": "Light source type",
+        "function": "Function",
+        "rgb": "RGB tag (colour-capable lights)"
       }
     }
   },

@@ -25,6 +25,7 @@ from .const import (
     NAME,
     TIMING_PARAMETERS,
     TRANSITION_MAX,
+    CategoryKind,
     LightAction,
     OperatingMode,
     SensorKind,
@@ -70,6 +71,7 @@ CONF_LIGHT = "light"
 CONF_REMOVE = "remove"
 CONF_INVERTED = "inverted_signals"
 CONF_ADJACENT = "adjacent_rooms"
+CONF_KIND = "kind"
 
 # A stuck detection shorter than this would flag normal sensors.
 MIN_STUCK_SECONDS = 60
@@ -594,7 +596,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
                 errors[CONF_NAME] = "category_exists"
             else:
                 key = unique_category_key(name, {c.key for c in self._config.categories})
-                cat = LightCategory(key=key, name=name, label_id=user_input.get(CONF_LABEL) or None)
+                cat = LightCategory(key=key, name=name, label_id=user_input.get(CONF_LABEL) or None,
+                                    kind=CategoryKind(user_input.get(CONF_KIND, CategoryKind.SOURCE)))
                 self._config = replace(self._config, categories=(*self._config.categories, cat))
                 return self._save()
         return self.async_show_form(
@@ -602,6 +605,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
             data_schema=vol.Schema({
                 vol.Required(CONF_NAME): sel.TextSelector(),
                 vol.Optional(CONF_LABEL): sel.LabelSelector(),
+                vol.Required(CONF_KIND, default=CategoryKind.SOURCE.value): _select(
+                    [k.value for k in CategoryKind], translation_key="category_kind"),
             }),
             errors=errors,
         )
@@ -630,7 +635,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
             elif name.casefold() in others:
                 errors[CONF_NAME] = "category_exists"
             else:
-                updated = replace(cat, name=name, label_id=user_input.get(CONF_LABEL) or None)
+                updated = replace(cat, name=name, label_id=user_input.get(CONF_LABEL) or None,
+                                  kind=CategoryKind(user_input.get(CONF_KIND, cat.kind)))
                 self._config = replace(self._config, categories=tuple(
                     updated if c.key == cat.key else c for c in self._config.categories
                 ))
@@ -638,6 +644,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
         schema = vol.Schema({
             vol.Required(CONF_NAME, default=cat.name): sel.TextSelector(),
             vol.Optional(CONF_LABEL): sel.LabelSelector(),
+            vol.Required(CONF_KIND, default=cat.kind.value): _select(
+                [k.value for k in CategoryKind], translation_key="category_kind"),
         })
         return self.async_show_form(
             step_id="category_edit",

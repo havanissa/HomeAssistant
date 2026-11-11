@@ -45,6 +45,9 @@ from typing import Any
 
 from .const import (
     CONFIG_VERSION,
+    FUNCTION_CATEGORY_NAMES,
+    RGB_CATEGORY_NAMES,
+    CategoryKind,
     DEFAULT_AUTO_OPTION,
     DEFAULT_CATEGORIES,
     DEFAULT_MISMATCH_GRACE_SECONDS,
@@ -109,6 +112,16 @@ class MoodConfig:
         ]
 
 
+def guess_kind(key: str, name: str, label_id: str | None) -> CategoryKind:
+    """Kind of a category stored before 0.3.1 (by its key, name or label)."""
+    names = {v.casefold().strip() for v in (key, name, label_id or "") if v}
+    if names & RGB_CATEGORY_NAMES:
+        return CategoryKind.RGB
+    if names & FUNCTION_CATEGORY_NAMES:
+        return CategoryKind.FUNCTION
+    return CategoryKind.SOURCE
+
+
 @dataclass(frozen=True, slots=True)
 class LightCategory:
     """A light category, bound to a Home Assistant label."""
@@ -116,13 +129,18 @@ class LightCategory:
     key: str
     name: str
     label_id: str | None = None
+    kind: CategoryKind = CategoryKind.SOURCE
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LightCategory:
-        return cls(key=data["key"], name=data["name"], label_id=data.get("label_id"))
+        kind = data.get("kind")
+        return cls(
+            key=data["key"], name=data["name"], label_id=data.get("label_id"),
+            kind=_enum_or(CategoryKind, kind, None) or guess_kind(data["key"], data["name"], data.get("label_id")),
+        )
 
     def as_dict(self) -> dict[str, Any]:
-        return {"key": self.key, "name": self.name, "label_id": self.label_id}
+        return {"key": self.key, "name": self.name, "label_id": self.label_id, "kind": self.kind.value}
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,7 +437,7 @@ def migrate_options(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def default_categories() -> tuple[LightCategory, ...]:
-    return tuple(LightCategory(key=k, name=n) for k, n in DEFAULT_CATEGORIES)
+    return tuple(LightCategory(key=k, name=n, kind=kind) for k, n, kind in DEFAULT_CATEGORIES)
 
 
 def unique_category_key(name: str, existing: set[str]) -> str:

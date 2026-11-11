@@ -23,7 +23,8 @@ Persisted shape (store version 1)::
           "mood_overrides": {mood: {category_key: setting}},
           "light_overrides": {mood: {light entity id: setting}},
           "manual_override_minutes": null,
-          "manual_switches": [entity ids]}}
+          "manual_switches": [entity ids],
+          "dismissed": [problem subjects]}}
     }
 
 On first start the profiles are copied from the Phase 0.2 options (which are
@@ -142,6 +143,8 @@ class RoomLighting:
     # Wall switch / remote entities: a light change right after one of them
     # changed is attributed to a person at the switch.
     manual_switches: tuple[str, ...] = ()
+    # Warnings the user chose to ignore ("Ignore warning for now"); shown as notes.
+    dismissed: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, data: Any) -> RoomLighting:
@@ -158,6 +161,7 @@ class RoomLighting:
             light_overrides=_table_from(data.get("light_overrides")),
             manual_override_minutes=_minutes(data.get("manual_override_minutes"), None),
             manual_switches=_ids(data.get("manual_switches")),
+            dismissed=_ids(data.get("dismissed")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -173,6 +177,7 @@ class RoomLighting:
             "light_overrides": _table_as_dict(self.light_overrides),
             "manual_override_minutes": self.manual_override_minutes,
             "manual_switches": list(self.manual_switches),
+            "dismissed": list(self.dismissed),
         }
 
 
