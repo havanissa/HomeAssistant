@@ -22,18 +22,25 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import config_validation as cv, label_registry as lr
+from homeassistant.helpers import config_validation as cv, entity_registry as er, label_registry as lr
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
+from .adaptive import read_brightness, read_color_temp
 from .const import (
+    ADAPTIVE_BRIGHTNESS_STEP_MAX,
+    ADAPTIVE_KELVIN_STEP_MAX,
+    ADAPTIVE_MIN_INTERVAL_MAX,
+    ALL_MOODS,
     DOMAIN,
     MANUAL_OVERRIDE_MAX_MINUTES,
     RGB_SUFFIX,
     SIGNAL_LIGHTING_UPDATED,
     VERSION,
+    TRANSITION_MAX,
     CategoryKind,
+    SourceScale,
     UnattributedPolicy,
     UnrepresentableMode,
 )
@@ -41,10 +48,17 @@ from .controller import LightingController
 from .discovery import area_name
 from .health import room_health
 from .lighting import light_capabilities
-from .lighting_config import UnrepresentableHandling, parent_cycle, set_profile, table_get, without_categories
+from .lighting_config import (
+    AdaptiveConfig,
+    UnrepresentableHandling,
+    parent_cycle,
+    set_profile,
+    table_get,
+    without_categories,
+)
 from .models import IntegrationConfig, LightCategory, ProfileSetting, guess_kind, unique_category_key
 from .occupancy import friendly_name
-from .profiles import resolve, validate_setting
+from .profiles import validate_setting
 
 _THROTTLE_SECONDS = 0.3
 _REGISTERED = f"{DOMAIN}_websocket_registered"
@@ -58,7 +72,16 @@ ERROR_TEXT = {
     "invalid_transition": "Transition must be 0-300 seconds",
     "invalid_effect": "Effect must not be empty",
     "off_with_attributes": "Off cannot have brightness, colour or effect",
+    "invalid_brightness_offset": "Brightness offset must be a whole number from -99 to +99 percentage points",
+    "invalid_kelvin_offset": "Colour temperature offset must be a whole number from -5000 to +5000 K",
+    "all_moods_action": "An entry for every mood cannot switch lights on or off; set that per mood",
+    "all_moods_field": "An entry for every mood cannot set an effect or ambient lighting; set that per mood",
 }
+# Words that make an entity a likely global source (shown first in the picker).
+_SOURCE_HINTS = ("adaptive", "circadian", "bright", "birti", "ljósstyrk", "ljosstyrk", "dim", "colour_temp",
+                 "color_temp", "kelvin", "litatemp", "hiti", "temperature")
+_NOT_SOURCES = frozenset({"battery", "humidity", "moisture", "power_factor", "signal_strength", "temperature",
+                          "illuminance", "volume_flow_rate", "aqi", "pm25", "pm10"})
 
 
 def _controller(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> LightingController | None:
@@ -76,7 +99,53 @@ def _iso(value: datetime | None) -> str | None:
 # ------------------------------------------------------------------ models
 def _resolved(ctrl: LightingController, mood: str, area_id: str | None, entity_id: str | None,
               category: str | None, levels: tuple[str, ...], config=None) -> dict[str, Any]:
-    return resolve(config or ctrl.lighting, mood, area_id, entity_id, category, levels=levels).as_dict()
+    """Resolved setting with the current global values filled in (what the light gets now)."""
+    return ctrl.resolve(mood, area_id, entity_id, category, levels=levels, config=config).as_dict()
+
+
+def source_candidates(hass: HomeAssistant) -> dict[str, list[dict[str, Any]]]:
+    """Entities that could be the existing system's brightness / colour temperature outputs.
+
+    Read only. Likely ones first (Adaptive Lighting switches, names that mention brightness,
+    colour temperature or "adaptive"); measurement sensors such as battery or humidity are left out.
+    """
+    out: dict[str, list[dict[str, Any]]] = {"brightness": [], "color_temp": []}
+    ent_reg = er.async_get(hass)
+    for state in hass.states.async_all(("sensor", "input_number", "number", "switch")):
+        if (entry := ent_reg.async_get(state.entity_id)) is not None and entry.platform == DOMAIN:
+            continue  # our own sensors (e.g. confidence %) are not adjustment outputs
+        attrs = state.attributes
+        domain = state.domain
+        if domain == "switch" and attrs.get("brightness_pct") is None and attrs.get("color_temp_kelvin") is None:
+            continue
+        if (attrs.get("device_class") or "") in _NOT_SOURCES:
+            continue
+        unit = str(attrs.get("unit_of_measurement") or "")
+        text = f"{state.entity_id} {attrs.get('friendly_name') or ''}".casefold()
+        likely = any(h in text for h in _SOURCE_HINTS) or domain == "switch"
+        base = {"entity_id": state.entity_id, "name": attrs.get("friendly_name") or state.entity_id, "likely": likely}
+        b = read_brightness(state, state.entity_id)
+        if b.ok and (domain == "switch" or unit == "%" or (likely and unit == "")):
+            out["brightness"].append({**base, "value": round(b.value or 0), "unit": b.unit})
+        k = read_color_temp(state, state.entity_id)
+        if k.ok and (domain == "switch" or unit.casefold() in ("k", "kelvin", "mired", "mireds") or likely):
+            out["color_temp"].append({**base, "value": round(k.value or 0), "unit": k.unit})
+    for items in out.values():
+        items.sort(key=lambda x: (not x["likely"], x["name"].casefold()))
+    return out
+
+
+def adaptive_model(hass: HomeAssistant, ctrl: LightingController, *, candidates: bool) -> dict[str, Any]:
+    values = ctrl.global_values()
+    model: dict[str, Any] = {
+        "config": ctrl.lighting.adaptive.as_dict(),
+        "values": values.as_dict(),
+        "status": values.status,
+        "controllers": [c.as_dict() for c in ctrl.source_controllers()],
+    }
+    if candidates:
+        model["candidates"] = source_candidates(hass)
+    return model
 
 
 def _caps(hass: HomeAssistant, entity_ids: list[str]) -> dict[str, Any]:
@@ -222,7 +291,11 @@ def editor_model(hass: HomeAssistant, ctrl: LightingController, mood: str | None
         "types": types,
         "global": {t["target"]: t for t in types},
         "label_suggestions": label_suggestions(hass, ctrl),
+        "all_moods": ALL_MOODS,
+        "manual_mode": status.manual,
+        "adaptive": adaptive_model(hass, ctrl, candidates=is_admin and area_id is None),
         "settings": {
+            "manual_option": lighting.manual_option,
             "fallback_mood": lighting.fallback_mood,
             "exclude_label": lighting.exclude_label,
             "manual_override_minutes": lighting.manual_override_minutes,
@@ -283,6 +356,7 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
     conflicts = ctrl.conflicts(area_id)
     acknowledged = set(room_lighting.acknowledged)
     cat_names = {c.key: c.name for c in ctrl.config.categories}
+    now_mood, _ = ctrl.room_mood(area_id)
     lights: list[dict[str, Any]] = []
     for entity_id in managed.targets:
         state = hass.states.get(entity_id)
@@ -312,6 +386,9 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
             "inherited": _resolved(ctrl, mood, area_id, entity_id, targets, ("global", "room")) if mood else None,
             "effective": _resolved(ctrl, mood, area_id, entity_id, targets, ("global", "room", "light"))
             if mood else None,
+            # What the light gets right now (current room mood, current global values).
+            "now": _resolved(ctrl, now_mood, area_id, entity_id, targets, ("global", "room", "light"))
+            if now_mood else None,
         })
     # Excluded lights stay listed, so they can be included again.
     for entity_id in room_lighting.excluded:
@@ -322,6 +399,7 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
     return {
         "area_id": area_id,
         "name": area_name(hass, area_id) or area_id,
+        "now_mood": now_mood,
         "enabled": area_id in ctrl.config.enabled_rooms,
         "diagnostics": ctrl.room_diagnostics(area_id),
         "settings": room_lighting.as_dict() | {"mood_overrides": None, "light_overrides": None},
@@ -442,7 +520,7 @@ def ws_profile_set(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
     setting = None
     if msg["setting"] is not None:
         setting = ProfileSetting.from_dict(msg["setting"])
-        if errors := validate_setting(setting):
+        if errors := validate_setting(setting, mood):
             connection.send_error(
                 msg["id"], "invalid_profile",
                 "; ".join(ERROR_TEXT.get(e, e) for e in errors.values()),
@@ -480,6 +558,7 @@ def ws_mood_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
     vol.Optional("exclude_label"): vol.Any(str, None),
     vol.Optional("manual_override_minutes"): vol.All(vol.Coerce(int), vol.Range(min=0, max=MANUAL_OVERRIDE_MAX_MINUTES)),
     vol.Optional("unattributed"): vol.In([p.value for p in UnattributedPolicy]),
+    vol.Optional("manual_option"): vol.All(str, vol.Length(min=1, max=100)),
     vol.Optional("unrepresentable"): {str: vol.Any(None, {
         vol.Required("mode"): vol.In([m.value for m in UnrepresentableMode]),
         vol.Optional("mood"): vol.Any(str, None),
@@ -506,6 +585,8 @@ def ws_settings_set(hass: HomeAssistant, connection: websocket_api.ActiveConnect
         changes["manual_override_minutes"] = msg["manual_override_minutes"]
     if "unattributed" in msg:
         changes["unattributed"] = UnattributedPolicy(msg["unattributed"])
+    if "manual_option" in msg:
+        changes["manual_option"] = msg["manual_option"].strip() or lighting.manual_option
     if "unrepresentable" in msg:
         handling = dict(lighting.unrepresentable)
         for mood, value in msg["unrepresentable"].items():
@@ -520,6 +601,55 @@ def ws_settings_set(hass: HomeAssistant, connection: websocket_api.ActiveConnect
         changes["unrepresentable"] = handling
     ctrl.store.async_set(replace(lighting, **changes))
     connection.send_result(msg["id"], {"revision": ctrl.store.revision})
+
+
+_SOURCE_ENTITY = vol.Any(None, vol.All(str, vol.Length(max=255)))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "smart_occupancy/lighting/adaptive/set",
+    vol.Optional("brightness_entity"): _SOURCE_ENTITY,
+    vol.Optional("brightness_attribute"): vol.Any(None, vol.All(str, vol.Length(max=64))),
+    vol.Optional("brightness_scale"): vol.In([SourceScale.AUTO, SourceScale.PERCENT, SourceScale.BYTE]),
+    vol.Optional("color_temp_entity"): _SOURCE_ENTITY,
+    vol.Optional("color_temp_attribute"): vol.Any(None, vol.All(str, vol.Length(max=64))),
+    vol.Optional("color_temp_scale"): vol.In([SourceScale.AUTO, SourceScale.KELVIN, SourceScale.MIRED]),
+    vol.Optional("min_interval"): vol.All(vol.Coerce(int), vol.Range(min=0, max=ADAPTIVE_MIN_INTERVAL_MAX)),
+    vol.Optional("brightness_step"): vol.All(vol.Coerce(int), vol.Range(min=1, max=ADAPTIVE_BRIGHTNESS_STEP_MAX)),
+    vol.Optional("kelvin_step"): vol.All(vol.Coerce(int), vol.Range(min=10, max=ADAPTIVE_KELVIN_STEP_MAX)),
+    vol.Optional("transition"): vol.All(vol.Coerce(float), vol.Range(min=0, max=TRANSITION_MAX)),
+})
+@websocket_api.require_admin
+@callback
+def ws_adaptive_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Bind (or unbind) the existing global brightness / colour temperature outputs. Read only on them."""
+    if (ctrl := _controller(hass, connection, msg)) is None:
+        return
+    current = ctrl.lighting.adaptive.as_dict()
+    for key in ("brightness_entity", "color_temp_entity"):
+        if key not in msg:
+            continue
+        value = (msg[key] or "").strip() or None
+        if value is not None:
+            try:
+                cv.entity_id(value)
+            except vol.Invalid:
+                connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, f"{value} is not an entity id")
+                return
+            if hass.states.get(value) is None and er.async_get(hass).async_get(value) is None:
+                connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"{value} does not exist")
+                return
+        current[key] = value
+    for key in ("brightness_attribute", "color_temp_attribute"):
+        if key in msg:
+            current[key] = (msg[key] or "").strip() or None
+    for key in ("brightness_scale", "color_temp_scale", "min_interval", "brightness_step", "kelvin_step",
+                "transition"):
+        if key in msg:
+            current[key] = msg[key]
+    ctrl.store.async_set(replace(ctrl.lighting, adaptive=AdaptiveConfig.from_dict(current)))
+    connection.send_result(msg["id"], {"revision": ctrl.store.revision,
+                                       "adaptive": adaptive_model(hass, ctrl, candidates=False)})
 
 
 @websocket_api.websocket_command({
@@ -766,7 +896,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         return
     hass.data[_REGISTERED] = True
     for handler in (
-        ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_room_set,
+        ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_adaptive_set, ws_room_set,
         ws_activation, ws_activate, ws_deactivate, ws_acknowledge, ws_override_clear, ws_group_choice,
         ws_category_set, ws_category_remove,
     ):

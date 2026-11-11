@@ -7,8 +7,8 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.3.1"
-VERSION: Final = "0.3.1"
+PHASE: Final = "0.3.2"
+VERSION: Final = "0.3.2"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -69,6 +69,19 @@ class LightAction(StrEnum):
     OFF = "off"
     INHERIT = "inherit"
     IGNORE = "ignore"
+
+
+class AdjustMode(StrEnum):
+    """How a profile sets brightness or colour temperature (Phase 0.3.2).
+
+    Not set (``None``) means inherit. A profile that sets a value without a
+    mode is ``fixed``, so every profile made before 0.3.2 stays fixed.
+    """
+
+    FIXED = "fixed"      # the profile's own value
+    GLOBAL = "global"    # the existing global adjustment's current value
+    OFFSET = "offset"    # the global value plus the profile's offset
+    IGNORE = "ignore"    # leave this property unchanged
 
 
 class Severity(StrEnum):
@@ -257,3 +270,39 @@ class LightingMode(StrEnum):
     OBSERVE = "observe"
     ACTIVE = "active"
     BLOCKED = "blocked"
+    # Main Mood is the Manual option: every automatic lighting command is paused.
+    PAUSED = "paused"
+
+
+# Global light adjustment (Phase 0.3.2) ---------------------------------------
+# Profiles can follow the values of the user's existing adaptive brightness and
+# colour temperature system. Smart Occupancy does not calculate them.
+#
+# Pseudo mood of profile entries that apply in every mood (below the entries
+# of the mood itself, at each level).
+ALL_MOODS: Final = "*"
+# Main Mood option that pauses all automatic lighting (not a mood).
+DEFAULT_MANUAL_OPTION: Final = "Manual"
+MANUAL_PAUSED_TEXT: Final = "Manual control — automatic lighting paused"
+# Defaults for gradual (adaptive-only) updates; mood changes are not throttled.
+DEFAULT_ADAPTIVE_MIN_INTERVAL: Final = 60       # seconds per light or group
+DEFAULT_ADAPTIVE_BRIGHTNESS_STEP: Final = 3     # percentage points
+DEFAULT_ADAPTIVE_KELVIN_STEP: Final = 100       # K
+DEFAULT_ADAPTIVE_TRANSITION: Final = 10.0       # seconds; 0 = none
+ADAPTIVE_MIN_INTERVAL_MAX: Final = 3600
+ADAPTIVE_BRIGHTNESS_STEP_MAX: Final = 50
+ADAPTIVE_KELVIN_STEP_MAX: Final = 2000
+# Source changes arriving within this window are coalesced into one update.
+ADAPTIVE_DEBOUNCE_SECONDS: Final = 2.0
+BRIGHTNESS_OFFSET_MAX: Final = 99    # +- percentage points
+KELVIN_OFFSET_MAX: Final = 5000      # +- K
+
+
+class SourceScale(StrEnum):
+    """Unit of a global source value."""
+
+    AUTO = "auto"
+    PERCENT = "percent"   # brightness 0-100 %
+    BYTE = "byte"         # brightness 0-255
+    KELVIN = "kelvin"
+    MIRED = "mired"

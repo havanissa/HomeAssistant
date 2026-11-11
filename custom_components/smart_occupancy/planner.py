@@ -17,6 +17,10 @@ Decision for each target, in order:
 3. ``unchanged`` - the light already is in the requested state, or the
    same command was sent and nobody changed the light since.
 4. ``change`` - the command that will be (or, in Observe mode, would be) sent.
+
+Brightness and colour temperature that follow the global adjustment are
+already filled in (``adaptive.apply_global``). While Main Mood is the Manual
+option, every target is ``blocked`` (``manual_mode``): nothing is sent.
 """
 
 from __future__ import annotations
@@ -29,7 +33,9 @@ from .const import (
     BRIGHTNESS_TOLERANCE_PCT,
     HS_TOLERANCE,
     KELVIN_TOLERANCE,
+    MANUAL_PAUSED_TEXT,
     RGB_TOLERANCE,
+    AdjustMode,
     LightAction,
     OccupancyState,
 )
@@ -114,6 +120,8 @@ class PlanItem:
     persistent: bool = False
     override: dict[str, Any] | None = None
     conflicts: tuple[dict[str, Any], ...] = ()
+    # The next gradual (global adjustment) update of this light, set by the controller.
+    adaptive_update: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -134,6 +142,8 @@ class PlanItem:
             "persistent": self.persistent,
             "override": self.override,
             "conflicts": [dict(c) for c in self.conflicts],
+            "adaptive": self.resolved.adaptive,
+            "adaptive_update": self.adaptive_update,
         }
 
 
@@ -147,6 +157,7 @@ class Plan:
     control_enabled: bool
     items: list[PlanItem]
     note: str | None = None
+    manual_mode: bool = False
 
     @property
     def changes(self) -> list[PlanItem]:
@@ -168,6 +179,7 @@ class Plan:
             "control_enabled": self.control_enabled,
             "will_execute": self.control_enabled and bool(self.changes),
             "note": self.note,
+            "manual_mode": self.manual_mode,
             "counts": self.counts(),
             "items": [i.as_dict() for i in self.items],
         }
@@ -205,12 +217,24 @@ def build_command(
         return None, {}, {}, unsupported
 
     data = {}
+    following_b = resolved.brightness_mode in (AdjustMode.GLOBAL, AdjustMode.OFFSET)
+    following_k = resolved.color_temp_mode in (AdjustMode.GLOBAL, AdjustMode.OFFSET)
     if (b := resolved.brightness_pct) is not None:
         if caps.brightness:
             data["brightness_pct"] = b
+        elif following_b:
+            note("brightness_pct", "on/off only; the global brightness is not used", "info")
         else:
             note("brightness_pct", "brightness not supported (on/off only); brightness omitted")
-    if (k := resolved.color_temp_kelvin) is not None:
+    for kind, f in (("brightness", "brightness_pct"), ("color_temp", "color_temp_kelvin")):
+        entry = (resolved.adaptive or {}).get(kind) or {}
+        if entry.get("reason") and entry.get("value") is None:
+            note(f, entry["reason"], "info")  # the source problem itself is reported once, not per light
+    if (k := resolved.color_temp_kelvin) is not None and following_k and not caps.color_temp:
+        # A global white temperature is applied only to lights with a native white mode.
+        note("color_temp_kelvin", "no colour temperature mode; follows the global brightness only"
+             if caps.brightness else "no colour temperature mode; the global colour temperature is not used", "info")
+    elif k is not None:
         if caps.color_temp:
             low, high = caps.min_kelvin, caps.max_kelvin
             clamped = min(max(k, low or k), high or k)
@@ -292,10 +316,11 @@ def describe(resolved: ResolvedSetting, mood: str | None) -> str:
     if resolved.action != LightAction.ON:
         return "Ignore"
     parts: list[str] = []
+    glob = {AdjustMode.GLOBAL: " (global)", AdjustMode.OFFSET: " (global + offset)"}
     if resolved.brightness_pct is not None:
-        parts.append(f"{resolved.brightness_pct} %")
+        parts.append(f"{resolved.brightness_pct} %{glob.get(resolved.brightness_mode, '')}")
     if resolved.color_temp_kelvin is not None:
-        parts.append(f"{resolved.color_temp_kelvin} K")
+        parts.append(f"{resolved.color_temp_kelvin} K{glob.get(resolved.color_temp_mode, '')}")
     if resolved.rgb_color is not None:
         parts.append("RGB " + ",".join(str(c) for c in resolved.rgb_color))
     if resolved.hs_color is not None:
@@ -305,7 +330,7 @@ def describe(resolved: ResolvedSetting, mood: str | None) -> str:
     head = "On" + (f" {', '.join(parts)}" if parts else "")
     by_source: dict[str, list[str]] = {}
     for f, src in resolved.sources.items():
-        if f in ("transition",):
+        if f in ("transition", "brightness_offset", "color_temp_offset", "color_temp_mode", "brightness_mode"):
             continue
         by_source.setdefault(_source_text(src, mood), []).append(_FIELD_WORDS.get(f, f))
     origin = "; ".join(f"{', '.join(fields)} from {src}" for src, fields in by_source.items())
@@ -323,6 +348,7 @@ def build_plan(
     trigger: str,
     control_enabled: bool,
     note: str | None = None,
+    manual_mode: bool = False,
 ) -> Plan:
     """Build the plan for one room. ``resolve_fn(target) -> ResolvedSetting``."""
     items: list[PlanItem] = []
@@ -343,6 +369,9 @@ def build_plan(
         def set_(decision: str, code: str, reason: str, item: PlanItem = item) -> None:
             item.decision, item.reason_code, item.reason = decision, code, reason
 
+        if manual_mode:
+            set_(BLOCKED, "manual_mode", f"{MANUAL_PAUSED_TEXT}: nothing is sent")
+            continue
         if mood is None:
             set_(SKIPPED, "no_mood", "No effective mood, so nothing is changed")
             continue
@@ -396,8 +425,9 @@ def build_plan(
             "room_mood_override": f"the room mood was set to {mood}",
             "profile_change": "the profile was changed",
             "reconnected": "the light is available again",
+            "adaptive": "the global adjustment changed",
             "preview": f"it does not match {mood}",
         }.get(trigger, trigger)
         ambient = " Ambient: applied regardless of occupancy." if resolved.is_persistent and not occupied else ""
         set_(CHANGE, "change", f"{verb} set {summary} because {why}.{ambient}")
-    return Plan(area_id, mood, occupancy_state, occupied, trigger, control_enabled, items, note)
+    return Plan(area_id, mood, occupancy_state, occupied, trigger, control_enabled, items, note, manual_mode)

@@ -27,6 +27,7 @@ from .const import (
 from .discovery import area_name
 from .models import IntegrationConfig
 from .lighting_config import parent_cycle
+from .const import ALL_MOODS, MANUAL_PAUSED_TEXT, AdjustMode
 from .models import LightCategory
 from .occupancy import (
     AVAILABLE,
@@ -476,6 +477,7 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
 
     # Moods and inheritance ------------------------------------------------
     reported_main: set[str] = set()
+    uses_global: set[str] = set()
     for scope, area_id, mood_name, target, setting in iter_profile_entries(lighting_cfg):
         where = f"{scope} profile '{mood_name}' / {target}"
         subject = f"{scope}:{area_id or ''}:{mood_name}:{target}"
@@ -488,6 +490,8 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
                         subject=subject + suffix, **ctx, **extra))
 
         info = known.get(mood_name.casefold())
+        if mood_name == ALL_MOODS:
+            info = {"in_main": True}  # entries for every mood
         if main_known and info is None:
             profile("profile_unknown_mood", Severity.WARNING, "Profile for unknown mood",
                     f"mood '{mood_name}' is not an option of any mood selector.")
@@ -528,11 +532,17 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
                     profile("profile_effect_unsupported", Severity.WARNING, "Effect not supported",
                             f"effect '{setting.effect}' is not offered by the light.", entity_id=target,
                             aspect="lighting")
-        if scope == "global" and setting.action.value == "inherit" and not lighting_cfg.parent_of(mood_name) \
+        if scope == "global" and mood_name != ALL_MOODS and setting.action.value == "inherit" \
+                and not lighting_cfg.parent_of(mood_name) \
                 and not lighting_cfg.fallback_mood:
             profile("global_inherit", Severity.INFO, "Inherit without a parent mood",
                     "'inherit' at global level needs a parent or fallback mood; without one it means 'ignore'.")
-        for field_name, error in validate_setting(setting).items():
+        following = (AdjustMode.GLOBAL, AdjustMode.OFFSET)
+        if setting.brightness_mode in following:
+            uses_global.add("brightness")
+        if setting.color_temp_mode in following:
+            uses_global.add("color_temp")
+        for field_name, error in validate_setting(setting, mood_name).items():
             profile("profile_invalid", Severity.ERROR, "Invalid profile value",
                     f"{field_name} is invalid ({error}).", suffix=f":{field_name}")
 
@@ -558,7 +568,38 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
             "Choose another fallback mood under Smart Lighting → Advanced.", subject="fallback",
         ))
 
+    # Global light adjustment ------------------------------------------------
+    values = controller.global_values()
+    words = {"brightness": "brightness", "color_temp": "colour temperature"}
+    for kind in sorted(uses_global):
+        src = getattr(values, kind)
+        if src.status == "not_configured":
+            add(Problem(
+                "global_source_not_configured", Severity.WARNING, CONFIG, "Global source not configured",
+                f"Some profiles follow the global {words[kind]}, but no {words[kind]} source is configured, so "
+                f"they leave the {words[kind]} unchanged.",
+                "Choose the existing adjustment's output entity under Smart Lighting → Global light adjustment.",
+                subject=f"global_source:{kind}", aspect="lighting",
+            ))
+        elif src.status in ("unavailable", "stale"):
+            add(Problem(
+                "global_source_unavailable", Severity.WARNING, OPERATIONAL, "Global source unavailable",
+                f"The global {words[kind]} source {src.entity_id} has no usable value ({src.detail}). "
+                + ("The last good value is used meanwhile." if src.status == "stale"
+                   else f"Profiles that follow it leave the {words[kind]} unchanged; it is never taken as 0."),
+                "Check the entity of the existing adjustment system, or choose another source.",
+                entity_id=src.entity_id, subject=f"global_source:{kind}", aspect="lighting",
+            ))
+
     status = controller.mood_status()
+    if status.manual:
+        add(Problem(
+            "lighting_manual_mode", Severity.INFO, OPERATIONAL, "Manual control",
+            f"{MANUAL_PAUSED_TEXT}. Main Mood is '{status.main_mood}'. Occupancy and diagnostics continue; "
+            "nothing is queued for later.",
+            "Choose another mood in Main Mood (or Manual Mood) to resume automatic lighting.",
+            entity_id=main_entity, subject="manual_mode", aspect="lighting",
+        ))
     if status.unrepresentable:
         add(Problem(
             "mood_unrepresentable", Severity.WARNING, OPERATIONAL, "Mood cannot be represented by Main Mood",
@@ -664,6 +705,19 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
                 "Disable or change that automation yourself, exclude the lights, or acknowledge it in the "
                 "Smart Room Lighting card. Existing automations are never changed by this integration.",
                 entity_id=automation, name=c0.name, subject=f"conflict:{automation}", aspect="lighting", **ctx,
+            ))
+        for light, found in sorted(controller.adaptive_conflicts(area_id).items() if uses_global else ()):
+            names = ", ".join(c.get("name") or c["entity_id"] for c in found)
+            add(Problem(
+                "adaptive_controller_conflict", Severity.WARNING if active else Severity.INFO, OPERATIONAL,
+                "Existing adjustment also controls this light",
+                f"{names} (the existing global adjustment) also adjusts {light} in {room_name}. Smart Occupancy "
+                "does not send global adjustment updates to it, so the two never compete.",
+                "To let Smart Occupancy follow the global values for this light, stop the existing system from "
+                "commanding it (for example remove it from that automation or Adaptive Lighting switch). "
+                "Nothing is changed automatically.",
+                entity_id=light, name=friendly_name(hass, light), subject=f"adaptive_conflict:{light}",
+                aspect="lighting", **ctx,
             ))
         if active:
             rt = controller.runtime.get(area_id)

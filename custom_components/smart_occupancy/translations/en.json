@@ -276,7 +276,11 @@
       "off_with_attributes": "Action Off cannot have brightness, colour or effect.",
       "stuck_too_short": "Must be 0 (off) or at least 60 seconds.",
       "several_colors": "Choose only one of colour temperature, RGB or HS colour.",
-      "invalid_hs": "HS colour must be hue 0-360 and saturation 0-100."
+      "invalid_hs": "HS colour must be hue 0-360 and saturation 0-100.",
+      "invalid_brightness_offset": "Brightness offset must be a whole number from -99 to +99 percentage points",
+      "invalid_kelvin_offset": "Colour temperature offset must be a whole number from -5000 to +5000 K",
+      "all_moods_action": "An entry for every mood cannot switch lights on or off; set the action per mood",
+      "all_moods_field": "An entry for every mood cannot set an effect or ambient lighting; set them per mood"
     },
     "abort": {
       "no_categories": "No light categories are configured.",
@@ -418,7 +422,8 @@
         "state": {
           "observe": "Observe",
           "active": "Active",
-          "blocked": "Blocked"
+          "blocked": "Blocked",
+          "paused": "Paused (Manual)"
         }
       }
     },
