@@ -149,6 +149,17 @@ class OccupancyManager:
 
         return remove
 
+    @callback
+    def async_note_activity(self, area_id: str, source: str) -> bool:
+        """Refresh the activity of an occupied room (optional wall switch evidence). Never occupies a room."""
+        engine = self.engines.get(area_id)
+        if engine is None or not self._running:
+            return False
+        if not engine.note_activity_evidence(dt_util.utcnow(), source):
+            return False
+        self._evaluate(area_id, dt_util.utcnow())
+        return True
+
     def result(self, area_id: str) -> RoomResult | None:
         engine = self.engines.get(area_id)
         return engine.result if engine else None

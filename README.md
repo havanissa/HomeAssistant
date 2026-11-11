@@ -2,12 +2,13 @@
 
 A Home Assistant custom integration that will eventually provide intelligent occupancy detection, predictive room occupancy, mood-based lighting and lighting supervision.
 
-**This is Phase 0.3.3: mood-based lighting with simple dashboard cards (Smart Lighting Profiles, Smart Room Lighting, Room Status), on top of the Phase 0.2 occupancy engine (see [CHANGELOG.md](CHANGELOG.md)).** Phase 0.3.3 switches a room's mood lighting on when someone arrives **and it is dark**: indoor light sensors (protected against being lit by the room's own lamps), an optional outdoor sensor and the sun decide whether artificial light is needed. Phase 0.3.2 lets moods, light types and single lights follow your **existing global brightness and colour temperature adjustment**, and adds the **Manual** pause. The interface stays simple by default; everything else is under *Advanced*.
+**This is Phase 0.3.5: mood-based lighting with simple dashboard cards (Smart Lighting Profiles, Smart Room Lighting, Room Status), on top of the Phase 0.2 occupancy engine (see [CHANGELOG.md](CHANGELOG.md)).** Phase 0.3.5 adds **native wall switches and remotes** (Zigbee2MQTT, MQTT device triggers and event entities): assign a switch to a room, learn its buttons, give each button an action, and let presses count as manual changes that automatic lighting respects (see [Wall switches and remotes](#wall-switches-and-remotes-phase-035)). Phase 0.3.3 switches a room's mood lighting on when someone arrives **and it is dark**: indoor light sensors (protected against being lit by the room's own lamps), an optional outdoor sensor and the sun decide whether artificial light is needed. Phase 0.3.2 lets moods, light types and single lights follow your **existing global brightness and colour temperature adjustment**, and adds the **Manual** pause. The interface stays simple by default; everything else is under *Advanced*.
 
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
-- changes, disables or triggers existing automations, scripts or scenes
-- changes the mood selectors or any other helper (they are only *read*)
+- changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
+- changes the mood selectors or any other helper (they are only *read*), except when you press a wall switch button that you assigned to *Select mood (all rooms)*: that selects the option on your Manual Mood selector. Main Mood is never written
+- takes over a wall switch, changes Zigbee bindings, or publishes MQTT messages
 - controls lights in a room that was not explicitly activated
 - switches lights off because a room became vacant (that is Phase 0.4)
 - switches lights off, or changes their brightness or colour, because of daylight or a lux reading
@@ -256,6 +257,7 @@ A light changed by a person is respected for a while (default 60 min; per room o
 | From an automation triggered by a configured **wall-switch entity**, or within 3 s after it changed | **manual** |
 | From another automation or script | not manual (recorded as an external change) |
 | Our own command, including MQTT devices reporting back | ours |
+| A press of an assigned wall switch (0.3.5), or a light change within 3 s after it | **manual** (also for directly bound switches in Listen only) |
 | No context at all (e.g. a directly bound Zigbee switch) | **not** manual by default; configurable |
 
 Opening a dashboard never applies anything.
@@ -385,9 +387,118 @@ When **Main Mood** is `Manual`, all automatic lighting is paused. `Manual` is an
 - The cards show **Manual control — automatic lighting paused**. Active rooms report `paused`, and the Room Status card shows *Paused (Manual)*.
 - `Manual` needs no lighting profile, and it is not listed as a mood.
 
+**Wall switches keep working in Manual** (0.3.5): a switch in Smart Occupancy control still executes its button actions; see [Wall switches while Main Mood is Manual](#wall-switches-while-main-mood-is-manual).
+
 Manual takes precedence over every mood, room mood, profile and global adjustment setting. When Main Mood changes to anything else, automatic lighting resumes only in explicitly activated rooms, with the newly selected mood and the current sensor and global values.
 
 The option name is configurable under *Smart Lighting → Advanced → Manual option* (default `Manual`). The selectors, their options and your automations are not changed. `Auto` stays a Manual Mood option as before.
+
+## Wall switches and remotes (Phase 0.3.5)
+
+Physical wall switches and remotes stay the simple, reliable way to operate a room; Smart Occupancy handles the intelligence behind them. A switch is assigned to a room in the **Switches** tab of the Smart Room Lighting card. No MQTT topic or YAML is needed for normal configuration.
+
+The examples use a Schneider Electric Wiser battery wireless switch paired with Zigbee2MQTT as `avb_ksu` (topic `zigbee2mqtt/avb_ksu`, payload `{"action": "on_right", "battery": 100, "linkquality": 120}`). Its button names are only an illustration: the buttons of every device are discovered from the device or learned by pressing them, never assumed.
+
+### Input sources
+
+| Source | How presses arrive | Discovery |
+|---|---|---|
+| **Zigbee2MQTT** (preferred) | the `action` of the device topic `<base>/<friendly name>` (base topic `zigbee2mqtt`, configurable), through Home Assistant's MQTT integration | Zigbee2MQTT's retained device list (`<base>/bridge/devices`): name, model, the values of the `action` expose, bindings, renames |
+| **MQTT device triggers** | Home Assistant MQTT device triggers of the device (attached like an automation trigger) | the device's triggers (Zigbee2MQTT creates them after a button was first used) |
+| **Event entity** | an `event` entity; its state is the time of the event, the action is `event_type` (or `button` + `event_type`) | the entity's `event_types` |
+
+Smart Occupancy never opens its own MQTT connection, stores no credentials, never subscribes to wildcards and never publishes anything (no Zigbee management commands). It subscribes only to the topics of the switches you assigned (plus their availability topic and the bridge device list). Experimental Zigbee2MQTT event entities are **not** required.
+
+One source per switch is authoritative: *Automatic* prefers raw MQTT, then device triggers, then the event entity (*Advanced switch settings → Input source*). The same press seen through several paths is executed once; two separate presses of the same button are both kept (a repeat within the debounce time, default 100 ms, counts once).
+
+### Assign a switch (example: Kamar Suður, `avb_ksu`)
+
+1. Open **Smart Room Lighting** for the room (`area: kamar_sudur`) → **Switches** → **Add a switch or remote**.
+2. Pick **avb_ksu** (Schneider Electric · Wiser wireless switch · Zigbee2MQTT · 10 button actions known) → **Assign to Kamar Suður**.
+3. The switch starts in **Listen only** with the buttons the device declares. Recognisable buttons get a suggested action (ON → *Turn lights on*, OFF → *Turn lights off*, *brightness move up/down* → *Start dimming up/down*, *brightness stop* → *Stop dimming*); every other button stays unassigned.
+
+A device that cannot be discovered can be added under *Add a switch → Advanced* with its exact MQTT topic (no `+` or `#`) or its event entity.
+
+### Learn buttons
+
+1. **Configure** the switch (or use **Learn buttons** in its card).
+2. Click **Learn buttons** and press a button on the switch.
+3. The card shows the detected action (*Detected: ON right `on_right`*). Learned buttons are saved at once and survive restarts.
+4. Assign its action in the button table; repeat for the other buttons; click **Done** (learning also ends after 60 s).
+
+While learning, nothing is executed (no light is switched, even in Smart Occupancy control) and every available input path listens. Retained MQTT messages, battery and link-quality updates, malformed messages, restored or stale event-entity states and triggers replayed right after attaching are not learned. Single, double, hold and release presses are learned exactly as the device names them; no press type is synthesised.
+
+### Assign actions
+
+Each learned button event has its own action (or none):
+
+| Group | Actions |
+|---|---|
+| Lights | Turn lights on · Turn lights off · Toggle lights · Increase / Decrease brightness (one step per press) · Start dimming up / down · Stop dimming · Set brightness · Set colour temperature |
+| Moods | Select mood (this room, optionally for N minutes; or all rooms) · Return to Auto mood |
+| Advanced | Activate scene · Run script · Activate WLED preset (WLED preset selector) |
+
+Light actions control **Room lights** (every managed light of the room, through managed groups instead of their members) or one chosen light or group. **Turn lights on** uses the **current mood** (lights the mood switches on get its brightness and colour; lights it leaves off stay off; with no mood, Manual, or a mood that switches none of them on, the lights come on with their own last values), the lights' **last used** values, or **fixed** brightness / colour temperature. Values a light cannot take are not sent (a brightness-only strip never gets a colour temperature; colour temperatures are clamped to each light's range). Moods are the discovered options (`Morgun`, `Dagur`, `Kvøld`, `Nátt`, `Hygge`, `Arbeiði`, `Veitsla`, …); option names are never changed.
+
+Only these fixed actions are available. Every entity is validated (scene, script, WLED preset, light), and no template, shell command or arbitrary service call can be configured.
+
+### Listen only and Smart Occupancy control
+
+| | Listen only (default) | Smart Occupancy control |
+|---|---|---|
+| Light commands | **never** | the assigned actions |
+| Presses count as manual changes | yes: light changes in the room in the next 3 s are a person's | yes, and the lights it switches get a manual override directly |
+| Suitable for | switches bound directly to lights (Zigbee binding) or handled by your own automations | switches that only Smart Occupancy acts on |
+| Activation | — | explicit (*Activate Smart Occupancy control* → *Confirm*) |
+
+Smart Occupancy never takes over a switch by itself, never removes or changes Zigbee bindings and never disables automations. Before activating control:
+
+- **Direct Zigbee binding**: Zigbee2MQTT reports a binding of the switch to lights or a group (`genOnOff`, `genLevelCtrl`, …; the normal binding to the coordinator is ignored). Control is **refused** while it exists, so a press is never executed twice. Keep the switch in Listen only, or remove the binding in Zigbee2MQTT (*Devices → avb_ksu → Bind*) and activate control.
+- **Competing automations**: automations whose triggers use the switch (its device triggers, its event entity or its MQTT topic) are listed. Disable or change them first, or tick them to acknowledge that both may act.
+
+Commands are sent only in rooms where mood lighting is enabled: in an **Observe** room, presses are recognised and shown, but nothing is sent.
+
+### Manual overrides
+
+A press of a switch in Smart Occupancy control is a person's explicit request and wins over automatic lighting:
+
+1. the press is recorded (*Last button: OFF right*),
+2. the mapped command is sent (to the managed group, not to each bulb),
+3. the lights it changed get a **manual override** (*source: wall switch avb_ksu, reason: Physical switch OFF requested*), for the room's manual override time (or the switch's own, *Advanced → Manual override*; 0 = until the room is empty),
+4. occupancy, mood changes and the global adjustment leave those lights alone until the override expires or the room becomes vacant.
+
+Example: the room is occupied and Smart Occupancy switched the ceiling lights on. You press **OFF**: they switch off, the override is registered, and they are **not** switched back on just because the room is occupied and dark. Pressing **ON** switches them on even when the daylight sensor says the room is bright: daylight gates only *automatic* switch-on. Overrides are listed in *Advanced → Manual overrides* (with the switch and the reason) and in the switch's card (*Manual override: Active*).
+
+Hold-to-dim and brightness steps keep their brightness as an override until its normal expiry, so the global adjustment does not immediately correct it.
+
+### Wall switches while Main Mood is Manual
+
+**Manual pauses automatic lighting, never your wall switches.** While Main Mood is `Manual`, Smart Occupancy sends no automatic command, but a switch in Smart Occupancy control still executes its actions (there is no mood then, so *Turn lights on* uses the lights' own last values), and its overrides are recorded so that your choice is still respected when Manual ends.
+
+### Moods from a switch
+
+- **This room**: sets the room's mood (the same room mood as *Overrides → Room mood*); *Return to Auto* makes the room follow the global mood again. Optionally for a number of minutes, after which the room returns to automatic selection.
+- **All rooms**: selects the option on your **mood selector (Manual Mood)**, `input_select.mood`; your existing automation then sets Main Mood, as when you change it in the app. *Return to Auto* selects `Auto`. **Main Mood (`input_select.main_mood`) is never written.**
+
+### Dimming
+
+- *Increase / Decrease brightness*: one step per press (default 10 %), for remotes that send one message per press or repeat messages while held.
+- *Start dimming up / down* + *Stop dimming*: for switches that send a start and a stop message (for example `brightness_move_up_left` … `brightness_stop_left`; nothing assumes that a held button repeats its message). Smart Occupancy then sends one brightness command per interval (default 8 % every 0.4 s, with a matching transition), waits for each command to finish, stops when STOP/release arrives (subject to the Zigbee and MQTT latency), at the maximum or minimum brightness, or after the safety timeout (default 10 s) if STOP never arrives.
+- Step, hold step, interval, minimum and maximum brightness and the timeout are set per switch under *Advanced switch settings → Dimming*. Lights without brightness are not dimmed; an off light is never dimmed *down*, and dimming *up* switches it on at the minimum.
+
+### Optional: presses as room activity
+
+*Advanced switch settings → A press counts as activity in the room* (off by default): a press refreshes the activity of an **occupied** room in the existing occupancy engine, so it is vacated one quiet period later. A press never makes an empty room occupied and never keeps a room occupied by itself.
+
+### Diagnose MQTT button messages
+
+The switch's card shows the connection, availability (Zigbee2MQTT `…/availability`), the last button and time, the result (*Room lights (5 lights) switched off*), what it controls and how many buttons are configured. *Advanced switch settings → Listener diagnostics* shows the MQTT state, the authoritative and available inputs, the topic, the last command, the last ignored message and why (*retained message*, *the same press through another input path*, *malformed message*, …), the number of ignored status updates, and the recent presses. Raw payloads are never shown or logged. To watch the messages yourself: Zigbee2MQTT → *Logs*, or Home Assistant → *Settings → Devices & services → MQTT → Configure → Listen to a topic* `zigbee2mqtt/avb_ksu`, and press a button.
+
+If nothing arrives: check that MQTT is connected (the Switches tab says so), that the device topic matches (*Advanced → MQTT topic*; the base topic is a global setting), and whether the device is online. A Zigbee2MQTT rename is followed automatically (by IEEE address).
+
+### Remove or replace a switch
+
+*Remove* in the switch's card deletes its learned buttons and assignments and ends its subscriptions; overrides it created expire as usual. Bindings, automations and the device are not changed. To replace a switch, remove the old one and assign the new device (learn its buttons again). The wall switch entities of earlier versions (*Advanced → Wall switch entities*) are unchanged and keep working as listen-only sources.
 
 ## Daylight-aware automatic lighting (Phase 0.3.3)
 
@@ -731,10 +842,11 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements_test.txt
 .venv/bin/pytest
 ```
 
-To test against a Home Assistant release newer than the harness (2026.11.1 at the time of writing), install it over the harness and use the runner, which aliases one helper that moved in 2026.11:
+To test against a Home Assistant release newer than the harness (2026.11.1 at the time of writing), install it over the harness, install the libraries that release declares for the components the tests start (MQTT and the Supervisor client its config flow imports), and use the runner, which aliases one helper that moved in 2026.11:
 
 ```bash
 .venv/bin/pip install homeassistant==2026.11.1 home-assistant-frontend==20261028.5
+.venv/bin/pip install $(.venv/bin/python scripts/component_requirements.py mqtt hassio)
 .venv/bin/python scripts/run_tests.py
 ```
 
@@ -754,11 +866,21 @@ The suite covers:
 - daylight (0.3.3):
   - pure tests: readings (`unknown`/`unavailable` never 0 lx, freshness, report modes), contamination and settling, re-published PIR values, every estimation step, outdoor spike smoothing, calibration, hysteresis, stability, the gate and the store migration
   - in Home Assistant with simulated lights: dark and bright arrivals, prompt PIR and conservative confirmation, radar holding, lamp-lit readings rejected, settling and fresh samples, outdoor darkness, bright outside with a dark room, frequent and infrequent sensors, stale/unknown/unavailable and mixed sensors, outdoor spikes, hysteresis and becoming dark, occupancy uncertainty, On/Off/Ignore per mood, global brightness/temperature, Manual, Observe, manual overrides, automation conflicts, ambient lighting, groups, websocket persistence, reload/restart, and the upgrade from a 0.3.2 store
+- wall switches (0.3.5):
+  - pure tests: action names and press types, suggested defaults, Zigbee2MQTT payloads (battery/link-quality updates, cleared and malformed actions, oversized messages), event-entity actions, topic validation (no wildcards, no bridge topics), deduplication across paths with deliberate repeats, the bridge device list and bindings, the model's bounds and the store migration
+  - in Home Assistant with the real MQTT integration (mocked broker) and simulated Wiser `avb_ksu` events: discovery and assignment, learning (retained, status, malformed), persistence over restarts, ON/OFF of the room group with manual overrides, occupancy and mood changes not undoing a manual OFF, ON despite the daylight gate, Manual mood, Observe, Listen only with a direct binding, MQTT device triggers, event entities (split and stale events), one press through three paths, deliberate repeats and debounce, availability, MQTT reconnects, Zigbee2MQTT renames and removal, competing automations, hold-to-dim with STOP, without STOP, limits and pacing, brightness steps and capabilities, room and global moods, temporary room moods, websocket validation and permissions, listener cleanup on reload and unload, activity evidence
 - card serving through the real frontend component
 
 Observe rooms are asserted never to call a light service. Any test that logs an ERROR, or in which Home Assistant reports deprecated usage, fails. CI (`.github/workflows/validate.yml`) runs hassfest, HACS validation and the tests on Home Assistant 2026.10.4 and 2026.11.1.
 
 ## Upgrading
+
+**From 0.3.4.** Nothing to do, and nothing is applied by the upgrade:
+- The lighting store is migrated from 1.2 to 1.3: every room gets an empty list of switches. Rooms, moods, profiles, manual overrides, daylight settings, light groups, activation and the global adjustment are kept unchanged.
+- The **wall switch entities** of earlier versions (*Advanced → Wall switch entities*) are kept and keep working as listen-only sources; none is converted into a command source.
+- Every switch you add starts in **Listen only**. Smart Occupancy control is an explicit activation per switch.
+- The Switches tab appears between Automatic and Overrides; the other tabs are unchanged.
+- 0.3.4 can still read a 1.3 store after a downgrade (same major version); it ignores the switches and drops them the next time it saves.
 
 **From 0.3.2.** Nothing to do, and nothing is applied by the upgrade:
 - The lighting store is migrated from 1.1 to 1.2. Every setting is kept.
@@ -783,7 +905,16 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 
 **From 0.1.x.** Configuration version 1.1 is migrated to 1.2 on the first start, keeping everything you configured; then the 0.2 step above applies.
 
-## Known limitations (Phase 0.3.3)
+## Known limitations (Phase 0.3.5)
+
+- **Not tested with a physical Wiser switch.** The wall switch support was tested with the automated suite on Home Assistant 2026.10.4 and 2026.11.1, with the real MQTT integration, a mocked broker and simulated Zigbee2MQTT messages, device triggers and event entities. Not hardware verified; not deployed to the production Home Assistant.
+- **Zigbee bindings are known only from Zigbee2MQTT's device list.** Bindings made another way (Touchlink, a different coordinator) are invisible: if lights react to a switch by themselves, keep it in Listen only.
+- **Competing automations are found by their triggers** (device triggers, event entity, the MQTT topic). Node-RED, AppDaemon and templated triggers are invisible.
+- **Device triggers appear after first use** in Zigbee2MQTT; raw MQTT does not need them.
+- **Hold-to-dim is a sequence of brightness steps**, not a native Zigbee *move/stop*: dimming continues until the next interval after STOP at most, plus the Zigbee and MQTT latency.
+- **Learning, dimming and the presses waiting per switch are in memory**: a restart ends learning and dimming; learned buttons are saved at once.
+
+### From Phase 0.3.3
 
 - **Not verified on the production Home Assistant.** Tested with the automated suite on 2026.10.4 and 2026.11.1, and on an isolated 2026.11.1 instance with simulated light sensors and demo lights.
 - **Lights not listed as influencing** (a lamp in another area that reaches the sensor, a TV) can make a reading look like daylight. After dusk this is detected and reported; during the day add such lights under *Automatic → Advanced daylight settings → Contamination*.

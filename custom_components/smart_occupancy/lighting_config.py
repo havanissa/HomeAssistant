@@ -30,8 +30,10 @@ Persisted shape (store version 1)::
           "manual_override_minutes": null,
           "manual_switches": [entity ids],
           "dismissed": [problem subjects],
-          "daylight": {...}}},                         # 0.3.3: daylight-aware switch-on (daylight.RoomDaylight)
-      "daylight": {"outdoor_entity": null, ...}      # 0.3.3: global daylight settings (daylight.DaylightConfig)
+          "daylight": {...},                           # 0.3.3: daylight-aware switch-on (daylight.RoomDaylight)
+          "switches": [{...}]}},                       # 0.3.5: wall switches / remotes (switches.SwitchConfig)
+      "daylight": {"outdoor_entity": null, ...},     # 0.3.3: global daylight settings (daylight.DaylightConfig)
+      "switch_settings": {"mqtt_base_topic": "zigbee2mqtt"}  # 0.3.5 (switches.SwitchSettings)
     }
 
 Profile tables may contain the pseudo mood ``"*"`` (every mood, 0.3.2).
@@ -49,6 +51,12 @@ Store 1.2 (0.3.3) adds ``daylight`` (global and per room). The migration from
 for confirmed occupancy as before (``on_first_motion: false``); every other
 room gets the new defaults. All other values are kept. A 0.3.2 install reads a
 1.2 store as is (same major version) and ignores the new keys.
+
+Store 1.3 (0.3.5) adds wall switches: ``switches`` per room (none after the
+migration) and the global ``switch_settings``. The existing wall switch
+entities (``manual_switches``) are kept unchanged and stay listen-only
+sources: nothing is converted into a command source. A 0.3.4 install reads a
+1.3 store as is and ignores the new keys.
 """
 
 from __future__ import annotations
@@ -83,6 +91,7 @@ from .const import (
 from .const import LIGHTING_STORE_MINOR_VERSION
 from .daylight import DaylightConfig, RoomDaylight
 from .models import IntegrationConfig, ProfileSetting, ProfileTable, _enum_or
+from .switches import ROOM_TARGET, SwitchConfig, SwitchSettings, switches_from
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -248,6 +257,20 @@ class RoomLighting:
     dismissed: tuple[str, ...] = ()
     # Daylight-aware automatic switch-on (0.3.3).
     daylight: RoomDaylight = field(default_factory=RoomDaylight)
+    # Wall switches and remotes (0.3.5); each starts in Listen only.
+    switches: tuple[SwitchConfig, ...] = ()
+
+    def switch(self, switch_id: str) -> SwitchConfig | None:
+        return next((s for s in self.switches if s.id == switch_id), None)
+
+    def with_switch(self, switch: SwitchConfig) -> RoomLighting:
+        """Add or replace one switch (by id)."""
+        if any(s.id == switch.id for s in self.switches):
+            return replace(self, switches=tuple(switch if s.id == switch.id else s for s in self.switches))
+        return replace(self, switches=(*self.switches, switch))
+
+    def without_switch(self, switch_id: str) -> RoomLighting:
+        return replace(self, switches=tuple(s for s in self.switches if s.id != switch_id))
 
     @classmethod
     def from_dict(cls, data: Any) -> RoomLighting:
@@ -266,6 +289,7 @@ class RoomLighting:
             manual_switches=_ids(data.get("manual_switches")),
             dismissed=_ids(data.get("dismissed")),
             daylight=RoomDaylight.from_dict(data.get("daylight")),
+            switches=switches_from(data.get("switches")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -283,6 +307,7 @@ class RoomLighting:
             "manual_switches": list(self.manual_switches),
             "dismissed": list(self.dismissed),
             "daylight": self.daylight.as_dict(),
+            "switches": [s.as_dict() for s in self.switches],
         }
 
 
@@ -302,6 +327,7 @@ class LightingConfig:
     manual_option: str = DEFAULT_MANUAL_OPTION
     adaptive: AdaptiveConfig = field(default_factory=AdaptiveConfig)
     daylight: DaylightConfig = field(default_factory=DaylightConfig)
+    switch_settings: SwitchSettings = field(default_factory=SwitchSettings)
 
     @classmethod
     def from_dict(cls, data: Any) -> LightingConfig:
@@ -323,6 +349,7 @@ class LightingConfig:
             manual_option=str(data.get("manual_option") or DEFAULT_MANUAL_OPTION).strip() or DEFAULT_MANUAL_OPTION,
             adaptive=AdaptiveConfig.from_dict(data.get("adaptive")),
             daylight=DaylightConfig.from_dict(data.get("daylight")),
+            switch_settings=SwitchSettings.from_dict(data.get("switch_settings")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -338,6 +365,7 @@ class LightingConfig:
             "manual_option": self.manual_option,
             "adaptive": self.adaptive.as_dict(),
             "daylight": self.daylight.as_dict(),
+            "switch_settings": self.switch_settings.as_dict(),
         }
 
     def room(self, area_id: str) -> RoomLighting:
@@ -474,6 +502,26 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
             sensors = tuple(replace(s, entity_id=new) if s.entity_id == old else s for s in sensors)
         return replace(daylight, sensors=sensors, influencing=sub_ids(daylight.influencing))
 
+    def sub_switch(switch: SwitchConfig) -> SwitchConfig:
+        nonlocal changed
+        updated = switch
+        if switch.event_entity == old:
+            updated = replace(updated, event_entity=new)
+        mappings = {}
+        for raw, m in switch.mappings.items():
+            if m.target == old and m.target != ROOM_TARGET:
+                m = replace(m, target=new)
+            if m.entity == old:
+                m = replace(m, entity=new)
+            mappings[raw] = m
+        if mappings != switch.mappings:
+            updated = replace(updated, mappings=mappings)
+        if old in switch.acknowledged:
+            updated = replace(updated, acknowledged=sub_ids(switch.acknowledged))
+        if updated != switch:
+            changed = True
+        return updated
+
     rooms = {
         area_id: replace(
             room,
@@ -482,6 +530,7 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
             manual_switches=sub_ids(room.manual_switches),
             light_overrides=sub_table(room.light_overrides),
             daylight=sub_daylight(room.daylight),
+            switches=tuple(sub_switch(s) for s in room.switches),
         )
         for area_id, room in config.rooms.items()
     }
@@ -509,6 +558,14 @@ def migrate_store(old_major: int, old_minor: int, data: dict[str, Any]) -> dict[
             if "daylight" not in room:
                 # Activated rooms keep their accepted timing: switch on at confirmed occupancy.
                 room["daylight"] = {"on_first_motion": not bool(room.get("control_enabled"))}
+            rooms[area_id] = room
+        data["rooms"] = rooms
+    if old_minor < 3:
+        # Wall switches (0.3.5): no room has one yet. Wall switch entities stay listen-only.
+        rooms = {}
+        for area_id, room in (data.get("rooms") or {}).items():
+            room = dict(room) if isinstance(room, dict) else {}
+            room.setdefault("switches", [])
             rooms[area_id] = room
         data["rooms"] = rooms
     return data

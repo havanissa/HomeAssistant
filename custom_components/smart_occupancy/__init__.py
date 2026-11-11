@@ -1,11 +1,16 @@
-"""Smart Occupancy & Lighting - Phase 0.3 (mood lighting, per-room activation).
+"""Smart Occupancy & Lighting - Phase 0.3 (mood lighting, per-room activation, wall switches).
 
 This integration reads states and registries, computes its own occupancy
 per room, exposes diagnostics, and plans mood lighting for every room. Light
 commands are sent only in rooms where mood lighting was explicitly enabled;
-every other room stays in Observe mode. It never modifies automations,
-helpers (including the mood selectors) or other integrations' entities, and
-does not poll.
+every other room stays in Observe mode. It never modifies automations or
+other integrations' entities, and does not poll. Helpers (including the mood
+selectors) are only read, with one explicit exception (0.3.5): a wall switch
+button assigned to "Select mood (all rooms)" selects that option on the
+Manual Mood selector when a person presses it. Main Mood is never written.
+Wall switch presses arrive through Home Assistant's MQTT integration
+(subscriptions to the assigned switches' topics only), MQTT device triggers or
+event entities; nothing is ever published.
 """
 
 from __future__ import annotations

@@ -7,8 +7,8 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.3.3"
-VERSION: Final = "0.3.4"
+PHASE: Final = "0.3.5"
+VERSION: Final = "0.3.5"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -222,7 +222,8 @@ CARD_FILENAMES: Final = (CARD_FILENAME, LIGHTING_CARD_FILENAME)
 # API, and saved without reloading the integration.
 LIGHTING_STORE_VERSION: Final = 1
 # Minor 2 (0.3.3): daylight settings; rooms activated before 0.3.3 keep waiting for confirmed occupancy.
-LIGHTING_STORE_MINOR_VERSION: Final = 2
+# Minor 3 (0.3.5): wall switches and remotes (every room starts with none; legacy entities kept).
+LIGHTING_STORE_MINOR_VERSION: Final = 3
 LIGHTING_STORE_KEY: Final = "smart_occupancy.lighting"
 LIGHTING_SAVE_DELAY_SECONDS: Final = 1
 # Runtime state of mood lighting (manual overrides, last applied profile).
@@ -377,3 +378,84 @@ DAYLIGHT_DEBOUNCE_SECONDS: Final = 3.0
 # A contaminated (lights on) indoor reading below the turn-on threshold proves darkness
 # while it is at most this old.
 BOUND_MAX_AGE_MINUTES: Final = 30
+
+
+# Wall switches and remotes (Phase 0.3.5) --------------------------------------
+# Button events come from Zigbee2MQTT (raw MQTT on the device topic), Home
+# Assistant MQTT device triggers or event entities. Every switch starts in
+# Listen only; Smart Occupancy control is an explicit activation per switch.
+DEFAULT_MQTT_BASE_TOPIC: Final = "zigbee2mqtt"
+MAX_SWITCHES_PER_ROOM: Final = 20
+MAX_BUTTONS_PER_SWITCH: Final = 64
+# Learning mode: how long it listens unless cancelled.
+DEFAULT_LEARN_SECONDS: Final = 60
+MAX_LEARN_SECONDS: Final = 300
+# The same action through a second input path within this window is one press.
+DEDUPE_WINDOW_SECONDS: Final = 0.5
+# Repeats of the same action through the same path faster than this are one press.
+DEFAULT_DEBOUNCE_MS: Final = 100
+MAX_DEBOUNCE_MS: Final = 2000
+# An event entity whose event is older than this when it is reported is stale (restored state).
+STALE_EVENT_SECONDS: Final = 5.0
+# Triggers that were just attached may replay a retained message; ignored for this long.
+ATTACH_SETTLE_SECONDS: Final = 2.0
+# Presses queued per switch while its previous command still runs; more are dropped.
+MAX_QUEUED_PRESSES: Final = 4
+# Brightness steps and hold-to-dim.
+DEFAULT_STEP_PCT: Final = 10
+DEFAULT_HOLD_STEP_PCT: Final = 8
+DEFAULT_DIM_INTERVAL: Final = 0.4      # seconds between hold-to-dim commands
+DIM_INTERVAL_MIN: Final = 0.2
+DIM_INTERVAL_MAX: Final = 2.0
+DEFAULT_DIM_TIMEOUT: Final = 10        # seconds: dimming stops if no STOP/release arrives
+DIM_TIMEOUT_MAX: Final = 60
+# A commanded brightness is trusted over the reported state for this long (state reports lag).
+LEVEL_MEMORY_SECONDS: Final = 5.0
+MQTT_PAYLOAD_MAX_BYTES: Final = 65536
+BRIDGE_PAYLOAD_MAX_BYTES: Final = 8 * 1024 * 1024
+SWITCH_HISTORY_SIZE: Final = 10
+
+
+class SwitchSource(StrEnum):
+    """Where a switch's button events are read from."""
+
+    AUTO = "auto"                    # the best available source (preference order below)
+    ZIGBEE2MQTT = "zigbee2mqtt"      # raw MQTT: the "action" of the device topic
+    DEVICE_TRIGGER = "device_trigger"  # Home Assistant MQTT device triggers
+    EVENT_ENTITY = "event_entity"    # a Home Assistant event entity
+
+
+class SwitchMode(StrEnum):
+    """What Smart Occupancy does with a switch's button events."""
+
+    LISTEN = "listen"    # recognise manual intervention only; never sends a command (default)
+    CONTROL = "control"  # execute the configured button mappings (explicit activation)
+
+
+class ButtonAction(StrEnum):
+    """What a button press does."""
+
+    NONE = "none"
+    ON = "on"
+    OFF = "off"
+    TOGGLE = "toggle"
+    BRIGHTNESS_UP = "brightness_up"      # one step per press
+    BRIGHTNESS_DOWN = "brightness_down"
+    DIM_UP = "dim_up"                    # start dimming up (hold)
+    DIM_DOWN = "dim_down"
+    DIM_STOP = "dim_stop"                # stop dimming (release / stop)
+    SET_BRIGHTNESS = "set_brightness"
+    SET_COLOR_TEMP = "set_color_temp"
+    MOOD = "mood"                        # select a mood (room or global)
+    MOOD_AUTO = "mood_auto"              # return to automatic mood selection
+    SCENE = "scene"
+    SCRIPT = "script"
+    WLED_PRESET = "wled_preset"
+
+
+class OnValues(StrEnum):
+    """What an ON press switches lights on with."""
+
+    MOOD = "mood"      # the currently effective mood's values (default)
+    LAST = "last"      # the light's own last values
+    FIXED = "fixed"    # the brightness / colour temperature of the mapping
