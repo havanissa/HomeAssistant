@@ -35,7 +35,7 @@ from homeassistant.helpers.event import async_call_later, async_track_state_chan
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import discovery, lighting, mood as mood_mod
+from . import discovery, mood as mood_mod
 from .const import (
     DOMAIN,
     LAST_CHECKED_REFRESH_MINUTES,
@@ -47,6 +47,7 @@ from .const import (
     ProblemCategory,
     Severity,
 )
+from .controller import LightingController
 from .models import IntegrationConfig
 from .occupancy import (
     AVAILABLE,
@@ -62,7 +63,7 @@ from .occupancy_manager import OccupancyManager
 from .prediction import NullPredictor
 from .problems import ProblemTracker
 from .supervision import effective_mode
-from .validation import ENTITY_PROBLEM_CODES, Problem, validate
+from .validation import ENTITY_PROBLEM_CODES, Problem, validate, validate_lighting
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -167,6 +168,8 @@ class Snapshot:
     checked_bucket: str | None
     evaluated_at: datetime = field(compare=False)
     first_detected: dict[str, str] = field(compare=False, default_factory=dict)
+    # Rooms with mood lighting control enabled (area ids).
+    mood_lighting_rooms: tuple[str, ...] = ()
 
     @property
     def last_checked(self) -> str:
@@ -229,6 +232,7 @@ class Snapshot:
             "last_checked": self.last_checked,
             "configured_mode": self.configured_mode.value,
             "effective_mode": self.effective_mode.value,
+            "mood_lighting_rooms": list(self.mood_lighting_rooms),
             "mood": self.mood.as_dict(),
             "mood_mismatch": self.mood_mismatch,
             "rooms": [r.as_dict() for r in self.rooms],
@@ -271,6 +275,7 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         self.config = IntegrationConfig.from_dict(dict(entry.options))
         self.predictor = NullPredictor()
         self.occupancy = OccupancyManager(hass, self.config)
+        self.lighting = LightingController(hass, self)
         self.tracker = ProblemTracker(hass)
         self._unsubs: list[CALLBACK_TYPE] = []
         self._started_unsub: CALLBACK_TYPE | None = None
@@ -282,7 +287,7 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
             _LOGGER,
             cooldown=REGISTRY_DEBOUNCE_SECONDS,
             immediate=False,
-            function=self.async_refresh,
+            function=self._async_registry_refresh,
         )
         self._reported: set[str] = set()
         # A reload while Home Assistant is running needs no start-up grace.
@@ -349,6 +354,18 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
     def _on_registry_event(self, event: Event) -> None:
         self.hass.async_create_task(self._registry_debouncer.async_call(), eager_start=True)
 
+    async def _async_registry_refresh(self) -> None:
+        # Registries changed: the cached light index and managed lights are stale.
+        self.lighting.async_registry_changed()
+        await self.async_refresh()
+
+    @callback
+    def async_schedule_refresh(self) -> None:
+        """Request a (debounced) re-evaluation, e.g. after a lighting change."""
+        if self.hass.is_stopping:
+            return
+        self.hass.async_create_task(self.async_request_refresh(), eager_start=True)
+
     async def _on_started(self, event: Event) -> None:
         self._started_unsub = None  # one-shot listener is already removed
         self._started = True
@@ -387,7 +404,9 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         config = self.config
         now = dt_util.utcnow()
         settled = self._settled
-        problems = validate(hass, config, settled=settled)
+        problems = validate(hass, config, settled=settled, index=self.lighting.index,
+                            managed={a: m.targets for a, m in self.lighting.managed.items()})
+        problems += validate_lighting(hass, config, self.lighting)
 
         observation = mood_mod.observe(hass, config.mood)
         mismatch = self._evaluate_mismatch(observation)
@@ -404,7 +423,8 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
                 subject="mood",
             ))
 
-        by_category, by_light = lighting.classify_lights(hass, config.categories)
+        index = self.lighting.index
+        by_category, by_light = index.by_category, index.categories_of
         label_reg = lr.async_get(hass)
         categories = tuple(
             CategorySnapshot(
@@ -458,6 +478,7 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
             checked_bucket=bucket,
             evaluated_at=now,
             first_detected=first_detected,
+            mood_lighting_rooms=tuple(a for a in self.lighting.lighting.active_rooms if a in config.enabled_rooms),
         )
         self._log_transitions(snapshot)
         return snapshot
@@ -473,7 +494,7 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         lights = tuple(
             EntityStatus(e, friendly_name(hass, e), entity_health(hass, e, settled=settled),
                          ", ".join(by_light.get(e, [])) or "no category")
-            for e in room.lights
+            for e in self.lighting.managed_room(area_id).controlled
         )
         ref = None
         if room.reference_occupancy_entity:

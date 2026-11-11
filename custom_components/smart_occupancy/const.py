@@ -7,8 +7,8 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.2"
-VERSION: Final = "0.2.0"
+PHASE: Final = "0.3"
+VERSION: Final = "0.3.0"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -137,8 +137,8 @@ DEFAULT_CATEGORIES: Final[list[tuple[str, str]]] = [
     ("outdoor", "Outdoor lighting"),
 ]
 
-# Profile value limits.
-BRIGHTNESS_MIN: Final = 0
+# Profile value limits. Brightness 0 is not a level: use the Off action.
+BRIGHTNESS_MIN: Final = 1
 BRIGHTNESS_MAX: Final = 100
 KELVIN_MIN: Final = 1000
 KELVIN_MAX: Final = 10000
@@ -174,6 +174,63 @@ OCCUPANCY_STORE_KEY: Final = "smart_occupancy.occupancy_state"
 # Engine state is written on occupancy transitions only, coalesced this long.
 OCCUPANCY_SAVE_DELAY_SECONDS: Final = 15
 
-# Dashboard card served by this integration.
+# Dashboard cards served by this integration.
 CARD_URL_BASE: Final = "/smart_occupancy_static"
 CARD_FILENAME: Final = "smart-occupancy-room-card.js"
+LIGHTING_CARD_FILENAME: Final = "smart-occupancy-lighting-cards.js"
+CARD_FILENAMES: Final = (CARD_FILENAME, LIGHTING_CARD_FILENAME)
+
+# Mood lighting (Phase 0.3) -------------------------------------------------
+# User configuration of mood lighting (profiles, room overrides, activation).
+# Owned by the integration, edited by the dashboard cards over the websocket
+# API, and saved without reloading the integration.
+LIGHTING_STORE_VERSION: Final = 1
+LIGHTING_STORE_KEY: Final = "smart_occupancy.lighting"
+LIGHTING_SAVE_DELAY_SECONDS: Final = 1
+# Runtime state of mood lighting (manual overrides, last applied profile).
+LIGHTING_STATE_STORE_VERSION: Final = 1
+LIGHTING_STATE_STORE_KEY: Final = "smart_occupancy.lighting_state"
+LIGHTING_STATE_SAVE_DELAY_SECONDS: Final = 10
+
+# Coalesces Manual Mood -> Main Mood propagation and bursts of triggers.
+APPLY_DEBOUNCE_SECONDS: Final = 1.0
+# A light service call that takes longer than this is reported as failed.
+COMMAND_TIMEOUT_SECONDS: Final = 15
+# After a command, state changes matching the requested state within this
+# window are attributed to us (MQTT lights report back with a new context).
+OWN_CHANGE_WINDOW_SECONDS: Final = 20
+# A light change this soon after a configured wall-switch entity changed is
+# attributed to that switch.
+SWITCH_ATTRIBUTION_SECONDS: Final = 3
+DEFAULT_MANUAL_OVERRIDE_MINUTES: Final = 60
+MANUAL_OVERRIDE_MAX_MINUTES: Final = 1440
+# Light state tolerances when deciding whether a light already matches.
+BRIGHTNESS_TOLERANCE_PCT: Final = 2
+KELVIN_TOLERANCE: Final = 60
+RGB_TOLERANCE: Final = 4
+HS_TOLERANCE: Final = 2.0
+
+SIGNAL_LIGHTING_UPDATED: Final = f"{DOMAIN}_lighting_updated"
+
+
+class UnrepresentableMode(StrEnum):
+    """What lighting does while the expected mood is not a Main Mood option."""
+
+    FOLLOW_MAIN = "follow_main"  # keep following Main Mood's actual value (default)
+    NO_MOOD = "no_mood"          # treat as "no mood": lighting changes nothing
+    USE_MOOD = "use_mood"        # treat it as another (configured) mood
+
+
+class UnattributedPolicy(StrEnum):
+    """How light changes without any Home Assistant context are treated."""
+
+    IGNORE = "ignore"            # not a manual override (default)
+    MANUAL = "manual"            # treat as a manual override
+
+
+class LightingMode(StrEnum):
+    """Lighting control state of a room."""
+
+    OBSERVE = "observe"
+    ACTIVE = "active"
+    BLOCKED = "blocked"

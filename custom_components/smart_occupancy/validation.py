@@ -9,10 +9,10 @@ configuration problem or an operational one (e.g. a device that is offline).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import area_registry as ar, label_registry as lr
+from homeassistant.helpers import area_registry as ar, entity_registry as er, label_registry as lr
 
 from . import lighting
 from .const import (
@@ -24,7 +24,7 @@ from .const import (
 )
 from .discovery import area_name
 from .models import IntegrationConfig
-from .mood import mood_names
+from .lighting_config import parent_cycle
 from .occupancy import (
     AVAILABLE,
     DISABLED,
@@ -38,8 +38,11 @@ from .occupancy import (
     entity_health,
     friendly_name,
 )
-from .profiles import iter_profile_entries, validate_setting
+from .profiles import iter_profile_entries, mood_chain, validate_setting
 from .supervision import mode_permitted
+
+if TYPE_CHECKING:
+    from .controller import LightingController
 
 CONFIG = ProblemCategory.CONFIGURATION
 OPERATIONAL = ProblemCategory.OPERATIONAL
@@ -66,6 +69,9 @@ class Problem:
     # Identifies non-entity subjects (category, label, profile entry, ...).
     subject: str | None = None
     health: str | None = None
+    # "lighting" for problems that affect mood lighting but not occupancy
+    # (shown in the Lighting health row instead of Occupancy).
+    aspect: str | None = None
 
     @property
     def key(self) -> str:
@@ -96,7 +102,7 @@ class Problem:
             "explanation": self.explanation,
             "action": self.action,
         }
-        for key in ("entity_id", "name", "room", "area_id", "health"):
+        for key in ("entity_id", "name", "room", "area_id", "health", "aspect"):
             if (value := getattr(self, key)) is not None:
                 out[key] = value
         if first_detected:
@@ -189,8 +195,19 @@ def entity_problem(
     return None
 
 
-def validate(hass: HomeAssistant, config: IntegrationConfig, *, settled: bool = True) -> list[Problem]:
-    """Validate the configuration and the health of every configured entity. Read only."""
+def validate(
+    hass: HomeAssistant,
+    config: IntegrationConfig,
+    *,
+    settled: bool = True,
+    index: lighting.LightIndex | None = None,
+    managed: dict[str, list[str]] | None = None,
+) -> list[Problem]:
+    """Validate the configuration and the health of every configured entity. Read only.
+
+    ``managed`` maps each room to its managed lights (configured and
+    discovered by label); without it the configured lights are used.
+    """
     problems: list[Problem] = []
     add = problems.append
 
@@ -288,11 +305,13 @@ def validate(hass: HomeAssistant, config: IntegrationConfig, *, settled: bool = 
             ))
         seen_labels.setdefault(cat.label_id, cat.name)
 
-    _, light_categories = lighting.classify_lights(hass, config.categories)
+    index = index or lighting.LightIndex(hass, config.categories)
+    light_categories = index.categories_of
 
     # Rooms ----------------------------------------------------------------
     area_reg = ar.async_get(hass)
-    managed: dict[str, list[str]] = {}
+    managed_in = managed
+    managed = {}
     signal_owner: dict[str, str] = {}
     for area_id, room in config.enabled_rooms.items():
         room_name = area_name(hass, area_id) or area_id
@@ -363,7 +382,6 @@ def validate(hass: HomeAssistant, config: IntegrationConfig, *, settled: bool = 
             if problem := entity_problem(hass, ref, health(ref), "reference", essential=False, **in_room):
                 add(problem)
 
-        managed[area_id] = list(room.lights)
         for light in room.lights:
             if light.split(".", 1)[0] != "light":
                 add(Problem(
@@ -372,15 +390,20 @@ def validate(hass: HomeAssistant, config: IntegrationConfig, *, settled: bool = 
                     f"Remove it from the managed lights in Configure → Rooms → {room_name}.",
                     entity_id=light, name=friendly_name(hass, light), **in_room,
                 ))
-                continue
+        room_lights = [
+            e for e in (managed_in.get(area_id) if managed_in is not None else room.lights)
+            if e.split(".", 1)[0] == "light"
+        ]
+        managed[area_id] = room_lights
+        for light in room_lights:
             if problem := entity_problem(hass, light, health(light), "light", essential=False, **in_room):
                 add(problem)
             cats = light_categories.get(light, [])
             if not cats:
                 add(Problem(
                     "light_without_category", Severity.WARNING, CONFIG, "Light has no category",
-                    f"{light} has no category label, so no global mood profile will apply to it in later phases. "
-                    "This does not affect anything in Observe mode.",
+                    f"{light} has no category label, so no global mood profile applies to it (only an "
+                    "individual light override can).",
                     "Apply one of the category labels to the light (or its device) under Settings → Entities.",
                     entity_id=light, name=friendly_name(hass, light), **in_room,
                 ))
@@ -391,7 +414,7 @@ def validate(hass: HomeAssistant, config: IntegrationConfig, *, settled: bool = 
                     "Keep only one category label on the light.",
                     entity_id=light, name=friendly_name(hass, light), **in_room,
                 ))
-            if lighting.is_unexposed_group(hass, light):
+            if index.is_opaque_group(light):
                 add(Problem(
                     "group_members_unknown", Severity.INFO, CONFIG, "Group members not exposed",
                     f"{light} is a group that does not expose its members, so overlap with its member "
@@ -416,58 +439,255 @@ def validate(hass: HomeAssistant, config: IntegrationConfig, *, settled: bool = 
     for c in lighting.find_group_conflicts(hass, managed):
         member_room = area_name(hass, c.member_room) or c.member_room
         group_room = area_name(hass, c.group_room) or c.group_room
+        if c.member_room == c.group_room:
+            add(Problem(
+                "group_member_overlap", Severity.INFO, CONFIG, "Group and member both managed",
+                f"Group {c.group} and its member {c.member} are both managed in {group_room}. Mood lighting "
+                "sends commands to the group only, so the member does not get duplicate commands.",
+                f"To control {c.member} individually, exclude the group in the Room Mood Lighting card.",
+                area_id=c.member_room, room=member_room, entity_id=c.member,
+                name=friendly_name(hass, c.member), subject=c.group, aspect="lighting",
+            ))
+            continue
         add(Problem(
-            "group_member_conflict", Severity.WARNING, CONFIG, "Group and member both selected",
-            f"Group {c.group} ({group_room}) and its member {c.member} ({member_room}) are both selected "
-            "for independent control.",
-            f"Select either the group or its member lights in Configure → Rooms → {member_room}.",
+            "group_member_conflict", Severity.WARNING, CONFIG, "Group and member in different rooms",
+            f"Group {c.group} ({group_room}) and its member {c.member} ({member_room}) are managed by two "
+            "rooms, so both rooms could send commands to the same light.",
+            f"Keep the group or its member lights in one room only (Configure → Rooms → {member_room}), "
+            "or exclude one of them in the Room Mood Lighting card.",
             area_id=c.member_room, room=member_room, entity_id=c.member,
-            name=friendly_name(hass, c.member), subject=c.group,
+            name=friendly_name(hass, c.member), subject=c.group, aspect="lighting",
         ))
 
-    # Profiles -------------------------------------------------------------
-    known_moods = {m.casefold() for m in mood_names(hass, mood)}
+    return problems
+
+
+def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller: LightingController) -> list[Problem]:
+    """Problems of the mood lighting configuration and its runtime. Read only."""
+    problems: list[Problem] = []
+    add = problems.append
+    lighting_cfg = controller.lighting
+    index = controller.index
+    moods = controller.discovered_moods()
+    known = {m["name"].casefold(): m for m in moods}
+    main_known = any(m["in_main"] for m in moods)
     category_keys = {c.key for c in config.categories}
-    for scope, area_id, mood_name, target, setting in iter_profile_entries(config):
+    main_entity = config.mood.main_mood_entity
+    fix = "Edit or remove the entry in the Global Mood Editor or Room Mood Lighting card."
+
+    def room_ctx(area_id: str | None) -> dict[str, Any]:
+        return {"area_id": area_id, "room": (area_name(hass, area_id) or area_id) if area_id else None}
+
+    # Moods and inheritance ------------------------------------------------
+    reported_main: set[str] = set()
+    for scope, area_id, mood_name, target, setting in iter_profile_entries(lighting_cfg):
         where = f"{scope} profile '{mood_name}' / {target}"
         subject = f"{scope}:{area_id or ''}:{mood_name}:{target}"
-        ctx: dict[str, Any] = {
-            "area_id": area_id,
-            "room": area_name(hass, area_id) or area_id if area_id else None,
-            "subject": subject,
-        }
-        fix = "Edit or remove the entry in Configure → Mood profiles."
+        ctx = room_ctx(area_id)
 
-        def profile(code: str, severity: Severity, title: str, text: str, suffix: str = "",
-                    *, where: str = where, fix: str = fix, ctx: dict[str, Any] = ctx, **extra: Any) -> None:
-            add(Problem(code, severity, CONFIG, title, f"{where}: {text}", fix,
-                        **{**ctx, "subject": ctx["subject"] + suffix}, **extra))
+        def profile(code: str, severity: Severity, title: str, text: str, suffix: str = "", *,
+                    where: str = where, subject: str = subject, ctx: dict[str, Any] = ctx,
+                    action: str = fix, **extra: Any) -> None:
+            add(Problem(code, severity, CONFIG, title, f"{where}: {text}", action,
+                        subject=subject + suffix, **ctx, **extra))
 
-        if known_moods and mood_name.casefold() not in known_moods:
+        info = known.get(mood_name.casefold())
+        if main_known and info is None:
             profile("profile_unknown_mood", Severity.WARNING, "Profile for unknown mood",
-                    f"mood '{mood_name}' is not a Main Mood option.")
+                    f"mood '{mood_name}' is not an option of any mood selector.")
+        elif main_known and info and not info["in_main"] and mood_name.casefold() not in reported_main:
+            reported_main.add(mood_name.casefold())
+            add(Problem(
+                "mood_not_in_main", Severity.WARNING, CONFIG, "Mood missing from Main Mood",
+                f"Profiles exist for '{mood_name}', but Main Mood ({main_entity}) has no such option, so the "
+                "profile can only be used as a room mood override or a parent/fallback mood.",
+                f"Add '{mood_name}' to the options of {main_entity} (Settings → Helpers) to use it as the "
+                "effective mood.",
+                entity_id=main_entity, name=friendly_name(hass, main_entity) if main_entity else None,
+                subject=f"mood:{mood_name}",
+            ))
         if scope in ("global", "room") and target not in category_keys:
             profile("profile_unknown_category", Severity.WARNING, "Profile for unknown category",
                     "the category does not exist.")
         if scope == "light":
-            room = config.rooms.get(area_id or "")
-            if room is None or target not in room.lights:
+            managed = controller.managed.get(area_id or "")
+            if managed is None or target not in managed.targets:
                 profile("profile_light_not_managed", Severity.WARNING, "Profile for unmanaged light",
                         "the light is not a managed light of this room.", entity_id=target)
             if caps := lighting.capabilities(hass, target):
-                if setting.rgb_color is not None and not caps["rgb"]:
-                    profile("profile_rgb_unsupported", Severity.WARNING, "RGB not supported",
-                            "the light does not support RGB colour.", entity_id=target)
-                if setting.color_temp_kelvin is not None and not caps["color_temp"]:
+                if (setting.rgb_color is not None or setting.hs_color is not None) and not caps["rgb"]:
+                    profile("profile_rgb_unsupported", Severity.WARNING, "Colour not supported",
+                            "the light does not support RGB/HS colour.", entity_id=target, aspect="lighting")
+                if setting.color_temp_kelvin is not None and not caps["color_temp"] and not caps["rgb"]:
                     profile("profile_kelvin_unsupported", Severity.WARNING, "Colour temperature not supported",
-                            "the light does not support colour temperature.", entity_id=target)
+                            "the light does not support colour temperature.", entity_id=target, aspect="lighting")
+                if setting.brightness_pct is not None and not caps["brightness"]:
+                    profile("profile_brightness_unsupported", Severity.WARNING, "Brightness not supported",
+                            "the light can only be switched on and off.", entity_id=target, aspect="lighting")
                 if setting.effect and setting.effect not in caps["effects"]:
                     profile("profile_effect_unsupported", Severity.WARNING, "Effect not supported",
-                            f"effect '{setting.effect}' is not offered by the light.", entity_id=target)
-        if scope == "global" and setting.action.value == "inherit":
-            profile("global_inherit", Severity.INFO, "Inherit at global level",
-                    "'inherit' at global level means 'ignore'.")
+                            f"effect '{setting.effect}' is not offered by the light.", entity_id=target,
+                            aspect="lighting")
+        if scope == "global" and setting.action.value == "inherit" and not lighting_cfg.parent_of(mood_name) \
+                and not lighting_cfg.fallback_mood:
+            profile("global_inherit", Severity.INFO, "Inherit without a parent mood",
+                    "'inherit' at global level needs a parent or fallback mood; without one it means 'ignore'.")
         for field_name, error in validate_setting(setting).items():
             profile("profile_invalid", Severity.ERROR, "Invalid profile value",
                     f"{field_name} is invalid ({error}).", suffix=f":{field_name}")
+
+    for mood_name, parent in lighting_cfg.parents.items():
+        chain = mood_chain(lighting_cfg, mood_name)
+        if main_known and parent.casefold() not in known:
+            add(Problem(
+                "mood_parent_unknown", Severity.WARNING, CONFIG, "Parent mood unknown",
+                f"'{mood_name}' inherits from '{parent}', which is not an option of any mood selector.",
+                "Choose another parent mood in the Global Mood Editor.", subject=f"parent:{mood_name}",
+            ))
+        if cycle := parent_cycle(lighting_cfg, mood_name, parent):
+            add(Problem(
+                "mood_inheritance_loop", Severity.ERROR, CONFIG, "Mood inheritance loop",
+                f"'{mood_name}' inherits from '{parent}', which leads back to it: {' → '.join(cycle)}. The "
+                f"loop is cut off; resolution uses {' → '.join(chain)}.",
+                "Choose a different parent mood in the Global Mood Editor.", subject=f"loop:{mood_name}",
+            ))
+    if (fb := lighting_cfg.fallback_mood) and main_known and fb.casefold() not in known:
+        add(Problem(
+            "fallback_mood_unknown", Severity.WARNING, CONFIG, "Fallback mood unknown",
+            f"The fallback mood '{fb}' is not an option of any mood selector.",
+            "Choose another fallback mood in the Global Mood Editor settings.", subject="fallback",
+        ))
+
+    status = controller.mood_status()
+    if status.unrepresentable:
+        add(Problem(
+            "mood_unrepresentable", Severity.WARNING, OPERATIONAL, "Mood cannot be represented by Main Mood",
+            f"{status.detail}. Main Mood ({main_entity}) has no option '{status.unrepresentable}'.",
+            f"Add '{status.unrepresentable}' to {main_entity} if it is a real mood, or choose how lighting "
+            "handles it in the Global Mood Editor (follow Main Mood, no mood, or use another mood).",
+            entity_id=main_entity, name=friendly_name(hass, main_entity) if main_entity else None,
+            subject=f"unrepresentable:{status.unrepresentable}", aspect="lighting",
+        ))
+    if lighting_cfg.exclude_label and lr.async_get(hass).async_get_label(lighting_cfg.exclude_label) is None:
+        add(Problem(
+            "exclude_label_missing", Severity.WARNING, CONFIG, "Exclusion label deleted",
+            f"The exclusion label '{lighting_cfg.exclude_label}' no longer exists, so no light is excluded by label.",
+            "Choose another exclusion label in the Global Mood Editor settings.", subject="exclude_label",
+        ))
+
+    # Rooms ------------------------------------------------------------------
+    for area_id in sorted(set(lighting_cfg.rooms) | set(config.enabled_rooms)):
+        room_lighting = lighting_cfg.room(area_id)
+        ctx = room_ctx(area_id)
+        room_name = ctx["room"]
+        enabled = area_id in config.enabled_rooms
+        if room_lighting.control_enabled and not enabled:
+            add(Problem(
+                "lighting_room_not_enabled", Severity.WARNING, CONFIG, "Mood lighting enabled for a disabled room",
+                f"Mood lighting is enabled for {room_name}, but the room is not enabled, so nothing is controlled.",
+                f"Enable the room in Configure → Rooms → {room_name}, or disable its mood lighting.",
+                subject=f"lighting_room:{area_id}", **ctx,
+            ))
+        if room_lighting.mood_override and main_known and room_lighting.mood_override.casefold() not in known:
+            add(Problem(
+                "room_mood_unknown", Severity.WARNING, CONFIG, "Room mood unknown",
+                f"{room_name} uses the mood '{room_lighting.mood_override}', which no mood selector offers.",
+                "Choose another room mood, or follow the global mood, in the Room Mood Lighting card.",
+                subject=f"room_mood:{area_id}", **ctx,
+            ))
+        for switch in room_lighting.manual_switches:
+            if hass.states.get(switch) is None and er.async_get(hass).async_get(switch) is None:
+                add(Problem(
+                    "manual_switch_missing", Severity.WARNING, CONFIG, "Wall switch entity missing",
+                    f"{switch} is configured as a wall switch of {room_name} but does not exist.",
+                    "Remove or replace it in the Room Mood Lighting card.",
+                    entity_id=switch, subject=f"switch:{switch}", **ctx,
+                ))
+        if not enabled:
+            continue
+        managed = controller.managed_room(area_id)
+        active = controller.room_active(area_id)
+        for entity_id in room_lighting.excluded:
+            if hass.states.get(entity_id) is None and er.async_get(hass).async_get(entity_id) is None:
+                add(Problem(
+                    "excluded_light_missing", Severity.INFO, CONFIG, "Excluded light no longer exists",
+                    f"{entity_id} is excluded in {room_name} but no longer exists.",
+                    "Remove it from the excluded lights in the Room Mood Lighting card.",
+                    entity_id=entity_id, subject=f"excluded:{entity_id}", **ctx,
+                ))
+        for entity_id in managed.outside_area:
+            info = index.info(entity_id)
+            add(Problem(
+                "light_outside_area", Severity.WARNING, CONFIG, "Managed light is in another area",
+                f"{entity_id} is a configured light of {room_name}, but it is now assigned to the area "
+                f"'{area_name(hass, info.area_id) if info and info.area_id else '?'}'. It is still managed here.",
+                f"Move it back, or remove it from the lights in Configure → Rooms → {room_name}.",
+                entity_id=entity_id, name=friendly_name(hass, entity_id), **ctx,
+            ))
+        for group in managed.opaque_groups:
+            category = index.category_of(group)
+            same = [e for e in managed.controlled if e != group and category and index.category_of(e) == category]
+            if same:
+                add(Problem(
+                    "group_overlap_unknown", Severity.WARNING, OPERATIONAL, "Possible duplicate group commands",
+                    f"{group} is a group whose members Home Assistant cannot see (for example a Zigbee2MQTT "
+                    f"group), and {room_name} also manages {', '.join(same)} in the same category. If they are "
+                    "members of the group, they receive the same command twice.",
+                    "Exclude either the group or its member lights in the Room Mood Lighting card.",
+                    entity_id=group, name=friendly_name(hass, group), subject=f"opaque:{group}",
+                    aspect="lighting", **ctx,
+                ))
+        acknowledged = set(room_lighting.acknowledged)
+        by_automation: dict[str, list[Any]] = {}
+        for conflicts in controller.conflicts(area_id).values():
+            for c in conflicts:
+                by_automation.setdefault(c.automation, []).append(c)
+        for automation, conflicts in sorted(by_automation.items()):
+            c0 = conflicts[0]
+            lights = sorted({c.light for c in conflicts})
+            blocking = active and c0.enabled and automation not in acknowledged
+            state = "enabled" if c0.enabled else "disabled"
+            if blocking:
+                text = ("Mood lighting leaves these lights alone until you acknowledge the automation or "
+                        "resolve the conflict.")
+            elif automation in acknowledged:
+                text = "Acknowledged: mood lighting and the automation both control these lights."
+            elif c0.enabled:
+                text = "Before you enable mood lighting here, decide how both should work together."
+            else:
+                text = "It is disabled, so it does not compete at the moment."
+            add(Problem(
+                "automation_conflict", Severity.WARNING if blocking else Severity.INFO, OPERATIONAL,
+                "Another automation controls these lights",
+                f"The {state} automation {c0.name or automation} ({automation}) appears to control "
+                f"{', '.join(lights)} in {room_name} ({c0.detail}). {text}",
+                "Disable or change that automation yourself, exclude the lights, or acknowledge it in the "
+                "Room Mood Lighting card. Existing automations are never changed by this integration.",
+                entity_id=automation, name=c0.name, subject=f"conflict:{automation}", aspect="lighting", **ctx,
+            ))
+        if active:
+            rt = controller.runtime.get(area_id)
+            if rt and rt.last_result in ("failed", "partial"):
+                add(Problem(
+                    "lighting_execution_failed", Severity.WARNING, OPERATIONAL, "Mood lighting command failed",
+                    f"The last mood lighting application in {room_name} ({rt.last_decision_at}) "
+                    f"{'partly ' if rt.last_result == 'partial' else ''}failed: {'; '.join(rt.last_errors)}.",
+                    "Check the lights and their integration. The next mood change or arrival tries again.",
+                    subject=f"execution:{area_id}", aspect="lighting", **ctx,
+                ))
+            mood, _ = controller.room_mood(area_id, status)
+            if mood:
+                plan = controller.plan(area_id, "preview", mood)
+                for item in plan.items:
+                    if item.unsupported and item.decision != "skipped":
+                        dropped = any(n.get("level") == "warning" for n in item.unsupported)
+                        add(Problem(
+                            "lighting_unsupported", Severity.WARNING if dropped else Severity.INFO, OPERATIONAL,
+                            "Unsupported light settings" if dropped else "Light settings adapted",
+                            f"In {mood}, {item.entity_id}: "
+                            + "; ".join(n["message"] for n in item.unsupported) + ". The rest is applied.",
+                            "Adjust the profile for this light or category, or ignore this if intended.",
+                            entity_id=item.entity_id, name=item.name, subject=f"unsupported:{item.entity_id}",
+                            aspect="lighting", **ctx,
+                        ))
     return problems

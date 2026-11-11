@@ -39,6 +39,8 @@ ROOM_OCCUPANCY_ENTITIES: dict[str, tuple[str, str]] = {
 }
 # Only for rooms with an existing occupancy helper configured.
 ROOM_COMPARISON_ENTITY: tuple[str, str, str] = ("helper_comparison", "sensor", "room_helper_comparison")
+# Mood lighting state and diagnostics of every enabled room (Phase 0.3).
+ROOM_LIGHTING_ENTITY: tuple[str, str, str] = ("mood_lighting", "sensor", "room_mood_lighting")
 
 
 def global_unique_id(key: str) -> str:
@@ -59,6 +61,7 @@ def expected_unique_ids(config: IntegrationConfig) -> set[str]:
     for area_id, room in config.enabled_rooms.items():
         ids.add(room_unique_id(area_id))
         ids |= {room_entity_unique_id(area_id, key) for key in ROOM_OCCUPANCY_ENTITIES}
+        ids.add(room_entity_unique_id(area_id, ROOM_LIGHTING_ENTITY[0]))
         if room.reference_occupancy_entity:
             ids.add(room_entity_unique_id(area_id, ROOM_COMPARISON_ENTITY[0]))
     return ids

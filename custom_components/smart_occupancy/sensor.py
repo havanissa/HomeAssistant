@@ -23,6 +23,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import PERCENTAGE, EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import PHASE, Classification, OccupancyState, OperatingMode, ProblemCategory, Severity
@@ -38,6 +39,7 @@ from .discovery import area_name
 from .engine import SignalStatus
 from .entity import (
     ROOM_COMPARISON_ENTITY,
+    ROOM_LIGHTING_ENTITY,
     ROOM_OCCUPANCY_ENTITIES,
     RoomOccupancyEntity,
     SmartOccupancyEntity,
@@ -47,7 +49,7 @@ from .entity import (
 )
 from .health import room_health
 from .occupancy import AVAILABLE, PENDING
-from .supervision import control_permitted
+from .const import SIGNAL_LIGHTING_UPDATED, LightingMode
 
 PARALLEL_UPDATES = 0
 
@@ -111,7 +113,9 @@ SENSORS: tuple[SmartSensorDescription, ...] = (
         value_fn=lambda s: s.effective_mode.value,
         attrs_fn=lambda s: {
             "configured_mode": s.configured_mode.value,
-            "lighting_control": False,
+            # The integration-wide mode stays Observe; mood lighting is enabled per room.
+            "lighting_control": bool(s.mood_lighting_rooms),
+            "mood_lighting_rooms": list(s.mood_lighting_rooms),
         },
     ),
     SmartSensorDescription(
@@ -198,6 +202,7 @@ async def async_setup_entry(
         ]
         if room.reference_occupancy_entity:
             entities.append(RoomHelperComparisonSensor(coordinator, area_id))
+        entities.append(RoomMoodLightingSensor(coordinator, area_id))
     async_add_entities(entities)
 
 
@@ -341,6 +346,7 @@ class RoomStateSensor(RoomOccupancyEntity, SensorEntity):
             for v in result.views(SignalStatus.ACTIVE, SignalStatus.GRACE)
         ]
         mode = coordinator.data.effective_mode if coordinator.data else OperatingMode.OBSERVE
+        lighting_active = coordinator.lighting.room_active(self._area_id)
         return {
             "integration": "smart_occupancy",
             "area_id": self._area_id,
@@ -366,8 +372,9 @@ class RoomStateSensor(RoomOccupancyEntity, SensorEntity):
             "health": health,
             "occupancy_usable": health["occupancy"]["usable"],
             "operating_mode": mode.value,
-            "observe_only": mode == OperatingMode.OBSERVE,
-            "lighting_control": control_permitted(mode),
+            # Per room: Observe unless mood lighting was explicitly enabled here.
+            "observe_only": not lighting_active,
+            "lighting_control": lighting_active,
             "comparison": (
                 {"helper": room_config.reference_occupancy_entity, **comparison.as_dict()}
                 if comparison else None
@@ -473,3 +480,52 @@ class RoomHelperComparisonSensor(RoomOccupancyEntity, SensorEntity):
             "helper": self.coordinator.config.room(self._area_id).reference_occupancy_entity,
             **tracker.as_dict(),
         }
+
+
+class RoomMoodLightingSensor(RoomOccupancyEntity, SensorEntity):
+    """Mood lighting state of a room: observe, active or blocked, with its diagnostics.
+
+    Updated when the lighting controller reports a change. Every attribute is
+    excluded from the Recorder; the state changes only with the control mode.
+    """
+
+    _platform_domain = "sensor"
+    _key = ROOM_LIGHTING_ENTITY[0]
+    _attr_translation_key = ROOM_LIGHTING_ENTITY[2]
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [m.value for m in LightingMode]
+    _unrecorded_attributes = frozenset({
+        "area_id", "room", "control_mode_reason", "control_enabled", "activated_at", "global_mood",
+        "global_mood_detail", "mood_source", "room_mood", "follows_global", "room_mood_override",
+        "room_profile_overrides", "managed_lights", "managed", "discovered", "excluded", "covered_by_group",
+        "opaque_groups", "offline_lights", "unsupported", "conflicts", "blocking_automations",
+        "manual_overrides", "manual_override_minutes", "last_applied_profile", "last_applied_at",
+        "last_trigger", "last_result", "last_reason", "last_counts", "last_errors", "last_decision_at",
+        "integration",
+    })
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(async_dispatcher_connect(self.hass, SIGNAL_LIGHTING_UPDATED, self._write_if_changed))
+
+    def _diagnostics(self) -> dict[str, Any]:
+        return self.coordinator.lighting.room_diagnostics(self._area_id)
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.last_update_success
+
+    def _fingerprint(self) -> Any:
+        diag = self._diagnostics()
+        diag.pop("last_external_changes", None)
+        return (self.available, diag)
+
+    @property
+    def native_value(self) -> str | None:
+        return self._diagnostics()["control_mode"]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        diag = self._diagnostics()
+        diag.pop("last_external_changes", None)
+        return {"integration": "smart_occupancy", **diag}

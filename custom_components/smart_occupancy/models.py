@@ -31,6 +31,11 @@ Persisted shape (CONFIG_VERSION 2)::
 
 Version 2 only adds keys, each with a default, so ``migrate_options`` is a
 pure function that keeps every existing value.
+
+Since Phase 0.3 the mood profiles (``global_profiles`` and the rooms'
+``mood_overrides`` / ``light_overrides``) live in the lighting store
+(lighting_config.py), which is seeded once from these keys. The keys are
+left in the options unchanged, so a downgrade still finds them.
 """
 
 from __future__ import annotations
@@ -191,42 +196,71 @@ class OccupancyTiming:
         return replace(self, **_clean_timing(overrides, fill_defaults=False))
 
 
+def _number(value: Any) -> Any:
+    """Keep numbers as they are; parse numeric strings; leave anything else for validation."""
+    if isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError:
+            return value
+        return int(number) if number.is_integer() else number
+    return value
+
+
+def _sequence(value: Any) -> tuple[Any, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return tuple(_number(v) for v in value)
+    return (value,)  # invalid; reported by validation
+
+
 @dataclass(frozen=True, slots=True)
 class ProfileSetting:
-    """One mood profile entry. ``None`` on any field means "inherit"."""
+    """One mood profile entry. ``None`` on any field means "inherit".
+
+    At most one colour field (``color_temp_kelvin``, ``rgb_color``,
+    ``hs_color``) is set per entry. ``persistent`` marks ambient lighting
+    that follows the mood whether or not the room is occupied.
+    """
 
     action: LightAction = LightAction.INHERIT
     brightness_pct: int | None = None
     color_temp_kelvin: int | None = None
     rgb_color: tuple[int, int, int] | None = None
+    hs_color: tuple[float, float] | None = None
     effect: str | None = None
     transition: float | None = None
+    persistent: bool | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ProfileSetting:
-        rgb = data.get("rgb_color")
+        persistent = data.get("persistent")
         return cls(
             action=_enum_or(LightAction, data.get("action"), LightAction.INHERIT),
-            brightness_pct=data.get("brightness_pct"),
-            color_temp_kelvin=data.get("color_temp_kelvin"),
-            rgb_color=tuple(rgb) if rgb is not None else None,  # type: ignore[arg-type]
+            brightness_pct=_number(data.get("brightness_pct")),
+            color_temp_kelvin=_number(data.get("color_temp_kelvin")),
+            rgb_color=_sequence(data.get("rgb_color")),  # type: ignore[arg-type]
+            hs_color=_sequence(data.get("hs_color")),  # type: ignore[arg-type]
             effect=data.get("effect") or None,
-            transition=data.get("transition"),
+            transition=_number(data.get("transition")),
+            persistent=persistent if isinstance(persistent, bool) else None,
         )
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"action": self.action.value}
-        if self.brightness_pct is not None:
-            out["brightness_pct"] = self.brightness_pct
-        if self.color_temp_kelvin is not None:
-            out["color_temp_kelvin"] = self.color_temp_kelvin
-        if self.rgb_color is not None:
-            out["rgb_color"] = list(self.rgb_color)
-        if self.effect is not None:
-            out["effect"] = self.effect
-        if self.transition is not None:
-            out["transition"] = self.transition
+        for key in ("brightness_pct", "color_temp_kelvin", "effect", "transition", "persistent"):
+            if (value := getattr(self, key)) is not None:
+                out[key] = value
+        for key in ("rgb_color", "hs_color"):
+            if (value := getattr(self, key)) is not None:
+                out[key] = list(value)
         return out
+
+    @property
+    def is_empty(self) -> bool:
+        """Nothing set: the entry inherits everything."""
+        return self.as_dict() == {"action": LightAction.INHERIT.value}
 
 
 # mood -> target (category key or light entity id) -> setting

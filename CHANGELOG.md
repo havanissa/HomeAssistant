@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.3.0 — Mood lighting, dashboard editors and controlled activation
+
+Every room still starts in **Observe** mode. Light commands are sent only in rooms where an administrator explicitly enabled mood lighting. Existing automations and the mood selectors are never changed.
+
+### Added
+
+- **Generic mood lighting executor.** One executor works for every mood. Hygge is an ordinary mood: there is no special function or button.
+  - It follows Main Mood, or a per-room mood.
+  - It applies on a mood change, on newly confirmed occupancy (Phase 0.2 engine), on activation, on profile changes (only the affected lights), and when an offline light comes back.
+  - Nothing is applied on start-up or restart.
+  - Identical commands are batched, and commands already in effect are not repeated.
+  - Every decision has a recorded reason.
+- **Occupancy rules for lighting:**
+  - Vacant and uncertain rooms are not changed.
+  - Lights are not switched off on unconfirmed occupancy.
+  - *Ambient* settings follow the mood even while a room is vacant.
+- **Global mood profiles** per light category, with:
+  - On / Off / Inherit / Ignore
+  - brightness 1–100 %
+  - colour temperature, RGB or HS
+  - effect, transition and *ambient*
+- **Mood inheritance**: a parent mood per mood, plus a fallback mood. Loops are refused.
+- **Three-level inheritance**, merged field by field: global → room override → individual light/group override. Values are adapted to each light's capabilities, and what can't be applied is reported.
+- **Moods are discovered** from the three selectors. New moods appear without code changes, and moods missing from Main Mood are explained.
+- **Configurable handling of moods Main Mood cannot represent** (e.g. `Onki`, which is not treated as Auto): follow Main Mood (default), no mood, or another mood. A warning names the missing option.
+- **Label-based discovery**: labelled lights and groups in a room's area are managed automatically. Excluding is possible per room or with an exclusion label.
+- **Group de-duplication**: a managed Home Assistant light group is commanded instead of its members. Groups that hide their members (Zigbee2MQTT, Hue) are reported.
+- **Per-room activation** in the Room Mood Lighting card:
+  - a review of the lights, the exclusions, the groups and the existing automations that appear to control the same lights
+  - explicit two-step confirmation, administrators only
+  - lights of enabled automations that you have not acknowledged are left alone
+- **Automation conflict detection** (read only). It follows the automations' actions through entity, group, member, device, area, floor and label targets, scenes and scripts.
+- **Manual overrides**:
+  - App/UI changes, and wall-switch changes (configured switch entities), are respected for a configurable time (default 60 min; 0 = until vacant).
+  - Overrides are cleared on vacancy or from the card.
+  - Our own commands, including MQTT echoes, and other automations are not mistaken for manual changes. Changes without any context are not manual by default.
+- **Dashboard cards** (served by the integration, with visual editors):
+  - **Global Mood Editor** (`custom:smart-occupancy-mood-editor-card`)
+  - **Room Mood Lighting** (`custom:smart-occupancy-room-lighting-card`)
+
+  Both have:
+  - inherited/overridden display with sources
+  - inline validation and immediate saving
+  - a live preview that never sends commands
+  - light/dark themes and phone layout
+  - no polling (one subscription)
+- **Websocket API** (`smart_occupancy/lighting/*`): authenticated, and every write is `require_admin`.
+- **Per-room sensor** `sensor.smart_occupancy_<room>_mood_lighting` (`observe` / `active` / `blocked`). Its attributes hold:
+  - the global and room mood
+  - managed, offline and unsupported lights
+  - conflicts and manual overrides
+  - the last applied profile, with its time, result and reason
+- **New problems:**
+  - mood not in Main Mood, mood cannot be represented, unknown or looping parent moods
+  - managed light in another area, possible duplicate group commands, automation conflict
+  - unsupported or adapted light settings, failed command
+  - missing wall switch, room mood unknown
+
+### Changed
+
+- **Mood profiles are stored in `.storage/smart_occupancy.lighting`**, owned by the integration and saved without a reload. On the first start the 0.2 profiles are copied there. The config entry options are not changed (a downgrade still loads).
+- The options-flow *Mood profiles* step edits the same store, without reloading.
+- **Managed lights** of a room are now the configured lights plus the labelled lights of its area.
+- **Health split:** mood-lighting problems are shown under *Lighting*, never under *Occupancy*.
+- A group and its member in the **same** room is now an info note (de-duplicated automatically). In **different** rooms it is still a warning.
+- Profile brightness is 1–100 % (use *Off* instead of 0). Several colours in one entry are reported as `several_colors`.
+- The Room Status card shows *Mood lighting* instead of *Observe only* for activated rooms.
+
+### Recorder and efficiency
+
+- No polling.
+- One state subscription for:
+  - the mood helpers
+  - managed lights, and the members of managed groups
+  - wall switches
+- Registry-derived data (labels, areas, categories) is cached and invalidated by registry events. Automation references are cached and refreshed on reloads and on enable/disable.
+- Every attribute of the new sensor is excluded from the Recorder.
+- Runtime state (overrides, last applied profile) is kept in `.storage/smart_occupancy.lighting_state`, with delayed writes.
+
 ## 0.2.0 — Occupancy engine and Room Status card
 
 Still **Observe only**: no light is controlled, no automation or helper is changed, nothing acts on the new occupancy.

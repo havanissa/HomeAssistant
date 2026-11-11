@@ -10,7 +10,7 @@ from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import CoreState, HomeAssistant
-from homeassistant.helpers import area_registry as ar, entity_registry as er
+from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 
 from custom_components.smart_occupancy.const import DOMAIN, PROBLEM_STORE_KEY, STARTUP_GRACE_SECONDS
 from custom_components.smart_occupancy.models import migrate_options
@@ -205,6 +205,10 @@ async def test_invalid_room_configuration(hass: HomeAssistant, home: Home) -> No
 
 
 async def test_multiple_problems_clear_independently(hass: HomeAssistant, home: Home, freezer) -> None:
+    # The lamp's device is in another area; move it into the room so that only the problems
+    # created below are present (a configured light in another area is reported since 0.3).
+    lamp_device = er.async_get(hass).async_get(home.lamp).device_id
+    dr.async_get(hass).async_update_device(lamp_device, area_id=home.pilot_area)
     opts = labelled_options(home, lights=[home.group, home.lamp])
     opts["rooms"][home.pilot_area]["sensors"].append(
         {"entity_id": "binary_sensor.gone", "kind": "pir", "role": "trigger"}

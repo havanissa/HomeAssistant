@@ -15,7 +15,6 @@ from .const import PHASE
 from .coordinator import SmartOccupancyConfigEntry
 from .lighting import expand_group
 from .occupancy import live_signal_summary
-from .profiles import resolve
 
 
 async def async_get_config_entry_diagnostics(
@@ -25,29 +24,19 @@ async def async_get_config_entry_diagnostics(
     config = coordinator.config
     snapshot = coordinator.data
 
+    lighting = coordinator.lighting
     rooms: dict[str, Any] = {}
-    categories_by_light = {
-        light: [c.key for c in snapshot.categories if light in c.lights]
-        for c in snapshot.categories
-        for light in c.lights
-    }
     for area_id, room in config.enabled_rooms.items():
-        mood = snapshot.mood.main_mood
+        managed = lighting.managed_room(area_id)
         rooms[area_id] = {
             "active_signals_now": live_signal_summary(hass, room.sensors),
             "group_members": {
                 light: sorted(members)
-                for light in room.lights
+                for light in managed.targets
                 if (members := expand_group(hass, light))
             },
-            # Preview of what *would* apply in the current mood. Nothing is applied.
-            "resolved_profiles_preview": {
-                light: resolve(
-                    config, mood, area_id, light,
-                    (categories_by_light.get(light) or [None])[0],
-                ).as_dict()
-                for light in room.lights
-            } if mood else {},
+            # Preview of what *would* apply in the room's current mood. Nothing is applied.
+            "resolved_profiles_preview": lighting.plan(area_id, "preview").as_dict(),
         }
 
     return {
@@ -65,4 +54,5 @@ async def async_get_config_entry_diagnostics(
         ],
         "tracked_entities": coordinator.tracked_entities,
         "occupancy": coordinator.occupancy.diagnostics(),
+        "lighting": lighting.diagnostics(),
     }

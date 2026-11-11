@@ -123,7 +123,13 @@ async def test_category_add_edit_remove(hass: HomeAssistant, home: Home) -> None
 
 
 async def test_profiles_global_room_light(hass: HomeAssistant, home: Home, service_calls) -> None:
+    """The options-flow profile editor writes to the lighting store, without reloading."""
     entry = await setup_entry(hass, base_options(home))
+    coordinator = entry.runtime_data
+    options_before = dict(entry.options)
+
+    def store():
+        return entry.runtime_data.lighting.store.config
 
     async def edit(scope: str, mood: str, room: str | None, target: dict, values: dict):
         result = await _open(hass, entry, "profiles")
@@ -135,39 +141,46 @@ async def test_profiles_global_room_light(hass: HomeAssistant, home: Home, servi
         return await hass.config_entries.options.async_configure(result["flow_id"], values)
 
     result = await edit("global", "Kvøld", None, {"category": "downlights"},
-                        {"action": "on", "brightness_pct": 75, "color_temp_kelvin": 3000, "transition": 2, "remove": False})
+                        {"action": "on", "brightness_pct": 75, "color_temp_kelvin": 3000, "transition": 2,
+                         "persistent": "inherit", "remove": False})
     assert result["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
-    assert entry.options["global_profiles"]["Kvøld"]["downlights"] == {
+    assert store().global_profiles["Kvøld"]["downlights"].as_dict() == {
         "action": "on", "brightness_pct": 75, "color_temp_kelvin": 3000, "transition": 2.0,
     }
+    # Saved without a reload: same runtime object, options unchanged.
+    assert entry.runtime_data is coordinator
+    assert dict(entry.options) == options_before
 
     result = await edit("room", "Kvøld", home.pilot_area, {"category": "downlights"},
-                        {"action": "inherit", "brightness_pct": 50, "remove": False})
+                        {"action": "inherit", "brightness_pct": 50, "persistent": "yes", "remove": False})
     await hass.async_block_till_done()
-    assert entry.options["rooms"][home.pilot_area]["mood_overrides"]["Kvøld"]["downlights"] == {
-        "action": "inherit", "brightness_pct": 50,
+    assert store().rooms[home.pilot_area].mood_overrides["Kvøld"]["downlights"].as_dict() == {
+        "action": "inherit", "brightness_pct": 50, "persistent": True,
     }
 
     # Validation: colour temperature and RGB together are rejected.
     result = await edit("light", "Kvøld", home.pilot_area, {"light": home.group},
-                        {"action": "on", "color_temp_kelvin": 2700, "rgb_color": [255, 0, 0], "remove": False})
+                        {"action": "on", "color_temp_kelvin": 2700, "rgb_color": [255, 0, 0], "persistent": "inherit",
+                         "remove": False})
     assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {"rgb_color": "kelvin_and_rgb"}
+    assert result["errors"] == {"rgb_color": "several_colors"}
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {"action": "on", "rgb_color": [255, 0, 0], "effect": "candle", "remove": False}
+        result["flow_id"], {"action": "on", "rgb_color": [255, 0, 0], "effect": "candle", "persistent": "inherit",
+                            "remove": False}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
-    assert entry.options["rooms"][home.pilot_area]["light_overrides"]["Kvøld"][home.group] == {
+    assert store().rooms[home.pilot_area].light_overrides["Kvøld"][home.group].as_dict() == {
         "action": "on", "rgb_color": [255, 0, 0], "effect": "candle",
     }
 
     # Remove the light override again.
-    result = await edit("light", "Kvøld", home.pilot_area, {"light": home.group}, {"action": "on", "remove": True})
+    result = await edit("light", "Kvøld", home.pilot_area, {"light": home.group},
+                        {"action": "on", "persistent": "inherit", "remove": True})
     await hass.async_block_till_done()
-    assert entry.options["rooms"][home.pilot_area]["light_overrides"] == {}
-    # Preparing profiles never touches a light.
+    assert store().rooms[home.pilot_area].light_overrides == {}
+    # Editing profiles in an Observe room never touches a light.
     assert service_calls == []
 
 

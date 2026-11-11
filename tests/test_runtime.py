@@ -41,7 +41,7 @@ async def test_entities_created_with_stable_unique_ids(hass: HomeAssistant, home
         )
     } | {
         f"{DOMAIN}_room_{home.pilot_area}_{k}"
-        for k in ("observation", "occupied", "state", "confidence", "last_activity", "reason")
+        for k in ("observation", "occupied", "state", "confidence", "last_activity", "reason", "mood_lighting")
     }
     assert state(hass, "sensor", "operating_mode").state == "observe"
     room = hass.states.get(eid(hass, "sensor", f"{DOMAIN}_room_{home.pilot_area}_observation"))
@@ -140,8 +140,25 @@ async def test_deleted_label_reported(hass: HomeAssistant, home: Home) -> None:
     assert "category_label_missing" in codes
 
 
-async def test_group_and_member_conflict(hass: HomeAssistant, home: Home) -> None:
-    await setup_entry(hass, base_options(home, lights=[home.group, home.member_a]))
+async def test_group_and_member_in_one_room_are_deduplicated(hass: HomeAssistant, home: Home) -> None:
+    """A group and its member in the same room: only the group is commanded (an info note)."""
+    entry = await setup_entry(hass, base_options(home, lights=[home.group, home.member_a]))
+    config = state(hass, "sensor", "config_problems").attributes
+    assert not [p for p in config["problems"] if p["type"].startswith("group_member")]
+    overlap = [p for p in config["notes"] if p["type"] == "group_member_overlap"]
+    assert len(overlap) == 1 and overlap[0]["entity_id"] == home.member_a
+    managed = entry.runtime_data.lighting.managed_room(home.pilot_area)
+    assert managed.covered_by == {home.member_a: home.group}
+    assert managed.controlled == [home.group]
+
+
+async def test_group_and_member_in_two_rooms_conflict(hass: HomeAssistant, home: Home) -> None:
+    opts = base_options(home, lights=[home.group])
+    opts["rooms"][home.other_area] = {
+        "enabled": True, "sensors": [{"entity_id": home.pir, "kind": "pir", "role": "trigger"}],
+        "lights": [home.member_a],
+    }
+    await setup_entry(hass, opts)
     problems = state(hass, "sensor", "config_problems").attributes["problems"]
     conflict = [p for p in problems if p["type"] == "group_member_conflict"]
     assert len(conflict) == 1 and conflict[0]["entity_id"] == home.member_a
@@ -290,14 +307,19 @@ async def test_diagnostics(hass: HomeAssistant, home: Home) -> None:
     entry = await setup_entry(hass, opts)
     hass.states.async_set(home.radar, "on")
     diag = await async_get_config_entry_diagnostics(hass, entry)
-    assert diag["phase"] == "0.2"
+    assert diag["phase"] == "0.3"
     assert diag["occupancy"][home.pilot_area]["timing"]["inactivity_timeout"] == 600
     room = diag["rooms"][home.pilot_area]
     assert room["active_signals_now"] == {"maintain": [home.radar]}
     assert sorted(room["group_members"][home.group]) == sorted([home.member_a, home.member_b])
-    preview = room["resolved_profiles_preview"][home.group]
-    assert preview["action"] == "on" and preview["brightness_pct"] == 60
-    assert preview["sources"] == {"action": "global", "brightness_pct": "room", "color_temp_kelvin": "global"}
+    preview = next(i for i in room["resolved_profiles_preview"]["items"] if i["entity_id"] == home.group)
+    resolved = preview["resolved"]
+    assert resolved["action"] == "on" and resolved["brightness_pct"] == 60
+    assert {k: v["level"] for k, v in resolved["sources"].items()} == {
+        "action": "global", "brightness_pct": "room", "color_temp_kelvin": "global",
+    }
+    # Profiles were copied from the 0.2 options into the lighting store.
+    assert diag["lighting"]["lighting_config"]["global_profiles"]["Dagur"]["downlights"]["brightness_pct"] == 100
     assert any(a["name"] == "Kamar Norður" for a in diag["areas"])
 
 
