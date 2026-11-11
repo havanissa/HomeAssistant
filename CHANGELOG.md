@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.3 — Daylight-aware occupancy activation
+
+Occupancy switches a room's mood lighting on when someone arrives **and it is dark**. The daylight decision says whether lights are switched on; the mood profile still says what they look like. Nothing is switched off because of daylight, and no brightness or colour is derived from lux. The upgrade sends no command and keeps every setting.
+
+### Added
+
+- **Automatic lighting** in the Smart Room Lighting card (Overview): *Turn on when occupied and dark*, an indoor light sensor picker (illuminance sensors, the room's own first), the inherited outdoor sensor, a darkness threshold slider, and *Daylight now* (*Dark* / *Bright* / *Uncertain*) with a reason and how natural light was determined (measured or estimated). *Last decision* says what the last arrival or darkness change did and why.
+- **Daylight decision per room** (`daylight.py`, `daylight_monitor.py`):
+  - evidence: sun after civil dusk; indoor readings with the lights off and settled; "at most" readings with lights on that are still dark; outdoor darkness; the most recent indoor evidence; outdoor light × the room's daylight factor; twilight
+  - **lamp contamination**: managed lights, group members, lights in the area and configured extra lights or switches mark indoor readings as not usable for daylight while on, and for a settling time after they turn off. A reading counts only if it was *taken* after that (a changed value by default, or every report). Bright readings with lights on are never used; the last trustworthy reading and its time are kept
+  - several indoor sensors per room in priority order (preferred + fallbacks), each with a maximum age, a report mode and a reliability
+  - optional global outdoor sensor, smoothed with a time-weighted median (spikes are ignored)
+  - learned daylight factor (median of trusted indoor/outdoor pairs) or a factor set by the user
+  - hysteresis (turn on below 50 lx, not needed from 100 lx) and a stability period (90 s) for changes while occupied; arrivals use the latest evidence at once
+  - `unknown` / `unavailable` / invalid readings are never 0 lx
+- **Switch-on triggers**: the first motion of a Trigger sensor (PIR) starts a visit at once (*Advanced → Switch on at → Confirmed occupancy* for fewer false triggers); radar and other Maintain sensors hold occupancy; an occupied room becoming dark; mood changes and the other existing triggers.
+- **Policies** per room: *When occupied and dark* (default), *When occupied, regardless of daylight*, *Never automatically*; *When uncertain*: *Turn lights on* (default) or *Leave lights off*. Ambient (persistent) settings are never gated.
+- **Advanced → Daylight**: policy, timing, fallback, thresholds, stability, settling, sensor priority and freshness, influencing lights, calibration (learned/set factor, reset), the global outdoor sensor, and daylight diagnostics.
+- **Entity** `sensor.smart_occupancy_<room>_daylight` (`dark` / `bright` / `uncertain`) with the natural-light text, rounded lux, confidence, basis, contamination, sensor, outdoor lux, sun elevation, reason and the last activation. Attributes are not recorded; it is written only when the rounded summary changes.
+- **Daylight health** in the room health (separate from occupancy and lighting) and problems: light sensor missing / not usable (with the fallback in use), outdoor sensor missing / not usable, influencing light missing, a sensor that reads bright after dusk (a light not listed as influencing).
+- Plans and previews report the daylight decision; blocked lights say why (`daylight`, `daylight_uncertain`, `auto_on_never`). The mood lighting sensor has an `auto_on` attribute (policy, last activation and its reason).
+- Websocket commands `smart_occupancy/lighting/room/daylight` and `smart_occupancy/lighting/daylight/set` (admin only).
+
+### Changed
+
+- Rooms switch on at the first PIR motion instead of waiting for confirmed occupancy, except rooms that were already activated (see Configuration).
+
+### Configuration
+
+- **Lighting store 1.1 → 1.2** (`.storage/smart_occupancy.lighting`): `daylight` per room and globally. Rooms with mood lighting already enabled keep switching on at confirmed occupancy (`on_first_motion: false`). Everything else is kept. 0.3.2 can still read a 1.2 store.
+- **State store**: the last trusted indoor readings and the calibration samples per room.
+- Without a light sensor nothing changes in practice: daylight is uncertain (or dark by the sun) and the default fallback switches lights on as before.
+
 ## 0.3.2 — Global light adjustment and Manual mode
 
 Moods, light types and single lights can follow your **existing** adaptive brightness and colour-temperature system. Smart Occupancy has no adaptive-lighting engine of its own: it reads the values your system publishes. The upgrade changes no setting and sends no command. Every room keeps its Observe/Active state.

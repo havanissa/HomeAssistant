@@ -63,7 +63,7 @@ from .occupancy_manager import OccupancyManager
 from .prediction import NullPredictor
 from .problems import ProblemTracker
 from .supervision import effective_mode
-from .validation import ENTITY_PROBLEM_CODES, Problem, validate, validate_lighting
+from .validation import ENTITY_PROBLEM_CODES, Problem, validate, validate_daylight, validate_lighting
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -407,6 +407,7 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         problems = validate(hass, config, settled=settled, index=self.lighting.index,
                             managed={a: m.targets for a, m in self.lighting.managed.items()})
         problems += validate_lighting(hass, config, self.lighting)
+        problems += validate_daylight(hass, config, self.lighting, settled=settled)
 
         observation = mood_mod.observe(hass, config.mood)
         mismatch = self._evaluate_mismatch(observation)

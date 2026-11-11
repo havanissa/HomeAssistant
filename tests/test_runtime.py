@@ -41,7 +41,8 @@ async def test_entities_created_with_stable_unique_ids(hass: HomeAssistant, home
         )
     } | {
         f"{DOMAIN}_room_{home.pilot_area}_{k}"
-        for k in ("observation", "occupied", "state", "confidence", "last_activity", "reason", "mood_lighting")
+        for k in ("observation", "occupied", "state", "confidence", "last_activity", "reason", "mood_lighting",
+                  "daylight")
     }
     assert state(hass, "sensor", "operating_mode").state == "observe"
     room = hass.states.get(eid(hass, "sensor", f"{DOMAIN}_room_{home.pilot_area}_observation"))
@@ -307,7 +308,7 @@ async def test_diagnostics(hass: HomeAssistant, home: Home) -> None:
     entry = await setup_entry(hass, opts)
     hass.states.async_set(home.radar, "on")
     diag = await async_get_config_entry_diagnostics(hass, entry)
-    assert diag["phase"] == "0.3.2"
+    assert diag["phase"] == "0.3.3"
     assert diag["occupancy"][home.pilot_area]["timing"]["inactivity_timeout"] == 600
     room = diag["rooms"][home.pilot_area]
     assert room["active_signals_now"] == {"maintain": [home.radar]}

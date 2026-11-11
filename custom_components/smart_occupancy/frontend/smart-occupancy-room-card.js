@@ -13,7 +13,7 @@
  */
 
 const CARD_TYPE = "smart-occupancy-room-card";
-const CARD_VERSION = "0.3.2";
+const CARD_VERSION = "0.3.3";
 
 const STATE_LABELS = {
   vacant: "Vacant",
@@ -174,10 +174,11 @@ class SmartOccupancyRoomCard extends HTMLElement {
     }
     // One short line per warning; the full explanations behind "Details".
     const warnings = [];
-    for (const [key, word] of [["occupancy", "Occupancy"], ["lighting", "Lighting"], ["configuration", "Configuration"]]) {
+    // Daylight sensing (0.3.3) is its own area: a light sensor problem never degrades occupancy.
+    for (const [key, word] of [["occupancy", "Occupancy"], ["lighting", "Lighting"], ["configuration", "Configuration"], ["daylight", "Daylight"]]) {
       for (const r of health[key]?.reasons || []) warnings.push([word, r]);
     }
-    const details = ["occupancy", "lighting", "configuration"].flatMap((k) => health[k]?.details || health[k]?.reasons || []);
+    const details = ["occupancy", "lighting", "configuration", "daylight"].flatMap((k) => health[k]?.details || health[k]?.reasons || []);
     const open = this._details;
     const chip = (title, h) => {
       const info = HEALTH[h?.status] || HEALTH.healthy;
@@ -208,7 +209,7 @@ class SmartOccupancyRoomCard extends HTMLElement {
           ${pending ? `<div class="row pending"><span class="label">Vacancy pending</span>
             <span class="value">confirmed in <b data-countdown="${escapeHtml(a.vacancy_confirm_at)}"></b>
             if nothing is detected</span></div>` : ""}
-          <div class="hchips">${chip("Occupancy", health.occupancy)}${chip("Lighting", health.lighting)}${chip("Configuration", health.configuration)}
+          <div class="hchips">${chip("Occupancy", health.occupancy)}${chip("Lighting", health.lighting)}${chip("Configuration", health.configuration)}${health.daylight && health.daylight.status !== "healthy" ? chip("Daylight", health.daylight) : ""}
             ${usable ? "" : `<span class="usable bad">occupancy not usable</span>`}</div>
           ${warnings.length ? `<ul class="warnings">${warnings.slice(0, open ? 99 : 4).map(([w, r]) => `<li><span class="muted">${escapeHtml(w)}:</span> ${escapeHtml(r)}</li>`).join("")}</ul>
             <button class="link" data-details>${open ? "Hide details" : warnings.length > 4 ? `Details (+${warnings.length - 4} more)` : "Details"}</button>

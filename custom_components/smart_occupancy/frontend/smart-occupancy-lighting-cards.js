@@ -15,13 +15,18 @@
  * entries attach that to light types and single lights, and Main Mood =
  * Manual pauses all automatic lighting (shown as a banner).
  *
+ * 0.3.3: "Automatic lighting" in the room card: switch lights on when the room
+ * is occupied and dark, with an indoor light sensor, the inherited outdoor
+ * light, a darkness threshold and the current daylight decision. Sensor
+ * priority, calibration, hysteresis and freshness are under Advanced.
+ *
  * The cards are editors only: the integration owns the configuration
  * (websocket API, admin-only writes). The cards never call a light service and
  * a preview never changes a light. They refetch only when the integration
  * reports a change.
  */
 
-const VERSION = "0.3.2";
+const VERSION = "0.3.3";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -132,6 +137,9 @@ const globalNow = (a) => {
   if (v.color_temp?.status !== "not_configured") parts.push(v.color_temp?.value != null ? `${Math.round(v.color_temp.value)} K` : "— K");
   return parts.join(" · ");
 };
+const DL_WORDS = { dark: "Dark", bright: "Bright", uncertain: "Uncertain" };
+const DL_TONES = { dark: "info", bright: "ok", uncertain: "warn" };
+const AUTO_ON = [["dark", "When occupied and dark (recommended)"], ["always", "When occupied, regardless of daylight"], ["never", "Never automatically"]];
 const STATUS_WORDS = { connected: "Connected", unavailable: "Unavailable", not_configured: "Not configured", stale: "Unavailable (last value used)" };
 const dot = (s) => {
   if (s && s.action !== "on" && s.action !== "off" && (bMode(s) || kMode(s))) return `<span class="dot none"></span>`;
@@ -433,6 +441,11 @@ class SoLightingBase extends HTMLElement {
 
   _onInput(ev) {
     const el = ev.target;
+    if (el.dataset?.control === "dl-threshold") {
+      const out = this.shadowRoot.querySelector("[data-out-dl]");
+      if (out) out.textContent = `${el.value} lx`;
+      return;
+    }
     if (!el.dataset?.ed) return;
     if (el.dataset.field === "brightness_pct") {
       const out = this.shadowRoot.querySelector(`[data-out="${CSS.escape(el.dataset.ed)}"]`);
@@ -557,7 +570,9 @@ class SoLightingBase extends HTMLElement {
       }).join("");
       return `<div class="plan"><div class="plan-head"><b>${esc(p.room)}</b><span class="sub">${esc(p.manual_mode ? "Manual" : p.mood || "no mood")} ·
         ${c.change || 0} change · ${c.unchanged || 0} already right · ${c.blocked || 0} blocked${p.control_enabled ? "" : " · Observe: nothing is sent"}</span></div>
-        ${p.note ? `<div class="note">${esc(p.note)}</div>` : ""}${rows || `<div class="sub">Nothing to change.</div>`}</div>`;
+        ${p.note ? `<div class="note">${esc(p.note)}</div>` : ""}
+        ${p.daylight && !p.manual_mode ? `<div class="sub">Daylight: <b>${esc(DL_WORDS[p.daylight.decision] || p.daylight.decision)}</b> · ${esc(p.daylight.text)}${p.daylight.policy !== "dark" ? ` · switch-on ${p.daylight.policy === "never" ? "off" : "regardless of daylight"}` : ""}</div>` : ""}
+        ${rows || `<div class="sub">Nothing to change.</div>`}</div>`;
     }).join("") + `<button class="link" data-action="preview-detail">${detailed ? "Fewer details" : "Show every light and why"}</button>`;
   }
 
@@ -898,7 +913,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     }
     const h = r.health || {};
     const skip = /lighting conflict|duplicate control/i;
-    for (const [area, word] of [["occupancy", "Occupancy"], ["lighting", "Lighting"], ["configuration", "Configuration"]]) {
+    for (const [area, word] of [["occupancy", "Occupancy"], ["lighting", "Lighting"], ["configuration", "Configuration"], ["daylight", "Daylight"]]) {
       for (const reason of (h[area]?.reasons || []).filter((x) => !skip.test(x)).slice(0, 3)) {
         out.push(`<div class="issue ${h[area].status === "healthy" ? "" : "warn"}"><span class="ilabel">${word}</span><div class="imain">${esc(reason)}</div></div>`);
       }
@@ -922,6 +937,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         ${this._model.adaptive?.status && this._model.adaptive.status !== "not_configured" ? `<div><span>Global adjustment</span><b>${esc(globalNow(this._model.adaptive))}
           <span class="sub ${this._model.adaptive.status === "connected" ? "" : "warn"}">${esc(STATUS_WORDS[this._model.adaptive.status])}</span></b></div>` : ""}
       </div>
+      ${this._autoHtml(r)}
       ${issues ? `<div class="issues">${issues}</div>` : `<div class="note ok">No warnings.</div>`}
       ${this._statusHtml("group")}
       <div class="actions"><button class="btn" data-action="tab" data-tab="lights">Review lights</button>
@@ -929,6 +945,120 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         <button class="btn ghost" data-action="tab" data-tab="preview">Preview room</button>
         <button class="btn ghost" data-action="tab" data-tab="advanced">Advanced</button></div>`;
   }
+
+  // "Automatic lighting": the simple daylight settings and the decision now.
+  _autoHtml(r) {
+    const dl = r.daylight;
+    if (!dl) return "";
+    const c = dl.config;
+    const st = dl.status;
+    const g = dl.global || {};
+    const ro = !this._canEdit ? "disabled" : "";
+    const preferred = c.sensors[0]?.entity_id || "";
+    const cands = dl.candidates || [];
+    const known = cands.some((x) => x.entity_id === preferred);
+    const opt = (x) => `<option value="${esc(x.entity_id)}" ${x.entity_id === preferred ? "selected" : ""}>${esc(x.name)}${x.value != null ? ` · ${esc(x.value)} lx` : ""}${x.in_room ? "" : x.area ? ` (${esc(x.area)})` : ""}</option>`;
+    const sensorRow = c.sensors[0] ? st.sensors?.[0] : null;
+    const act = dl.activation;
+    return `<div class="section auto"><div class="stitle">Automatic lighting</div>
+      <label class="switch"><input type="checkbox" data-control="dl-auto" ${c.auto_on === "dark" ? "checked" : ""} ${ro}> Turn on when occupied and dark</label>
+      ${c.auto_on === "always" ? `<div class="sub">Now: turns on when occupied, regardless of daylight (Advanced).</div>` : c.auto_on === "never" ? `<div class="sub">Occupancy does not switch lights on. Lights that are on still follow the mood.</div>` : ""}
+      <div class="frow"><label>Indoor light sensor</label><div class="fval"><select data-control="dl-sensor" ${ro}>
+        <option value="">None — outdoor light and sun only</option>
+        ${preferred && !known ? `<option value="${esc(preferred)}" selected>${esc(preferred)} (not found)</option>` : ""}
+        ${cands.filter((x) => !x.outdoor || x.in_room).map(opt).join("")}</select>
+        ${sensorRow && sensorRow.status !== "ok" ? `<span class="sub warn">${esc(sensorRow.detail)}</span>` : ""}${this._statusHtml("daylight")}</div></div>
+      <div class="frow"><label>Outdoor light</label><div class="fval">${g.outdoor_entity ? `<span>${esc(g.outdoor_name || g.outdoor_entity)}</span>` : `<span class="muted">No outdoor sensor — sun position</span>`}
+        <span class="sub">global setting${st.outdoor?.value != null ? ` · ${esc(st.outdoor.value)} lx` : ""}</span></div></div>
+      <div class="frow"><label>Darkness threshold</label><div class="fval"><input type="range" min="5" max="300" step="5" value="${esc(c.on_below)}" data-control="dl-threshold" ${ro}>
+        <b class="val" data-out-dl>${esc(c.on_below)} lx</b><span class="sub">lights turn on below this</span></div></div>
+      <div class="frow"><label>Daylight now</label><div class="fval"><span class="pill ${DL_TONES[st.decision] || ""}">${esc(DL_WORDS[st.decision] || st.decision)}</span>
+        <span class="sub">${esc(st.reason)}</span></div></div>
+      <div class="sub">${esc(st.natural_light)}${st.estimated ? " (an estimate, not a measured value)" : ""}</div>
+      ${st.contaminated && st.contamination ? `<div class="sub">Indoor readings are not used as daylight now · ${esc(st.contamination)}</div>` : ""}
+      ${act ? `<div class="sub">Last decision: <b>${esc(act.text.split(" · ")[0])}</b> · ${fmtTime(act.at)}</div>` : ""}</div>`;
+  }
+
+  // Advanced → Daylight: priority, freshness, calibration, hysteresis, outdoor light.
+  _daylightAdvanced(r) {
+    const dl = r.daylight;
+    if (!dl) return "";
+    const c = dl.config;
+    const st = dl.status;
+    const g = dl.global || {};
+    const ro = !this._canEdit ? "disabled" : "";
+    const cands = dl.candidates || [];
+    const used = new Set(c.sensors.map((x) => x.entity_id));
+    const num = (key, value, min, max, unit, step = 1) => `<input type="number" class="num" min="${min}" max="${max}" step="${step}" value="${esc(value ?? "")}" data-control="dl-num" data-key="${key}" ${ro}> ${unit}`;
+    const sensors = c.sensors.map((x, i) => {
+      const live = (st.sensors || [])[i] || {};
+      return `<div class="sensor"><div><b>${esc(live.name || x.entity_id)}</b> <span class="pill ${i ? "muted" : "info"}">${i ? `fallback ${i}` : "preferred"}</span>
+          <span class="sub ${live.status === "ok" ? "" : "warn"}">${esc(live.status === "ok" ? `${live.value} lx · reported ${fmtTime(live.reported_at)}` : live.detail || live.status)}</span></div>
+        <div class="fval"><select data-control="dl-s-mode" data-index="${i}" ${ro}>
+            <option value="changes" ${x.report_mode === "changes" ? "selected" : ""}>New measurement: changed value</option>
+            <option value="reports" ${x.report_mode === "reports" ? "selected" : ""}>New measurement: every report</option></select>
+          <select data-control="dl-s-rel" data-index="${i}" ${ro}>
+            <option value="normal" ${x.reliability === "normal" ? "selected" : ""}>Reliable</option>
+            <option value="low" ${x.reliability === "low" ? "selected" : ""}>Less reliable</option></select>
+          <input type="number" class="num" min="0" max="1440" value="${esc(x.max_age)}" data-control="dl-s-age" data-index="${i}" ${ro}> min max age
+          ${ro ? "" : `${i ? `<button class="link" data-action="dl-up" data-index="${i}">prefer</button>` : ""}<button class="link" data-action="dl-remove" data-index="${i}">remove</button>`}</div></div>`;
+    }).join("");
+    const outdoorOpts = [...cands].sort((a, b) => (b.outdoor - a.outdoor));
+    const f = st.factor || {};
+    const lt = st.last_trusted;
+    const act = dl.activation;
+    return `<div class="stitle">Daylight</div>
+      <div class="frow"><label>Automatic switch-on</label><div class="fval"><select data-control="dl-policy" ${ro}>${AUTO_ON.map(([v, l]) => `<option value="${v}" ${c.auto_on === v ? "selected" : ""}>${l}</option>`).join("")}</select></div></div>
+      <div class="frow"><label>Switch on at</label><div class="fval"><select data-control="dl-motion" ${ro}>
+        <option value="motion" ${c.on_first_motion ? "selected" : ""}>First motion (PIR): prompt</option>
+        <option value="confirmed" ${c.on_first_motion ? "" : "selected"}>Confirmed occupancy: fewer false triggers</option></select></div></div>
+      <div class="frow"><label>When uncertain</label><div class="fval"><select data-control="dl-uncertain" ${ro}>
+        <option value="turn_on" ${c.uncertain === "turn_on" ? "selected" : ""}>Turn lights on</option>
+        <option value="stay_off" ${c.uncertain === "stay_off" ? "selected" : ""}>Leave lights off</option></select></div></div>
+      <div class="frow"><label>Not needed above</label><div class="fval">${num("off_above", c.off_above, 2, 10000, "lx")}<span class="sub">lights turn on below ${esc(c.on_below)} lx; between the two the decision stays as it was</span></div></div>
+      <div class="frow"><label>Stable for</label><div class="fval">${num("stable_seconds", c.stable_seconds, 0, 1800, "s")}<span class="sub">before a change in daylight counts (an arrival uses the latest reading at once)</span></div></div>
+      <div class="frow"><label>Settle after off</label><div class="fval">${num("settle_seconds", c.settle_seconds, 0, 900, "s")}<span class="sub">readings after the lights go off are used only after this</span></div></div>
+      <div class="frow"><label>Last reading valid</label><div class="fval">${num("sample_max_age", c.sample_max_age, 1, 240, "min")}<span class="sub">while the lights are on</span></div></div>
+      <div class="stitle">Light sensors in priority order</div>
+      ${sensors || `<div class="muted">No indoor light sensor.</div>`}
+      ${ro ? "" : `<div class="fval"><select data-control="dl-add"><option value="">Add a fallback sensor…</option>
+        ${cands.filter((x) => !used.has(x.entity_id)).map((x) => `<option value="${esc(x.entity_id)}">${esc(x.name)}${x.value != null ? ` · ${esc(x.value)} lx` : ""}${x.area ? ` (${esc(x.area)})` : ""}</option>`).join("")}</select></div>`}
+      <div class="stitle">Lights that reach the sensors</div>
+      <label class="switch"><input type="checkbox" data-control="dl-area-lights" ${c.area_lights ? "checked" : ""} ${ro}> Every light in this area (managed lights always count)</label>
+      <div class="frow"><label>Also</label><div class="fval"><input type="text" value="${esc((c.influencing || []).join(", "))}" placeholder="light.window_lamp, switch.stova_lamp" data-control="dl-influencing" ${ro}></div></div>
+      <div class="sub">${(dl.influencing || []).length} light(s) counted. While one is on, indoor readings are not used as daylight.</div>
+      <div class="stitle">Calibration</div>
+      <div class="frow"><label>Daylight factor</label><div class="fval"><input type="number" class="num" style="width:7em" min="0.0001" max="1" step="0.001" placeholder="${f.learned != null ? esc(f.learned) : "learned"}" value="${esc(f.set ?? "")}" data-control="dl-factor" ${ro}>
+        <span class="sub">indoor ÷ outdoor light · learned: ${f.learned != null ? `${esc(f.learned)} (${esc(f.samples)} samples)` : `not yet (${esc(f.samples || 0)} of 3 samples)`}</span>
+        ${ro ? "" : `<button class="link" data-action="dl-reset-cal">reset</button>`}</div></div>
+      <div class="stitle">Outdoor light (all rooms)</div>
+      <div class="frow"><label>Outdoor sensor</label><div class="fval"><select data-control="dl-outdoor" ${ro}><option value="">None — sun position only</option>
+        ${g.outdoor_entity && !cands.some((x) => x.entity_id === g.outdoor_entity) ? `<option value="${esc(g.outdoor_entity)}" selected>${esc(g.outdoor_entity)}</option>` : ""}
+        ${outdoorOpts.map((x) => `<option value="${esc(x.entity_id)}" ${x.entity_id === g.outdoor_entity ? "selected" : ""}>${esc(x.name)}${x.value != null ? ` · ${esc(x.value)} lx` : ""}</option>`).join("")}</select>${this._statusHtml("daylight-global")}</div></div>
+      <div class="frow"><label>Dark outside below</label><div class="fval"><input type="number" class="num" min="0" max="5000" value="${esc(g.outdoor_dark_lux)}" data-control="dl-out" data-key="outdoor_dark_lux" ${ro}> lx</div></div>
+      <div class="frow"><label>Smoothing</label><div class="fval"><input type="number" class="num" min="0" max="1800" value="${esc(g.outdoor_window)}" data-control="dl-out" data-key="outdoor_window" ${ro}> s <span class="sub">short spikes are ignored</span></div></div>
+      <div class="stitle">Daylight diagnostics</div>
+      <div class="kvs">
+        <div><span>Decision</span><b>${esc(DL_WORDS[st.decision] || st.decision)}${st.committed && st.committed !== st.decision ? ` (stable: ${esc(DL_WORDS[st.committed])})` : ""}</b></div>
+        <div><span>Confidence</span><b>${esc(st.confidence || "none")}</b></div>
+        <div><span>Chosen sensor</span><b>${esc(st.chosen ? st.chosen.name || st.chosen.entity_id : "none")}</b></div>
+        <div><span>Indoor readings</span><b>${st.contaminated ? `<span class="warn">affected by lights</span>` : "usable"}</b></div>
+        <div><span>Last trustworthy</span><b>${lt ? `${esc(lt.lux)} lx · ${fmtTime(lt.at)}` : "—"}</b></div>
+        <div><span>Outdoor</span><b>${st.outdoor?.entity_id ? (st.outdoor.value != null ? `${esc(st.outdoor.value)} lx` : esc(st.outdoor.status)) : "not configured"}</b></div>
+        <div><span>Sun</span><b>${st.sun?.elevation != null ? `${esc(st.sun.elevation)}°` : "—"}${st.sun?.next_sunset ? ` · sets ${fmtTime(st.sun.next_sunset)}` : ""}</b></div>
+        <div><span>Last switch-on</span><b>${dl.last_activation_at ? fmtTime(dl.last_activation_at) : "never"}</b></div>
+      </div>
+      <div class="sub">${esc(st.natural_light)}</div>
+      ${act ? `<div class="sub">Why (last arrival or darkness change): ${esc(act.text)}</div>` : ""}
+      ${(st.estimate?.notes || []).length ? `<div class="sub">${esc(st.estimate.notes.join(" · "))}</div>` : ""}
+      ${(st.errors || []).length ? `<div class="sub warn">${esc(st.errors.join(" · "))}</div>` : ""}`;
+  }
+
+  _saveDaylight(change, key = "daylight") {
+    this._save(key, { type: `${WS}/room/daylight`, area_id: this._config.area, ...change });
+  }
+
+  _sensors() { return (this._model.room.daylight?.config?.sensors || []).map((x) => ({ ...x })); }
 
   // Lights grouped by light type: one line per type, details on demand.
   _lights(r) {
@@ -1071,6 +1201,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       <div class="frow"><label>Respect manual changes</label><div class="fval"><input type="number" class="num" min="0" max="1440" placeholder="${esc(this._model.settings.manual_override_minutes)}" value="${s.manual_override_minutes ?? ""}" data-control="room-minutes" ${ro ? "disabled" : ""}> min${this._statusHtml("room-minutes")}</div></div>
       <div class="frow"><label>Wall switch entities</label><div class="fval"><input type="text" value="${esc((s.manual_switches || []).join(", "))}" placeholder="event.switch_action" data-control="switches" ${ro ? "disabled" : ""}>${this._statusHtml("switches")}</div></div>
       <label class="switch"><input type="checkbox" data-control="auto-discover" ${s.auto_discover ? "checked" : ""} ${ro ? "disabled" : ""}> Manage labelled lights in this area automatically</label>${this._statusHtml("room")}
+      ${this._daylightAdvanced(r)}${this._statusHtml("daylight")}
       <div class="stitle">Last decision</div>
       <div class="sub">${esc(d.last_reason || d.control_mode_reason)}${d.last_errors?.length ? ` · ${esc(d.last_errors.join("; "))}` : ""}</div>
       <div class="stitle">All diagnostics</div>${this._problemsHtml(r.problems)}`;
@@ -1101,6 +1232,15 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       this._save("activation", { type: `${WS}/room/activate`, area_id: area, confirm: true, acknowledge: ack }, "Mood lighting enabled").then(() => this._loadReview());
     } else if (a === "deactivate") this._save("activation", { type: `${WS}/room/deactivate`, area_id: area }, "Back in Observe").then(() => this._loadReview());
     else if (a === "clear-override") this._save("activation", { type: `${WS}/override/clear`, area_id: area, entity_id: el.dataset.entity }, "Cleared");
+    else if (a === "dl-up" || a === "dl-remove") {
+      const list = this._sensors();
+      const i = Number(el.dataset.index);
+      const [item] = list.splice(i, 1);
+      if (a === "dl-up") list.unshift(item);
+      this._saveDaylight({ sensors: list });
+    } else if (a === "dl-reset-cal") {
+      if (confirm("Forget the learned daylight factor and the last trusted readings of this room?")) this._saveDaylight({ reset_calibration: true });
+    }
   }
 
   _onControl(el) {
@@ -1122,6 +1262,29 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         el.checked ? "Allowed" : "No longer allowed").then(() => this._loadReview());
     } else if (c === "room-minutes") this._save("room-minutes", { type: `${WS}/room/set`, area_id: area, manual_override_minutes: el.value === "" ? null : Number(el.value) });
     else if (c === "switches") this._save("switches", { type: `${WS}/room/set`, area_id: area, manual_switches: el.value.split(/[\s,]+/).filter(Boolean) });
+    else if (c === "dl-auto") this._saveDaylight({ auto_on: el.checked ? "dark" : "never" });
+    else if (c === "dl-policy") this._saveDaylight({ auto_on: el.value });
+    else if (c === "dl-motion") this._saveDaylight({ on_first_motion: el.value === "motion" });
+    else if (c === "dl-uncertain") this._saveDaylight({ uncertain: el.value });
+    else if (c === "dl-threshold") this._saveDaylight({ on_below: Number(el.value) });
+    else if (c === "dl-num" && el.value !== "") this._saveDaylight({ [el.dataset.key]: Number(el.value) });
+    else if (c === "dl-area-lights") this._saveDaylight({ area_lights: el.checked });
+    else if (c === "dl-influencing") this._saveDaylight({ influencing: el.value.split(/[\s,]+/).filter(Boolean) });
+    else if (c === "dl-factor") this._saveDaylight({ factor: el.value === "" ? null : Number(el.value) });
+    else if (c === "dl-sensor") {
+      const rest = this._sensors().slice(1).filter((x) => x.entity_id !== el.value);
+      this._saveDaylight({ sensors: el.value ? [{ entity_id: el.value }, ...rest] : rest });
+    } else if (c === "dl-add" && el.value) this._saveDaylight({ sensors: [...this._sensors(), { entity_id: el.value }] });
+    else if (c === "dl-s-mode" || c === "dl-s-rel" || c === "dl-s-age") {
+      const list = this._sensors();
+      const item = list[Number(el.dataset.index)];
+      if (!item || (c === "dl-s-age" && el.value === "")) return;
+      if (c === "dl-s-mode") item.report_mode = el.value;
+      else if (c === "dl-s-rel") item.reliability = el.value;
+      else item.max_age = Number(el.value);
+      this._saveDaylight({ sensors: list });
+    } else if (c === "dl-outdoor") this._save("daylight-global", { type: `${WS}/daylight/set`, outdoor_entity: el.value || null });
+    else if (c === "dl-out" && el.value !== "") this._save("daylight-global", { type: `${WS}/daylight/set`, [el.dataset.key]: Number(el.value) });
   }
 }
 
@@ -1247,6 +1410,9 @@ const STYLE = `<style>
   .pill.muted { color: var(--secondary-text-color); }
   .section { display: grid; gap: 8px; border-top: 1px solid var(--divider-color); padding-top: 10px; }
   .stitle { font-weight: 500; margin-top: 6px; }
+  .section.auto { display: grid; gap: 6px; margin-top: 8px; }
+  .sensor { display: grid; gap: 4px; border-bottom: 1px solid var(--divider-color); padding: 4px 0; }
+  .sub.warn, .warn { color: var(--warning-color, #ff9800); }
   .editor { display: grid; gap: 12px; padding: 12px; border: 1px solid var(--primary-color); border-radius: 12px; }
   .ehead { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
   .etitle { font-size: 1.1em; font-weight: 500; }

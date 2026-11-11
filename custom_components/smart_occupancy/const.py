@@ -7,8 +7,8 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.3.2"
-VERSION: Final = "0.3.2"
+PHASE: Final = "0.3.3"
+VERSION: Final = "0.3.3"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -221,6 +221,8 @@ CARD_FILENAMES: Final = (CARD_FILENAME, LIGHTING_CARD_FILENAME)
 # Owned by the integration, edited by the dashboard cards over the websocket
 # API, and saved without reloading the integration.
 LIGHTING_STORE_VERSION: Final = 1
+# Minor 2 (0.3.3): daylight settings; rooms activated before 0.3.3 keep waiting for confirmed occupancy.
+LIGHTING_STORE_MINOR_VERSION: Final = 2
 LIGHTING_STORE_KEY: Final = "smart_occupancy.lighting"
 LIGHTING_SAVE_DELAY_SECONDS: Final = 1
 # Runtime state of mood lighting (manual overrides, last applied profile).
@@ -306,3 +308,72 @@ class SourceScale(StrEnum):
     BYTE = "byte"         # brightness 0-255
     KELVIN = "kelvin"
     MIRED = "mired"
+
+
+# Daylight-aware automatic switch-on (Phase 0.3.3) -----------------------------
+class AutoOn(StrEnum):
+    """When occupancy may switch a room's lights on."""
+
+    DARK = "dark"          # when occupied and dark (default)
+    ALWAYS = "always"      # when occupied, regardless of daylight (behaviour before 0.3.3)
+    NEVER = "never"        # never switched on automatically (lights already on still follow the mood)
+
+
+class UncertainPolicy(StrEnum):
+    """What automatic switch-on does while daylight cannot be determined."""
+
+    TURN_ON = "turn_on"    # switch on (as before 0.3.3; default)
+    STAY_OFF = "stay_off"  # leave the lights off
+
+
+class ReportMode(StrEnum):
+    """What counts as a new measurement of an indoor light sensor."""
+
+    CHANGES = "changes"    # only a changed value (safe for sensors that repeat cached values)
+    REPORTS = "reports"    # every report, also with an unchanged value (frequently reporting sensors)
+
+
+class Reliability(StrEnum):
+    NORMAL = "normal"
+    LOW = "low"
+
+
+class Darkness(StrEnum):
+    """Daylight decision of a room."""
+
+    DARK = "dark"
+    BRIGHT = "bright"
+    UNCERTAIN = "uncertain"
+
+
+DEFAULT_ON_BELOW_LUX: Final = 50          # turn-on threshold
+DEFAULT_OFF_ABOVE_LUX: Final = 100        # light-not-needed threshold (hysteresis)
+DEFAULT_DAYLIGHT_STABLE_SECONDS: Final = 90
+DEFAULT_SETTLE_SECONDS: Final = 60        # after influencing lights turn off
+DEFAULT_SAMPLE_MAX_AGE_MINUTES: Final = 30
+DEFAULT_OUTDOOR_DARK_LUX: Final = 50
+DEFAULT_OUTDOOR_WINDOW_SECONDS: Final = 300
+LUX_MIN: Final = 1
+LUX_MAX_THRESHOLD: Final = 5000
+LUX_VALID_MAX: Final = 200000             # a reading above this is invalid
+STABLE_SECONDS_MAX: Final = 1800
+SETTLE_SECONDS_MAX: Final = 900
+SENSOR_MAX_AGE_MAX_MINUTES: Final = 1440
+SAMPLE_MAX_AGE_MAX_MINUTES: Final = 240
+OUTDOOR_WINDOW_MAX_SECONDS: Final = 1800
+DAYLIGHT_FACTOR_MIN: Final = 0.0001
+DAYLIGHT_FACTOR_MAX: Final = 1.0
+# Sun elevation (degrees) below which it is reliably dark outside (end of civil twilight),
+# and the horizon used for sunset (refraction included).
+SUN_DARK_ELEVATION: Final = -6.0
+SUN_HORIZON_ELEVATION: Final = -0.833
+# Calibration: trusted indoor/outdoor pairs give the room's daylight factor.
+CALIBRATION_MIN_OUTDOOR_LUX: Final = 200
+CALIBRATION_MIN_INTERVAL_SECONDS: Final = 600
+CALIBRATION_MAX_SAMPLES: Final = 20
+CALIBRATION_MIN_SAMPLES: Final = 3
+# Lux changes are coalesced this long before a background re-evaluation.
+DAYLIGHT_DEBOUNCE_SECONDS: Final = 3.0
+# A contaminated (lights on) indoor reading below the turn-on threshold proves darkness
+# while it is at most this old.
+BOUND_MAX_AGE_MINUTES: Final = 30

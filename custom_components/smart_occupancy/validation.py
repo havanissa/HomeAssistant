@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar, entity_registry as er, label_registry as lr
+from homeassistant.util import dt as dt_util
 
 from . import lighting
 from .const import (
@@ -749,4 +750,78 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
         if p.area_id and p.severity == Severity.WARNING and p.subject \
                 and p.subject in lighting_cfg.room(p.area_id).dismissed:
             problems[i] = replace(p, severity=Severity.INFO)
+    return problems
+
+
+def validate_daylight(hass: HomeAssistant, config: IntegrationConfig, controller: LightingController, *,
+                      settled: bool = True) -> list[Problem]:
+    """Daylight sensing problems (0.3.3). Aspect "daylight": kept apart from occupancy and lighting health."""
+    problems: list[Problem] = []
+    add = problems.append
+    glob = controller.lighting.daylight
+    ent_reg = er.async_get(hass)
+    if (outdoor := glob.outdoor_entity) is not None:
+        state = hass.states.get(outdoor)
+        name = friendly_name(hass, outdoor)
+        if state is None and ent_reg.async_get(outdoor) is None:
+            add(Problem(
+                "daylight_outdoor_missing", Severity.WARNING, CONFIG, "Outdoor light sensor missing",
+                f"The outdoor light sensor {outdoor} does not exist, so outdoor light is not used.",
+                "Choose another outdoor light sensor in the Smart Room Lighting card (Advanced → Daylight).",
+                entity_id=outdoor, subject="daylight_outdoor", aspect="daylight",
+            ))
+        else:
+            reading = controller.daylight._outdoor_reading(dt_util.utcnow())
+            if reading.status != "ok" and (settled or reading.status == "invalid"):
+                add(Problem(
+                    "daylight_outdoor_unavailable", Severity.WARNING, OPERATIONAL, "Outdoor light sensor unusable",
+                    f"{reading.detail}. It is never taken as 0 lx: rooms use indoor sensors and the sun meanwhile.",
+                    "Check the outdoor sensor's battery and connection.",
+                    entity_id=outdoor, name=name, subject="daylight_outdoor", aspect="daylight",
+                ))
+    for area_id in sorted(config.enabled_rooms):
+        cfg = controller.lighting.room(area_id).daylight
+        room_name = area_name(hass, area_id) or area_id
+        ctx = {"area_id": area_id, "room": room_name}
+        status = controller.daylight.status(area_id)
+        usable = [r for r in status.readings if r.usable]
+        for reading in status.readings:
+            entity_id = reading.entity_id
+            if reading.status == "missing" and ent_reg.async_get(entity_id) is None:
+                add(Problem(
+                    "daylight_sensor_missing", Severity.WARNING, CONFIG, "Light sensor missing",
+                    f"{entity_id} is a light sensor of {room_name} but does not exist.",
+                    "Remove or replace it in the Smart Room Lighting card.",
+                    entity_id=entity_id, subject=f"daylight_sensor:{entity_id}", aspect="daylight", **ctx,
+                ))
+            elif reading.status != "ok":
+                if not settled and reading.status in ("missing", "unavailable", "unknown"):
+                    continue  # still loading after a start
+                fallback = next((r for r in usable if r.entity_id != entity_id), None)
+                tail = (f" {fallback.name or fallback.entity_id} is used instead." if fallback
+                        else " Daylight is estimated from the outdoor light and the sun meanwhile.")
+                add(Problem(
+                    "daylight_sensor_unavailable", Severity.WARNING if not fallback else Severity.INFO,
+                    OPERATIONAL, "Light sensor not usable",
+                    f"{reading.name or entity_id} in {room_name} {reading.detail}; it is never read as 0 lx.{tail}",
+                    "Check the sensor's battery and connection, or its freshness limit (Advanced → Daylight).",
+                    entity_id=entity_id, name=reading.name, subject=f"daylight_sensor:{entity_id}",
+                    aspect="daylight", **ctx,
+                ))
+        for entity_id in cfg.influencing:
+            if hass.states.get(entity_id) is None and ent_reg.async_get(entity_id) is None:
+                add(Problem(
+                    "daylight_influencing_missing", Severity.INFO, CONFIG, "Influencing light missing",
+                    f"{entity_id} is listed as a light that reaches the sensors of {room_name}, but it does not exist.",
+                    "Remove it from the influencing lights (Advanced → Daylight).",
+                    entity_id=entity_id, subject=f"daylight_influencing:{entity_id}", aspect="daylight", **ctx,
+                ))
+        for note in status.estimate.notes:
+            if "not listed as influencing" in note:
+                add(Problem(
+                    "daylight_unknown_light", Severity.INFO, OPERATIONAL, "Light sensor sees another light",
+                    f"In {room_name}: {note}. That reading is not used as daylight.",
+                    "Add the light that reaches the sensor as an influencing light (Advanced → Daylight).",
+                    subject=f"daylight_unknown_light:{area_id}", aspect="daylight", **ctx,
+                ))
     return problems

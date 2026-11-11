@@ -77,7 +77,7 @@ def test_lighting_cards_never_control_lights() -> None:
     assert commands <= {
         "subscribe", "editor", "preview", "profile/set", "mood/set", "settings/set", "room/set", "room/activation",
         "room/activate", "room/deactivate", "room/acknowledge", "override/clear", "room/group_choice",
-        "category/set", "category/remove", "adaptive/set",
+        "category/set", "category/remove", "adaptive/set", "room/daylight", "daylight/set",
     }, commands
 
 

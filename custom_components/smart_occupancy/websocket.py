@@ -22,13 +22,31 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import config_validation as cv, entity_registry as er, label_registry as lr
+from homeassistant.helpers import (
+    config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
+    label_registry as lr,
+)
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
 from .adaptive import read_brightness, read_color_temp
 from .const import (
+    DAYLIGHT_FACTOR_MAX,
+    DAYLIGHT_FACTOR_MIN,
+    LUX_MAX_THRESHOLD,
+    LUX_MIN,
+    OUTDOOR_WINDOW_MAX_SECONDS,
+    SAMPLE_MAX_AGE_MAX_MINUTES,
+    SENSOR_MAX_AGE_MAX_MINUTES,
+    SETTLE_SECONDS_MAX,
+    STABLE_SECONDS_MAX,
+    AutoOn,
+    Reliability,
+    ReportMode,
+    UncertainPolicy,
     ADAPTIVE_BRIGHTNESS_STEP_MAX,
     ADAPTIVE_KELVIN_STEP_MAX,
     ADAPTIVE_MIN_INTERVAL_MAX,
@@ -45,6 +63,7 @@ from .const import (
     UnrepresentableMode,
 )
 from .controller import LightingController
+from .daylight import DaylightConfig, RoomDaylight, parse_lux, round_lux
 from .discovery import area_name
 from .health import room_health
 from .lighting import light_capabilities
@@ -133,6 +152,59 @@ def source_candidates(hass: HomeAssistant) -> dict[str, list[dict[str, Any]]]:
     for items in out.values():
         items.sort(key=lambda x: (not x["likely"], x["name"].casefold()))
     return out
+
+
+_OUTDOOR_HINTS = ("outdoor", "outside", "uti", "úti", "weather", "veður", "vedur", "garden", "balcony", "altan")
+
+
+def illuminance_candidates(hass: HomeAssistant, area_id: str | None = None) -> list[dict[str, Any]]:
+    """Illuminance sensors (device class illuminance or unit lx). Read only; the room's own first."""
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+    out = []
+    for state in hass.states.async_all("sensor"):
+        attrs = state.attributes
+        unit = str(attrs.get("unit_of_measurement") or "").strip().casefold()
+        if attrs.get("device_class") != "illuminance" and unit not in ("lx", "lux"):
+            continue
+        entry = ent_reg.async_get(state.entity_id)
+        if entry is not None and entry.platform == DOMAIN:
+            continue
+        area = entry.area_id if entry else None
+        if area is None and entry and entry.device_id and (device := dev_reg.async_get(entry.device_id)):
+            area = device.area_id
+        value, status, _ = parse_lux(state)
+        text = f"{state.entity_id} {attrs.get('friendly_name') or ''}".casefold()
+        out.append({
+            "entity_id": state.entity_id, "name": attrs.get("friendly_name") or state.entity_id,
+            "value": round_lux(value) if status == "ok" else None, "status": status,
+            "area_id": area, "area": area_name(hass, area) if area else None,
+            "in_room": bool(area_id and area == area_id),
+            "outdoor": any(h in text for h in _OUTDOOR_HINTS),
+        })
+    out.sort(key=lambda c: (not c["in_room"], c["outdoor"], c["name"].casefold()))
+    return out
+
+
+def daylight_global(hass: HomeAssistant, ctrl: LightingController) -> dict[str, Any]:
+    cfg = ctrl.lighting.daylight
+    state = hass.states.get(cfg.outdoor_entity) if cfg.outdoor_entity else None
+    return {**cfg.as_dict(), "outdoor_name": friendly_name(hass, cfg.outdoor_entity) if cfg.outdoor_entity else None,
+            "outdoor_exists": state is not None or not cfg.outdoor_entity}
+
+
+def daylight_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> dict[str, Any]:
+    status = ctrl.daylight.evaluate(area_id, notify=False)
+    rt = ctrl.runtime.get(area_id)
+    return {
+        "config": ctrl.lighting.room(area_id).daylight.as_dict(),
+        "status": status.as_dict(),
+        "global": daylight_global(hass, ctrl),
+        "candidates": illuminance_candidates(hass, area_id),
+        "influencing": ctrl.daylight.influencing(area_id),
+        "activation": rt.activation if rt else None,
+        "last_activation_at": rt.last_activation_at if rt else None,
+    }
 
 
 def adaptive_model(hass: HomeAssistant, ctrl: LightingController, *, candidates: bool) -> dict[str, Any]:
@@ -302,6 +374,8 @@ def editor_model(hass: HomeAssistant, ctrl: LightingController, mood: str | None
             "unattributed": lighting.unattributed.value,
             "unrepresentable": {m: h.as_dict() for m, h in lighting.unrepresentable.items()},
         },
+        "daylight": daylight_global(hass, ctrl) | (
+            {"candidates": illuminance_candidates(hass)} if is_admin and area_id is None else {}),
         "labels": sorted(
             ({"label_id": label.label_id, "name": label.name} for label in label_reg.async_list_labels()),
             key=lambda x: x["name"].casefold(),
@@ -407,6 +481,7 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
         "categories": {t["target"]: t for t in types},
         "lights": lights,
         "group_issues": _group_issues(ctrl, area_id),
+        "daylight": daylight_model(hass, ctrl, area_id) if area_id in ctrl.config.enabled_rooms else None,
         "occupancy": {
             "state": result.state.value if result else None,
             "occupied": result.occupied if result else None,
@@ -686,6 +761,118 @@ def ws_room_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
     connection.send_result(msg["id"], {"revision": ctrl.store.revision})
 
 
+def _exists(hass: HomeAssistant, entity_id: str) -> bool:
+    return hass.states.get(entity_id) is not None or er.async_get(hass).async_get(entity_id) is not None
+
+
+_INDOOR_SENSOR = vol.Schema({
+    vol.Required("entity_id"): cv.entity_id,
+    vol.Optional("max_age"): vol.All(vol.Coerce(int), vol.Range(min=0, max=SENSOR_MAX_AGE_MAX_MINUTES)),
+    vol.Optional("report_mode"): vol.In([m.value for m in ReportMode]),
+    vol.Optional("reliability"): vol.In([r.value for r in Reliability]),
+})
+_LUX = vol.All(vol.Coerce(int), vol.Range(min=LUX_MIN, max=LUX_MAX_THRESHOLD))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "smart_occupancy/lighting/room/daylight",
+    vol.Required("area_id"): str,
+    vol.Optional("auto_on"): vol.In([p.value for p in AutoOn]),
+    vol.Optional("on_first_motion"): bool,
+    vol.Optional("uncertain"): vol.In([p.value for p in UncertainPolicy]),
+    vol.Optional("sensors"): [_INDOOR_SENSOR],
+    vol.Optional("on_below"): _LUX,
+    vol.Optional("off_above"): vol.All(vol.Coerce(int), vol.Range(min=LUX_MIN, max=LUX_MAX_THRESHOLD * 2)),
+    vol.Optional("stable_seconds"): vol.All(vol.Coerce(int), vol.Range(min=0, max=STABLE_SECONDS_MAX)),
+    vol.Optional("settle_seconds"): vol.All(vol.Coerce(int), vol.Range(min=0, max=SETTLE_SECONDS_MAX)),
+    vol.Optional("sample_max_age"): vol.All(vol.Coerce(int), vol.Range(min=1, max=SAMPLE_MAX_AGE_MAX_MINUTES)),
+    vol.Optional("influencing"): [cv.entity_id],
+    vol.Optional("area_lights"): bool,
+    vol.Optional("factor"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=DAYLIGHT_FACTOR_MIN,
+                                                                               max=DAYLIGHT_FACTOR_MAX))),
+    vol.Optional("reset_calibration"): bool,
+})
+@websocket_api.require_admin
+@callback
+def ws_room_daylight(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Automatic switch-on settings of one room (daylight sensors, thresholds, policy). Read only on sensors."""
+    if (ctrl := _controller(hass, connection, msg)) is None:
+        return
+    area_id = msg["area_id"]
+    if area_id not in ctrl.config.rooms:
+        connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"Room {area_id} is not configured")
+        return
+    current = ctrl.lighting.room(area_id).daylight.as_dict()
+    if "sensors" in msg:
+        for item in msg["sensors"]:
+            if not _exists(hass, item["entity_id"]):
+                connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"{item['entity_id']} does not exist")
+                return
+            if item["entity_id"].split(".", 1)[0] != "sensor":
+                connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT,
+                                      f"{item['entity_id']} is not a sensor")
+                return
+        previous = {s["entity_id"]: s for s in current["sensors"]}
+        current["sensors"] = [{**previous.get(i["entity_id"], {}), **i} for i in msg["sensors"]]
+    if "influencing" in msg:
+        for entity_id in msg["influencing"]:
+            if entity_id.split(".", 1)[0] not in ("light", "switch"):
+                connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT,
+                                      f"{entity_id} is not a light or switch")
+                return
+        current["influencing"] = list(dict.fromkeys(msg["influencing"]))
+    for key in ("auto_on", "on_first_motion", "uncertain", "stable_seconds", "settle_seconds", "sample_max_age",
+                "area_lights", "factor"):
+        if key in msg:
+            current[key] = msg[key]
+    if "on_below" in msg:
+        current["on_below"] = msg["on_below"]
+        if "off_above" not in msg and current["off_above"] <= msg["on_below"]:
+            current["off_above"] = msg["on_below"] * 2
+    if "off_above" in msg:
+        current["off_above"] = msg["off_above"]
+    if current["off_above"] <= current["on_below"]:
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT,
+                              "The light-not-needed level must be above the turn-on level")
+        return
+    ctrl.store.async_set(ctrl.with_room(area_id, daylight=RoomDaylight.from_dict(current)))
+    if msg.get("reset_calibration"):
+        ctrl.daylight.reset_calibration(area_id)
+    connection.send_result(msg["id"], {"revision": ctrl.store.revision})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "smart_occupancy/lighting/daylight/set",
+    vol.Optional("outdoor_entity"): vol.Any(None, vol.All(str, vol.Length(max=255))),
+    vol.Optional("outdoor_dark_lux"): vol.All(vol.Coerce(int), vol.Range(min=0, max=LUX_MAX_THRESHOLD)),
+    vol.Optional("outdoor_window"): vol.All(vol.Coerce(int), vol.Range(min=0, max=OUTDOOR_WINDOW_MAX_SECONDS)),
+})
+@websocket_api.require_admin
+@callback
+def ws_daylight_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Global daylight settings: the optional outdoor light sensor (read only) and its smoothing."""
+    if (ctrl := _controller(hass, connection, msg)) is None:
+        return
+    current = ctrl.lighting.daylight.as_dict()
+    if "outdoor_entity" in msg:
+        value = (msg["outdoor_entity"] or "").strip() or None
+        if value is not None:
+            try:
+                cv.entity_id(value)
+            except vol.Invalid:
+                connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, f"{value} is not an entity id")
+                return
+            if not _exists(hass, value):
+                connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"{value} does not exist")
+                return
+        current["outdoor_entity"] = value
+    for key in ("outdoor_dark_lux", "outdoor_window"):
+        if key in msg:
+            current[key] = msg[key]
+    ctrl.store.async_set(replace(ctrl.lighting, daylight=DaylightConfig.from_dict(current)))
+    connection.send_result(msg["id"], {"revision": ctrl.store.revision})
+
+
 @websocket_api.websocket_command({
     vol.Required("type"): "smart_occupancy/lighting/room/activation",
     vol.Required("area_id"): str,
@@ -898,6 +1085,6 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     for handler in (
         ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_adaptive_set, ws_room_set,
         ws_activation, ws_activate, ws_deactivate, ws_acknowledge, ws_override_clear, ws_group_choice,
-        ws_category_set, ws_category_remove,
+        ws_category_set, ws_category_remove, ws_room_daylight, ws_daylight_set,
     ):
         websocket_api.async_register_command(hass, handler)

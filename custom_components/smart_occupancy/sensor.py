@@ -39,6 +39,7 @@ from .discovery import area_name
 from .engine import SignalStatus
 from .entity import (
     ROOM_COMPARISON_ENTITY,
+    ROOM_DAYLIGHT_ENTITY,
     ROOM_LIGHTING_ENTITY,
     ROOM_OCCUPANCY_ENTITIES,
     RoomOccupancyEntity,
@@ -49,7 +50,7 @@ from .entity import (
 )
 from .health import room_health
 from .occupancy import AVAILABLE, PENDING
-from .const import SIGNAL_LIGHTING_UPDATED, LightingMode
+from .const import SIGNAL_LIGHTING_UPDATED, Darkness, LightingMode
 
 PARALLEL_UPDATES = 0
 
@@ -203,6 +204,7 @@ async def async_setup_entry(
         if room.reference_occupancy_entity:
             entities.append(RoomHelperComparisonSensor(coordinator, area_id))
         entities.append(RoomMoodLightingSensor(coordinator, area_id))
+        entities.append(RoomDaylightSensor(coordinator, area_id))
     async_add_entities(entities)
 
 
@@ -504,6 +506,7 @@ class RoomMoodLightingSensor(RoomOccupancyEntity, SensorEntity):
         "manual_overrides", "manual_override_minutes", "last_applied_profile", "last_applied_at",
         "last_trigger", "last_result", "last_reason", "last_counts", "last_errors", "last_decision_at",
         "integration", "manual_mode", "global_adjustment", "last_adaptive_at", "last_adaptive", "adaptive_conflicts",
+        "auto_on",
     })
 
     async def async_added_to_hass(self) -> None:
@@ -531,3 +534,50 @@ class RoomMoodLightingSensor(RoomOccupancyEntity, SensorEntity):
         diag = self._diagnostics()
         diag.pop("last_external_changes", None)
         return {"integration": "smart_occupancy", **diag}
+
+
+class RoomDaylightSensor(RoomOccupancyEntity, SensorEntity):
+    """Daylight decision of a room: dark, bright or uncertain (Phase 0.3.3).
+
+    Says whether occupancy may switch the room's lights on. The attributes
+    (rounded, never recorded) explain how natural light was determined; the
+    entity is written only when that summary changes.
+    """
+
+    _platform_domain = "sensor"
+    _key = ROOM_DAYLIGHT_ENTITY[0]
+    _attr_translation_key = ROOM_DAYLIGHT_ENTITY[2]
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [d.value for d in Darkness]
+    _unrecorded_attributes = frozenset({
+        "integration", "area_id", "natural_light", "lux", "estimated", "upper_bound", "confidence", "basis",
+        "reason", "policy", "contaminated", "contamination", "sensor", "outdoor_lux", "sun_elevation", "errors",
+        "last_activation_at", "activation",
+    })
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(async_dispatcher_connect(self.hass, SIGNAL_LIGHTING_UPDATED, self._write_if_changed))
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.last_update_success
+
+    def _summary(self) -> dict[str, Any]:
+        return self.coordinator.lighting.daylight.status(self._area_id).summary()
+
+    @property
+    def native_value(self) -> str | None:
+        return self._summary()["decision"]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        rt = self.coordinator.lighting.runtime.get(self._area_id)
+        activation = rt.activation if rt else None
+        return {
+            "integration": "smart_occupancy",
+            "area_id": self._area_id,
+            **self._summary(),
+            "last_activation_at": rt.last_activation_at if rt else None,
+            "activation": activation.get("text") if activation else None,
+        }

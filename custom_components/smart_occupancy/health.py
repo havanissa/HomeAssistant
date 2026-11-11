@@ -9,6 +9,8 @@ from making occupancy detection look degraded:
 * **lighting** - are the managed lights available, and can mood lighting
   work (automation conflicts, unsupported settings, failed commands)?
 * **configuration** - are the room's assignments and settings valid?
+* **daylight** (0.3.3) - are the light sensors usable? A light sensor problem
+  never degrades occupancy or lighting health.
 """
 
 from __future__ import annotations
@@ -96,12 +98,13 @@ def room_health(snapshot: Snapshot | None, area_id: str, result: RoomResult | No
     # Mood lighting problems (conflicts, unsupported settings, failed commands):
     # one short line each by default; the full text is in ``details``.
     lighting_problems = [p for p in problems if p.aspect == "lighting" and p.code not in ENTITY_PROBLEM_CODES]
+    daylight_problems = [p for p in problems if p.aspect == "daylight"]
     light_reasons += short_lighting_reasons(lighting_problems)
     light_details = [f"{p.title}: {p.explanation}" for p in lighting_problems]
 
     # Configuration ---------------------------------------------------------
     config_problems = [
-        p for p in problems if p.category == ProblemCategory.CONFIGURATION and p.aspect != "lighting"
+        p for p in problems if p.category == ProblemCategory.CONFIGURATION and p.aspect not in ("lighting", "daylight")
     ]
     if any(p.severity == Severity.ERROR for p in config_problems):
         config_status = CONFIG_ERROR
@@ -133,6 +136,11 @@ def room_health(snapshot: Snapshot | None, area_id: str, result: RoomResult | No
             "status": config_status,
             "reasons": config_reasons,
             "details": config_details,
+        },
+        "daylight": {
+            "status": WARNING if daylight_problems else HEALTHY,
+            "reasons": [f"{p.title}: {p.name or p.entity_id}" if p.entity_id else p.title for p in daylight_problems],
+            "details": [f"{p.title}: {p.explanation}" for p in daylight_problems],
         },
     }
 

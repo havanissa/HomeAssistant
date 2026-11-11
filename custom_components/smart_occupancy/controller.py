@@ -32,6 +32,14 @@ Manual (0.3.2): while Main Mood is the Manual option, no automatic lighting
 command is sent at all (mood, occupancy or global adjustment), queued
 applications and updates are dropped, and manual light changes are not
 recorded as overrides. Occupancy, diagnostics and editing continue.
+
+Daylight (0.3.3): occupancy switches lights on only when the room needs
+artificial light (``daylight.py``, ``daylight_monitor.py``). The daylight
+decision says whether an off light may be switched on; the mood profile says
+what it looks like. A visit starts on the first motion of a trigger sensor
+(PIR) when the room allows it, otherwise on confirmed occupancy; radar and
+other presence sensors hold occupancy. An occupied room that becomes dark is
+evaluated again. Nothing is switched off because of daylight.
 """
 
 from __future__ import annotations
@@ -85,6 +93,9 @@ from .adaptive import (
     find_source_controllers,
 )
 from .conflicts import AutomationInfo, Conflict, collect_automations, find_conflicts
+from .daylight import GATE_CODES, GATE_NEVER, GATE_NOT_NEEDED, GATE_UNCERTAIN, DaylightGate
+from .daylight_monitor import DaylightMonitor, DaylightStatus
+from .engine import RoomResult, SignalStatus
 from .const import (
     ADAPTIVE_DEBOUNCE_SECONDS,
     APPLY_DEBOUNCE_SECONDS,
@@ -96,6 +107,7 @@ from .const import (
     OWN_CHANGE_WINDOW_SECONDS,
     SIGNAL_LIGHTING_UPDATED,
     SWITCH_ATTRIBUTION_SECONDS,
+    AutoOn,
     LightingMode,
     OccupancyState,
     UnattributedPolicy,
@@ -120,6 +132,9 @@ _UNAVAILABLE = (STATE_UNAVAILABLE, STATE_UNKNOWN)
 _SIGNIFICANT_ATTRS = ("brightness", "color_temp_kelvin", "rgb_color", "hs_color", "xy_color", "effect", "color_mode")
 _AUTOMATION_DEBOUNCE_SECONDS = 2.0
 _PAUSED = "__paused__"
+# Triggers that can switch lights on because someone is (or arrived) in the room.
+_ACTIVATION_TRIGGERS = frozenset({"motion", "occupancy_confirmed", "became_dark"})
+_TRIGGER_WORDS = {"motion": "motion", "occupancy_confirmed": "occupancy confirmed", "became_dark": "it became dark"}
 
 
 @dataclass(slots=True, frozen=True)
@@ -191,6 +206,12 @@ class RoomRuntime:
     adaptive_sent: dict[str, AdaptiveSent] = field(default_factory=dict)
     last_adaptive_at: str | None = None
     last_adaptive: str | None = None
+    # A visit started (first motion or confirmation) and was counted (0.3.3).
+    visit_started: bool = False
+    visit: int = 0
+    # Why occupancy did or did not switch lights on (latest visit or darkness change).
+    activation: dict[str, Any] | None = None
+    last_activation_at: str | None = None
 
     def persist(self) -> dict[str, Any]:
         return {
@@ -204,12 +225,15 @@ class RoomRuntime:
             "last_decision_at": self.last_decision_at,
             "overrides": self.overrides,
             "last_commands": {e: [s, d] for e, (s, d) in self.last_commands.items()},
+            "activation": self.activation,
+            "last_activation_at": self.last_activation_at,
         }
 
     @classmethod
     def restore(cls, data: Any) -> RoomRuntime:
         data = data if isinstance(data, dict) else {}
         commands = data.get("last_commands") if isinstance(data.get("last_commands"), dict) else {}
+        activation = data.get("activation") if isinstance(data.get("activation"), dict) else None
         return cls(
             last_applied_mood=data.get("last_applied_mood"),
             last_applied_at=data.get("last_applied_at"),
@@ -224,6 +248,10 @@ class RoomRuntime:
                 e: (v[0], dict(v[1])) for e, v in commands.items()
                 if isinstance(v, list) and len(v) == 2 and isinstance(v[1], dict)
             },
+            activation=activation,
+            last_activation_at=data.get("last_activation_at"),
+            # Continue counting visits, so the next visit is never mistaken for the recorded one.
+            visit=int(activation.get("visit") or 0) if activation else 0,
         )
 
 
@@ -280,6 +308,7 @@ class LightingController:
         self._adaptive_force: dict[str, set[str]] = {}
         self._source_controllers: tuple[list[SourceController], list[AutomationInfo]] | None = None
         self._adaptive_conflicts: dict[str, dict[str, list[dict[str, Any]]]] | None = None
+        self.daylight = DaylightMonitor(hass, self)
 
     # ------------------------------------------------------------ properties
     @property
@@ -324,6 +353,7 @@ class LightingController:
         rooms = data.get("rooms") if isinstance(data.get("rooms"), dict) else {}
         self.adaptive.restore(data.get("adaptive"))
         self.adaptive.async_configure(self.lighting.adaptive)
+        self.daylight.restore(data.get("daylight"))
         now = dt_util.utcnow()
         for area_id in self.config.enabled_rooms:
             rt = RoomRuntime.restore(rooms.get(area_id))
@@ -348,6 +378,7 @@ class LightingController:
         self._unsubs.append(self.hass.bus.async_listen("script_reloaded", self._on_automations_reloaded))
         self._resubscribe()
         self.adaptive.async_start()
+        self.daylight.async_start()
         if self.hass.state is CoreState.running:
             self._on_started()
         else:
@@ -370,6 +401,8 @@ class LightingController:
             if result is not None:
                 rt.occupancy_state, rt.occupied = result.state.value, result.occupied
                 rt.visit_confirmed = bool(result.occupied) and result.state != OccupancyState.POSSIBLE_OCCUPANCY
+                # Someone already in the room at start is not a new visit.
+                rt.visit_started = bool(result.occupied)
         self._automations = None
         self._conflicts = None
         _LOGGER.debug(
@@ -394,6 +427,7 @@ class LightingController:
                 setattr(self, attr, None)
         self._cancel_adaptive()
         self.adaptive.async_stop()
+        self.daylight.async_stop()
         for task in list(self._tasks):
             task.cancel()
         self._tasks.clear()
@@ -417,6 +451,7 @@ class LightingController:
         self._conflicts = None
         self._adaptive_conflicts = None
         self._resubscribe()
+        self.daylight.async_config_changed()
         self._notify()
 
     def _invalidate_managed(self) -> None:
@@ -424,6 +459,7 @@ class LightingController:
         self._conflicts = None
         self._adaptive_conflicts = None
         self._resubscribe()
+        self.daylight.resubscribe()
 
     # ------------------------------------------------------------ discovery
     def _compute_managed(self, area_id: str) -> ManagedRoom:
@@ -688,13 +724,21 @@ class LightingController:
         return apply_global(resolved, self.adaptive.values)
 
     def plan(self, area_id: str, trigger: str = "preview", mood: str | None = None,
-             config: LightingConfig | None = None) -> Plan:
-        """Plan for a room, including each light's next gradual update. Never sends anything."""
-        plan, _ = self._plan(area_id, trigger, mood, config)
+             config: LightingConfig | None = None, *, fresh: bool = False) -> Plan:
+        """Plan for a room, including each light's next gradual update. Never sends anything.
+
+        ``fresh`` re-evaluates daylight now (used right before executing); otherwise the
+        latest daylight evaluation is used.
+        """
+        plan, _ = self._plan(area_id, trigger, mood, config, fresh=fresh)
         return plan
 
+    def daylight_gate(self, area_id: str, *, fresh: bool = False) -> DaylightGate:
+        return self.daylight.gate(area_id) if fresh else self.daylight.status(area_id).gate
+
     def _plan(self, area_id: str, trigger: str, mood: str | None = None,
-              config: LightingConfig | None = None) -> tuple[Plan, dict[str, tuple[Target, AdaptiveDecision]]]:
+              config: LightingConfig | None = None, *, fresh: bool = False,
+              ) -> tuple[Plan, dict[str, tuple[Target, AdaptiveDecision]]]:
         lighting = config or self.lighting
         status = self.mood_status()
         if mood is None:
@@ -713,6 +757,7 @@ class LightingController:
             control_enabled=self.room_active(area_id),
             note=note,
             manual_mode=status.manual,
+            gate=self.daylight_gate(area_id, fresh=fresh),
         )
         rt = self.runtime.get(area_id) or RoomRuntime()
         now = time.monotonic()
@@ -754,7 +799,8 @@ class LightingController:
         pending, self._pending = self._pending, {}
         for area_id, (triggers, only) in pending.items():
             trigger = next((t for t in ("room_mood_override", "mood_change", "activated", "occupancy_confirmed",
-                                        "profile_change", "reconnected") if t in triggers), sorted(triggers)[0])
+                                        "motion", "became_dark", "profile_change", "reconnected")
+                            if t in triggers), sorted(triggers)[0])
             self._create_task(self.async_apply(area_id, trigger, only=only))
 
     def _create_task(self, coro) -> None:
@@ -775,9 +821,22 @@ class LightingController:
                 return
             if result.state == OccupancyState.CONFIRMED_OCCUPANCY and not rt.visit_confirmed:
                 rt.visit_confirmed = True
+                new_visit = not rt.visit_started
+                rt.visit_started = True
+                if new_visit:
+                    rt.visit += 1
                 _LOGGER.debug("lighting_visit_confirmed area=%s", area_id)
-                self._schedule_apply(area_id, "occupancy_confirmed")
+                self._visit_trigger(area_id, "occupancy_confirmed")
+            elif (not rt.visit_started and result.occupied
+                  and result.state == OccupancyState.POSSIBLE_OCCUPANCY
+                  and self.lighting.room(area_id).daylight.on_first_motion and _motion(result)):
+                # A trigger sensor (PIR) saw motion: respond now, radar/presence keeps the room occupied.
+                rt.visit_started = True
+                rt.visit += 1
+                _LOGGER.debug("lighting_visit_started area=%s reason=motion", area_id)
+                self._visit_trigger(area_id, "motion")
             elif result.state == OccupancyState.VACANT and result.occupied is False:
+                rt.visit_started = False
                 if rt.visit_confirmed:
                     rt.visit_confirmed = False
                 if rt.overrides:
@@ -789,6 +848,78 @@ class LightingController:
                 self._notify()
 
         return update
+
+    @callback
+    def _visit_trigger(self, area_id: str, trigger: str) -> None:
+        """Arrival (or darkness) in a room: apply in an active room; otherwise record what would happen."""
+        if self.room_active(area_id) and not self._manual:
+            self._schedule_apply(area_id, trigger)
+        else:
+            # Kept in memory (saved with the next state write): no extra storage write per visit.
+            self._record_activation(area_id, trigger, self.plan(area_id, trigger, fresh=True), None)
+            self._notify()
+
+    @callback
+    def async_daylight_dark(self, area_id: str, status: DaylightStatus) -> None:
+        """The daylight monitor's decision for a room became dark (after its stability period)."""
+        if not self._running or self._stopped:
+            return
+        result = self.coordinator.occupancy.result(area_id)
+        if result is None or not result.occupied or result.state not in (
+                OccupancyState.CONFIRMED_OCCUPANCY, OccupancyState.POSSIBLE_OCCUPANCY):
+            return
+        _LOGGER.debug("lighting_became_dark area=%s %s", area_id, status.estimate.text)
+        self._visit_trigger(area_id, "became_dark")
+
+    def _record_activation(self, area_id: str, trigger: str, plan: Plan, switched_on: list[PlanItem] | None) -> None:
+        """Why occupancy did (or did not) switch lights on. ``switched_on`` is None when nothing was executed."""
+        if trigger not in _ACTIVATION_TRIGGERS:
+            return
+        rt = self.runtime.setdefault(area_id, RoomRuntime())
+        candidates = [i for i in plan.items if i.service == "turn_on" and i.current.get("state") != "on"
+                      and i.decision != "skipped"]
+        gated = [i for i in candidates if i.reason_code in GATE_CODES]
+        blocked = [i for i in candidates if i.decision == "blocked" and i.reason_code not in GATE_CODES]
+        would = [i for i in candidates if i.decision == "change"]
+        gate = plan.daylight
+        word = _TRIGGER_WORDS.get(trigger, trigger)
+        n = len(switched_on) if switched_on is not None else len(would)
+        lights = f"{n} light{'s' if n != 1 else ''}"
+        if plan.manual_mode:
+            result, text = "manual", "Manual mode: nothing is switched on automatically"
+        elif plan.mood is None:
+            result, text = "no_mood", plan.note or "No effective mood: nothing is switched on"
+        elif switched_on:
+            result, text = "turned_on", f"Turned on {lights} ({word})"
+        elif would and not plan.control_enabled:
+            result, text = "observe", f"Observe: would turn on {lights} ({word})"
+        elif would and switched_on is not None:
+            n = len(would)
+            result, text = "failed", f"Switching on {n} light{'s' if n != 1 else ''} failed ({word})"
+        elif gated:
+            code = gated[0].reason_code
+            result = {GATE_NOT_NEEDED: "not_needed", GATE_UNCERTAIN: "uncertain", GATE_NEVER: "disabled"}[code]
+            text = {"not_needed": "Not turned on: daylight is enough",
+                    "uncertain": "Not turned on: daylight is uncertain (this room then leaves lights off)",
+                    "disabled": "Not turned on: automatic switch-on is off for this room"}[result]
+            if not plan.control_enabled:
+                text = f"Observe: {text[0].lower()}{text[1:]}"
+        elif blocked:
+            reasons = sorted({i.reason_code.replace("_", " ") for i in blocked})
+            result, text = "blocked", f"Not turned on: {', '.join(reasons)}"
+        elif any(i.service == "turn_on" for i in plan.items):
+            result, text = "already_on", "Lights were already on"
+        else:
+            result, text = "nothing", f"No light switches on in {plan.mood}"
+        if gate is not None and gate.policy == AutoOn.DARK and result not in ("manual", "no_mood"):
+            text += f" · {gate.decision.value.capitalize()}: {gate.text}"
+        same_visit = rt.activation is not None and rt.activation.get("visit") == rt.visit
+        if switched_on or trigger == "became_dark" or not same_visit or rt.activation.get("result") != "turned_on":
+            rt.activation = {"at": _iso(dt_util.utcnow()), "trigger": trigger, "result": result, "text": text,
+                             "lights": n, "visit": rt.visit,
+                             "daylight": gate.decision.value if gate else None}
+        if switched_on:
+            rt.last_activation_at = rt.activation["at"]
 
     @callback
     def _on_state_event(self, event: Event[EventStateChangedData]) -> None:
@@ -1064,7 +1195,7 @@ class LightingController:
         async with lock:
             if self._manual:
                 return None  # Manual started while this application was queued: not replayed
-            plan = self.plan(area_id, trigger)
+            plan = self.plan(area_id, trigger, fresh=True)
             rt = self.runtime.setdefault(area_id, RoomRuntime())
             changes = [i for i in plan.changes if only is None or i.entity_id in only]
             relevant = [i for i in plan.items if only is None or i.entity_id in only]
@@ -1079,12 +1210,14 @@ class LightingController:
             rt.last_counts = counts
             if plan.mood is None:
                 rt.last_result, rt.last_reason, rt.last_errors = "no_mood", plan.note or "No effective mood", []
+                self._record_activation(area_id, trigger, plan, [])
                 self._finish(area_id, plan)
                 return plan
             if not changes:
                 rt.last_result = "no_change"
                 rt.last_reason = _summary(plan.mood, relevant, trigger)
                 rt.last_errors = []
+                self._record_activation(area_id, trigger, plan, [])
                 self._finish(area_id, plan)
                 return plan
             errors = await self._execute(area_id, changes)
@@ -1102,6 +1235,8 @@ class LightingController:
             if ok:
                 rt.last_applied_mood = plan.mood
                 rt.last_applied_at = _iso(dt_util.utcnow())
+            self._record_activation(area_id, trigger, plan, [
+                i for i in ok if i.service == "turn_on" and i.current.get("state") != "on"])
             log = _LOGGER.warning if errors else _LOGGER.info
             log("lighting_applied area=%s mood=%s trigger=%s result=%s changed=%d failed=%d",
                 area_id, plan.mood, trigger, rt.last_result, len(ok), len(errors))
@@ -1162,6 +1297,7 @@ class LightingController:
     @callback
     def _on_lighting_config_changed(self, old: LightingConfig, new: LightingConfig) -> None:
         self._invalidate_managed()
+        self.daylight.async_config_changed()
         self.coordinator.async_schedule_refresh()
         if old.adaptive != new.adaptive:
             self._source_controllers = None
@@ -1279,6 +1415,12 @@ class LightingController:
             "last_adaptive_at": rt.last_adaptive_at,
             "last_adaptive": rt.last_adaptive,
             "adaptive_conflicts": {e: [dict(c) for c in cs] for e, cs in self.adaptive_conflicts(area_id).items()},
+            "auto_on": {
+                "policy": room_lighting.daylight.auto_on.value,
+                "on_first_motion": room_lighting.daylight.on_first_motion,
+                "last_activation_at": rt.last_activation_at,
+                "activation": rt.activation,
+            },
             "last_external_changes": rt.last_external,
         }
 
@@ -1326,7 +1468,8 @@ class LightingController:
 
     def _state_data(self) -> dict[str, Any]:
         self._dirty = False
-        return {"rooms": {a: rt.persist() for a, rt in self.runtime.items()}, "adaptive": self.adaptive.persist()}
+        return {"rooms": {a: rt.persist() for a, rt in self.runtime.items()}, "adaptive": self.adaptive.persist(),
+                "daylight": self.daylight.persist()}
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -1336,6 +1479,7 @@ class LightingController:
             "source_controllers": [c.as_dict() for c in self.source_controllers()],
             "rooms": {a: self.room_diagnostics(a) for a in sorted(self.config.enabled_rooms)},
             "tracked_entities": list(self._tracked),
+            "daylight": self.daylight.diagnostics(),
         }
 
     def with_room(self, area_id: str, **changes: Any) -> LightingConfig:
@@ -1353,6 +1497,8 @@ def _summary(mood: str | None, items, trigger: str, *, failed: int = 0) -> str:
         "offline": "offline", "manual_override": "manual override", "conflict": "automation conflict",
         "vacant": "room vacant", "occupancy_uncertain": "occupancy uncertain",
         "off_needs_confirmation": "occupancy not confirmed",
+        GATE_NOT_NEEDED: "not needed (daylight)", GATE_UNCERTAIN: "daylight uncertain",
+        GATE_NEVER: "automatic switch-on off",
     }
     parts = [f"{mood} ({trigger.replace('_', ' ')})"]
     if n := counts.get(CHANGE, 0) - failed:
@@ -1366,3 +1512,8 @@ def _summary(mood: str | None, items, trigger: str, *, failed: int = 0) -> str:
     if n := counts.get("skipped"):
         parts.append(f"{n} not controlled")
     return " · ".join(parts)
+
+
+def _motion(result: RoomResult) -> bool:
+    """A trigger sensor (PIR or other motion, not a door) is active now."""
+    return any(v.track.is_trigger and v.status == SignalStatus.ACTIVE for v in result.signals)

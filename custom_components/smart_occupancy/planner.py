@@ -14,9 +14,14 @@ Decision for each target, in order:
    automation that was not acknowledged also controls it, or occupancy does
    not allow it (vacant or uncertain room; Off while occupancy is not yet
    confirmed). *Persistent* (ambient) settings ignore occupancy.
-3. ``unchanged`` - the light already is in the requested state, or the
+3. ``blocked`` by the daylight gate (0.3.3) - switching an *off* light on is
+   not wanted: daylight is enough, daylight is uncertain and the room then
+   leaves lights off, or automatic switch-on is off for the room. Lights that
+   are already on still follow the mood, Off is never affected, and ambient
+   (persistent) settings are never gated.
+4. ``unchanged`` - the light already is in the requested state, or the
    same command was sent and nobody changed the light since.
-4. ``change`` - the command that will be (or, in Observe mode, would be) sent.
+5. ``change`` - the command that will be (or, in Observe mode, would be) sent.
 
 Brightness and colour temperature that follow the global adjustment are
 already filled in (``adaptive.apply_global``). While Main Mood is the Manual
@@ -36,9 +41,11 @@ from .const import (
     MANUAL_PAUSED_TEXT,
     RGB_TOLERANCE,
     AdjustMode,
+    AutoOn,
     LightAction,
     OccupancyState,
 )
+from .daylight import DaylightGate
 from .lighting import Capabilities
 from .profiles import ResolvedSetting
 
@@ -158,6 +165,7 @@ class Plan:
     items: list[PlanItem]
     note: str | None = None
     manual_mode: bool = False
+    daylight: DaylightGate | None = None
 
     @property
     def changes(self) -> list[PlanItem]:
@@ -180,6 +188,7 @@ class Plan:
             "will_execute": self.control_enabled and bool(self.changes),
             "note": self.note,
             "manual_mode": self.manual_mode,
+            "daylight": self.daylight.as_dict() if self.daylight else None,
             "counts": self.counts(),
             "items": [i.as_dict() for i in self.items],
         }
@@ -349,8 +358,10 @@ def build_plan(
     control_enabled: bool,
     note: str | None = None,
     manual_mode: bool = False,
+    gate: DaylightGate | None = None,
 ) -> Plan:
     """Build the plan for one room. ``resolve_fn(target) -> ResolvedSetting``."""
+    gate_block = gate.blocks() if gate else None
     items: list[PlanItem] = []
     confirmed = occupancy_state == OccupancyState.CONFIRMED_OCCUPANCY
     for t in targets:
@@ -412,6 +423,9 @@ def build_plan(
                 set_(BLOCKED, "off_needs_confirmation",
                      "Occupancy is not confirmed; lights are not switched off on uncertain evidence")
                 continue
+            if gate_block and service == "turn_on" and t.state != "on":
+                set_(BLOCKED, gate_block[0], gate_block[1])
+                continue
         if matches(t, service, data):
             set_(UNCHANGED, "already", f"Already in the requested state: {summary.split(' (')[0]}")
             continue
@@ -426,8 +440,14 @@ def build_plan(
             "profile_change": "the profile was changed",
             "reconnected": "the light is available again",
             "adaptive": "the global adjustment changed",
+            "motion": "motion was detected",
+            "became_dark": "the room became dark",
             "preview": f"it does not match {mood}",
         }.get(trigger, trigger)
         ambient = " Ambient: applied regardless of occupancy." if resolved.is_persistent and not occupied else ""
-        set_(CHANGE, "change", f"{verb} set {summary} because {why}.{ambient}")
-    return Plan(area_id, mood, occupancy_state, occupied, trigger, control_enabled, items, note, manual_mode)
+        light = ""
+        if gate and gate.policy == AutoOn.DARK and service == "turn_on" and t.state != "on" \
+                and not resolved.is_persistent:
+            light = f" Daylight: {gate.decision.value} ({gate.text})."
+        set_(CHANGE, "change", f"{verb} set {summary} because {why}.{ambient}{light}")
+    return Plan(area_id, mood, occupancy_state, occupied, trigger, control_enabled, items, note, manual_mode, gate)
