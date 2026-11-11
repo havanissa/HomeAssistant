@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.4 — Room lighting card cleanup
+
+A dashboard-only release. Lighting behaviour, the occupancy engine, the websocket API and every saved setting (including the chosen light sensors) are unchanged.
+
+### Changed
+
+- **Smart Room Lighting** tabs: **Overview · Lights · Automatic · Overrides · Preview · Advanced**. The tabs are the only navigation: the *Review lights*, *Configure overrides*, *Preview room* and *Advanced* buttons at the bottom of Overview are gone.
+- **Automatic** tab (new): the automatic lighting settings moved here from Overview (turn on when occupied and dark, indoor light sensor, the inherited outdoor light, darkness threshold, daylight now, natural light, last decision). Sensor priority, contamination, calibration, hysteresis and diagnostics are in the collapsible *Advanced daylight settings* in the same tab, and no longer in the general Advanced tab.
+- **Overview** is compact: mood, mode, occupancy and lighting health, managed lights, last applied, the global adjustment, a one-line daylight summary and warnings. No settings forms.
+- **Outdoor light sensor** is shown as one global setting. It is configured in the Smart Lighting card (*Advanced → Settings → Outdoor light (all rooms)*); a room's Automatic tab shows it as inherited, with *change for all rooms*, which edits the same global setting.
+- Slightly narrower tabs on phones.
+
 ## 0.3.3 — Daylight-aware occupancy activation
 
 Occupancy switches a room's mood lighting on when someone arrives **and it is dark**. The daylight decision says whether lights are switched on; the mood profile still says what they look like. Nothing is switched off because of daylight, and no brightness or colour is derived from lux. The upgrade sends no command and keeps every setting.

@@ -199,12 +199,13 @@ Not set — tap to set: [Task lighting]
 - **Edit** (tap a row) opens one focused editor: *On / Off / Leave unchanged*, brightness, white (Warm / Soft / Neutral / Cool and a slider), colour swatches and effects. Only the controls the type's lights support are shown: a brightness-only LED strip shows just brightness; colours appear for RGB targets. **Only the RGB-tagged lights of this type** turns the edit into "type + RGB". Veistla: pick the mood, tap *Uppljós*, tick *Only RGB*, tap a colour. Done.
 - Changes save immediately. *Advanced* inside the editor has transition, ambient, the exact values and where each comes from, and per-field reset.
 - **Preview** shows what each room would do; a preview never changes a light.
-- **Advanced** (card): mood inheritance (parent and fallback mood), handling of moods Main Mood cannot represent, light types (kind, label, add/remove, suggestions), exclusion label, manual-override duration, and the full validation list.
+- **Advanced** (card): mood inheritance (parent and fallback mood), handling of moods Main Mood cannot represent, light types (kind, label, add/remove, suggestions), exclusion label, manual-override duration, the **outdoor light sensor (all rooms)**, and the full validation list.
 
-**Smart Room Lighting** (`custom:smart-occupancy-room-lighting-card`, pick the room in the visual editor). Five tabs; only **Overview** is open by default:
+**Smart Room Lighting** (`custom:smart-occupancy-room-lighting-card`, pick the room in the visual editor). Six tabs (**Overview · Lights · Automatic · Overrides · Preview · Advanced**), the only navigation; only **Overview** is open by default:
 
-- **Overview**: mood (follows global or room mood), mode (Observe/Active), occupancy and lighting health, managed lights, last applied, then one line per issue: a group question with its three buttons, "2 lighting conflicts · Review", short health lines.
+- **Overview**: mood (follows global or room mood), mode (Observe/Active), occupancy and lighting health, managed lights, last applied, the daylight decision in one line, then one line per issue: a group question with its three buttons, "2 lighting conflicts · Review", short health lines. No settings forms.
 - **Lights**: one line per light type ("Spottar · 6 lights · follows global · Off"); tap to see its lights, or tick *Show every light*. *Managed* toggles exclusion.
+- **Automatic**: automatic switch-on when occupied and dark (see [Daylight](#daylight-aware-automatic-lighting-phase-033)), with the details collapsed under *Advanced daylight settings*.
 - **Overrides**: room mood; per type *follows global* or *overridden* (tap to override, the same editor with *Follow global*); single-light overrides.
 - **Preview**: what this room would do in a mood.
 - **Advanced**: activation (Observe/Active), automations that also control the lights (allow both or leave them alone), group decisions, manual overrides, wall-switch entities, discovery, last decision and the full diagnostics.
@@ -392,11 +393,11 @@ The option name is configurable under *Smart Lighting → Advanced → Manual op
 
 When a room becomes occupied, its mood lights are switched on only if **artificial light is needed**. The daylight decision says *whether* lights are switched on; the mood profile still says *what they look like* (brightness, colour temperature, colour, global adjustment). Smart Occupancy does not calculate brightness or colour from lux.
 
-### In the Smart Room Lighting card (Overview → Automatic lighting)
+### In the Smart Room Lighting card (Automatic tab)
 
 - **Turn on when occupied and dark**: on by default.
 - **Indoor light sensor**: pick any illuminance sensor (the room's own are listed first). No sensor: outdoor light and the sun decide.
-- **Outdoor light**: the global outdoor sensor, shown as inherited.
+- **Outdoor light**: the global outdoor sensor, shown as inherited. It is one setting for every room: change it with *change for all rooms* here, or in the Smart Lighting card under *Advanced → Settings*.
 - **Darkness threshold**: lights turn on below this (default 50 lx).
 - **Daylight now**: *Dark*, *Bright* or *Uncertain*, with a short reason and how natural light was determined, for example:
   - *Natural light: 35 lx — measured indoors, lights off*
@@ -406,11 +407,13 @@ When a room becomes occupied, its mood lights are switched on only if **artifici
   - *Natural light: Uncertain — no trustworthy reading*
 - **Last decision**: what the last arrival (or darkness change) did and why.
 
+*Advanced daylight settings* (collapsed, in the same tab): switch-on policy and timing, the fallback, hysteresis and stability, sensor priority and freshness, contamination (lights that reach the sensors), calibration, and daylight diagnostics.
+
 Values are rounded (1 lx below 10, 5 lx below 100, then two significant digits); sensors are not more precise than that.
 
 ### When lights are switched on
 
-- **A new visit**: the first motion of a *Trigger* sensor (PIR) switches on at once, without waiting for confirmation. Radar, PC activity and other *Maintain* sensors keep the room occupied but never start a visit alone. Under *Advanced → Switch on at*, choose *Confirmed occupancy* for fewer false triggers.
+- **A new visit**: the first motion of a *Trigger* sensor (PIR) switches on at once, without waiting for confirmation. Radar, PC activity and other *Maintain* sensors keep the room occupied but never start a visit alone. Under *Advanced daylight settings → Switch on at*, choose *Confirmed occupancy* for fewer false triggers.
 - **The room becomes dark while occupied** (after the stability period, default 90 s).
 - **A mood change**, room activation, profile change or a light coming back: off lights are switched on only if it is dark.
 
@@ -418,7 +421,7 @@ Only **off** lights the mood switches **on** are gated. Lights that are already 
 
 All existing protections still apply first: exclusions, groups (one command per group), offline lights, manual overrides, unacknowledged automation conflicts, occupancy (vacant/uncertain rooms), Observe and Manual. Commands are batched, an identical command is not repeated, and noise around the threshold causes no repeated commands (hysteresis plus the stability period).
 
-*Advanced → Automatic switch-on* offers: *When occupied and dark* (default), *When occupied, regardless of daylight* (the behaviour before 0.3.3), *Never automatically*. *When uncertain*: *Turn lights on* (default, as before 0.3.3) or *Leave lights off*.
+*Advanced daylight settings → Automatic switch-on* offers: *When occupied and dark* (default), *When occupied, regardless of daylight* (the behaviour before 0.3.3), *Never automatically*. *When uncertain*: *Turn lights on* (default, as before 0.3.3) or *Leave lights off*.
 
 ### How natural light is determined
 
@@ -428,16 +431,16 @@ Evidence, strongest first:
 3. **An indoor reading with lights on that is still below the threshold**: lamps only add light, so natural light is *at most* that much. It is dark. A bright reading with lights on is **never** used: it may be the lamp itself.
 4. **Outdoor darkness** (outdoor sensor at or below 50 lx, smoothed).
 5. **The most recent indoor evidence** (default up to 30 min old), scaled by the change in outdoor light if both are known.
-6. **Outdoor light × the room's daylight factor.** Outside being bright never makes every room bright: the factor is learned from trusted indoor/outdoor pairs (at least 3, outdoor ≥ 200 lx, 10 min apart; the median is used), or set under *Advanced → Calibration*.
+6. **Outdoor light × the room's daylight factor.** Outside being bright never makes every room bright: the factor is learned from trusted indoor/outdoor pairs (at least 3, outdoor ≥ 200 lx, 10 min apart; the median is used), or set under *Advanced daylight settings → Calibration*.
 7. **After sunset** (twilight): low natural light, medium confidence.
 
 Otherwise daylight is *Uncertain* and the room's fallback applies. `unknown`, `unavailable` and non-numeric readings are never treated as 0 lx.
 
 **Contamination by the room's own lights.** Every managed light (and every member of a managed group) counts as influencing the sensor, plus every light in the area (*Every light in this area*, on by default) and lights you add (*Also*: window lamps, lights of an adjacent open-plan area; lights or switches). While one is on, readings are not used as daylight. After they all turn off, a reading counts only if it was taken after the settling time. With the default *New measurement: changed value*, a sensor that re-publishes its cached value (common with Zigbee PIR sensors) does not produce a "fresh" measurement just because the lamp went off; choose *every report* for sensors that report often (e.g. FP2). An unavailable influencing light lowers the confidence instead of being ignored.
 
-**Freshness and reliability** per sensor (*Advanced → Light sensors*): a maximum age (default none: a stable value is not a failed sensor), what counts as a new measurement, and *Reliable* / *Less reliable* (lower confidence). The first sensor is preferred; the others are fallbacks, in order.
+**Freshness and reliability** per sensor (*Advanced daylight settings → Light sensors*): a maximum age (default none: a stable value is not a failed sensor), what counts as a new measurement, and *Reliable* / *Less reliable* (lower confidence). The first sensor is preferred; the others are fallbacks, in order.
 
-**Outdoor sensor** (optional, global, *Advanced → Outdoor light (all rooms)*): smoothed with a time-weighted median over 5 minutes, so short spikes or shadows do not change decisions.
+**Outdoor sensor** (optional, one global setting: Smart Lighting card → *Advanced → Settings*, or *change for all rooms* in a room's Automatic tab): smoothed with a time-weighted median over 5 minutes, so short spikes or shadows do not change decisions.
 
 **Darkness decision.** Below the turn-on threshold (default 50 lx) it is *Dark*; at or above the light-not-needed threshold (default 100 lx) it is *Bright*; in between the previous decision stays (hysteresis). An arrival uses the latest evidence at once; a change while the room is occupied counts only after it held for the stability period.
 
@@ -446,7 +449,7 @@ Otherwise daylight is *Uncertain* and the room's fallback applies. `unknown`, `u
 ### Entities and diagnostics
 
 - `sensor.smart_occupancy_<room>_daylight`: `dark` / `bright` / `uncertain`, with `natural_light`, `lux` (rounded), `estimated`, `confidence`, `basis`, `contaminated`, `sensor`, `outdoor_lux`, `sun_elevation`, `reason`, `last_activation_at` and `activation` (why the last arrival did or did not switch lights on). Attributes are not recorded, and the entity is written only when the rounded summary changes.
-- The room card's *Advanced → Daylight diagnostics*: chosen sensor, last trustworthy reading, whether indoor readings are affected by lights, outdoor value, sun, confidence, last switch-on and errors.
+- The room card's *Automatic → Advanced daylight settings → Daylight diagnostics*: chosen sensor, last trustworthy reading, whether indoor readings are affected by lights, outdoor value, sun, confidence, last switch-on and errors.
 - Daylight sensing has its own health (*Daylight*), separate from occupancy and lighting: an unavailable light sensor never makes occupancy look degraded.
 
 ## Occupancy engine
@@ -759,7 +762,7 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 
 **From 0.3.2.** Nothing to do, and nothing is applied by the upgrade:
 - The lighting store is migrated from 1.1 to 1.2. Every setting is kept.
-- **Rooms where mood lighting was already enabled keep their timing**: they switch on at confirmed occupancy, as in 0.3.2 (*Advanced → Switch on at*). Every other room switches on at the first motion of a PIR.
+- **Rooms where mood lighting was already enabled keep their timing**: they switch on at confirmed occupancy, as in 0.3.2 (*Automatic → Advanced daylight settings → Switch on at*). Every other room switches on at the first motion of a PIR.
 - Every room uses *When occupied and dark*, with *Turn lights on* when uncertain. Until you choose a light sensor (or an outdoor sensor and a daylight factor), daylight is usually uncertain or dark by the sun, so lights switch on as before.
 - A `…_daylight` sensor is added per room.
 - 0.3.2 can still read the store after a downgrade (same major version); it ignores the daylight settings and drops them the next time it saves.
@@ -783,7 +786,7 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 ## Known limitations (Phase 0.3.3)
 
 - **Not verified on the production Home Assistant.** Tested with the automated suite on 2026.10.4 and 2026.11.1, and on an isolated 2026.11.1 instance with simulated light sensors and demo lights.
-- **Lights not listed as influencing** (a lamp in another area that reaches the sensor, a TV) can make a reading look like daylight. After dusk this is detected and reported; during the day add such lights under *Advanced → Lights that reach the sensors*.
+- **Lights not listed as influencing** (a lamp in another area that reaches the sensor, a TV) can make a reading look like daylight. After dusk this is detected and reported; during the day add such lights under *Automatic → Advanced daylight settings → Contamination*.
 - **After a restart**, every light and sensor state is new, so indoor readings count again only after a new value arrives (or a report, for *every report* sensors). Until then the last trusted reading (kept across restarts, up to 30 min), the outdoor light and the sun are used.
 - **The sun thresholds are fixed**: dark after civil dusk (−6°), low light after sunset. In Faroese summer nights the sun does not reach −6°, so an outdoor or indoor sensor decides then.
 - **The daylight factor needs an outdoor sensor** and at least three trusted samples in daylight (outdoor ≥ 200 lx). It is a single number per room: it does not model the sun's direction or blinds.
