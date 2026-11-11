@@ -5,7 +5,7 @@ Supervise and Full Control exist in the configuration model for later
 phases, but any request for them is downgraded to Observe here.
 
 Mood lighting is enabled **per room** instead (``RoomLighting.control_enabled``,
-set only by an explicit, admin-only activation in the Room Mood Lighting card).
+set only by an explicit, admin-only activation in the Smart Room Lighting card).
 Every light command passes ``assert_room_control_permitted`` first, so a room
 that was not activated can never be controlled.
 """

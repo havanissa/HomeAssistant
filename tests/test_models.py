@@ -62,8 +62,11 @@ def test_migration_v1_to_v2_keeps_everything() -> None:
     migrated = migrate_options(copy.deepcopy(RAW_V1))
     assert migrated["config_version"] == CONFIG_VERSION == 2
     # Every v1 value is carried over unchanged.
-    for key in ("operating_mode", "mood", "categories", "global_profiles"):
+    for key in ("operating_mode", "mood", "global_profiles"):
         assert migrated[key] == RAW_V1[key]
+    # Categories are kept; since 0.3.1 each also gets its kind (derived for old entries).
+    assert [{k: v for k, v in c.items() if k != "kind"} for c in migrated["categories"]] == RAW_V1["categories"]
+    assert [c["kind"] for c in migrated["categories"]] == ["source"]
     room, old = migrated["rooms"]["room1"], RAW_V1["rooms"]["room1"]
     for key in ("enabled", "lights", "reference_occupancy_entity", "mood_overrides", "light_overrides"):
         assert room[key] == old[key]

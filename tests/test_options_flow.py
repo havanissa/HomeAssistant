@@ -99,7 +99,7 @@ async def test_category_add_edit_remove(hass: HomeAssistant, home: Home) -> None
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
-    assert {"key": "cabinet_lights", "name": "Cabinet lights", "label_id": home.lamp_label} in entry.options["categories"]
+    assert {"key": "cabinet_lights", "name": "Cabinet lights", "label_id": home.lamp_label, "kind": "source"} in entry.options["categories"]
 
     result = await _open(hass, entry, "categories")
     result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "category_select"})
@@ -108,7 +108,7 @@ async def test_category_add_edit_remove(hass: HomeAssistant, home: Home) -> None
     await hass.async_block_till_done()
     cab = next(c for c in entry.options["categories"] if c["key"] == "cabinet_lights")
     # Key is stable across rename; clearing the label unmaps it.
-    assert cab == {"key": "cabinet_lights", "name": "Cabinet", "label_id": None}
+    assert cab == {"key": "cabinet_lights", "name": "Cabinet", "label_id": None, "kind": "source"}
 
     result = await _open(hass, entry, "categories")
     result = await hass.config_entries.options.async_configure(result["flow_id"], {"next_step_id": "category_remove"})

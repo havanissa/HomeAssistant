@@ -8,7 +8,7 @@ configuration problem or an operational one (e.g. a device that is offline).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import HomeAssistant
@@ -17,6 +17,8 @@ from homeassistant.helpers import area_registry as ar, entity_registry as er, la
 from . import lighting
 from .const import (
     MOOD_ENTITY_DOMAINS,
+    RGB_SUFFIX,
+    CategoryKind,
     Classification,
     ProblemCategory,
     SensorKind,
@@ -25,6 +27,7 @@ from .const import (
 from .discovery import area_name
 from .models import IntegrationConfig
 from .lighting_config import parent_cycle
+from .models import LightCategory
 from .occupancy import (
     AVAILABLE,
     DISABLED,
@@ -407,13 +410,6 @@ def validate(
                     "Apply one of the category labels to the light (or its device) under Settings → Entities.",
                     entity_id=light, name=friendly_name(hass, light), **in_room,
                 ))
-            elif len(cats) > 1:
-                add(Problem(
-                    "light_in_multiple_categories", Severity.WARNING, CONFIG, "Light in several categories",
-                    f"{light} has labels of several categories ({', '.join(cats)}); '{cats[0]}' takes precedence.",
-                    "Keep only one category label on the light.",
-                    entity_id=light, name=friendly_name(hass, light), **in_room,
-                ))
             if index.is_opaque_group(light):
                 add(Problem(
                     "group_members_unknown", Severity.INFO, CONFIG, "Group members not exposed",
@@ -444,7 +440,7 @@ def validate(
                 "group_member_overlap", Severity.INFO, CONFIG, "Group and member both managed",
                 f"Group {c.group} and its member {c.member} are both managed in {group_room}. Mood lighting "
                 "sends commands to the group only, so the member does not get duplicate commands.",
-                f"To control {c.member} individually, exclude the group in the Room Mood Lighting card.",
+                f"To control {c.member} individually, exclude the group in the Smart Room Lighting card.",
                 area_id=c.member_room, room=member_room, entity_id=c.member,
                 name=friendly_name(hass, c.member), subject=c.group, aspect="lighting",
             ))
@@ -454,7 +450,7 @@ def validate(
             f"Group {c.group} ({group_room}) and its member {c.member} ({member_room}) are managed by two "
             "rooms, so both rooms could send commands to the same light.",
             f"Keep the group or its member lights in one room only (Configure → Rooms → {member_room}), "
-            "or exclude one of them in the Room Mood Lighting card.",
+            "or exclude one of them in the Smart Room Lighting card.",
             area_id=c.member_room, room=member_room, entity_id=c.member,
             name=friendly_name(hass, c.member), subject=c.group, aspect="lighting",
         ))
@@ -473,7 +469,7 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
     main_known = any(m["in_main"] for m in moods)
     category_keys = {c.key for c in config.categories}
     main_entity = config.mood.main_mood_entity
-    fix = "Edit or remove the entry in the Global Mood Editor or Room Mood Lighting card."
+    fix = "Edit or remove the entry in the Smart Lighting or Smart Room Lighting card."
 
     def room_ctx(area_id: str | None) -> dict[str, Any]:
         return {"area_id": area_id, "room": (area_name(hass, area_id) or area_id) if area_id else None}
@@ -506,7 +502,11 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
                 entity_id=main_entity, name=friendly_name(hass, main_entity) if main_entity else None,
                 subject=f"mood:{mood_name}",
             ))
-        if scope in ("global", "room") and target not in category_keys:
+        base = target.removesuffix(RGB_SUFFIX)
+        if scope in ("global", "room") and (
+            base not in category_keys
+            or (target.endswith(RGB_SUFFIX) and (config.category(base) or LightCategory("", "")).kind == CategoryKind.RGB)
+        ):
             profile("profile_unknown_category", Severity.WARNING, "Profile for unknown category",
                     "the category does not exist.")
         if scope == "light":
@@ -542,20 +542,20 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
             add(Problem(
                 "mood_parent_unknown", Severity.WARNING, CONFIG, "Parent mood unknown",
                 f"'{mood_name}' inherits from '{parent}', which is not an option of any mood selector.",
-                "Choose another parent mood in the Global Mood Editor.", subject=f"parent:{mood_name}",
+                "Choose another parent mood in the Smart Lighting card.", subject=f"parent:{mood_name}",
             ))
         if cycle := parent_cycle(lighting_cfg, mood_name, parent):
             add(Problem(
                 "mood_inheritance_loop", Severity.ERROR, CONFIG, "Mood inheritance loop",
                 f"'{mood_name}' inherits from '{parent}', which leads back to it: {' → '.join(cycle)}. The "
                 f"loop is cut off; resolution uses {' → '.join(chain)}.",
-                "Choose a different parent mood in the Global Mood Editor.", subject=f"loop:{mood_name}",
+                "Choose a different parent mood in the Smart Lighting card.", subject=f"loop:{mood_name}",
             ))
     if (fb := lighting_cfg.fallback_mood) and main_known and fb.casefold() not in known:
         add(Problem(
             "fallback_mood_unknown", Severity.WARNING, CONFIG, "Fallback mood unknown",
             f"The fallback mood '{fb}' is not an option of any mood selector.",
-            "Choose another fallback mood in the Global Mood Editor settings.", subject="fallback",
+            "Choose another fallback mood under Smart Lighting → Advanced.", subject="fallback",
         ))
 
     status = controller.mood_status()
@@ -564,7 +564,7 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
             "mood_unrepresentable", Severity.WARNING, OPERATIONAL, "Mood cannot be represented by Main Mood",
             f"{status.detail}. Main Mood ({main_entity}) has no option '{status.unrepresentable}'.",
             f"Add '{status.unrepresentable}' to {main_entity} if it is a real mood, or choose how lighting "
-            "handles it in the Global Mood Editor (follow Main Mood, no mood, or use another mood).",
+            "handles it in the Smart Lighting card (follow Main Mood, no mood, or use another mood).",
             entity_id=main_entity, name=friendly_name(hass, main_entity) if main_entity else None,
             subject=f"unrepresentable:{status.unrepresentable}", aspect="lighting",
         ))
@@ -572,7 +572,7 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
         add(Problem(
             "exclude_label_missing", Severity.WARNING, CONFIG, "Exclusion label deleted",
             f"The exclusion label '{lighting_cfg.exclude_label}' no longer exists, so no light is excluded by label.",
-            "Choose another exclusion label in the Global Mood Editor settings.", subject="exclude_label",
+            "Choose another exclusion label under Smart Lighting → Advanced.", subject="exclude_label",
         ))
 
     # Rooms ------------------------------------------------------------------
@@ -592,7 +592,7 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
             add(Problem(
                 "room_mood_unknown", Severity.WARNING, CONFIG, "Room mood unknown",
                 f"{room_name} uses the mood '{room_lighting.mood_override}', which no mood selector offers.",
-                "Choose another room mood, or follow the global mood, in the Room Mood Lighting card.",
+                "Choose another room mood, or follow the global mood, in the Smart Room Lighting card.",
                 subject=f"room_mood:{area_id}", **ctx,
             ))
         for switch in room_lighting.manual_switches:
@@ -600,7 +600,7 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
                 add(Problem(
                     "manual_switch_missing", Severity.WARNING, CONFIG, "Wall switch entity missing",
                     f"{switch} is configured as a wall switch of {room_name} but does not exist.",
-                    "Remove or replace it in the Room Mood Lighting card.",
+                    "Remove or replace it in the Smart Room Lighting card.",
                     entity_id=switch, subject=f"switch:{switch}", **ctx,
                 ))
         if not enabled:
@@ -612,7 +612,7 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
                 add(Problem(
                     "excluded_light_missing", Severity.INFO, CONFIG, "Excluded light no longer exists",
                     f"{entity_id} is excluded in {room_name} but no longer exists.",
-                    "Remove it from the excluded lights in the Room Mood Lighting card.",
+                    "Remove it from the excluded lights in the Smart Room Lighting card.",
                     entity_id=entity_id, subject=f"excluded:{entity_id}", **ctx,
                 ))
         for entity_id in managed.outside_area:
@@ -633,7 +633,7 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
                     f"{group} is a group whose members Home Assistant cannot see (for example a Zigbee2MQTT "
                     f"group), and {room_name} also manages {', '.join(same)} in the same category. If they are "
                     "members of the group, they receive the same command twice.",
-                    "Exclude either the group or its member lights in the Room Mood Lighting card.",
+                    "Exclude either the group or its member lights in the Smart Room Lighting card.",
                     entity_id=group, name=friendly_name(hass, group), subject=f"opaque:{group}",
                     aspect="lighting", **ctx,
                 ))
@@ -662,7 +662,7 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
                 f"The {state} automation {c0.name or automation} ({automation}) appears to control "
                 f"{', '.join(lights)} in {room_name} ({c0.detail}). {text}",
                 "Disable or change that automation yourself, exclude the lights, or acknowledge it in the "
-                "Room Mood Lighting card. Existing automations are never changed by this integration.",
+                "Smart Room Lighting card. Existing automations are never changed by this integration.",
                 entity_id=automation, name=c0.name, subject=f"conflict:{automation}", aspect="lighting", **ctx,
             ))
         if active:
@@ -690,4 +690,9 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
                             entity_id=item.entity_id, name=item.name, subject=f"unsupported:{item.entity_id}",
                             aspect="lighting", **ctx,
                         ))
+    # Warnings the user chose to ignore stay visible as notes (Advanced), not as warnings.
+    for i, p in enumerate(problems):
+        if p.area_id and p.severity == Severity.WARNING and p.subject \
+                and p.subject in lighting_cfg.room(p.area_id).dismissed:
+            problems[i] = replace(p, severity=Severity.INFO)
     return problems

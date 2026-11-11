@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.1 — Simple dashboards
+
+A usability redesign of the 0.3 cards: simple by default, advanced on request. No lighting behaviour changes; Observe stays the default and nothing is applied by the upgrade.
+
+### Changed
+
+- **Smart Lighting Profiles** (Global Mood Editor):
+  - Pick a mood and see one line per light type ("Loft ljós — 40 % · 2700 K", "Uppljós + RGB — Amber · 30 %"), with a colour dot.
+  - Types with nothing set are one line of chips. Types without lights are hidden. No blocks of empty categories or "Ignore", and no validation dump.
+  - **Focused editor** for one mood and one light type:
+    - On / Off / Leave unchanged
+    - brightness
+    - white presets, colour swatches, effects
+  - Only the controls the lights support are shown. Transition, ambient and the exact inherited values are behind *Advanced* in the editor.
+  - Preview is a compact per-room list. Inheritance, light types, settings and validation are behind **Advanced**.
+- **Smart Room Lighting** (Room Mood Lighting), tabs **Overview · Lights · Overrides · Preview · Advanced**:
+  - The **Overview** shows mood, mode, health, managed lights and one line per issue.
+  - Lights are grouped by light type; single lights appear only when expanded.
+  - Overrides: per type *follow global* / *overridden*, and single lights.
+  - Activation, automation conflicts, manual overrides and diagnostics are under Advanced.
+- **Room Status card:** three health chips, one short line per warning (*Details* for the full text), and a one-line helper comparison.
+- **Short health reasons:**
+  - The *Lighting* health lists "2 lighting conflicts (…)", "Some settings not supported by …" and similar short lines.
+  - The full explanations are in `details`.
+- Lights with several category labels are normal now; the *Light in several categories* warning is gone.
+
+### Added
+
+- **Light type / function / RGB tag** (category *kind*).
+  - A light gets the settings of all its labels, merged field by field (types < functions < RGB tag < "type + RGB" < "function + RGB").
+  - **"type + RGB" targets** apply only to the RGB-tagged lights of a type, e.g. Veistla *Uppljós + RGB* purple.
+- **Uppljós** default function category for new installations.
+- **Label suggestions:** existing *Uppljós*/*Rgb*-style labels are offered with one click.
+- **Group question:** *As a group* / *Individually* / *Ignore for now*. A warning you ignore becomes a note under Advanced (stored per room in `dismissed`).
+- Websocket commands `lighting/room/group_choice`, `lighting/category/set`, `lighting/category/remove` (admin only).
+
+### Configuration
+
+- **Store:** lighting store version unchanged; rooms get an optional `dismissed` list.
+- **Categories:** they get a `kind`, derived for existing ones, and are written to the options only when a light type is changed.
+
 ## 0.3.0 — Mood lighting, dashboard editors and controlled activation
 
 Every room still starts in **Observe** mode. Light commands are sent only in rooms where an administrator explicitly enabled mood lighting. Existing automations and the mood selectors are never changed.

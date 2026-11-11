@@ -573,6 +573,7 @@ class LightingController:
                 conflicts=tuple(c.as_dict() for c in conflicts if c.enabled and c.automation not in acknowledged),
                 acknowledged_conflicts=tuple(c.as_dict() for c in conflicts if c.automation in acknowledged),
                 last_command=rt.last_commands.get(entity_id),
+                targets=tuple(self.index.profile_targets(entity_id)),
             ))
         return out
 
@@ -589,7 +590,7 @@ class LightingController:
             area_id=area_id,
             mood=mood,
             targets=self._targets(area_id),
-            resolve_fn=lambda t: resolve(lighting, mood or "", area_id, t.entity_id, t.category),
+            resolve_fn=lambda t: resolve(lighting, mood or "", area_id, t.entity_id, t.targets),
             occupancy_state=result.state.value if result else None,
             occupied=result.occupied if result else None,
             trigger=trigger,
@@ -926,9 +927,9 @@ class LightingController:
             return set()
         out: set[str] = set()
         for entity_id in self.managed_room(area_id).controlled:
-            category = self.index.category_of(entity_id)
-            if resolve(old, mood, area_id, entity_id, category).as_dict() != \
-                    resolve(new, mood, area_id, entity_id, category).as_dict():
+            targets = self.index.profile_targets(entity_id)
+            if resolve(old, mood, area_id, entity_id, targets).as_dict() != \
+                    resolve(new, mood, area_id, entity_id, targets).as_dict():
                 out.add(entity_id)
         return out
 

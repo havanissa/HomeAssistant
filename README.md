@@ -2,9 +2,9 @@
 
 A Home Assistant custom integration that will eventually provide intelligent occupancy detection, predictive room occupancy, mood-based lighting and lighting supervision.
 
-**This is Phase 0.3: mood-based lighting with a Global Mood Editor and a Room Mood Lighting card, on top of the Phase 0.2 occupancy engine (see [CHANGELOG.md](CHANGELOG.md)).**
+**This is Phase 0.3.1: mood-based lighting with simple dashboard cards (Smart Lighting Profiles, Smart Room Lighting, Room Status), on top of the Phase 0.2 occupancy engine (see [CHANGELOG.md](CHANGELOG.md)).** Phase 0.3.1 makes the 0.3 interface simple by default: one mood, one light type, one thing at a time; everything else is under *Advanced*.
 
-Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Room Mood Lighting card (the pilot is Kamar Norður). The integration never:
+Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes
 - changes the mood selectors or any other helper (they are only *read*)
@@ -81,11 +81,11 @@ The existing mood system stays in charge, and nothing in it is changed:
 | `input_select.mood` | The manual choice, or `Auto` |
 | `input_select.main_mood` | The effective mood: Manual Mood, or Auto Mood when Manual is `Auto` (set by your automation) |
 
-Lighting follows **Main Mood**. A room can have its own **room mood** instead (Room Mood Lighting card → Profiles → *Room mood*).
+Lighting follows **Main Mood**. A room can have its own **room mood** instead (Smart Room Lighting card → Overrides → *Room mood*).
 
 **Moods are discovered, not coded.** Every option of the three selectors is a mood, and so is every mood that has a profile. Add *Hygge*, *Work* or anything else to a selector and it appears in the editors. Nothing about Hygge is special: there is no Hygge function or button, it is a mood like any other. If a mood is offered by Auto or Manual Mood but not by Main Mood, the editor says so and tells you to add it to the Main Mood helper. Until you do, it can only be a room mood or a parent/fallback mood.
 
-**Moods Main Mood cannot represent (`Onki`).** `Onki` is in Auto Mood but not in Main Mood. It is *not* treated as `Auto`. While Auto (or Manual) Mood is set to such a mood, Main Mood keeps its previous value, and a *Mood cannot be represented by Main Mood* warning names the missing option. What lighting does then is configurable per mood (Global Mood Editor → select the mood):
+**Moods Main Mood cannot represent (`Onki`).** `Onki` is in Auto Mood but not in Main Mood. It is *not* treated as `Auto`. While Auto (or Manual) Mood is set to such a mood, Main Mood keeps its previous value, and a *Mood cannot be represented by Main Mood* warning names the missing option. What lighting does then is configurable per mood (Smart Lighting → select the mood → Advanced):
 
 - *Keep following Main Mood* (default; the existing behaviour)
 - *No mood: change nothing*
@@ -93,17 +93,33 @@ Lighting follows **Main Mood**. A room can have its own **room mood** instead (R
 
 The selectors themselves are never rewritten.
 
-### Light categories: Home Assistant labels
+### Light types: Home Assistant labels
 
-Each category (*Downlights*, *Lamps*, *LED strips*, *Decorative*, *Task*, *Path*, *Outdoor*, and your own) is bound to a Home Assistant label in *Configure → Light categories*. A light or group belongs to a category when the label is on the entity or on its device. Entity names are never used.
+Lights are configured by **type**, not one by one. Each light type is bound to a Home Assistant label; a light or group belongs to it when the label is on the entity or on its device. Entity names are never used.
+
+A light can carry **several labels**. There are three kinds, and the cards combine them for you:
+
+| Kind | Examples | Meaning |
+|---|---|---|
+| **Light type** | Spottar, Loft ljós, LED strips, Downlights, Lamps | What the light is |
+| **Function** | Uppljós, Decorative, Task, Path, Outdoor | What it is used for |
+| **RGB tag** | Rgb | Lights that may get colours. RGB is not a type: not every LED strip is RGB, and not every RGB light is a strip. |
+
+Without an RGB tag configured, "RGB" means "supports colour".
+
+A light gets the settings of **all** its labels, merged field by field from the least to the most specific: types, then functions, then the RGB tag, then "type + RGB", then "function + RGB". For example, a kitchen light labelled *Spottar*, *Loft ljós* and *Rgb*:
+- With *Spottar: Off* and *Loft ljós + RGB: purple 70 %*, it glows purple.
+- A plain spot next to it stays off.
+
+The default categories of a new installation include **Uppljós** (function). Categories made before 0.3.1 get their kind from their name: *Rgb* becomes the RGB tag, and *Uppljós*, *Decorative*, *Task*, *Path* and *Outdoor* become functions. Change kinds, labels and types under **Smart Lighting → Advanced → Light types** (the card also suggests existing labels such as *Uppljós* or *Rgb* that aren't used yet), or in *Configure → Light categories*. Changing light types reloads the integration; nothing is applied on reload.
 
 **Discovery.** A light or group in a room's area that carries a category label is managed by that room automatically. Lights configured explicitly in *Configure → Rooms* are managed too. When a light gets the label, moves to another area, or is renamed, the room follows on the next registry update. A configured light that has moved to another area is reported (*Managed light is in another area*).
 
 **Exclusion.** A light or group is never controlled when:
 - it is unticked (*managed*) in the room card, or
-- it carries the **exclusion label** chosen in the Global Mood Editor's settings.
+- it carries the **exclusion label** chosen under Smart Lighting → Advanced.
 
-**Groups.** When a Home Assistant light group and its members are all managed in one room, only the group receives commands, so a member never gets a duplicate or conflicting command. Exclude the group to control its members individually. Zigbee2MQTT groups (device model *Group*) and Hue groups don't expose their members. If such a group shares a category with other managed lights of the room, a *Possible duplicate group commands* warning asks you to exclude one side.
+**Groups.** When a group and its lights are both managed in a room, the room card asks one question: **As a group** (the member lights are no longer managed), **Individually** (the group is no longer managed), or **Ignore for now** (keeps things as they are; the warning becomes a note under Advanced). Until you answer, a Home Assistant light group is commanded instead of its members, so no light gets duplicate commands. Zigbee2MQTT groups (device model *Group*) and Hue groups don't expose their members: lights of the same type in the room are treated as possible members.
 
 ### Profiles and inheritance
 
@@ -120,8 +136,8 @@ A profile entry sets, for one mood:
 
 Three levels, merged **field by field**; the most specific configured value wins:
 
-1. **Global** – mood × category (Global Mood Editor)
-2. **Room override** – room × mood × category (Room Mood Lighting card → Profiles)
+1. **Global** – mood × light type (Smart Lighting card)
+2. **Room override** – room × mood × light type (Smart Room Lighting → Overrides)
 3. **Individual light override** – room × mood × light or group (same tab)
 
 Example: global *Hygge / Lamps* = 70 %, 2700 K; Kamar Norður *Hygge / Lamps* = 50 %; the desk lamp = 80 %. The desk lamp gets 80 % and 2700 K; the other lamps in Kamar Norður get 50 % and 2700 K.
@@ -160,50 +176,56 @@ Commands with identical data are batched into one `light.turn_on`/`turn_off` cal
 
 ### Dashboard cards
 
-The integration serves both cards itself: there is no resource to add. After updating, reload the browser once. Then **Edit dashboard → Add card** and choose:
+The integration serves the cards itself: there is no resource to add. After updating, reload the browser once. Existing dashboards keep working (the card types are unchanged). **Edit dashboard → Add card**:
 
-- **Smart Occupancy Global Mood Editor** (`custom:smart-occupancy-mood-editor-card`)
-  - Mood chips (⚠ marks moods Main Mood doesn't offer), each mood's parent, and its handling if Main Mood can't represent it.
-  - A category table, and an editor for the selected category.
-  - A preview for every enabled room.
-  - Settings: fallback mood, exclusion label, manual-override duration, changes without context.
-  - Validation messages.
-- **Smart Occupancy Room Mood Lighting** (`custom:smart-occupancy-room-lighting-card`). Pick the room in the visual editor.
-  - The room's diagnostics and health split, then four tabs:
-  - **Lights**: managed lights and groups, with category, live state, group and discovery badges, overrides and conflicts. *Managed* toggles exclusion.
-  - **Profiles**: room mood, room overrides per category, individual light overrides.
-  - **Preview**
-  - **Control**: activation review and activation, acknowledged automations, manual overrides, wall-switch entities.
+**Smart Lighting Profiles** (`custom:smart-occupancy-mood-editor-card`). Pick a mood (Dagur, Hygge, Arbeiði, Nátt, Veistla …) and see one line per light type, with a colour dot:
+
+```
+Smart Lighting                      Now: Hygge
+[Dagur] [Hygge] [Arbeiði] [Nátt] [Veistla]
+●  Spottar          Off
+●  Loft ljós        40 % · 2700 K
+●  LED strips       25 %
+●  Uppljós + RGB    Amber · 30 %
+Not set — tap to set: [Task lighting]
+[Preview] [Advanced]
+```
+
+- Only types with a setting in this mood are rows. Types with lights but no setting are one line of chips. Types without any light are hidden ("Show unused light types").
+- **Edit** (tap a row) opens one focused editor: *On / Off / Leave unchanged*, brightness, white (Warm / Soft / Neutral / Cool and a slider), colour swatches and effects. Only the controls the type's lights support are shown: a brightness-only LED strip shows just brightness; colours appear for RGB targets. **Only the RGB-tagged lights of this type** turns the edit into "type + RGB". Veistla: pick the mood, tap *Uppljós*, tick *Only RGB*, tap a colour. Done.
+- Changes save immediately. *Advanced* inside the editor has transition, ambient, the exact values and where each comes from, and per-field reset.
+- **Preview** shows what each room would do; a preview never changes a light.
+- **Advanced** (card): mood inheritance (parent and fallback mood), handling of moods Main Mood cannot represent, light types (kind, label, add/remove, suggestions), exclusion label, manual-override duration, and the full validation list.
+
+**Smart Room Lighting** (`custom:smart-occupancy-room-lighting-card`, pick the room in the visual editor). Five tabs; only **Overview** is open by default:
+
+- **Overview**: mood (follows global or room mood), mode (Observe/Active), occupancy and lighting health, managed lights, last applied, then one line per issue: a group question with its three buttons, "2 lighting conflicts · Review", short health lines.
+- **Lights**: one line per light type ("Spottar · 6 lights · follows global · Off"); tap to see its lights, or tick *Show every light*. *Managed* toggles exclusion.
+- **Overrides**: room mood; per type *follows global* or *overridden* (tap to override, the same editor with *Follow global*); single-light overrides.
+- **Preview**: what this room would do in a mood.
+- **Advanced**: activation (Observe/Active), automations that also control the lights (allow both or leave them alone), group decisions, manual overrides, wall-switch entities, discovery, last decision and the full diagnostics.
+
+**Room Status** (`custom:smart-occupancy-room-card`): occupancy state, evidence quality, active sensors, three health chips (Occupancy / Lighting / Configuration), one short line per warning (*Details* for the full explanations), and the existing-helper comparison in one line.
 
 ```yaml
 type: custom:smart-occupancy-mood-editor-card
 ---
 type: custom:smart-occupancy-room-lighting-card
 area: kamar_nordur        # area id of an enabled room
+---
+type: custom:smart-occupancy-room-card
+area: kamar_nordur
 ```
 
 **How the cards behave:**
-- **Saving.** Changes save immediately (a short pause after typing, at once for selections), with the result or a validation message shown next to the field.
-- **Configuration.** The integration owns and stores the configuration (`.storage/smart_occupancy.lighting`). It works with no dashboard open and survives restarts and updates.
-- **Network.** No polling: the cards subscribe once and refetch only when the integration reports a change; light states come from the frontend's own state.
-- **Theme and layout.** The cards use theme variables only (light and dark), and adapt from phone width to wide dashboards (sections views supported).
-- **Permissions.** Every user can view the cards and previews. Only administrators can change settings: the websocket commands are `require_admin`.
-
-**Preview** shows, per light or group:
-- name
-- category
-- current state
-- requested state, brightness and colour
-- where each value comes from
-- the decision (*change*, *unchanged*, *blocked*, *not controlled*), with whether a manual override blocks it
-- unsupported settings
-- why
-
-A preview never sends a command.
+- **Storage.** The integration owns the configuration (`.storage/smart_occupancy.lighting`), so it works with no dashboard open.
+- **Network.** No polling: one subscription, and a refetch only when something changes.
+- **Theme and layout.** Light and dark themes, phone to wide dashboards.
+- **Permissions.** Only administrators can change settings.
 
 ### Activation (pilot: Kamar Norður)
 
-1. Open the Room Mood Lighting card for Kamar Norður → **Control** → **Review lights and conflicts**. The review shows:
+1. Open the Smart Room Lighting card for Kamar Norður → **Advanced**. The review shows:
    - which lights and groups will be controlled
    - which are excluded or controlled through a group
    - which groups hide their members
@@ -215,7 +237,7 @@ A preview never sends a command.
    - tick it (*acknowledged*: both may control the light).
 
    **Lights affected by an enabled, unacknowledged automation are left alone** while mood lighting is active.
-3. **Enable mood lighting in Kamar Norður → Confirm.** Only administrators can do this. The current mood is applied if the room is occupied.
+3. **Enable mood lighting in Kamar Norður → Confirm** (in the same tab). Only administrators can do this. The current mood is applied if the room is occupied.
 
 **Return to Observe** stops control immediately, and lights are left as they are. Other rooms stay in Observe until you activate them the same way. Existing automations are never disabled or modified.
 
@@ -353,21 +375,7 @@ area: kamar_nordur        # the area id of the room
 # title: Kamar Norður     # optional
 ```
 
-The card is read-only and shows:
-- the room name
-- the occupancy state
-- the evidence quality
-- the active sensors
-- a pending vacancy, with a live countdown
-- the reason for the current state
-- the *Observe only* or *Mood lighting* badge (per room)
-- three separate health rows. Each row names the exact sensors or lights involved and its reason:
-  - **Occupancy detection**: whether presence and vacancy can be determined, marked *usable* or *not usable*. Only sensors count here.
-  - **Lighting**: whether the lights are available.
-  - **Configuration**: whether the room's assignments and settings are valid.
-- if a helper is configured, the comparison with it
-
-An unplugged light shows under *Lighting* only. Occupancy stays healthy if its sensors are. The layout adapts from phone width to wide dashboards (sections grid supported). It uses only Home Assistant theme variables, so light and dark themes both work.
+The card is read-only. It shows the occupancy state, evidence quality, active sensors, a pending vacancy with a live countdown, and the *Observe* or *Mood lighting* badge. Health is three chips: **Occupancy** (sensors only), **Lighting** and **Configuration**. Each warning is one short line; *Details* shows the full explanations. If a helper is configured, its comparison is one line. An unplugged light shows under *Lighting* only. The layout adapts from phone width to wide dashboards and follows the theme.
 
 ## Entities
 
@@ -560,6 +568,8 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 
 ## Upgrading
 
+**From 0.3.0.** Nothing to do. Profiles, room settings, activation, acknowledgements and overrides are kept. Light categories get a kind derived from their name (*Rgb* → RGB tag; *Uppljós*, *Decorative*, *Task*, *Path*, *Outdoor* → function; others → light type); the options are not rewritten until you change a light type. Existing dashboards keep working: the card types are unchanged, only their layout is new.
+
 **From 0.2.x.** Nothing to do. On the first start:
 - The mood profiles stored in the options (global, room and light overrides) are copied once into the new lighting store (`.storage/smart_occupancy.lighting`). The options themselves are not changed, so 0.2 still loads after a downgrade. From then on the store is used; profile edits made in 0.2 after a downgrade are not re-imported.
 - Every room starts with mood lighting **disabled** (Observe).
@@ -568,13 +578,15 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 
 **From 0.1.x.** Configuration version 1.1 is migrated to 1.2 on the first start, keeping everything you configured; then the 0.2 step above applies.
 
-## Known limitations (Phase 0.3)
+## Known limitations (Phase 0.3.1)
 
 - **No vacancy shutdown and no periodic correction.** A room's lights are not switched off when it becomes vacant, and lights changed by other automations are not corrected. That is Phase 0.4.
 - **Conflict detection reads automation actions.** It sees direct, group, device, area, floor and label targets, scenes and scripts (three levels). Templated targets, blueprints with templated inputs, Node-RED and AppDaemon are invisible.
 - **Manual changes without any context** (directly bound Zigbee switches, Hue dimmers) cannot be attributed. Configure the switch's action/event entity as a *wall switch* in the room, or choose *Treat as a manual change* globally.
 - **Groups that hide their members** (Zigbee2MQTT, Hue) cannot be de-duplicated automatically; a warning asks you to exclude one side.
 - **Room and light overrides do not follow mood inheritance**; only global profiles inherit from parent and fallback moods.
+- **Colour names are approximate**: summaries name the nearest of eight swatches (Amber, Orange, Red, Pink, Purple, Blue, Cyan, Green), or show RGB values.
+- **Changing light types reloads the integration** (they are part of the options). Nothing is applied on reload.
 - **The cards are in English only.** The options-flow strings are translatable.
 - **"Already in this state" is approximate**: brightness ±2 %, colour temperature ±60 K. Colour-only lights given a colour temperature are compared with the last command instead.
 
@@ -599,6 +611,6 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 | Occupancy | Engine per room with explainable states, evidence and helper comparison | Vacancy-based shutdown, using the same results |
 | Lighting | Plans per room with a reason for every light; per-room activation; manual overrides with expiry; conflict detection | Light supervision: compare plans with actual states periodically, correct misfires, expand override handling |
 | Configuration | Lighting store (versioned) owned by the integration; websocket API with admin-only writes | Add fields with defaults and a store migration |
-| Dashboard | Global Mood Editor, Room Mood Lighting card, Room Status card | Supervision views |
+| Dashboard | Smart Lighting Profiles, Smart Room Lighting and Room Status cards (simple by default, Advanced on request) | Supervision views |
 | Prediction | `OccupancyHistory` receives every transition (`NullHistory`) | Phase 0.5 learning |
 | Safety | `assert_room_control_permitted()` gates every command; integration-wide mode stays Observe | Supervise / Full Control modes with their own tests |

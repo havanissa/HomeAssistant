@@ -80,7 +80,8 @@ async def test_full_user_flow(hass: HomeAssistant, home: Home, service_calls) ->
     }
     assert room["lights"] == [home.group]
     assert options["operating_mode"] == "observe"
-    assert len(options["categories"]) == 7
+    assert len(options["categories"]) == 8
+    assert {c["key"]: c["kind"] for c in options["categories"]}["uplight"] == "function"
     await hass.async_block_till_done()
     assert result["result"].state is config_entries.ConfigEntryState.LOADED
     assert service_calls == []

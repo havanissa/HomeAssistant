@@ -3,9 +3,14 @@
 Three configuration levels, merged field by field (the most specific
 configured value wins)::
 
-    global   [mood][category]        (lighting store: global_profiles)
-      -> room  [mood][category]      (rooms[area].mood_overrides)
+    global   [mood][target]          (lighting store: global_profiles)
+      -> room  [mood][target]        (rooms[area].mood_overrides)
         -> light [mood][light/group] (rooms[area].light_overrides)
+
+A target is a light category ("spottar", "uplight"), the RGB tag ("rgb"), or
+the RGB-tagged part of a category ("uplight+rgb"). A light carrying several
+labels gets the entries of all its targets, merged from the least to the most
+specific (see ``LightIndex.profile_targets``).
 
 Moods can inherit too: a mood's global profile inherits every field it does
 not set from its *parent* mood, then from the *fallback* mood (for example
@@ -175,28 +180,48 @@ def _apply(result: ResolvedSetting, layer: ProfileSetting, source: dict[str, str
         result.sources[f] = source
 
 
+Targets = str | list[str] | tuple[str, ...] | None
+
+
+def _targets(targets: Targets) -> list[str]:
+    if targets is None:
+        return []
+    return [targets] if isinstance(targets, str) else list(targets)
+
+
 def layers(
     config: LightingConfig,
     mood: str,
     area_id: str | None,
     light_entity_id: str | None,
-    category_key: str | None,
+    targets: Targets,
     *,
     levels: tuple[str, ...] = LEVELS,
 ) -> list[tuple[dict[str, str], ProfileSetting]]:
-    """The configured entries that apply, least specific first."""
+    """The configured entries that apply, least specific first.
+
+    ``targets`` are the light's profile targets, least specific first (see
+    ``LightIndex.profile_targets``); a single category key is accepted too.
+    Order: the mood chain (fallback, parents, the mood itself), and within a
+    mood the targets; then the room override for the targets; then the light.
+    """
+    keys = _targets(targets)
     out: list[tuple[dict[str, str], ProfileSetting]] = []
-    if "global" in levels and category_key:
+    if "global" in levels and keys:
         for m in reversed(mood_chain(config, mood)):
-            if (entry := table_get(config.global_profiles, m).get(category_key)) is not None:
-                out.append(({"level": "global", "mood": m}, entry))
+            entries = table_get(config.global_profiles, m)
+            for key in keys:
+                if (entry := entries.get(key)) is not None:
+                    out.append(({"level": "global", "mood": m, "target": key}, entry))
     room = config.room(area_id) if area_id else None
-    if room is not None and "room" in levels and category_key:
-        if (entry := table_get(room.mood_overrides, mood).get(category_key)) is not None:
-            out.append(({"level": "room", "mood": mood}, entry))
+    if room is not None and "room" in levels and keys:
+        entries = table_get(room.mood_overrides, mood)
+        for key in keys:
+            if (entry := entries.get(key)) is not None:
+                out.append(({"level": "room", "mood": mood, "target": key}, entry))
     if room is not None and "light" in levels and light_entity_id:
         if (entry := table_get(room.light_overrides, mood).get(light_entity_id)) is not None:
-            out.append(({"level": "light", "mood": mood}, entry))
+            out.append(({"level": "light", "mood": mood, "target": light_entity_id}, entry))
     return out
 
 
@@ -205,7 +230,7 @@ def resolve(
     mood: str,
     area_id: str | None,
     light_entity_id: str | None,
-    category_key: str | None,
+    targets: Targets,
     *,
     levels: tuple[str, ...] = LEVELS,
 ) -> ResolvedSetting:
@@ -215,7 +240,7 @@ def resolve(
     override would inherit.
     """
     result = ResolvedSetting()
-    for source, layer in layers(config, mood, area_id, light_entity_id, category_key, levels=levels):
+    for source, layer in layers(config, mood, area_id, light_entity_id, targets, levels=levels):
         _apply(result, layer, source)
     if result.action == LightAction.OFF:
         for f in _ON_ONLY:

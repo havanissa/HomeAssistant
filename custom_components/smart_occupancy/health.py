@@ -93,11 +93,11 @@ def room_health(snapshot: Snapshot | None, area_id: str, result: RoomResult | No
         f"Light {_label(li['name'], li['entity_id'])} {_HEALTH_WORDS.get(li['health'], li['health'])}"
         for li in unavailable_lights
     ]
-    # Mood lighting problems (conflicts, unsupported settings, failed commands).
+    # Mood lighting problems (conflicts, unsupported settings, failed commands):
+    # one short line each by default; the full text is in ``details``.
     lighting_problems = [p for p in problems if p.aspect == "lighting" and p.code not in ENTITY_PROBLEM_CODES]
-    light_reasons += [
-        f"{p.title}: {p.explanation}" for p in lighting_problems
-    ]
+    light_reasons += short_lighting_reasons(lighting_problems)
+    light_details = [f"{p.title}: {p.explanation}" for p in lighting_problems]
 
     # Configuration ---------------------------------------------------------
     config_problems = [
@@ -110,9 +110,10 @@ def room_health(snapshot: Snapshot | None, area_id: str, result: RoomResult | No
     else:
         config_status = HEALTHY
     config_reasons = [
-        f"{p.title}: {_label(p.name, p.entity_id)}" if p.entity_id else f"{p.title}: {p.explanation}"
+        f"{p.title}: {p.name or p.entity_id}" if p.entity_id else p.title
         for p in config_problems
     ]
+    config_details = [f"{p.title}: {p.explanation}" for p in config_problems]
 
     return {
         "occupancy": {
@@ -124,11 +125,39 @@ def room_health(snapshot: Snapshot | None, area_id: str, result: RoomResult | No
         "lighting": {
             "status": WARNING if unavailable_lights or lighting_problems else HEALTHY,
             "reasons": light_reasons,
+            "details": light_details,
             "unavailable_lights": unavailable_lights,
             "lights": len(light_ids),
         },
         "configuration": {
             "status": config_status,
             "reasons": config_reasons,
+            "details": config_details,
         },
     }
+
+
+def short_lighting_reasons(problems) -> list[str]:
+    """One concise line per kind of lighting problem (e.g. "2 lighting conflicts")."""
+    out: list[str] = []
+    conflicts = sorted({p.name or p.entity_id for p in problems if p.code == "automation_conflict"})
+    if conflicts:
+        n = len(conflicts)
+        out.append(f"{n} lighting conflict{'s' if n != 1 else ''} ({', '.join(conflicts)})")
+    for p in problems:
+        name = p.name or p.entity_id or ""
+        if p.code == "automation_conflict":
+            continue
+        if p.code == "lighting_unsupported":
+            out.append(f"Some settings not supported by {name}")
+        elif p.code == "group_overlap_unknown":
+            out.append(f"Possible duplicate control: {name}")
+        elif p.code == "group_member_conflict":
+            out.append(f"Group and member in two rooms: {name}")
+        elif p.code == "lighting_execution_failed":
+            out.append("Last light command failed")
+        elif p.code == "mood_unrepresentable":
+            out.append(p.title)
+        else:
+            out.append(f"{p.title}: {name}" if name else p.title)
+    return out

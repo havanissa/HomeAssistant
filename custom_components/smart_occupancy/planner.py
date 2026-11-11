@@ -72,6 +72,8 @@ class Target:
     conflicts: tuple[dict[str, Any], ...] = ()
     acknowledged_conflicts: tuple[dict[str, Any], ...] = ()
     last_command: tuple[str, dict[str, Any]] | None = None
+    # Profile targets of the light, least specific first.
+    targets: tuple[str, ...] = ()
 
     @property
     def offline(self) -> bool:
