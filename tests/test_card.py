@@ -85,3 +85,23 @@ def test_lighting_cards_never_control_lights() -> None:
 @pytest.mark.parametrize("path", [CARD_FILE, LIGHTING_FILE])
 def test_card_javascript_parses(path: Path) -> None:
     subprocess.run(["node", "--check", str(path)], check=True, cwd=Path(__file__).parent)
+
+
+def test_room_card_layout() -> None:
+    """Tabs are the single navigation; daylight settings live in the Automatic tab only; one outdoor editor."""
+    source = LIGHTING_FILE.read_text(encoding="utf-8")
+    tabs = re.search(r"const tabs = (\[.*?\]);", source, re.S).group(1)
+    order = re.findall(r'\["([a-z]+)", "([A-Za-z]+)"\]', tabs)
+    assert [k for k, _ in order] == ["overview", "lights", "automatic", "overrides", "preview", "advanced"]
+    # No duplicate navigation buttons at the bottom of Overview.
+    for label in ("Review lights", "Configure overrides", "Preview room"):
+        assert label not in source
+    overview = source[source.index("  _overview(r) {"):source.index("  _daylightSummary(r) {")]
+    assert "_autoHtml" not in overview and "<select" not in overview and "_daylightSummary" in overview
+    advanced = source[source.index("  _advanced(r) {"):source.index("  async _loadReview() {")]
+    assert "_daylightAdvanced" not in advanced and "dl-" not in advanced
+    automatic = source[source.index("  _automatic(r) {"):source.index("  _autoHtml(r) {")]
+    assert "_autoHtml(r)" in automatic and "Advanced daylight settings" in automatic and "_daylightAdvanced(r)" in automatic
+    # One shared renderer for the global outdoor sensor, used by the global card and the room card.
+    assert source.count('data-control="dl-outdoor"') == 1
+    assert source.count("this._outdoorGlobalHtml(") == 2
