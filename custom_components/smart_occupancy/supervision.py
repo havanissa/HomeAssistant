@@ -6,8 +6,13 @@ phases, but any request for them is downgraded to Observe here.
 
 Mood lighting is enabled **per room** instead (``RoomLighting.control_enabled``,
 set only by an explicit, admin-only activation in the Smart Room Lighting card).
-Every light command passes ``assert_room_control_permitted`` first, so a room
-that was not activated can never be controlled.
+Every automatic light command passes ``assert_room_control_permitted`` first,
+so a room that was not activated can never be controlled automatically.
+
+Wall switch actions are a person's explicit request and have their own,
+independent gate (``assert_switch_control_permitted``): a switch set to
+**Active** executes its button actions also while the room's automatic
+lighting is Observing. A switch in **Observing** never sends anything.
 """
 
 from __future__ import annotations
@@ -48,3 +53,9 @@ def assert_room_control_permitted(room_active: bool, area_id: str) -> None:
     """Gate for mood lighting commands: only explicitly activated rooms."""
     if not room_active:
         raise ControlNotPermittedError(f"Mood lighting is not enabled for room {area_id}")
+
+
+def assert_switch_control_permitted(switch_active: bool, area_id: str, switch_id: str) -> None:
+    """Gate for wall switch button actions: only switches set to Active, in an enabled room."""
+    if not switch_active:
+        raise ControlNotPermittedError(f"Switch {switch_id} in room {area_id} is not Active")

@@ -8,8 +8,9 @@ Every press of a configured switch is first a *physical, manual* action:
 * optionally it refreshes the room's activity in the occupancy engine (never
   occupies a room by itself).
 
-Then, only for a switch in **Smart Occupancy control**, in a room whose mood
-lighting was activated, the button's mapping is executed:
+Then, only for a switch set to **Active**, the button's mapping is executed.
+The switch's own mode is the only gate (0.3.6): the room's automatic lighting
+mode (Observing / Automatic) does not block a deliberately activated switch:
 
 * light commands go to the room's managed lights through the same group
   handling as mood lighting (a managed group is commanded, not its members),
@@ -26,7 +27,16 @@ waiting); hold-to-dim sends at most one command per interval, waits for each
 command to finish, stops on STOP/release or after the safety timeout, and
 never goes beyond the configured minimum and maximum brightness.
 
-Listen only never sends anything. A room in Observe never gets a command.
+A switch in **Observing** never sends anything; its presses are registered
+and logged. Every press ends with one outcome (diagnostics):
+
+* ``observed``   - the switch is Observing: registered, nothing executed;
+* ``not_mapped`` - the button has no assigned action;
+* ``blocked``    - the switch is Active, but something else prevents the
+  action (the room is not enabled, too many presses queued, the switch was
+  set to Observing before the press ran);
+* ``succeeded`` / ``failed`` - the action was dispatched and Home Assistant
+  accepted it or reported an error (an unavailable target is a failure).
 """
 
 from __future__ import annotations
@@ -52,6 +62,7 @@ from .const import (
     OnValues,
 )
 from .lighting import light_capabilities
+from .supervision import assert_switch_control_permitted
 from .planner import build_command
 from .switches import (
     IGNORED_WORDS,
@@ -84,9 +95,19 @@ class _DimRun:
         self.wake.set()
 
 
+# Outcomes of a press (see the module docstring).
+OUTCOME_OBSERVED = "observed"
+OUTCOME_NOT_MAPPED = "not_mapped"
+OUTCOME_BLOCKED = "blocked"
+OUTCOME_SUCCEEDED = "succeeded"
+OUTCOME_FAILED = "failed"
+
+
 class _Result:
-    def __init__(self, text: str, ok: bool | None, command: str | None = None, override: bool = False) -> None:
+    def __init__(self, text: str, ok: bool | None, command: str | None = None, override: bool = False,
+                 outcome: str | None = None) -> None:
         self.text, self.ok, self.command, self.override = text, ok, command, override
+        self.outcome = outcome or (OUTCOME_SUCCEEDED if ok else OUTCOME_FAILED if ok is False else OUTCOME_OBSERVED)
 
 
 def _plural(n: int, word: str = "light") -> str:
@@ -94,7 +115,7 @@ def _plural(n: int, word: str = "light") -> str:
 
 
 class SwitchControl:
-    """Executes button mappings for switches in Smart Occupancy control."""
+    """Executes button mappings for switches set to Active."""
 
     def __init__(self, hass: HomeAssistant, ctrl: LightingController) -> None:
         self.hass = hass
@@ -148,7 +169,7 @@ class SwitchControl:
         if switch is None or self._stopped:
             return
         if event.area_id not in ctrl.config.enabled_rooms:
-            self._record(key, event, _Result(IGNORED_WORDS["disabled"], None))
+            self._record(key, event, _Result(IGNORED_WORDS["disabled"], None, outcome=OUTCOME_BLOCKED))
             return
         # A person pressed a physical switch: light changes right after it are theirs.
         context = ctrl.note_switch_press(event.area_id)
@@ -156,16 +177,14 @@ class SwitchControl:
             ctrl.coordinator.occupancy.async_note_activity(event.area_id, f"wall switch {switch.name}")
         mapping = switch.mapping(event.raw)
         if not switch.controls:
-            text = "Listen only: recognised as a manual action"
+            text = "Observing: registered as a manual action"
             if mapping:
-                text += f" (assigned: {mapping.describe()}; not sent)"
-            self._record(key, event, _Result(text, None))
+                text += f" (assigned: {mapping.describe()}; not executed)"
+            self._record(key, event, _Result(text, None, outcome=OUTCOME_OBSERVED))
             return
         if mapping is None:
-            self._record(key, event, _Result("Recognised as a manual action; " + IGNORED_WORDS["not_mapped"], None))
-            return
-        if not ctrl.room_active(event.area_id):
-            self._record(key, event, _Result(f"{IGNORED_WORDS['observe']} ({mapping.describe()})", None))
+            self._record(key, event, _Result("Registered as a manual action; " + IGNORED_WORDS["not_mapped"], None,
+                                             outcome=OUTCOME_NOT_MAPPED))
             return
         if mapping.action == ButtonAction.DIM_STOP:
             stopped = self._stop_dim(key)
@@ -178,7 +197,7 @@ class SwitchControl:
                 self._dims[key] = run
             return
         if self._queued.get(key, 0) >= MAX_QUEUED_PRESSES:
-            self._record(key, event, _Result(IGNORED_WORDS["busy"], False))
+            self._record(key, event, _Result(IGNORED_WORDS["busy"], False, outcome=OUTCOME_BLOCKED))
             return
         self._queued[key] = self._queued.get(key, 0) + 1
         self._create_task(self._run(key, event, switch, mapping, context))
@@ -190,8 +209,8 @@ class SwitchControl:
             async with lock:
                 if self._stopped:
                     return
-                if not self.ctrl.room_active(event.area_id):
-                    result = _Result(IGNORED_WORDS["observe"], None)
+                if not self.ctrl.switch_active(event.area_id, event.switch_id):
+                    result = _Result(IGNORED_WORDS["switched_to_observe"], None, outcome=OUTCOME_BLOCKED)
                 else:
                     try:
                         result = await self._execute(event, switch, mapping, context)
@@ -207,14 +226,17 @@ class SwitchControl:
         if status is None:
             return
         status.last_result, status.last_result_ok = result.text, result.ok
+        status.last_outcome = result.outcome
         if result.command is not None:
             status.last_command = result.command
         status.override = result.override
         status.history.append({"at": event.when, "raw": event.raw, "label": action_label(event.raw),
-                               "result": result.text, "ok": result.ok, "source": event.source})
-        log = _LOGGER.info if result.ok is not None else _LOGGER.debug
-        log("switch_press area=%s switch=%s action=%s source=%s result=%s", event.area_id, event.switch_id,
-            event.raw, event.source, result.text)
+                               "result": result.text, "ok": result.ok, "outcome": result.outcome,
+                               "source": event.source})
+        # Executed (or failed / blocked) actions at info; observed presses only at debug (no log noise).
+        log = _LOGGER.info if result.outcome in (OUTCOME_SUCCEEDED, OUTCOME_FAILED, OUTCOME_BLOCKED) else _LOGGER.debug
+        log("switch_press area=%s switch=%s action=%s source=%s outcome=%s result=%s", event.area_id,
+            event.switch_id, event.raw, event.source, result.outcome, result.text)
         self.ctrl.mark_dirty()
         self.ctrl.notify()
 
@@ -248,7 +270,7 @@ class SwitchControl:
         """Send a light command and register the manual override for what was switched."""
         if not data_by_entity:
             return {}
-        errors = await self.ctrl.async_switch_lights(area_id, service, data_by_entity, context)
+        errors = await self.ctrl.async_switch_lights(area_id, service, data_by_entity, context, switch_id=switch.id)
         sent = [e for e in data_by_entity if e not in errors]
         now = time.monotonic()
         for entity_id in sent:
@@ -266,7 +288,10 @@ class SwitchControl:
     async def _execute(self, event: ButtonEvent, switch: SwitchConfig, mapping: ButtonMapping,
                        context: Context) -> _Result:
         area_id = event.area_id
+        assert_switch_control_permitted(self.ctrl.switch_active(area_id, switch.id), area_id, switch.id)
         action = mapping.action
+        _LOGGER.debug("switch_action_dispatched area=%s switch=%s action=%s mapping=%s", area_id, switch.id,
+                      event.raw, mapping.describe())
         if action in LIGHT_ACTIONS:
             online, offline = self._targets(area_id, mapping)
             if not online:
@@ -430,8 +455,8 @@ class SwitchControl:
                     if not data:
                         why = "reached the " + ("maximum" if direction > 0 else "minimum")
                         break
-                    if not self.ctrl.room_active(area_id):
-                        why = "the room returned to Observe"
+                    if not self.ctrl.switch_active(area_id, switch.id):
+                        why = "the switch was set to Observing"
                         break
                     errors = await self._lights(area_id, "turn_on", data, context, switch, event,
                                                 f"Physical switch dimming {'up' if direction > 0 else 'down'}")

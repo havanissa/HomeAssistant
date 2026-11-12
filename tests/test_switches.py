@@ -153,9 +153,11 @@ async def test_discover_select_and_assign_wiser_switch(hass: HomeAssistant, mqtt
     assert candidate["assigned_room"] == lit.area
     press(hass, "on_right")
     await settle(hass, freezer)
-    assert calls.all == []  # Listen only
+    assert calls.all == []  # Observing
     status = ctrl_of(entry).switch_inputs.status[(lit.area, switch_id)]
-    assert status.last_event["raw"] == "on_right" and status.last_result.startswith("Listen only")
+    assert status.last_event["raw"] == "on_right" and status.last_result.startswith("Observing")
+    assert status.last_outcome == "observed" and status.history[-1]["outcome"] == "observed"
+    assert room_switches(ctrl_of(entry), lit.area)[0]["operating"]["state"] == "observing"
 
 
 async def test_learn_buttons_persist_and_never_command(hass: HomeAssistant, mqtt, lit: Lit, calls: Calls,
@@ -299,22 +301,41 @@ async def test_wiser_controls_room_group_with_manual_override(hass: HomeAssistan
     assert rt.overrides == {}
 
 
-async def test_switches_work_in_manual_mood_and_respect_observe(hass: HomeAssistant, mqtt, lit: Lit, calls: Calls,
-                                                                hass_ws_client, freezer) -> None:
-    """9-10: Main Mood = Manual pauses automatic lighting, never the wall switches; Observe never sends."""
+async def test_switches_work_in_manual_mood_and_while_room_lighting_observes(
+        hass: HomeAssistant, mqtt, lit: Lit, calls: Calls, hass_ws_client, freezer) -> None:
+    """9-10 (0.3.6): Manual mood pauses automatic lighting, never the wall switches; an Active switch also works
+    while the room's automatic lighting is Observing (independent modes); an Observing switch never sends."""
     entry = await setup_entry(hass, options(lit))
     ctrl = ctrl_of(entry)
     ws = WS(await hass_ws_client(hass))
     await occupy(hass, lit, freezer)
-    # Observe: the switch is in control, the room was never activated.
+    # The room's automatic lighting is Observing (never activated); the switch is Active.
     switch_id = await controlled(hass, ws, lit, freezer, entry)
+    assert not ctrl.room_active(lit.area)
     calls.clear()
     press(hass, "off_right")
     await settle(hass, freezer)
-    assert calls.all == []
+    assert calls.by_entity()[lit.group] == ("turn_off", {})  # executed once, through the managed group
+    assert len(calls.off) == 1
     status = ctrl.switch_inputs.status[(lit.area, switch_id)]
-    assert "Observe" in status.last_result
-    assert any(w["code"] == "observe" for w in room_switches(ctrl, lit.area)[0]["warnings"])
+    assert status.last_outcome == "succeeded" and "switched off" in status.last_result
+    model = room_switches(ctrl, lit.area)[0]
+    assert model["operating"]["state"] == "active" and "Observing" in model["operating"]["text"]
+    assert not any(w["code"] == "observe" for w in model["warnings"])
+    # Automatic lighting itself still sends nothing in Observing (occupancy, mood changes).
+    calls.clear()
+    set_moods(hass, "Kvøld", "Auto", "Kvøld")
+    await settle(hass, freezer, 2)
+    assert calls.all == []
+    # The switch set to Observing: the press is registered, nothing is executed.
+    assert (await ws(type="smart_occupancy/lighting/switch/mode", area_id=lit.area, switch_id=switch_id,
+                     mode="listen"))["success"]
+    press(hass, "on_right")
+    await settle(hass, freezer)
+    assert calls.all == []
+    assert status.last_outcome == "observed" and status.last_event["raw"] == "on_right"
+    assert (await ws(type="smart_occupancy/lighting/switch/mode", area_id=lit.area, switch_id=switch_id,
+                     mode="control", confirm=True))["success"]
     # Activated, then Main Mood = Manual: automatic lighting stops, the wall switch keeps working.
     await activate(hass, entry, lit, freezer)
     set_moods(hass, "Dagur", "Manual", "Manual", main_opts=["Morgun", "Dagur", "Kvøld", "Nátt", "Hygge", "Manual"])

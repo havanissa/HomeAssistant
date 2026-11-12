@@ -114,7 +114,46 @@ def test_room_card_layout() -> None:
     # Switches tab: assigned switches with Configure / Learn buttons / Remove; details collapsed under Advanced.
     switches = source[source.index("  _switches(r) {"):source.index("  _advanced(r) {")]
     for text in ("Assigned switches", "Learn buttons", "Configure", "Remove", "Advanced switch settings",
-                 "Listen only", "Smart Occupancy control", "Listener diagnostics"):
+                 "Observing", "Active", "Listener diagnostics"):
         assert text in switches, text
     assert "callService" not in switches and "dl-" not in switches
     assert source.count('data-action="tab"') == 2  # the tab bar and the conflicts "Review" link, as in 0.3.4
+
+
+def test_operating_modes_on_the_main_screens() -> None:
+    """0.3.6: the modes are shown and changed where they are used, never only in the browser.
+
+    * Automatic tab -> "Automatic lighting" box: the room's mode (double-click status + selector);
+    * Switches tab -> every switch card (not only its Configure page): Observing / Active.
+    """
+    source = LIGHTING_FILE.read_text(encoding="utf-8")
+    auto = source[source.index("  _autoHtml(r) {"):source.index("  // Advanced → Daylight")]
+    assert '<div class="section auto">${this._lightingModeHtml(r)}' in auto  # first thing in the box
+    automatic = source[source.index("  _automatic(r) {"):source.index("  _autoHtml(r) {")]
+    assert "this._lightingModeHtml(r)" in automatic  # also when no daylight information exists
+    mode = source[source.index("  _lightingModeHtml(r) {"):source.index("  _setRoomMode(mode) {")]
+    assert "Double-click to switch between Observing and Automatic." in mode
+    assert '<div class="stitle">Automatic lighting</div>' in mode  # the box's title, with the status beside it
+    assert 'data-dbl="room-mode"' in mode and 'data-action="room-mode"' in mode
+    assert 'data-mode="${mode}"' in mode and '"Observing"' in mode and '"Automatic"' in mode
+    assert "aria-pressed" in mode and "aria-label" in mode
+    # The status shows the integration's state (settings + diagnostics), and changes go to the backend.
+    state = source[source.index("  _roomModeState(r) {"):source.index("  // Operating mode: the status")]
+    assert "r.settings.control_enabled" in state and "d.control_mode" in state
+    for m in ("paused", "blocked"):
+        assert f'"{m}"' in state
+    setter = source[source.index("  _setRoomMode(mode) {"):source.index("  _onDouble(kind, el) {")]
+    assert "room/activate" in setter and "room/deactivate" in setter and "confirm: true" in setter
+    assert "this._save(" in setter and "control_enabled =" not in setter  # no UI-only toggle
+    # Switch cards: the mode control is on the card itself, with the effective state from the integration.
+    card = source[source.index("  _switchCard(r, sw, x) {"):source.index("  _learningHtml(x) {")]
+    assert "this._swModeHtml(x, " in card and "Last event" in card
+    sw = source[source.index("  _swModeHtml(x, head) {"):source.index("  _setSwitchMode(id, mode) {")]
+    assert "Double-click to switch between Observing and Active." in sw
+    assert 'data-dbl="sw-mode"' in sw and 'data-action="sw-mode-set"' in sw and "x.operating" in sw
+    setter = source[source.index("  _setSwitchMode(id, mode) {"):source.index("  _switchCard(r, sw, x) {")]
+    assert "switch/mode" in setter and "confirm: true" in setter and "can_control" in setter
+    # Double-click is detected from two clicks on the same status (a re-render between them is harmless).
+    tap = source[source.index("  _tap(el) {"):source.index("  _switchRgb(key, on) {")]
+    assert "this._onDouble" in tap and "500" in tap
+    assert 'closest("[data-dbl]")' in source and "touch-action: manipulation" in source

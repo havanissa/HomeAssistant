@@ -101,6 +101,7 @@ class SwitchStatus:
     last_event: dict[str, Any] | None = None
     last_result: str | None = None
     last_result_ok: bool | None = None
+    last_outcome: str | None = None                      # observed / not_mapped / blocked / succeeded / failed
     last_command: str | None = None
     override: bool = False
     last_ignored: dict[str, Any] | None = None
@@ -113,14 +114,15 @@ class SwitchStatus:
             "available_sources": list(self.available_sources), "topic": self.topic,
             "availability": self.availability, "problem": self.problem, "last_event": self.last_event,
             "last_result": self.last_result, "last_result_ok": self.last_result_ok,
+            "last_outcome": self.last_outcome,
             "last_command": self.last_command, "override": self.override, "last_ignored": self.last_ignored,
             "ignored_updates": self.ignored_updates, "history": list(self.history),
         }
 
     def persist(self) -> dict[str, Any]:
         return {"last_event": self.last_event, "last_result": self.last_result,
-                "last_result_ok": self.last_result_ok, "last_command": self.last_command,
-                "override": self.override, "history": list(self.history)}
+                "last_result_ok": self.last_result_ok, "last_outcome": self.last_outcome,
+                "last_command": self.last_command, "override": self.override, "history": list(self.history)}
 
     def restore(self, data: Any) -> None:
         if not isinstance(data, dict):
@@ -128,6 +130,7 @@ class SwitchStatus:
         self.last_event = data.get("last_event") if isinstance(data.get("last_event"), dict) else None
         self.last_result = data.get("last_result")
         self.last_result_ok = data.get("last_result_ok")
+        self.last_outcome = data.get("last_outcome") if isinstance(data.get("last_outcome"), str) else None
         self.last_command = data.get("last_command")
         self.override = bool(data.get("override"))
         for item in data.get("history") or []:

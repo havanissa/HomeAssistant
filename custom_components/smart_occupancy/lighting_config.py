@@ -257,7 +257,7 @@ class RoomLighting:
     dismissed: tuple[str, ...] = ()
     # Daylight-aware automatic switch-on (0.3.3).
     daylight: RoomDaylight = field(default_factory=RoomDaylight)
-    # Wall switches and remotes (0.3.5); each starts in Listen only.
+    # Wall switches and remotes (0.3.5); each starts Observing (mode "listen").
     switches: tuple[SwitchConfig, ...] = ()
 
     def switch(self, switch_id: str) -> SwitchConfig | None:

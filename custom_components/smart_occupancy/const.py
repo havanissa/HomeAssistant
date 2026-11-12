@@ -8,7 +8,7 @@ from typing import Final
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
 PHASE: Final = "0.3.5"
-VERSION: Final = "0.3.5"
+VERSION: Final = "0.3.6"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -383,7 +383,7 @@ BOUND_MAX_AGE_MINUTES: Final = 30
 # Wall switches and remotes (Phase 0.3.5) --------------------------------------
 # Button events come from Zigbee2MQTT (raw MQTT on the device topic), Home
 # Assistant MQTT device triggers or event entities. Every switch starts in
-# Listen only; Smart Occupancy control is an explicit activation per switch.
+# Observing (listen); Active (control) is an explicit activation per switch.
 DEFAULT_MQTT_BASE_TOPIC: Final = "zigbee2mqtt"
 MAX_SWITCHES_PER_ROOM: Final = 20
 MAX_BUTTONS_PER_SWITCH: Final = 64
@@ -428,8 +428,9 @@ class SwitchSource(StrEnum):
 class SwitchMode(StrEnum):
     """What Smart Occupancy does with a switch's button events."""
 
-    LISTEN = "listen"    # recognise manual intervention only; never sends a command (default)
-    CONTROL = "control"  # execute the configured button mappings (explicit activation)
+    # Stored values are unchanged since 0.3.5; the cards call them Observing and Active (0.3.6).
+    LISTEN = "listen"    # Observing: register manual intervention only; never sends a command (default)
+    CONTROL = "control"  # Active: execute the configured button mappings (explicit activation)
 
 
 class ButtonAction(StrEnum):
