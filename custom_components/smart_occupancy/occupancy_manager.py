@@ -158,6 +158,23 @@ class OccupancyManager:
             for area_id in self.engines:
                 self._evaluate(area_id, now)
 
+    @callback
+    def async_set_preliminary(self, signals: dict[str, frozenset[str]]) -> None:
+        """Signals that start possible occupancy lighting, per room: they cannot confirm occupancy alone (0.3.11).
+
+        Rooms without active preliminary lighting get an empty set (the
+        engine's rules unchanged). A change is evaluated at once.
+        """
+        now = dt_util.utcnow()
+        for area_id, engine in self.engines.items():
+            wanted = frozenset(signals.get(area_id, frozenset()))
+            if wanted == engine.preliminary:
+                continue
+            engine.preliminary = wanted
+            _LOGGER.debug("occupancy_preliminary_signals area=%s signals=%s", area_id, ",".join(sorted(wanted)))
+            if self._running:
+                self._evaluate(area_id, now)
+
     def same_signals(self, config: IntegrationConfig) -> bool:
         """The rooms and assigned signals of ``config`` are the ones this manager runs."""
         if set(config.enabled_rooms) != set(self.engines):
@@ -315,6 +332,7 @@ class OccupancyManager:
             result = engine.result
             out[area_id] = {
                 "timing": engine.timing.as_dict(),
+                "preliminary_signals": sorted(engine.preliminary),
                 "adjacent_rooms": list(engine.adjacent),
                 "state": result.state.value if result else None,
                 "occupied": result.occupied if result else None,

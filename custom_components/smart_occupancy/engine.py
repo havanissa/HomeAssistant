@@ -49,6 +49,13 @@ States and transitions
     ``correlation_window``, two different signals within the window, or a
     trigger active for the whole window. Stays confirmed while any evidence
     remains.
+
+    Preliminary signals (0.3.11): in a room with possible occupancy lighting,
+    the signals that start the preliminary light cannot confirm occupancy by
+    themselves - neither by staying active (a PIR that reports "occupied" for
+    60 s after one movement would otherwise confirm every passing movement
+    after the window) nor together with each other. Another signal must
+    agree (radar, PC activity, a door that is not a preliminary signal, ...).
 ``possible_vacancy``
     The room was occupied and no evidence remains. Vacancy is confirmed once
     the room has been quiet for the required time:
@@ -307,6 +314,8 @@ class RoomEngine:
         self._last_new_activity: datetime | None = None  # latest *start* inside the room
         self._neighbour_motion: dict[str, datetime] = {}
         self.result: RoomResult | None = None
+        # Signals that start possible occupancy lighting: they cannot confirm occupancy on their own (0.3.11).
+        self.preliminary: frozenset[str] = frozenset()
 
     def reconfigure(self, sensors: tuple[SensorAssignment, ...], timing: OccupancyTiming) -> None:
         """Apply changed signal assignments (enabled, role) and timing without losing what is known.
@@ -600,7 +609,7 @@ class RoomEngine:
         for v in views:
             t = v.track
             if v.status == SignalStatus.ACTIVE and t.since is not None:
-                if now - t.since >= window:
+                if now - t.since >= window and t.entity_id not in self.preliminary:
                     return True  # sustained presence or sustained motion
                 recent.add(t.entity_id)
             elif v.status == SignalStatus.GRACE:
@@ -610,7 +619,7 @@ class RoomEngine:
             elif v.status == SignalStatus.RECENT:
                 recent.add(t.entity_id)
         non_door = {e for e in recent if not self.tracks[e].is_door}
-        return len(recent) >= 2 and bool(non_door)
+        return len(recent) >= 2 and bool(non_door) and bool(recent - self.preliminary)
 
     def _fast_exit(
         self,

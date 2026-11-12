@@ -223,8 +223,9 @@ async def test_a_light_already_on_is_never_switched_off(hass: HomeAssistant, lit
 
 
 async def test_manual_changes_during_the_stage_are_respected(hass: HomeAssistant, lit: Lit, freezer) -> None:
-    """The lamp is dimmed up from the app (a person); the desk lamp is dimmed with a remote bound directly to it
-    (no attribution, but no longer the stage's brightness). Both stay on; the untouched spots go off."""
+    """The lamp is dimmed up from the app (a person: a recorded manual override) and stays on. The desk lamp is
+    dimmed by something unattributed (not recorded as a person's change in this room): it is still the stage's
+    and goes off, like the untouched spots."""
     zb = zigbee(hass, lit)
     targets = (PreliminaryTarget(lit.lamp, 10), PreliminaryTarget(lit.desk, 10), PreliminaryTarget(lit.group, 10))
     _entry, ctrl = await setup(hass, lit, freezer, zb, targets=targets)
@@ -234,12 +235,11 @@ async def test_manual_changes_during_the_stage_are_respected(hass: HomeAssistant
     zb.report(lit.desk, True, raw=180)
     await hass.async_block_till_done()
     await advance(hass, freezer, 30)
-    assert [s for s, _ in zb.of(lit.lamp)] == ["turn_on"] and [s for s, _ in zb.of(lit.desk)] == ["turn_on"]
+    assert [s for s, _ in zb.of(lit.lamp)] == ["turn_on"] and [s for s, _ in zb.of(lit.desk)] == ["turn_on", "turn_off"]
     assert zb.of(lit.group) == [SPOTS_10, SPOTS_OFF]
     d = log(ctrl, lit.area)[0]
-    assert "light.kno_spots switched off (preliminary light removed)" in d["explanation"]
+    assert "light.kno_desk and light.kno_spots switched off (preliminary light removed)" in d["explanation"], d
     assert "light.kno_lamp left as it is: changed by a person (manual override)" in d["explanation"]
-    assert "light.kno_desk left as it is: its brightness was changed since" in d["explanation"]
 
 
 async def test_vacant_mood_is_restored(hass: HomeAssistant, lit: Lit, freezer) -> None:
@@ -381,3 +381,113 @@ async def test_no_double_commands_when_the_room_becomes_vacant(hass: HomeAssista
     zb.clear()
     await advance(hass, freezer, 700)
     assert zb.calls == []
+
+
+# --------------------------------------------- 0.3.10: a PIR that holds "occupied" (Aqara through Zigbee2MQTT)
+async def held_detection(hass: HomeAssistant, lit: Lit, freezer, hold: int = 60) -> None:
+    """One movement: the PIR reports occupied and holds it for ``hold`` seconds; nobody stays, the radar sees no one."""
+    hass.states.async_set(lit.pir, "on")
+    await hass.async_block_till_done()
+    for _ in range(hold):
+        await advance(hass, freezer, 1)
+    hass.states.async_set(lit.pir, "off")
+    await hass.async_block_till_done()
+    await advance(hass, freezer, 1)
+
+
+async def test_held_pir_single_light_goes_off_at_the_timeout(hass: HomeAssistant, lit: Lit, freezer) -> None:
+    """The reported fault: vacant room, light off; one PIR detection held for 60 s; nobody stays.
+
+    Before 0.3.10 the engine confirmed occupancy after 10 s from the held PIR alone, the stage was handed over
+    and the light stayed on until the vacancy timeout (10 min after the PIR cleared). Now the PIR (a
+    preliminary signal) cannot confirm by itself: the timeout fires, light.turn_off is sent, the light is off."""
+    zb = zigbee(hass, lit)
+    _entry, ctrl = await setup(hass, lit, freezer, zb, targets=(PreliminaryTarget(lit.lamp, 10),))
+    assert state(ctrl, lit.area) == "vacant" and hass.states.is_state(lit.lamp, "off")
+    await held_detection(hass, lit, freezer)
+    assert zb.of(lit.lamp) == [("turn_on", {"brightness_pct": 10, "transition": 0.5}),
+                               ("turn_off", {"transition": 0.5})]
+    assert hass.states.is_state(lit.lamp, "off")
+    assert state(ctrl, lit.area) == "possible_vacancy"  # never confirmed
+    assert not any(c.service == "turn_on" for c in zb.calls[1:])  # nothing switched on again
+    trace = [t["event"] for t in ctrl.preliminary_trace(lit.area)]
+    for event in ("stage_start", "timeout_scheduled", "activation_plan", "activation_call", "timeout_fired",
+                  "stage_end", "cleanup_decision", "cleanup_call"):
+        assert event in trace, (event, trace)
+    start = next(t for t in ctrl.preliminary_trace(lit.area) if t["event"] == "stage_start")
+    assert start["occupancy_before"] == "vacant" and start["trigger"] == [lit.pir]
+    assert start["targets"] == {lit.lamp: "off"}
+    call = next(t for t in ctrl.preliminary_trace(lit.area) if t["event"] == "cleanup_call")
+    assert (call["result"], call["state_after"]) == ("accepted", "off")
+    diag = ctrl.room_diagnostics(lit.area)["preliminary"]
+    assert diag["trace"] and diag["stage"] is None and diag["cleanup_due"] == {}
+    await advance(hass, freezer, 400)  # vacant later: nothing more for the lamp
+    assert state(ctrl, lit.area) == "vacant" and len(zb.of(lit.lamp)) == 2
+
+
+async def test_held_pir_multiple_lights_and_platforms(hass: HomeAssistant, lit: Lit, freezer) -> None:
+    """Three platforms at once: a Zigbee lamp (reports with its own context), a light group (members report),
+    and a Wi-Fi strip whose switch-on call fails although the strip does switch on. All go off at the timeout."""
+    zb = zigbee(hass, lit)
+
+    async def wifi(call: ServiceCall) -> None:
+        zb.calls.append(call)
+        on = call.service == "turn_on"
+        zb.report(lit.strip, on, call.data.get("brightness_pct"))
+        if on:
+            raise HomeAssistantError("Device did not acknowledge in time")
+
+    original = hass.services.async_services()["light"]["turn_on"].job.target
+
+    async def turn_on(call: ServiceCall) -> None:
+        if lit.strip in ZigbeeLights._ids(call):
+            await wifi(call)
+        else:
+            await original(call)
+
+    hass.services.async_register("light", "turn_on", turn_on)
+    targets = (PreliminaryTarget(lit.lamp, 10), PreliminaryTarget(lit.group, 10), PreliminaryTarget(lit.strip, 10))
+    _entry, ctrl = await setup(hass, lit, freezer, zb, targets=targets)
+    await held_detection(hass, lit, freezer)
+    for e in (lit.lamp, lit.group, lit.strip):
+        assert [s for s, _ in zb.of(e)] == ["turn_on", "turn_off"], (e, zb.of(e))
+        assert hass.states.is_state(e, "off"), e
+    start = next(d for d in log(ctrl, lit.area) if d["action"] == "Preliminary light on")
+    assert start["status"] == "partial" and "light.kno_strip: Device did not acknowledge in time" in start["explanation"]
+
+
+async def test_held_pir_light_already_on_and_automation_adjustment(hass: HomeAssistant, lit: Lit, freezer) -> None:
+    """A light that was on before is never switched off. A light an automation re-dims right after it was switched
+    on (e.g. an adaptive lighting system) is still the stage's: only a recorded override would stop the switch-off."""
+    zb = zigbee(hass, lit)
+    targets = (PreliminaryTarget(lit.lamp, 10), PreliminaryTarget(lit.desk, 10))
+    _entry, ctrl = await setup(hass, lit, freezer, zb, targets=targets)
+    zb.report(lit.lamp, True, 40)
+    await advance(hass, freezer)
+    zb.clear()
+    hass.states.async_set(lit.pir, "on")
+    await hass.async_block_till_done()
+    await advance(hass, freezer, 3)
+    automation = Context(parent_id=Context().id)  # an automation's action
+    hass.states.async_set(lit.desk, "on", {**hass.states.get(lit.desk).attributes, "brightness": 150}, context=automation)
+    await hass.async_block_till_done()
+    for _ in range(57):
+        await advance(hass, freezer, 1)
+    assert zb.of(lit.lamp) == [] and hass.states.is_state(lit.lamp, "on")
+    assert [s for s, _ in zb.of(lit.desk)] == ["turn_on", "turn_off"] and hass.states.is_state(lit.desk, "off")
+
+
+async def test_held_pir_then_radar_confirms_and_hands_over(hass: HomeAssistant, lit: Lit, freezer) -> None:
+    """Someone does come in: the radar (not a preliminary signal) confirms before the timeout; the lamp is handed
+    over to Dagur and is not switched off by the cancelled timeout."""
+    zb = zigbee(hass, lit)
+    _entry, ctrl = await setup(hass, lit, freezer, zb, targets=(PreliminaryTarget(lit.lamp, 10),))
+    hass.states.async_set(lit.pir, "on")
+    await hass.async_block_till_done()
+    await advance(hass, freezer, 12)
+    assert state(ctrl, lit.area) == "possible_occupancy"
+    await presence(hass, lit, freezer)
+    assert state(ctrl, lit.area) == "confirmed_occupancy"
+    await advance(hass, freezer, 60)
+    assert [s for s, _ in zb.of(lit.lamp)] == ["turn_on", "turn_on"] and hass.states.is_state(lit.lamp, "on")
+    assert "timeout_cancelled" in [t["event"] for t in ctrl.preliminary_trace(lit.area)]

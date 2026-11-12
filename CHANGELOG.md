@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.11 — Fix: possible occupancy lights stayed on with a PIR that holds "occupied"
+
+### Fixed
+
+- **Preliminary lights did not go off when nobody stayed** (reproduced with a Zigbee lamp and a Wi-Fi LED strip, alone and together). Root cause, in the occupancy engine (`engine.RoomEngine._corroborated`): "a trigger active for the whole correlation window" confirms occupancy. A PIR that reports *occupied* for a hold time (the Aqara PIR through Zigbee2MQTT: about 60 s after one movement) stays active longer than the 10 s window after every single movement. So 10 s after the detection the engine reported **confirmed occupancy** from that detection alone. The controller then did what confirmation means: it cancelled the preliminary timeout (`_close_preliminary`), applied the normal lighting and handed the preliminary lights over (`_confirm_preliminary`). The timeout cleanup never ran. The lights stayed on until the vacancy timeout, 10 min after the PIR cleared, or for good with *Leave unchanged* or *Vacant mood*. The 0.3.9 and 0.3.10 tests released the PIR after 1–3 s, so they never reached the window. It was not device-specific: the lights were never commanded off.
+- Now, in a room with possible occupancy lighting, the signals that start it cannot confirm occupancy by themselves: not by staying active, and not together with each other. Another signal must agree (radar, PC activity, a door that is not selected, ...). Rooms without a preliminary light keep the engine's previous rules. The card lists the signals that can confirm, and warns when there is none.
+- **Ownership is now ended only by a recorded change by a person** (a manual override). A brightness change by an automation or an adaptive lighting system no longer makes the stage give up a light it switched on (0.3.10 did).
+- **A light whose switch-on call failed or timed out is still owned:** it was commanded on from off, so it is switched off at the end if it came on (for example a slow Wi-Fi device). Each preliminary light now gets its own command, so one failing light cannot hide another.
+
+### Added
+
+- Developer trace of the possible occupancy pipeline per room. It is in the diagnostics download (`preliminary.trace`) and in the debug log (`preliminary_trace`), bounded and in memory, with no sensor events logged. It records: occupancy before, the trigger, each target's state, the activation calls, results and states after, the timeout scheduled, fired or cancelled, the cleanup decision and what blocks it, the `light.turn_off` calls, results and states after, and any switch-on after a cleanup with its source. The occupancy diagnostics show each room's `preliminary_signals`.
+
+### Upgrade
+
+- The engine change applies only to rooms that have a preliminary light and have it enabled. A Home Assistant restart is needed after updating, because the integration's Python code is loaded at start; a browser reload is needed for the card.
+
 ## 0.3.10 — Fix: preliminary lights stayed on when possible occupancy was not confirmed
 
 ### Fixed
