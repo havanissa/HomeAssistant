@@ -3,7 +3,8 @@
 The lighting controller calls these at the points where it decides: after a
 plan was executed (or evaluated without sending), after a gradual update,
 when it registers a manual override, when a room's vacancy timeout starts or
-is cancelled, when a room becomes vacant (and what its vacancy action did, 0.3.8). Each call
+is cancelled, when a room becomes vacant (and what its vacancy action did, 0.3.8), and when
+a possible occupancy stage starts, ends without confirmation or is confirmed (0.3.9). Each call
 turns the controller's actual inputs (the plan and its per-light decisions,
 the occupancy result, the daylight gate, the operating mode, the commands sent
 and Home Assistant's errors) into one decision record (``decisions.py``).
@@ -21,6 +22,7 @@ from .daylight import BRIGHT, DARK, GATE_CODES, GATE_NOT_NEEDED, GATE_UNCERTAIN
 from .decisions import (
     BLOCKED,
     DISPATCHED,
+    EXECUTED,
     FAILED,
     MODULE_LIGHTING,
     NO_CHANGE,
@@ -54,6 +56,7 @@ TRIGGER_WORDS = {
     "manual_change": "manual change", "vacant": "room vacant", "manual_mode": "Manual mood", "deactivated":
     "set to Observing", "vacancy_wait": "no presence (vacancy timeout started)",
     "override_expired": "manual override ended",
+    "possible_occupancy": "possible occupancy", "preliminary_end": "possible occupancy not confirmed",
 }
 VACANCY_WORDS = {"turn_off": "Turn off", "vacant_mood": "Vacant mood", "leave": "Leave unchanged"}
 _SOURCE_WORDS = {
@@ -67,6 +70,10 @@ _BLOCK_WORDS = {
     "occupancy_uncertain": "occupancy is uncertain",
     "off_needs_confirmation": "occupancy is not confirmed, so nothing is switched off",
     "manual_mode": "Main Mood is Manual",
+    "manual_off": "lights of this room were switched off by a person",
+    "not_managed": "{names} not a controlled light of this room",
+    "not_possible": "the room is no longer in possible occupancy",
+    "no_mood": "there is no effective mood",
 }
 
 
@@ -588,6 +595,246 @@ class LightingDecisions:
             mode=mode, status=status, target=target, details=details,
             key=("vacancy", trigger, action_value, status, *codes), checks=checks,
             verify_after=self._verify_delay(changes),
+        )
+
+    # ------------------------------------------------------ possible occupancy (0.3.9)
+    def _evidence(self, area_id: str, episode: dict[str, Any]) -> str:
+        """"PIR Kamar Norður detected motion" for the signals that started the stage."""
+        result = self.ctrl.coordinator.occupancy.result(area_id)
+        wanted = list(episode.get("evidence") or [])
+        views = {v.track.entity_id: v for v in result.signals} if result else {}
+        phrases = []
+        for entity_id in wanted:
+            view = views.get(entity_id)
+            if view is None:
+                phrases.append(_name(self.ctrl.hass, entity_id))
+            elif view.track.is_door:
+                phrases.append(f"{view.track.label()} moved")
+            else:
+                phrases.append(_signal_phrase(view) if view.status in (SignalStatus.ACTIVE, SignalStatus.GRACE)
+                               else f"{view.track.label()} was active")
+        return _names(phrases) or "a selected signal"
+
+    def preliminary_start(self, area_id: str, plan: Plan, episode: dict[str, Any], *,
+                          ok: list[PlanItem] | None = None, errors: dict[str, str] | None = None,
+                          paused: set[str] | None = None) -> Decision | None:
+        """Possible occupancy: what the preliminary lighting did (or would do), and why."""
+        considered = [i for i in plan.items]
+        if not considered:
+            return None
+        errors = errors or {}
+        mode = MODE_OBSERVING if not plan.control_enabled else MODE_PAUSED if plan.manual_mode else MODE_AUTOMATIC
+        _occ, details = self.occupancy(area_id)
+        daylight, dl_details = self._daylight(area_id, plan)
+        details.update(dl_details)
+        details["trigger"] = TRIGGER_WORDS["possible_occupancy"]
+        details["mood"] = plan.mood
+        details["evidence"] = [_name(self.ctrl.hass, e) for e in episode.get("evidence") or []]
+        timeout = episode.get("timeout")
+        details["preliminary_timeout_s"] = timeout
+        details["targets"] = [f"{i.name or i.entity_id}: {i.decision} — {i.reason}" for i in considered]
+        why = f"Possible occupancy ({self._evidence(area_id, episode)})"
+        changes = [i for i in considered if i.decision == CHANGE]
+        blocked = [i for i in considered if i.decision == "blocked"]
+        gated = [i for i in blocked if i.reason_code in GATE_CODES]
+        offline = [i for i in blocked if i.reason_code == "offline"]
+        other = [i for i in blocked if i not in gated and i not in offline]
+        unchanged = [i for i in considered if i.decision == UNCHANGED]
+        skipped = [i for i in considered if i.decision == SKIPPED]
+        owned = set(episode.get("owned") or {})
+        if not changes and owned and all(i.entity_id in owned for i in unchanged) and not blocked:
+            return None  # evaluated again (it became dark): the stage's lights are already on, nothing new
+        level = lambda i: (  # noqa: E731
+            f"{i.data.get('brightness_pct', i.resolved.brightness_pct)} %"
+            + (f", {i.data['color_temp_kelvin']} K" if i.data.get("color_temp_kelvin") else ""))
+        lights = lambda items: _names([f"{i.name or i.entity_id} at {level(i)}" for i in items])  # noqa: E731
+        light_clause = f", {daylight}" if daylight and (changes or gated) else ""
+        after = (f" The normal lighting follows when occupancy is confirmed; otherwise it is switched off after "
+                 f"{_duration(int(timeout))}." if timeout else "")
+        action = "Preliminary light on"
+        checks: list[Check] | None = None
+        target = _names([i.name or i.entity_id for i in changes]) if changes else None
+        if plan.manual_mode:
+            status = BLOCKED
+            text = f"{why}, but Main Mood is Manual: automatic lighting is paused and no preliminary light is sent."
+        elif plan.mood is None:
+            status = BLOCKED
+            text = f"{why}, but there is no effective mood ({plan.note or 'Main Mood is unavailable'}): lighting is not changed."
+        elif ok is not None and changes:
+            failed = [i for i in changes if i.entity_id in errors]
+            stopped = [i for i in changes if paused and i.entity_id in paused]
+            text = (f"{why}{light_clause}: {lights(ok)} switched on as a preliminary light." if ok
+                    else f"{why}{light_clause}: no preliminary light was switched on.")
+            if failed:
+                text += " Failed: " + "; ".join(f"{i.name or i.entity_id}: {errors[i.entity_id]}" for i in failed) + "."
+            if stopped:
+                text += f" {_plural(len(stopped))} not sent: Manual mood started."
+            if ok:
+                text += after
+            status = PARTIAL if failed and ok else FAILED if failed or not ok else DISPATCHED
+            details["service"] = [f"light.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
+            details["result"] = f"{len(ok)} sent and accepted" + (f", {len(failed)} failed" if failed else "")
+            if failed:
+                details["errors"] = {i.entity_id: errors[i.entity_id] for i in failed}
+            if status == DISPATCHED:
+                checks = []
+                for i in ok:
+                    checks.extend(light_checks(i.service or "", {i.entity_id: i.data}))
+        elif changes and not plan.control_enabled:
+            status = OBSERVED
+            text = f"{why}{light_clause}: would switch on {lights(changes)} as a preliminary light. Observing: nothing was sent."
+            details["service"] = [f"light.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
+        elif gated:
+            code = gated[0].reason_code
+            status = NO_CHANGE if code == GATE_NOT_NEEDED else BLOCKED
+            action = "Keep preliminary light off"
+            if code == GATE_NOT_NEEDED:
+                text = f"{why}: preliminary lighting skipped: {daylight}."
+            elif code == GATE_UNCERTAIN:
+                text = f"{why}: preliminary lighting skipped: {daylight} and this room then leaves lights off."
+            else:
+                text = f"{why}: preliminary lighting skipped: automatic switch-on is off for this room."
+        elif other:
+            status = BLOCKED
+            action = "Keep preliminary light off"
+            text = f"{why}: preliminary lighting not switched on — {'; '.join(self._blocked_reasons(other))}."
+        elif offline:
+            status = FAILED
+            text = f"{why}: {_names([i.name or i.entity_id for i in offline])} could not be switched on: unavailable."
+            details["errors"] = {i.entity_id: i.current.get("state") or "missing" for i in offline}
+            target = _names([i.name or i.entity_id for i in offline])
+        elif unchanged:
+            status = NO_CHANGE
+            action = "No change"
+            text = f"{why}: {_names([i.name or i.entity_id for i in unchanged])} already on; left as it is."
+        else:
+            status = BLOCKED
+            action = "Keep preliminary light off"
+            text = f"{why}: no preliminary light can be controlled ({_names([i.entity_id for i in skipped])} not a controlled light of this room)."
+        codes = sorted({i.reason_code for i in blocked})
+        return self.log.record(
+            area_id, module=MODULE_LIGHTING, trigger="possible_occupancy", kind="preliminary", action=action,
+            explanation=text, mode=mode, status=status, target=target, details=details,
+            key=("preliminary", "start", action, status, *codes), checks=checks,
+            verify_after=self._verify_delay(changes),
+        )
+
+    def preliminary_end(self, area_id: str, reason: str, episode: dict[str, Any], *, removed: list[str],
+                        errors: dict[str, str], left: list[str], blocked: str | None) -> Decision | None:
+        """Possible occupancy was not confirmed: the preliminary lights it switched on are removed."""
+        ctrl = self.ctrl
+        names = lambda ids: _names([_name(ctrl.hass, e) for e in ids])  # noqa: E731
+        would = list(episode.get("would") or [])
+        owned = list((episode.get("owned") or {}).keys())
+        if not owned and not would:
+            return None  # nothing was (or would have been) switched on: nothing to undo or explain
+        timeout = episode.get("timeout")
+        if reason == "timeout":
+            why = f"Possible occupancy was not confirmed within {_duration(int(timeout or 0))}"
+        else:
+            why = "Possible occupancy ended without confirmation (the room is vacant)"
+        _occ, details = self.occupancy(area_id)
+        details["trigger"] = TRIGGER_WORDS["preliminary_end"]
+        details["evidence"] = [_name(ctrl.hass, e) for e in episode.get("evidence") or []]
+        details["preliminary_timeout_s"] = timeout
+        details["started"] = episode.get("started")
+        mode = self.mode(area_id)
+        failed = [e for e in removed if e in errors] + [e for e in errors if e not in removed]
+        sent = [e for e in removed if e not in errors]
+        checks = None
+        target = names(sent or owned or would)
+        action = "Preliminary light off"
+        if not owned and would:
+            status, mode = OBSERVED, MODE_OBSERVING
+            text = f"{why}: would switch off {names(would)} (preliminary light). Observing: nothing was sent."
+        elif blocked == "manual":
+            status, mode = BLOCKED, MODE_PAUSED
+            text = f"{why}, but Main Mood is Manual: {names(owned)} stays on (nothing is sent)."
+        elif blocked == "observing":
+            status, mode = BLOCKED, MODE_OBSERVING
+            text = f"{why}, but the room was set to Observing: {names(owned)} stays on (nothing is sent)."
+        elif sent or failed:
+            text = f"{why}: {names(sent)} switched off (preliminary light removed)." if sent else f"{why}:"
+            if failed:
+                text += " Failed: " + "; ".join(f"{_name(ctrl.hass, e)}: {errors[e]}" for e in failed) + "."
+            status = PARTIAL if failed and sent else FAILED if failed else DISPATCHED
+            details["service"] = [f"light.turn_off {_name(ctrl.hass, e)}" for e in removed]
+            if failed:
+                details["errors"] = {e: errors[e] for e in failed}
+            if status == DISPATCHED:
+                checks = light_checks("turn_off", {e: {} for e in sent})
+        else:
+            status = NO_CHANGE
+            action = "No change"
+            text = f"{why}: the preliminary light is no longer as it set it, so it is left as it is."
+        if left:
+            text += f" Left as {'it is' if len(left) == 1 else 'they are'}: {names(left)} (changed since)."
+            details["left"] = [_name(ctrl.hass, e) for e in left]
+        return self.log.record(
+            area_id, module=MODULE_LIGHTING, trigger="preliminary_end", kind="preliminary", action=action,
+            explanation=text, mode=mode, status=status, target=target, details=details,
+            key=("preliminary", "end", reason, status), checks=checks,
+        )
+
+    def preliminary_confirmed(self, area_id: str, plan: Plan, outcome: dict[str, str], *,
+                              errors: dict[str, str]) -> Decision | None:
+        """Occupancy confirmed after a preliminary light: handed over to the normal lighting or switched off."""
+        if not outcome:
+            return None
+        ctrl = self.ctrl
+        occupancy, details = self.occupancy(area_id)
+        by: dict[str, list[str]] = {}
+        for entity_id, what in outcome.items():
+            by.setdefault(what, []).append(entity_id)
+        names = lambda key: _names([_name(ctrl.hass, e) for e in by.get(key, [])])  # noqa: E731
+        off = [e for e in by.get("turned_off", []) + by.get("not_needed", []) if e not in errors]
+        failed = [e for e in errors]
+        parts: list[str] = []
+        if by.get("scene"):
+            parts.append(f"{names('scene')} now follow{'s' if len(by['scene']) == 1 else ''} {plan.mood}")
+        if by.get("scene_off"):
+            parts.append(f"{names('scene_off')} switched off by {plan.mood}")
+        if by.get("handed_over"):
+            parts.append(f"{names('handed_over')} stay{'s' if len(by['handed_over']) == 1 else ''} on "
+                         "(handed over to the room's lighting)")
+        if off:
+            turned = [e for e in off if outcome[e] == "turned_off"]
+            needless = [e for e in off if outcome[e] == "not_needed"]
+            if turned:
+                parts.append(f"{_names([_name(ctrl.hass, e) for e in turned])} switched off (preliminary light)")
+            if needless:
+                daylight, _ = self._daylight(area_id, plan)
+                parts.append(f"{_names([_name(ctrl.hass, e) for e in needless])} switched off: the normal lighting "
+                             f"is not needed ({daylight or 'daylight is enough'})")
+        if by.get("kept_dark"):
+            parts.append(f"{names('kept_dark')} kept on: no other light of the room is on")
+        if by.get("kept_failed"):
+            parts.append(f"{names('kept_failed')} kept as it is: the normal lighting could not be applied to it")
+        if by.get("kept_paused"):
+            parts.append(f"{names('kept_paused')} kept on: Main Mood is Manual")
+        if by.get("changed"):
+            parts.append(f"{names('changed')} left as it is (changed since)")
+        signals = occupancy[len("room occupied ("):-1] if occupancy.startswith("room occupied (") else None
+        text = f"Occupancy confirmed{f' ({signals})' if signals else ''}: " + "; ".join(parts) + "."
+        if failed:
+            text += " Failed: " + "; ".join(f"{_name(ctrl.hass, e)}: {errors[e]}" for e in failed) + "."
+        details["trigger"] = TRIGGER_WORDS["occupancy_confirmed"]
+        details["mood"] = plan.mood
+        details["preliminary_outcome"] = {_name(ctrl.hass, e): w.replace("_", " ") for e, w in outcome.items()}
+        checks = None
+        if off or failed:
+            status = PARTIAL if failed and off else FAILED if failed else DISPATCHED
+            action = "Preliminary light off"
+            details["service"] = [f"light.turn_off {_name(ctrl.hass, e)}" for e in [*off, *failed]]
+            if status == DISPATCHED:
+                checks = light_checks("turn_off", {e: {} for e in off})
+        else:
+            status = NOTED if not by.get("scene") and not by.get("scene_off") else EXECUTED
+            action = "Preliminary light handed over"
+        return self.log.record(
+            area_id, module=MODULE_LIGHTING, trigger="occupancy_confirmed", kind="preliminary", action=action,
+            explanation=text, mode=self.mode(area_id), status=status, target=_names([_name(ctrl.hass, e) for e in outcome]),
+            details=details, key=("preliminary", "confirmed", status, *sorted(by)), checks=checks,
         )
 
     def paused(self, area_id: str, triggers: set[str]) -> Decision:

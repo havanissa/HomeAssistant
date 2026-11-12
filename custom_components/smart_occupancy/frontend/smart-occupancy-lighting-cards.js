@@ -53,13 +53,25 @@
  * the bar); arrow keys, Home and End move between tabs; the bar wraps instead
  * of hiding tabs.
  *
+ * 0.3.9: Settings and possible occupancy. The room card's main bar is
+ * Overview, Log, Lights, Overrides, Preview and a Settings gear; Settings opens
+ * a compact second row with Automatic, Presence, Switches and Advanced (icon
+ * and name each, the selected one highlighted, a Back button to the main
+ * sections; the last section is remembered). The Overview keeps the room's
+ * Observing / Automatic control (double-click the status, or the selector) and
+ * every wall switch's Observing / Active control. Settings → Automatic has
+ * "Possible occupancy": a dim preliminary light per room (lights, brightness,
+ * colour temperature, transition, what happens on confirmation, the signals
+ * that start it, its timeout and light level), each value shown as a room
+ * override or the global default.
+ *
  * The cards are editors only: the integration owns the configuration
  * (websocket API, admin-only writes). The cards never call a light service and
  * a preview never changes a light. They refetch only when the integration
  * reports a change.
  */
 
-const VERSION = "0.3.8";
+const VERSION = "0.3.9";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -246,18 +258,26 @@ const detailValue = (k, v) => {
 };
 
 // Room card tabs (0.3.8): compact icons. The name is the tooltip and the accessible label, and is shown beside
-// the selected icon (below the bar on narrow cards), so no tab depends on hover alone. Order as before.
-const ROOM_TABS = [
+// the selected icon (below the bar on narrow cards), so no tab depends on hover alone.
+// 0.3.9: the configuration sections are in the Settings submenu (gear); the main bar keeps the everyday ones.
+const MAIN_TABS = [
   ["overview", "Overview", "mdi:view-dashboard-outline"],
   ["log", "Log", "mdi:history"],
   ["lights", "Lights", "mdi:lightbulb-group-outline"],
-  ["automatic", "Automatic", "mdi:lightbulb-auto-outline"],
-  ["presence", "Presence", "mdi:motion-sensor"],
-  ["switches", "Switches", "mdi:light-switch"],
   ["overrides", "Overrides", "mdi:hand-back-right-outline"],
   ["preview", "Preview", "mdi:eye-outline"],
-  ["advanced", "Advanced", "mdi:tune-variant"],
+  ["settings", "Settings", "mdi:cog-outline"],
 ];
+// [key, name, icon, tooltip]
+const SETTINGS_TABS = [
+  ["automatic", "Automatic", "mdi:lightning-bolt-outline", "Automatic: switch-on, daylight, possible occupancy and vacancy"],
+  ["presence", "Presence", "mdi:radar", "Presence: sensors and occupancy detection"],
+  ["switches", "Switches", "mdi:toggle-switch-outline", "Switches: wall switches and remotes of this room"],
+  ["advanced", "Advanced", "mdi:tune", "Advanced: settings, activation review and diagnostics"],
+];
+// Every section the card can show (the Settings gear itself is not a section).
+const ROOM_TABS = [...MAIN_TABS.filter(([k]) => k !== "settings"), ...SETTINGS_TABS];
+const isSetting = (k) => SETTINGS_TABS.some(([x]) => x === k);
 // Presence tab: what each signal contributes now (word + icon + tone, never colour alone).
 const PRESENCE = {
   active: ["Active", "ok", "mdi:check-circle-outline"],
@@ -1023,35 +1043,62 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const content = { overview: () => this._overview(r), log: () => this._log(r), lights: () => this._lights(r), automatic: () => this._automatic(r),
       presence: () => this._presence(r), switches: () => this._switches(r), overrides: () => this._overrides(r), preview: () => this._preview(r),
       advanced: () => this._advanced(r) }[tab]();
-    const current = ROOM_TABS.find(([k]) => k === tab);
+    const inSettings = isSetting(tab);
+    const mainKey = inSettings ? "settings" : tab;
+    const current = MAIN_TABS.find(([k]) => k === mainKey);
+    const sections = SETTINGS_TABS.map(([, l]) => l).join(", ");
     return `<div class="header"><ha-icon icon="${active ? "mdi:lightbulb-auto" : "mdi:lightbulb-outline"}" class="${active ? "lit" : ""}"></ha-icon>
         <div class="titles"><div class="title">${esc(this._config.title || r.name)}</div>
         <div class="sub">${esc(OCC[r.occupancy.state] || "Occupancy unknown")}</div></div>
         <span class="badge ${st.tone === "muted" ? "" : st.tone}" title="Automatic lighting: ${esc(st.word)}">${esc(st.short)}</span></div>
-      <div class="tabs" role="tablist" aria-label="${esc(r.name)}: sections">${ROOM_TABS.map(([k, l, icon]) => {
-        const on = k === tab;
+      <div class="tabs" role="tablist" aria-label="${esc(r.name)}: sections">${MAIN_TABS.map(([k, l, icon]) => {
+        const on = k === mainKey;
+        const label = k === "settings" ? `Settings (${sections})` : l;
         return `<button role="tab" id="tab-${k}" aria-selected="${on}" aria-controls="so-tabpanel" tabindex="${on ? 0 : -1}" class="tab ${on ? "on" : ""}"
-          data-action="tab" data-tab="${k}" aria-label="${l}" data-tip="${l}"><ha-icon icon="${icon}"></ha-icon><span class="tlabel" aria-hidden="true">${l}</span></button>`;
+          data-action="tab" data-tab="${k}" aria-label="${esc(label)}" data-tip="${esc(k === "settings" ? `Settings: ${sections}` : l)}"><ha-icon icon="${icon}"></ha-icon><span class="tlabel" aria-hidden="true">${l}</span></button>`;
       }).join("")}</div>
-      <div class="tabcap" aria-hidden="true">${esc(current[1])}</div>
+      ${inSettings ? this._settingsNavHtml(tab) : `<div class="tabcap" aria-hidden="true">${esc(current[1])}</div>`}
       <div class="pad" role="tabpanel" id="so-tabpanel" aria-labelledby="tab-${tab}">${manualBanner(this._model)}${content}</div>`;
   }
 
-  // Tabs: arrow keys, Home and End move to (and open) the next tab; Enter and Space work as on every button.
+  // Settings submenu (0.3.9): the four configuration sections, each with its icon and name; Back returns to the
+  // main sections. It is a tab list of its own (arrow keys, Home, End; Escape returns to the Settings tab).
+  _settingsNavHtml(tab) {
+    return `<div class="subnav"><button class="subback" data-action="tab" data-tab="overview" aria-label="Back to the main sections (Overview)"
+        data-tip="Back to the main sections"><ha-icon icon="mdi:arrow-left"></ha-icon><span>Back</span></button>
+      <div class="subtabs" role="tablist" aria-label="Settings sections">${SETTINGS_TABS.map(([k, l, icon, tip]) => {
+        const on = k === tab;
+        return `<button role="tab" id="tab-${k}" aria-selected="${on}" aria-controls="so-tabpanel" tabindex="${on ? 0 : -1}" class="stab ${on ? "on" : ""}"
+          data-action="tab" data-tab="${k}" title="${esc(tip)}"><ha-icon icon="${icon}"></ha-icon><span>${l}</span></button>`;
+      }).join("")}</div></div>`;
+  }
+
+  // Tabs: arrow keys, Home and End move to (and open) the next tab of the same bar; Enter and Space work as on
+  // every button. In the Settings submenu, Escape returns the focus to the Settings tab.
   _onKey(ev) {
     const tab = ev.target.closest && ev.target.closest('[role="tab"][data-tab]');
     if (!tab) return;
-    const keys = ROOM_TABS.map(([k]) => k);
+    const sub = !!tab.closest(".subtabs");
+    if (sub && ev.key === "Escape") {
+      ev.preventDefault();
+      this.shadowRoot.querySelector('.tabs [data-tab="settings"]')?.focus();
+      return;
+    }
+    const keys = (sub ? SETTINGS_TABS : MAIN_TABS).map(([k]) => k);
     const i = keys.indexOf(tab.dataset.tab);
     const next = { ArrowRight: i + 1, ArrowDown: i + 1, ArrowLeft: i - 1, ArrowUp: i - 1, Home: 0, End: keys.length - 1 }[ev.key];
     if (next === undefined) return;
     ev.preventDefault();
-    this._openTab(keys[(next + keys.length) % keys.length]);
-    this.shadowRoot.querySelector(`[role="tab"][data-tab="${this._ui.tab}"]`)?.focus();
+    const key = keys[(next + keys.length) % keys.length];
+    this._openTab(key);
+    const focus = sub ? `.subtabs [data-tab="${this._ui.tab}"]` : `.tabs [data-tab="${key}"]`;
+    this.shadowRoot.querySelector(focus)?.focus();
   }
 
   _openTab(key) {
     const ui = this._ui;
+    if (key === "settings") key = ui.settingsTab || "automatic";  // the last settings section
+    if (isSetting(key)) ui.settingsTab = key;
     ui.tab = key; ui.edit = null; ui.swEdit = null; ui.swAdd = false;
     if (key === "preview") ui.previewData = null;
     if (key === "advanced") ui.review = null;
@@ -1112,9 +1159,11 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const hv = (x, extra = "") => { const i = HEALTH[x?.status] || HEALTH.healthy; return `<span class="${i.tone}">${i.label}</span>${extra}`; };
     const nConf = new Set((d.conflicts || []).filter((c) => c.enabled && !c.acknowledged).map((c) => c.automation)).size;
     const issues = this._issues(r);
-    return `${this._lastDecisionHtml(r.decisions, "log")}<div class="kvs">
+    return `<div class="section auto ovmode">${this._lightingModeHtml(r, true)}</div>
+      ${this._lastDecisionHtml(r.decisions, "log")}<div class="kvs">
+        <div><span>Occupancy now</span><b>${esc(OCC[r.occupancy.state] || r.occupancy.state || "—")}${this._prelimNow(r)}</b></div>
         <div><span>Mood</span><b>${d.follows_global ? `follows global ${esc(d.room_mood || "—")}` : `room mood ${esc(d.room_mood)}`}</b></div>
-        <div><span>Automatic lighting</span><b>${esc(this._roomModeState(r).word)}</b></div>
+        <div><span>Possible occupancy</span><b>${esc(this._prelimWord(r))}</b></div>
         <div><span>When vacant</span><b>${esc(this._vacancyWord(r))}</b></div>
         <div><span>Occupancy</span><b>${hv(h.occupancy)}</b></div>
         <div><span>Lighting</span><b>${hv(h.lighting, nConf ? ` <span class="sub">(${nConf} conflict${nConf === 1 ? "" : "s"})</span>` : "")}</b></div>
@@ -1123,10 +1172,37 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         ${this._model.adaptive?.status && this._model.adaptive.status !== "not_configured" ? `<div><span>Global adjustment</span><b>${esc(globalNow(this._model.adaptive))}
           <span class="sub ${this._model.adaptive.status === "connected" ? "" : "warn"}">${esc(STATUS_WORDS[this._model.adaptive.status])}</span></b></div>` : ""}
         ${this._daylightSummary(r)}
-        ${(r.switches?.items || []).length ? `<div><span>Wall switches</span><b>${r.switches.items.length} · ${esc([...new Set(r.switches.items.map((x) => this._swModeWord(x)))].join(", "))}</b></div>` : ""}
       </div>
+      ${this._switchQuickHtml(r)}
       ${issues ? `<div class="issues">${issues}</div>` : `<div class="note ok">No warnings.</div>`}
       ${this._statusHtml("group")}`;
+  }
+
+  // Overview (0.3.9): every wall switch's Observing / Active control stays on the main screen; its buttons and
+  // settings are in Settings → Switches.
+  _switchQuickHtml(r) {
+    const items = r.switches?.items || [];
+    if (!items.length) return "";
+    return `<div class="section swquick"><div class="modehead"><div class="stitle">Wall switches</div>
+        <button class="link" data-action="tab" data-tab="switches">Switch settings</button></div>
+      ${items.map((x) => `<div class="swq">${this._swModeHtml(x, `<div class="lmain"><b>${esc(x.name)}</b></div>`)}</div>`).join("")}</div>`;
+  }
+
+  // " · preliminary light on: Lamp" while a possible occupancy stage runs.
+  _prelimNow(r) {
+    const stg = r.preliminary?.stage;
+    if (!stg) return "";
+    const lights = stg.lights?.length ? `preliminary light on: ${stg.lights.join(", ")}` : stg.would?.length ? `would switch on ${stg.would.join(", ")}` : "waiting for confirmation";
+    return ` <span class="sub">· ${esc(lights)} · until <time datetime="${esc(stg.deadline)}">${fmtTime(stg.deadline)}</time> unless confirmed</span>`;
+  }
+
+  _prelimWord(r) {
+    const p = r.preliminary;
+    if (!p) return "—";
+    const e = p.effective;
+    if (!e.enabled) return "Off";
+    if (!e.targets.length) return "On, but no light chosen";
+    return `Dim ${p.targets.map((t) => t.name).join(", ")} until confirmed`;
   }
 
   // Overview: the latest decision of the room (or a switch), compact: what, result, why, when.
@@ -1195,9 +1271,9 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
   // Automatic tab: the simple settings and the decision now; the details are collapsed below.
   _automatic(r) {
     if (!r.daylight) return `<div class="section auto">${this._lightingModeHtml(r)}
-      <div class="muted">Daylight information is not available for this room.</div></div>${this._vacancyHtml(r)}`;
+      <div class="muted">Daylight information is not available for this room.</div></div>${this._prelimHtml(r)}${this._vacancyHtml(r)}`;
     const open = this._ui.dlAdv;
-    return `${this._autoHtml(r)}${this._vacancyHtml(r)}
+    return `${this._autoHtml(r)}${this._prelimHtml(r)}${this._vacancyHtml(r)}
       <details class="dladv" ${open ? "open" : ""}><summary data-action="toggle-dl-adv">Advanced daylight settings</summary>
         <div class="section">${this._daylightAdvanced(r)}</div></details>`;
   }
@@ -1237,6 +1313,117 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       <div class="sub">${esc(st.natural_light)}${st.estimated ? " (an estimate, not a measured value)" : ""}</div>
       ${st.contaminated && st.contamination ? `<div class="sub">Indoor readings are not used as daylight now · ${esc(st.contamination)}</div>` : ""}
       ${act ? `<div class="sub">Last decision: <b>${esc(act.text.split(" · ")[0])}</b> · ${fmtTime(act.at)}</div>` : ""}</div>`;
+  }
+
+  // ------------------------------------------------ Possible occupancy (0.3.9)
+  // A dim preliminary light while occupancy is being confirmed. Values come from the integration: each one is a
+  // room override or the global default ("Use global default" returns to it).
+  _prelimHtml(r) {
+    const p = r.preliminary;
+    if (!p) return "";
+    const ro = !this._canEdit;
+    const dis = ro ? "disabled" : "";
+    const e = p.effective;
+    const set = p.settings;
+    const g = p.global;
+    const src = (k) => e.sources[k] === "room";
+    const pill = (own) => `<span class="pill ${own ? "info" : "muted"}">${own ? "Room override" : "Global default"}</span>`;
+    const inherit = (k, text) => (!ro && set[k] !== null && set[k] !== undefined
+      ? `<button class="link" data-action="pre-inherit" data-key="${k}">Use global default${text ? ` (${esc(text)})` : ""}</button>` : "");
+    const head = `<div class="stitle">Possible occupancy</div>
+      <div class="sub">A dim light as soon as there is a first sign of someone (for example PIR motion), while occupancy is being confirmed.
+        When it is confirmed the normal lighting takes over; if not, the light is switched off again.</div>
+      <label class="switch"><input type="checkbox" role="switch" data-control="pre-enabled" ${e.enabled ? "checked" : ""} ${dis}
+        aria-label="Dim light on possible occupancy in ${esc(r.name)}"> Dim light on possible occupancy</label>
+      <div class="fval">${pill(src("enabled"))} ${inherit("enabled", g.enabled ? "on" : "off")}${this._statusHtml("pre")}</div>`;
+    if (!e.enabled) return `<div class="section prelim">${head}${this._prelimGlobalHtml(p, ro)}</div>`;
+    const notes = [];
+    if (p.auto_on === "never") notes.push(`<div class="note warn">Automatic switch-on is off for this room (above): no preliminary light is switched on.</div>`);
+    if (!e.targets.length) notes.push(`<div class="note warn">Choose a light below: until then nothing changes in this room.</div>`);
+    else notes.push(`<div class="sub">While this is on, the normal lighting waits for confirmed occupancy${p.on_first_motion ? " instead of switching on at the first motion" : ""}.</div>`);
+    const targets = p.targets.map((t) => this._prelimTargetHtml(r, p, t, ro)).join("");
+    const chosen = new Set(p.targets.map((t) => t.entity_id));
+    const free = p.candidates.filter((c) => !chosen.has(c.entity_id));
+    const add = ro ? "" : `<div class="frow"><label for="so-pre-add">Add a light</label><div class="fval"><select id="so-pre-add" data-control="pre-add">
+        <option value="">Choose a light…</option>${free.map((c) => `<option value="${esc(c.entity_id)}">${esc(c.name)}${c.state === "on" ? " (on now)" : ""}</option>`).join("")}</select></div></div>`;
+    const sens = p.sensors.map((x) => `<label class="auto ${x.used ? "" : "muted"}"><input type="checkbox" data-control="pre-signal" data-entity="${esc(x.entity_id)}" ${x.selected ? "checked" : ""} ${dis}>
+        <ha-icon icon="${KIND_ICONS[x.kind] || KIND_ICONS.other}"></ha-icon><div><b>${esc(x.name)}</b> <span class="sub">${esc(x.kind_name)}${x.default ? " · default" : ""}${x.used ? "" : " · not used for occupancy (Presence)"}</span></div></label>`).join("");
+    const timeoutWarn = e.timeout <= p.correlation_window
+      ? `<div class="sub warn">Shorter than the confirmation window (${esc(fmtSecs(p.correlation_window))}): the light may go off just before occupancy is confirmed.</div>` : "";
+    const luxText = e.on_below == null ? `same as normal (${p.normal_on_below} lx)` : `${e.on_below} lx`;
+    const stg = p.stage;
+    return `<div class="section prelim">${head}${notes.join("")}
+      <div class="stitle small">Preliminary lights</div>
+      ${targets || `<div class="muted">No light chosen.</div>`}${add}
+      <div class="stitle small">Started by</div>
+      <div class="sub">Signals whose first evidence starts it. ${e.signals_default ? "Default: the room's motion (Trigger) sensors." : `Custom selection${ro ? "" : ` · <button class="link" data-action="pre-signals-default">use the default</button>`}`}${this._statusHtml("pre-signals")}</div>
+      <div class="plist pre-sens">${sens || `<div class="muted">No sensors are assigned to this room.</div>`}</div>
+      <div class="frow"><label for="so-pre-timeout">Timeout</label><div class="fval"><input id="so-pre-timeout" type="number" class="num" min="${p.limits.timeout[0]}" max="${p.limits.timeout[1]}" step="1"
+          value="${esc(e.timeout)}" data-control="pre-num" data-key="timeout" ${dis}> s ${pill(src("timeout"))} ${inherit("timeout", fmtSecs(g.timeout))}${this._statusHtml("pre-timeout")}</div></div>
+      <div class="sub">Switched off this long after it started if occupancy is not confirmed (more motion does not extend it).</div>${timeoutWarn}
+      <div class="frow"><label for="so-pre-lux">Light level</label><div class="fval">on below <input id="so-pre-lux" type="number" class="num" min="${p.limits.lux[0]}" max="${p.limits.lux[1]}" step="1"
+          value="${esc(set.on_below ?? "")}" placeholder="${esc(e.on_below ?? p.normal_on_below)}" data-control="pre-num" data-key="on_below" ${dis}> lx
+          <span class="sub">${set.on_below == null ? `now ${esc(luxText)}` : ""}</span> ${pill(src("on_below"))} ${inherit("on_below", g.on_below == null ? "same as normal" : `${g.on_below} lx`)}${this._statusHtml("pre-on_below")}</div></div>
+      <div class="sub">Uses this room's daylight rules (sensor, fallback when the reading is unknown); only the threshold can differ. Empty: ${esc(g.on_below == null ? `the normal threshold (${p.normal_on_below} lx)` : `the global default (${g.on_below} lx)`)}.</div>
+      ${stg ? `<div class="note">Now: possible occupancy since ${fmtTime(stg.started)} (${esc(stg.evidence.join(", "))})${stg.lights.length ? ` · ${esc(stg.lights.join(", "))} on` : ""} · ends ${fmtTime(stg.deadline)} unless confirmed.</div>` : ""}
+      ${this._prelimGlobalHtml(p, ro)}</div>`;
+  }
+
+  _prelimTargetHtml(r, p, t, ro) {
+    const dis = ro ? "disabled" : "";
+    const e = t.effective || {};
+    const own = t.settings;
+    const caps = t.capabilities || {};
+    const id = esc(t.entity_id);
+    const tag = (k) => `<span class="pill ${own[k] != null ? "info" : "muted"}">${own[k] != null ? "this light" : "default"}</span>`;
+    const confirm = e.on_confirm || "handover";
+    const seg = (v, label, icon) => `<button class="seg ${confirm === v ? "on" : ""}" aria-pressed="${confirm === v}" data-action="pre-confirm" data-entity="${id}" data-value="${v}" ${dis}><ha-icon icon="${icon}"></ha-icon>${label}</button>`;
+    const sc = t.scene;
+    let scene = "";
+    if (sc && sc.switches_on) scene = `In ${sc.mood} the normal lighting switches it on${sc.brightness_pct != null ? ` (${sc.brightness_pct} %)` : ""}: on confirmation it takes ${sc.mood}'s setting and is never switched off (the occupied scene has precedence).`;
+    else if (sc && sc.action === "off") scene = `In ${sc.mood} it is Off: the normal lighting switches it off on confirmation.`;
+    else if (sc) scene = `${sc.mood} does not control it: Hand over leaves it on (the vacancy action switches it off later); Turn off switches it off once the normal lighting is on.`;
+    const ctMin = caps.min_kelvin || p.limits.kelvin[0];
+    const ctMax = caps.max_kelvin || p.limits.kelvin[1];
+    return `<div class="ptarget"><div class="modehead"><div class="lmain"><b>${esc(t.name)}</b> <span class="sub">${esc(t.state || "")}</span></div>
+        ${ro ? "" : `<button class="link" data-action="pre-remove" data-entity="${id}">remove</button>`}</div>
+      ${t.managed ? "" : `<div class="sub warn">Not a controlled light of this room any more (excluded or controlled through its group): it is not switched.</div>`}
+      <div class="frow"><label for="so-pre-b-${id}">Brightness</label><div class="fval"><input id="so-pre-b-${id}" type="number" class="num" min="1" max="100" step="1"
+          value="${esc(own.brightness_pct ?? "")}" placeholder="${esc(e.brightness_pct)}" data-control="pre-t-num" data-entity="${id}" data-key="brightness_pct" ${dis}> %
+          ${tag("brightness_pct")}${caps.known && !caps.brightness ? `<span class="sub">on/off only</span>` : ""}</div></div>
+      ${caps.color_temp || caps.color || !caps.known ? `<div class="frow"><label for="so-pre-k-${id}">Colour temperature</label><div class="fval"><input id="so-pre-k-${id}" type="number" class="num" min="${ctMin}" max="${ctMax}" step="50"
+          value="${esc(own.color_temp_kelvin ?? "")}" placeholder="not set" data-control="pre-t-num" data-entity="${id}" data-key="color_temp_kelvin" ${dis}> K
+          <span class="sub">empty: the light keeps its colour</span></div></div>` : ""}
+      ${caps.transition || !caps.known ? `<div class="frow"><label for="so-pre-t-${id}">Transition</label><div class="fval"><input id="so-pre-t-${id}" type="number" class="num" min="0" max="${p.limits.transition[1]}" step="0.1"
+          value="${esc(own.transition ?? "")}" placeholder="${esc(e.transition)}" data-control="pre-t-num" data-entity="${id}" data-key="transition" ${dis}> s ${tag("transition")}</div></div>` : ""}
+      <div class="frow"><label>When confirmed</label><div class="fval"><div class="segs small mode" role="group" aria-label="${esc(t.name)}: when occupancy is confirmed">
+          ${seg("handover", "Hand over", "mdi:swap-horizontal")}${seg("turn_off", "Turn off", "mdi:lightbulb-off-outline")}</div> ${tag("on_confirm")}${this._statusHtml(`pre-${t.entity_id}`)}</div></div>
+      ${scene ? `<div class="sub">${esc(scene)}</div>` : ""}</div>`;
+  }
+
+  // Global defaults of possible occupancy lighting (every room that does not set a value follows them).
+  _prelimGlobalHtml(p, ro) {
+    const g = p.global;
+    const dis = ro ? "disabled" : "";
+    const seg = (v, label) => `<button class="seg ${g.on_confirm === v ? "on" : ""}" aria-pressed="${g.on_confirm === v}" data-action="pre-g-confirm" data-value="${v}" ${dis}>${label}</button>`;
+    const num = (k, v, min, max, step, unit, label) => `<div class="frow"><label for="so-preg-${k}">${label}</label><div class="fval"><input id="so-preg-${k}" type="number" class="num" min="${min}" max="${max}" step="${step}"
+        value="${esc(v ?? "")}" ${k === "on_below" ? `placeholder="same as normal"` : ""} data-control="pre-g-num" data-key="${k}" ${dis}> ${unit}${this._statusHtml(`preg-${k}`)}</div></div>`;
+    return `<details class="dladv" ${this._ui.preGlobal ? "open" : ""}><summary data-action="toggle-pre-global">Global defaults (all rooms)</summary>
+      <div class="global"><div class="sub"><b>Global setting</b> — every room that does not set a value follows it. Room values are not changed. A room changes nothing until it has a preliminary light.</div>
+        <label class="switch"><input type="checkbox" data-control="pre-g-enabled" ${g.enabled ? "checked" : ""} ${dis}> Enabled by default${this._statusHtml("preg-enabled")}</label>
+        ${num("brightness_pct", g.brightness_pct, 1, 100, 1, "%", "Brightness")}
+        ${num("transition", g.transition, 0, p.limits.transition[1], 0.1, "s", "Transition")}
+        ${num("timeout", g.timeout, p.limits.timeout[0], p.limits.timeout[1], 1, "s", "Timeout")}
+        ${num("on_below", g.on_below, p.limits.lux[0], p.limits.lux[1], 1, "lx", "Light level")}
+        <div class="frow"><label>When confirmed</label><div class="fval"><div class="segs small" role="group" aria-label="Default when occupancy is confirmed">${seg("handover", "Hand over")}${seg("turn_off", "Turn off")}</div>${this._statusHtml("preg-on_confirm")}</div></div>
+      </div></details>`;
+  }
+
+  // The room's preliminary lights as stored (own values only), for a full replacement.
+  _prelimTargets() { return (this._model?.room?.preliminary?.settings?.targets || []).map((t) => ({ ...t })); }
+
+  _savePrelim(key, changes, ok = "Saved") {
+    return this._save(key, { type: `${WS}/preliminary/set`, area_id: this._config.area, ...changes }, ok);
   }
 
   _vacancyWord(r) {
@@ -1347,7 +1534,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
   }
 
   // Operating mode: the status (double-click toggles Observing ⇄ Automatic) and a single-click selector.
-  _lightingModeHtml(r) {
+  // ``compact`` (the Overview): one short line instead of the full explanation.
+  _lightingModeHtml(r, compact = false) {
     const d = r.diagnostics;
     const on = !!r.settings.control_enabled;
     const st = this._roomModeState(r);
@@ -1370,7 +1558,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
           <ha-icon icon="${st.icon}"></ha-icon><span>${esc(st.word)}</span></button></div>
       <div class="modebar"><div class="segs small mode" role="group" aria-label="Automatic lighting mode">${seg("observe", "Observing", "mdi:eye-outline", !on)}${seg("automatic", "Automatic", "mdi:lightbulb-auto", on)}</div>
         ${this._statusHtml("room-mode")}</div>
-      <div class="sub ${st.tone === "warn" ? "warn" : ""}">${esc(explain + conf)} Wall switches set to Active work in both modes.</div>`;
+      ${compact ? (st.tone === "warn" ? `<div class="sub warn">${esc(explain)}</div>` : "")
+    : `<div class="sub ${st.tone === "warn" ? "warn" : ""}">${esc(explain + conf)} Wall switches set to Active work in both modes.</div>`}`;
   }
 
   _setRoomMode(mode) {
@@ -1965,6 +2154,14 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     if (a.startsWith("sw-")) { this._onSwitchAction(a, el); return; }
     if (a === "tab") this._openTab(el.dataset.tab);
     else if (a === "vac-action") this._setVacancy(el.dataset.value);
+    else if (a === "pre-inherit") this._savePrelim(el.dataset.key === "enabled" ? "pre" : `pre-${el.dataset.key}`, { [el.dataset.key]: null }, "Uses the global default");
+    else if (a === "pre-remove") this._savePrelim("pre", { targets: this._prelimTargets().filter((t) => t.entity_id !== el.dataset.entity) }, "Removed");
+    else if (a === "pre-confirm") {
+      const targets = this._prelimTargets().map((t) => (t.entity_id === el.dataset.entity ? { ...t, on_confirm: el.dataset.value } : t));
+      this._savePrelim(`pre-${el.dataset.entity}`, { targets }, el.dataset.value === "turn_off" ? "Turns off on confirmation" : "Hands over on confirmation");
+    } else if (a === "pre-signals-default") this._savePrelim("pre-signals", { signals: null }, "Default signals");
+    else if (a === "pre-g-confirm") this._save("preg-on_confirm", { type: `${WS}/preliminary/set`, on_confirm: el.dataset.value }, "Global default");
+    else if (a === "toggle-pre-global") { ui.preGlobal = !el.parentElement.open; }
     else if (a === "pr-inherit") this._savePresenceTime(area, { [el.dataset.key]: null }, `pr-${el.dataset.key}`, "Uses the global default");
     else if (a === "pr-reset-all") {
       if (confirm(`Use the global defaults for every presence setting of ${this._model.room.name}?`)) this._savePresenceTime(area, {}, "pr-all", "Global defaults", true);
@@ -2023,7 +2220,23 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         el.checked ? "Allowed" : "No longer allowed").then(() => this._loadReview());
     } else if (c === "room-minutes") this._save("room-minutes", { type: `${WS}/room/set`, area_id: area, manual_override_minutes: el.value === "" ? null : Number(el.value) });
     else if (c === "switches") this._save("switches", { type: `${WS}/room/set`, area_id: area, manual_switches: el.value.split(/[\s,]+/).filter(Boolean) });
-    else if (c === "vac-mood" && el.value) {
+    else if (c === "pre-enabled") this._savePrelim("pre", { enabled: el.checked }, el.checked ? "On for this room" : "Off for this room");
+    else if (c === "pre-add" && el.value) this._savePrelim("pre", { targets: [...this._prelimTargets(), { entity_id: el.value }] }, "Light added");
+    else if (c === "pre-t-num") {
+      const value = el.value === "" ? null : Number(el.value);
+      const targets = this._prelimTargets().map((t) => (t.entity_id === el.dataset.entity ? { ...t, [el.dataset.key]: value } : t));
+      this._savePrelim(`pre-${el.dataset.entity}`, { targets }, value === null ? "Uses the default" : "Saved");
+    } else if (c === "pre-signal") {
+      const p = this._model.room.preliminary;
+      const chosen = new Set(p.effective.signals);
+      if (el.checked) chosen.add(el.dataset.entity); else chosen.delete(el.dataset.entity);
+      this._savePrelim("pre-signals", { signals: p.sensors.map((x) => x.entity_id).filter((x) => chosen.has(x)) }, "Saved");
+    } else if (c === "pre-num") this._savePrelim(`pre-${el.dataset.key}`, { [el.dataset.key]: el.value === "" ? null : Number(el.value) }, el.value === "" ? "Uses the global default" : "Room override");
+    else if (c === "pre-g-enabled") this._save("preg-enabled", { type: `${WS}/preliminary/set`, enabled: el.checked }, "Global default");
+    else if (c === "pre-g-num") {
+      if (el.value === "" && el.dataset.key !== "on_below") return;
+      this._save(`preg-${el.dataset.key}`, { type: `${WS}/preliminary/set`, [el.dataset.key]: el.value === "" ? null : Number(el.value) }, "Global default");
+    } else if (c === "vac-mood" && el.value) {
       this._ui.vacPick = false;
       this._save("vacancy", { type: `${WS}/room/set`, area_id: area, vacancy_action: "vacant_mood", vacancy_mood: el.value }, `Vacant mood: ${el.value}`);
     } else if (c === "pr-enabled") {
@@ -2160,6 +2373,16 @@ const STYLE = `<style>
   .tab[data-tip]:first-child::after { left: 0; transform: none; }
   .tab[data-tip]:last-child::after { left: auto; right: 0; transform: none; }
   .tabcap { display: none; padding: 6px 16px 0; font-weight: 500; }
+  /* Settings submenu (0.3.9): icon and name for every section; it wraps, nothing is clipped. */
+  .subnav { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 12px 0; }
+  .subtabs { display: flex; flex-wrap: wrap; gap: 4px; flex: 1 1 auto; min-width: 0; }
+  .stab, .subback { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 4px 12px; border-radius: 18px;
+    border: 1px solid var(--divider-color); background: none; white-space: nowrap; touch-action: manipulation; font-size: 0.92em; }
+  .stab ha-icon, .subback ha-icon { --mdc-icon-size: 18px; }
+  .stab.on { border-color: var(--primary-color); background: var(--primary-color); color: var(--text-primary-color, #fff); font-weight: 500; }
+  .stab:not(.on):hover, .subback:hover { background: var(--secondary-background-color); }
+  .stab:focus-visible, .subback:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+  .subback { border-style: dashed; color: var(--secondary-text-color); }
   .plist { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
   .psens { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 8px; border: 1px solid var(--divider-color); border-radius: 8px; }
   .psens.off { opacity: 0.75; border-style: dashed; }
@@ -2171,6 +2394,16 @@ const STYLE = `<style>
   .prow2 { display: grid; gap: 2px; padding: 6px 0; border-bottom: 1px solid var(--divider-color); }
   .prow2 > label { font-weight: 500; }
   .section.vac { margin-top: 12px; }
+  .section.prelim { margin-top: 12px; }
+  .stitle.small { font-size: 0.95em; margin-top: 8px; }
+  .ptarget { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--divider-color); border-radius: 8px; }
+  .pre-sens { gap: 2px; }
+  .pre-sens label.auto { display: flex; gap: 8px; align-items: center; min-height: 36px; }
+  .pre-sens label.auto ha-icon { --mdc-icon-size: 20px; color: var(--secondary-text-color); }
+  .section.ovmode { margin: 0 0 10px; border-top: none; padding-top: 0; }
+  .section.swquick { margin-top: 10px; }
+  .swq { padding: 4px 0; border-bottom: 1px dashed var(--divider-color); }
+  .swq:last-child { border-bottom: none; }
   .rows { display: grid; }
   .trow { display: flex; gap: 10px; align-items: center; width: 100%; padding: 10px 4px; border: none; border-bottom: 1px solid var(--divider-color);
     background: none; text-align: left; }
@@ -2310,6 +2543,10 @@ const STYLE = `<style>
   @container (max-width: 320px) {
     .tabs { flex-wrap: wrap; }
     .tab { flex: 0 0 34px; }
+  }
+  @container (max-width: 420px) {
+    .subnav { padding: 8px 8px 0; }
+    .stab, .subback { padding: 4px 9px; }
   }
   @container (max-width: 480px) {
     .psens { grid-template-columns: auto minmax(0, 1fr); }

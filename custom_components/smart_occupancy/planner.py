@@ -63,6 +63,7 @@ from .const import (
 )
 from .daylight import DaylightGate
 from .lighting import Capabilities
+from .preliminary import TRIGGER as PRELIMINARY_TRIGGER, EffectivePreliminary, describe_setting
 from .profiles import ResolvedSetting
 
 CHANGE = "change"
@@ -379,11 +380,22 @@ def build_plan(
     note: str | None = None,
     manual_mode: bool = False,
     gate: DaylightGate | None = None,
+    await_confirmation: bool = False,
+    preliminary: frozenset[str] | set[str] = frozenset(),
 ) -> Plan:
-    """Build the plan for one room. ``resolve_fn(target) -> ResolvedSetting``."""
+    """Build the plan for one room. ``resolve_fn(target) -> ResolvedSetting``.
+
+    Possible occupancy lighting (0.3.9): ``await_confirmation`` (the room has
+    active preliminary lighting) keeps off lights off while occupancy is only
+    possible. ``preliminary`` are the lights the preliminary stage switched
+    on: until confirmation they are left to it; on confirmation they are
+    gated as if they were still off (the normal lighting decides whether they
+    are needed at all).
+    """
     gate_block = gate.blocks() if gate else None
     items: list[PlanItem] = []
     confirmed = occupancy_state == OccupancyState.CONFIRMED_OCCUPANCY
+    possible = occupancy_state == OccupancyState.POSSIBLE_OCCUPANCY
     for t in targets:
         resolved = resolve_fn(t) if mood else ResolvedSetting()
         service, data, requested, unsupported = build_command(resolved, t.capabilities)
@@ -439,11 +451,20 @@ def build_plan(
                 set_(BLOCKED, "vacant",
                      f"Room is not occupied; applied when occupancy is next confirmed ({summary})")
                 continue
+            if t.entity_id in preliminary and not confirmed:
+                set_(BLOCKED, "preliminary",
+                     "Preliminary light (possible occupancy); the normal lighting applies when occupancy is confirmed")
+                continue
             if service == "turn_off" and not confirmed:
                 set_(BLOCKED, "off_needs_confirmation",
                      "Occupancy is not confirmed; lights are not switched off on uncertain evidence")
                 continue
-            if gate_block and service == "turn_on" and t.state != "on":
+            if await_confirmation and possible and service == "turn_on" and t.state != "on":
+                set_(BLOCKED, "awaiting_confirmation",
+                     f"Occupancy is only possible: switched on when it is confirmed ({summary})")
+                continue
+            off = t.state != "on" or t.entity_id in preliminary
+            if gate_block and service == "turn_on" and off:
                 set_(BLOCKED, gate_block[0], gate_block[1])
                 continue
         if matches(t, service, data):
@@ -463,11 +484,12 @@ def build_plan(
             "motion": "motion was detected",
             "became_dark": "the room became dark",
             "preview": f"it does not match {mood}",
+            PRELIMINARY_TRIGGER: "occupancy is possible",
         }.get(trigger, trigger)
         ambient = " Ambient: applied regardless of occupancy." if resolved.is_persistent and not occupied else ""
         light = ""
-        if gate and gate.policy == AutoOn.DARK and service == "turn_on" and t.state != "on" \
-                and not resolved.is_persistent:
+        if gate and gate.policy == AutoOn.DARK and service == "turn_on" \
+                and (t.state != "on" or t.entity_id in preliminary) and not resolved.is_persistent:
             light = f" Daylight: {gate.decision.value} ({gate.text})."
         set_(CHANGE, "change", f"{verb} set {summary} because {why}.{ambient}{light}")
     return Plan(area_id, mood, occupancy_state, occupied, trigger, control_enabled, items, note, manual_mode, gate)
@@ -576,3 +598,83 @@ def build_vacancy_plan(
             set_(CHANGE, "change", f"{verb} set {describe(resolved, vacant_mood)} (vacant mood {vacant_mood}).")
     return Plan(area_id, plan_mood, occupancy_state, occupied, trigger, control_enabled, items, note, manual_mode,
                 None, action.value, mood)
+
+
+# ------------------------------------------------------- possible occupancy (0.3.9)
+def build_preliminary_plan(
+    *,
+    area_id: str,
+    settings: EffectivePreliminary,
+    targets: dict[str, Target],
+    mood: str | None,
+    occupancy_state: str | None,
+    occupied: bool | None,
+    control_enabled: bool,
+    gate: DaylightGate | None,
+    manual_mode: bool = False,
+    note: str | None = None,
+    manual_off: list[str] | None = None,
+) -> Plan:
+    """What the preliminary stage sends to each preliminary light. Never sends anything.
+
+    ``targets`` are the room's controlled lights (managed, not excluded, not
+    covered by a managed group); a preliminary light that is not one of them
+    is skipped. ``manual_off`` names lights a person switched off in the room
+    (an active manual override): then no preliminary light is switched on.
+    """
+    gate_block = gate.blocks() if gate else None
+    items: list[PlanItem] = []
+    for eff in settings.targets:
+        t = targets.get(eff.entity_id)
+        resolved = ResolvedSetting(action=LightAction.ON, brightness_pct=eff.brightness_pct,
+                                   color_temp_kelvin=eff.color_temp_kelvin, transition=eff.transition)
+        if t is None:
+            item = PlanItem(entity_id=eff.entity_id, name=None, category=None, category_name=None, is_group=False,
+                            current={}, resolved=resolved, requested={}, service=None, data={}, decision=SKIPPED,
+                            reason_code="not_managed",
+                            reason="Not a controlled light of this room (excluded, controlled through its group, "
+                                   "or no longer managed); nothing is sent")
+            items.append(item)
+            continue
+        service, data, requested, unsupported = build_command(resolved, t.capabilities)
+        item = PlanItem(
+            entity_id=t.entity_id, name=t.name, category=t.category, category_name=t.category_name,
+            is_group=t.is_group, current=t.current(), resolved=resolved, requested=requested, service=service,
+            data=data, decision=SKIPPED, reason_code="", reason="", unsupported=unsupported, override=t.override,
+            conflicts=t.conflicts,
+        )
+        items.append(item)
+
+        def set_(decision: str, code: str, reason: str, item: PlanItem = item) -> None:
+            item.decision, item.reason_code, item.reason = decision, code, reason
+
+        level = describe_setting(eff)
+        if manual_mode:
+            set_(BLOCKED, "manual_mode", f"{MANUAL_PAUSED_TEXT}: nothing is sent")
+        elif mood is None:
+            set_(BLOCKED, "no_mood", note or "No effective mood: lighting is not changed")
+        elif t.offline:
+            set_(BLOCKED, "offline", f"Light is {t.state or 'missing'}; nothing can be sent")
+        elif t.override:
+            source = t.override.get("source", "manual")
+            set_(BLOCKED, "manual_override", f"Manual change ({source}) is respected")
+        elif manual_off:
+            set_(BLOCKED, "manual_off",
+                 f"Switched off by a person ({', '.join(manual_off)}): no preliminary light is switched on")
+        elif t.conflicts:
+            names = ", ".join(c.get("name") or c["automation"] for c in t.conflicts)
+            set_(BLOCKED, "conflict",
+                 f"Also controlled by enabled automation(s) {names}; acknowledge or resolve the conflict first")
+        elif t.state == "on":
+            set_(UNCHANGED, "already_on", "Already on: left as it is (only lights that are off are switched on)")
+        elif occupancy_state != OccupancyState.POSSIBLE_OCCUPANCY:
+            set_(BLOCKED, "not_possible", "The room is not in possible occupancy")
+        elif gate_block:
+            set_(BLOCKED, gate_block[0], gate_block[1])
+        else:
+            verb = "Will" if control_enabled else "Would"
+            light = f" Daylight: {gate.decision.value} ({gate.text})." if gate and gate.policy == AutoOn.DARK else ""
+            set_(CHANGE, "change", f"{verb} switch on at {level} because occupancy is possible.{light}")
+    return Plan(area_id, mood, occupancy_state, occupied, PRELIMINARY_TRIGGER, control_enabled, items, note,
+                manual_mode, gate)
+

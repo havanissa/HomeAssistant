@@ -18,5 +18,5 @@
   "issue_tracker": "https://github.com/havanissa/HomeAssistant/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.3.8"
+  "version": "0.3.9"
 }
