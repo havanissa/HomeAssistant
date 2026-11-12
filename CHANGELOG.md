@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.12 — Fix: Turn off on confirmation kept the preliminary lights on
+
+### Fixed
+
+- **Preliminary lights set to *Turn off* stayed on after occupancy was confirmed.** Found from the live diagnostics trace of 2026-11-12 18:38 (Kamar Norður). Occupancy was confirmed by the radar and Nobara 22 s into the stage. The normal lighting (Kvøld) switched the spots group on. Then both preliminary lights got the outcome `kept_dark` and no command was sent. Root cause, in `_confirm_preliminary`: *Turn off* keeps a preliminary light on when no other light of the room is on, so the room is never left dark, and it checked that against Home Assistant's light states right after the normal lighting's `light.turn_on`. The spots group (Zigbee2MQTT) reports its new state only a moment after the call returns, so it still read "off". Lights the normal lighting has just switched on successfully now count as on. The trace's `confirmed` step lists `scene_switched_on` and `other_lights_on`.
+
 ## 0.3.11 — Fix: possible occupancy lights stayed on with a PIR that holds "occupied"
 
 ### Fixed
