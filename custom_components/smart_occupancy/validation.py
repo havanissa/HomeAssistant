@@ -329,12 +329,12 @@ def validate(
                 subject=area_id, **in_room,
             ))
 
-        essential = [s for s in room.sensors if s.role in ESSENTIAL_ROLES]
+        essential = [s for s in room.sensors if s.role in ESSENTIAL_ROLES and s.enabled]
         if not essential:
             add(Problem(
                 "room_without_signals", Severity.WARNING, CONFIG, "No occupancy signals",
-                f"{room_name} has no signal with the role Trigger, Maintain or Confirm vacancy, so its "
-                "occupancy cannot be observed.",
+                f"{room_name} has no signal with the role Trigger, Maintain or Confirm vacancy (that is not "
+                "excluded in the Presence tab), so its occupancy cannot be observed.",
                 f"Assign sensors and roles in Configure → Rooms → {room_name}.",
                 subject=area_id, **in_room,
             ))
@@ -358,6 +358,10 @@ def validate(
 
         essential_health: list[str] = []
         for s in room.sensors:
+            if not s.enabled:
+                # Excluded from this room's occupancy (Presence tab): its health cannot affect the room.
+                signal_owner.setdefault(s.entity_id, area_id)
+                continue
             h = health(s.entity_id)
             if s.role in ESSENTIAL_ROLES:
                 essential_health.append(h)

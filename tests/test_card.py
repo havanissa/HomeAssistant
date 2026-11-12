@@ -81,6 +81,8 @@ def test_lighting_cards_never_control_lights() -> None:
         # 0.3.5 Switches tab (configuration only; switch commands are executed by the integration)
         "switch/candidates", "switch/add", "switch/set", "switch/mapping", "switch/mode", "switch/learn",
         "switch/remove", "switch/settings",
+        # 0.3.8 Presence tab (settings only: include/exclude a signal, presence timing)
+        "presence/sensor", "presence/timing",
     }, commands
 
 
@@ -93,14 +95,14 @@ def test_card_javascript_parses(path: Path) -> None:
 def test_room_card_layout() -> None:
     """Tabs are the single navigation; daylight settings live in the Automatic tab only; one outdoor editor.
 
-    0.3.5 adds the Switches tab after Automatic, 0.3.7 the Log tab after Overview; everything else of the
-    0.3.4 layout is unchanged.
+    0.3.5 adds the Switches tab after Automatic, 0.3.7 the Log tab after Overview, 0.3.8 the Presence tab
+    after Automatic; everything else of the 0.3.4 layout is unchanged.
     """
     source = LIGHTING_FILE.read_text(encoding="utf-8")
-    tabs = re.search(r"const tabs = (\[.*?\]);", source, re.S).group(1)
-    order = re.findall(r'\["([a-z]+)", "([A-Za-z]+)"\]', tabs)
-    assert [k for k, _ in order] == ["overview", "log", "lights", "automatic", "switches", "overrides", "preview",
-                                     "advanced"]
+    tabs = re.search(r"const ROOM_TABS = (\[.*?\]);", source, re.S).group(1)
+    order = re.findall(r'\["([a-z]+)", "([A-Za-z]+)", "mdi:[a-z-]+"\]', tabs)
+    assert [k for k, _ in order] == ["overview", "log", "lights", "automatic", "presence", "switches", "overrides",
+                                     "preview", "advanced"]
     # No duplicate navigation buttons at the bottom of Overview.
     for label in ("Review lights", "Configure overrides", "Preview room"):
         assert label not in source
@@ -173,7 +175,7 @@ def test_decision_log_ui() -> None:
     # Every status the integration records has a word and an icon (never colour alone).
     table = source[source.index("const DECISION = {"):source.index("const decisionStatus")]
     for status in ("executed", "dispatched", "partial", "failed", "observed", "blocked", "no_change", "no_action",
-                   "noted"):
+                   "suppressed", "noted"):
         assert re.search(rf'{status}: \["[A-Z][^"]+", "[a-z]+", "mdi:[a-z-]+"\]', table), status
     assert "<ha-icon icon=" in source[source.index("const decisionPill"):source.index("const DECISION_MODES")]
     assert "not confirmed" in source  # sent but not reported back is not shown as executed
@@ -185,3 +187,54 @@ def test_decision_log_ui() -> None:
     assert "Last decision" in card and "x.decisions" in card and 'data-action="sw-log"' in card
     # The log link is outside the administrator-only buttons: read-only users see the log too.
     assert card.index('data-action="sw-log"') < card.index('${ro ? "" : `<div class="ibtns">')
+
+
+def test_icon_tabs_are_accessible_and_never_hidden() -> None:
+    """0.3.8: compact icon tabs with names (tooltip, accessible label, visible for the selected tab), keyboard
+    navigation, and a bar that wraps instead of scrolling tabs out of sight."""
+    source = LIGHTING_FILE.read_text(encoding="utf-8")
+    tabs = re.search(r"const ROOM_TABS = (\[.*?\]);", source, re.S).group(1)
+    entries = re.findall(r'\["([a-z]+)", "([A-Za-z]+)", "(mdi:[a-z-]+)"\]', tabs)
+    assert len(entries) == 9 and len({icon for *_, icon in entries}) == 9  # one distinct icon per tab
+    body = source[source.index("  _body() {", source.index("class SmartOccupancyRoomLightingCard")):
+                  source.index("  // Tabs: arrow keys")]
+    for text in ('role="tablist"', 'role="tab"', 'aria-selected="${on}"', 'aria-label="${l}"', 'data-tip="${l}"',
+                 'tabindex="${on ? 0 : -1}"', 'role="tabpanel"', 'aria-labelledby="tab-${tab}"', 'class="tabcap"',
+                 '<span class="tlabel"'):
+        assert text in body, text
+    keys = source[source.index("  _onKey(ev) {"):source.index("  _openTab(key) {")]
+    for key in ("ArrowRight", "ArrowLeft", "Home", "End", "preventDefault", ".focus()"):
+        assert key in keys, key
+    assert 'addEventListener("keydown"' in source
+    css = source[source.index("const STYLE = `<style>"):]
+    tab_css = css[css.index("  .tabs {"):css.index("  .tabcap {")]
+    assert "flex-wrap: wrap" in tab_css and "overflow-x" not in tab_css and "scrollbar-width" not in tab_css
+    assert ":hover::after" in tab_css and ":focus-visible::after" in tab_css and "attr(data-tip)" in tab_css
+    assert "min-height: 40px" in tab_css and "touch-action: manipulation" in tab_css  # touch targets
+    narrow = css[css.index("@container (max-width: 520px)"):]
+    assert ".tabcap { display: block; }" in narrow  # the selected name stays visible without hover
+    assert "@container (max-width: 320px)" in narrow and "flex-wrap: wrap" in narrow.split("@container (max-width: 320px)")[1]
+
+
+def test_presence_tab_and_vacancy_controls() -> None:
+    source = LIGHTING_FILE.read_text(encoding="utf-8")
+    presence = source[source.index("  _presence(r) {"):source.index("  _savePresenceTime(")]
+    for text in ('data-control="pr-enabled"', 'role="switch"', "s.label", "s.entity_id", "s.kind_name", "s.role_name",
+                 "s.last_changed", "PRESENCE[s.condition]", '"Room override"', '"Global default"',
+                 'data-action="pr-inherit"', "Use global default", 'data-action="pr-reset-all"', 'data-control="pr-global"',
+                 "Global defaults (all rooms)", "Room overrides are not changed"):
+        assert text in presence, text
+    assert "callService" not in presence
+    table = source[source.index("const PRESENCE = {"):source.index("const KIND_ICONS")]
+    for condition in ("active", "clear", "disabled", "unavailable", "invalid", "stuck"):
+        assert re.search(rf'{condition}: \["[A-Z][^"]+", "[a-z]+", "mdi:[a-z-]+"\]', table), condition
+    vacancy = source[source.index("  _vacancyHtml(r) {"):source.index("  // Presence tab (0.3.8)")]
+    for text in ("When the room becomes vacant", 'data-action="vac-action"', 'data-control="vac-mood"', "aria-pressed",
+                 "Ambient lights keep following the mood"):
+        assert text in vacancy, text
+    for action in ('"turn_off", "Turn off"', '"vacant_mood", "Vacant mood"', '"leave", "Leave unchanged"'):
+        assert action in source
+    automatic = source[source.index("  _automatic(r) {"):source.index("  _autoHtml(r) {")]
+    assert automatic.count("this._vacancyHtml(r)") == 2  # with and without daylight information
+    overview = source[source.index("  _overview(r) {"):source.index("  // Overview: the latest decision")]
+    assert "When vacant" in overview

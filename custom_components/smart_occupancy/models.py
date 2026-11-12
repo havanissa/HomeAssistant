@@ -18,7 +18,8 @@ Persisted shape (CONFIG_VERSION 2)::
       "rooms": {"<area_id>": {"enabled": true,
                               "sensors": [{"entity_id": ..., "kind": "pir",
                                            "role": "trigger",
-                                           "inverted": false}],
+                                           "inverted": false,
+                                           "enabled": false}],   # 0.3.8, only when excluded
                               "lights": ["light.x"],
                               "reference_occupancy_entity": null,
                               "mood_overrides": {mood: {category_key: setting}},
@@ -153,23 +154,37 @@ class SensorAssignment:
     role: SensorRole
     # The signal means "active" when it is off (e.g. a "PC idle" sensor).
     inverted: bool = False
+    # 0.3.8: False excludes the signal from this room's occupancy decisions (Presence tab). The assignment,
+    # its kind and role are kept, so enabling it again restores it exactly; the entity itself is untouched.
+    enabled: bool = True
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SensorAssignment:
         kind = _enum_or(SensorKind, data.get("kind"), SensorKind.OTHER)
         role = _enum_or(SensorRole, data.get("role"), DEFAULT_ROLE_FOR_KIND[kind])
+        enabled = data.get("enabled", True)
         return cls(
             entity_id=data["entity_id"], kind=kind, role=role,
             inverted=bool(data.get("inverted", False)),
+            enabled=enabled if isinstance(enabled, bool) else True,
         )
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "entity_id": self.entity_id,
             "kind": self.kind.value,
             "role": self.role.value,
             "inverted": self.inverted,
         }
+        if not self.enabled:
+            # Only written when excluded: options saved before 0.3.8 keep their exact shape.
+            out["enabled"] = False
+        return out
+
+    @property
+    def participates(self) -> bool:
+        """Takes part in occupancy decisions: enabled and not set to Ignore."""
+        return self.enabled and self.role != SensorRole.IGNORE
 
 
 def _clean_timing(data: Any, *, fill_defaults: bool) -> dict[str, int]:
@@ -365,8 +380,8 @@ class RoomConfig:
 
     @property
     def occupancy_sensors(self) -> tuple[SensorAssignment, ...]:
-        """Signals that take part in occupancy decisions (role is not Ignore)."""
-        return tuple(s for s in self.sensors if s.role != SensorRole.IGNORE)
+        """Signals that take part in occupancy decisions (enabled, role is not Ignore)."""
+        return tuple(s for s in self.sensors if s.participates)
 
     @property
     def referenced_entities(self) -> list[str]:

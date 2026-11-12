@@ -386,7 +386,10 @@ async def test_gradual_updates_fold_and_manual_mood_drop(hass: HomeAssistant, ho
 
 
 async def test_vacancy_is_explained(hass: HomeAssistant, lit: Lit, calls: Calls, freezer) -> None:
-    """Lights left on when a room empties are explained (Smart Occupancy has no vacancy switch-off)."""
+    """A room that empties is explained with what its vacancy action does (0.3.8: Turn off by default).
+
+    In Observing nothing is sent; the log says what would happen (before 0.3.8 the lights were left on).
+    """
     entry = await setup_entry(hass, options(lit))
     ctrl = ctrl_of(entry)
     await occupy(hass, lit, freezer)
@@ -394,8 +397,8 @@ async def test_vacancy_is_explained(hass: HomeAssistant, lit: Lit, calls: Calls,
     hass.states.async_set(lit.radar, "off")
     await advance(hass, freezer, 3600)
     d = log(ctrl, lit.area)[0]
-    assert (d["action"], d["status"], d["trigger"]) == ("Leave lights on", "no_change", "vacant"), d
+    assert (d["action"], d["status"], d["trigger"], d["mode"]) == ("Lights off", "observed", "vacant", "observing"), d
     assert d["explanation"].startswith("Vacant: no activity for ")
-    assert "light.kno_spots is left on: Smart Occupancy does not switch lights off when a room becomes vacant." \
-        in d["explanation"]
+    assert "would switch off light.kno_spots. Observing: nothing was sent." in d["explanation"]
+    assert d["details"]["vacancy_action"] == "Turn off"
     assert calls.all == []

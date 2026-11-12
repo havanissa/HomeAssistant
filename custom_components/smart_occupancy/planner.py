@@ -26,6 +26,21 @@ Decision for each target, in order:
 Brightness and colour temperature that follow the global adjustment are
 already filled in (``adaptive.apply_global``). While Main Mood is the Manual
 option, every target is ``blocked`` (``manual_mode``): nothing is sent.
+
+Vacancy plans (0.3.8, ``build_vacancy_plan``) decide what happens to the
+room's lights when it has become vacant, by the room's vacancy action:
+
+* ``turn_off``: lights that are on are switched off;
+* ``vacant_mood``: the chosen mood's profile is applied to the lights that
+  are on (On with its brightness and colour, Off, or left unchanged); it
+  never switches an off light on in an empty room;
+* ``leave``: nothing is planned.
+
+Ambient (persistent) settings of the room's current mood are never touched
+by vacancy, and the same protections as for mood plans apply first
+(exclusions, groups, offline lights, manual overrides, automation conflicts,
+Manual mode). A light that already is in the vacancy state is ``unchanged``
+even while it has a manual override.
 """
 
 from __future__ import annotations
@@ -44,6 +59,7 @@ from .const import (
     AutoOn,
     LightAction,
     OccupancyState,
+    VacancyAction,
 )
 from .daylight import DaylightGate
 from .lighting import Capabilities
@@ -166,6 +182,9 @@ class Plan:
     note: str | None = None
     manual_mode: bool = False
     daylight: DaylightGate | None = None
+    # Vacancy plans (0.3.8): the room's vacancy action, and the mood whose ambient lights are kept.
+    vacancy: str | None = None
+    current_mood: str | None = None
 
     @property
     def changes(self) -> list[PlanItem]:
@@ -189,6 +208,7 @@ class Plan:
             "note": self.note,
             "manual_mode": self.manual_mode,
             "daylight": self.daylight.as_dict() if self.daylight else None,
+            "vacancy": self.vacancy,
             "counts": self.counts(),
             "items": [i.as_dict() for i in self.items],
         }
@@ -451,3 +471,108 @@ def build_plan(
             light = f" Daylight: {gate.decision.value} ({gate.text})."
         set_(CHANGE, "change", f"{verb} set {summary} because {why}.{ambient}{light}")
     return Plan(area_id, mood, occupancy_state, occupied, trigger, control_enabled, items, note, manual_mode, gate)
+
+
+def build_vacancy_plan(
+    *,
+    area_id: str,
+    action: VacancyAction,
+    mood: str | None,
+    vacant_mood: str | None,
+    targets: list[Target],
+    resolve_current,
+    resolve_vacant,
+    occupancy_state: str | None,
+    occupied: bool | None,
+    trigger: str,
+    control_enabled: bool,
+    note: str | None = None,
+    manual_mode: bool = False,
+) -> Plan:
+    """What the room's vacancy action does to each target (see the module docstring). Never sends anything.
+
+    ``mood`` is the room's current mood (its ambient lights are kept);
+    ``resolve_current(target)`` / ``resolve_vacant(target)`` resolve the
+    current and the vacant mood for a target.
+    """
+    items: list[PlanItem] = []
+    plan_mood = vacant_mood if action == VacancyAction.VACANT_MOOD else mood
+    for t in targets:
+        current = resolve_current(t) if mood else ResolvedSetting()
+        resolved = resolve_vacant(t) if action == VacancyAction.VACANT_MOOD and vacant_mood else ResolvedSetting()
+        if action == VacancyAction.TURN_OFF:
+            service, data, requested, unsupported = "turn_off", {}, {"state": "off"}, []
+        elif action == VacancyAction.VACANT_MOOD and vacant_mood:
+            service, data, requested, unsupported = build_command(resolved, t.capabilities)
+        else:
+            service, data, requested, unsupported = None, {}, {}, []
+        item = PlanItem(
+            entity_id=t.entity_id, name=t.name, category=t.category, category_name=t.category_name,
+            is_group=t.is_group, current=t.current(), resolved=resolved, requested=requested,
+            service=service, data=data, decision=SKIPPED, reason_code="", reason="",
+            unsupported=unsupported, persistent=current.is_persistent, override=t.override,
+            conflicts=t.conflicts,
+        )
+        items.append(item)
+
+        def set_(decision: str, code: str, reason: str, item: PlanItem = item) -> None:
+            item.decision, item.reason_code, item.reason = decision, code, reason
+
+        if t.excluded:
+            set_(SKIPPED, "excluded", f"Excluded from automatic management ({t.excluded})")
+            continue
+        if t.covered_by:
+            set_(SKIPPED, "covered_by_group",
+                 f"Member of managed group {t.covered_by}; controlled through the group to avoid duplicate commands")
+            continue
+        if action == VacancyAction.LEAVE:
+            set_(SKIPPED, "vacancy_leave", "Vacancy behaviour is Leave unchanged")
+            continue
+        if manual_mode:
+            set_(BLOCKED, "manual_mode", f"{MANUAL_PAUSED_TEXT}: nothing is sent")
+            continue
+        if mood is None:
+            # Without a mood it is unknown which lights are ambient, so nothing is switched off.
+            set_(BLOCKED, "no_mood", "No effective mood, so ambient lights cannot be told apart; nothing is changed")
+            continue
+        if action == VacancyAction.VACANT_MOOD and not vacant_mood:
+            set_(BLOCKED, "no_vacant_mood", "No vacant mood is chosen for this room; nothing is changed")
+            continue
+        if current.is_persistent:
+            set_(SKIPPED, "ambient", f"Ambient in {mood}: follows the mood whether or not the room is occupied")
+            continue
+        if t.offline:
+            set_(BLOCKED, "offline", f"Light is {t.state or 'missing'}; it could not be changed")
+            continue
+        if service is None:
+            set_(UNCHANGED, "vacant_ignore", f"Left as it is: the vacant mood {vacant_mood} does not set it")
+            continue
+        if service == "turn_off" and t.state == "off":
+            set_(UNCHANGED, "already", "Already off")
+            continue
+        if service == "turn_on" and t.state != "on":
+            set_(UNCHANGED, "stays_off", f"Stays off: the vacant mood {vacant_mood} does not switch lights on "
+                 "in an empty room")
+            continue
+        if t.override:
+            until = t.override.get("until")
+            source = t.override.get("source", "manual")
+            set_(BLOCKED, "manual_override",
+                 f"Manual change ({source}) is respected" + (f" until {until}" if until else ""))
+            continue
+        if t.conflicts:
+            names = ", ".join(c.get("name") or c["automation"] for c in t.conflicts)
+            set_(BLOCKED, "conflict",
+                 f"Also controlled by enabled automation(s) {names}; acknowledge or resolve the conflict first")
+            continue
+        if service == "turn_on" and matches(t, service, data):
+            set_(UNCHANGED, "already", f"Already in the vacant mood {vacant_mood}")
+            continue
+        verb = "Will" if control_enabled else "Would"
+        if service == "turn_off":
+            why = "the room is vacant" if action == VacancyAction.TURN_OFF else f"the vacant mood {vacant_mood} sets Off"
+            set_(CHANGE, "change", f"{verb} switch off because {why}.")
+        else:
+            set_(CHANGE, "change", f"{verb} set {describe(resolved, vacant_mood)} (vacant mood {vacant_mood}).")
+    return Plan(area_id, plan_mood, occupancy_state, occupied, trigger, control_enabled, items, note, manual_mode,
+                None, action.value, mood)

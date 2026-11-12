@@ -42,13 +42,24 @@
  * decision and has its own log. Every word of a decision comes from the
  * integration, which records it while deciding; the card only formats it.
  *
+ * 0.3.8: vacancy and presence. The Automatic tab has "When the room becomes
+ * vacant" (Turn off / Vacant mood / Leave unchanged). The new Presence tab lists
+ * the room's occupancy inputs with their live states (labels by device class;
+ * the integration decides on the raw states), lets each one be used or not for
+ * this room, and shows every presence setting as inherited (global default) or
+ * a room override, with "Use global default" per setting and for all. The tabs
+ * are compact icons: the name is in a tooltip (hover and keyboard focus), in
+ * the accessible label and beside the selected icon (on narrow cards: below
+ * the bar); arrow keys, Home and End move between tabs; the bar wraps instead
+ * of hiding tabs.
+ *
  * The cards are editors only: the integration owns the configuration
  * (websocket API, admin-only writes). The cards never call a light service and
  * a preview never changes a light. They refetch only when the integration
  * reports a change.
  */
 
-const VERSION = "0.3.7";
+const VERSION = "0.3.8";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -196,6 +207,7 @@ const DECISION = {
   blocked: ["Blocked", "warn", "mdi:cancel"],
   no_change: ["No change needed", "muted", "mdi:check"],
   no_action: ["No action", "muted", "mdi:minus-circle-outline"],
+  suppressed: ["Not done (setting)", "muted", "mdi:cog-off-outline"],
   noted: ["Noted", "muted", "mdi:information-outline"],
 };
 const decisionStatus = (d) => {
@@ -217,6 +229,8 @@ const DETAIL_LABELS = [
   ["daylight_detail", "Daylight detail"], ["auto_on", "Automatic switch-on"],
   ["manual_overrides", "Manual overrides"], ["manual_override", "Manual override registered"],
   ["override_source", "Changed by"], ["override_minutes", "Respected for (min)"],
+  ["vacancy_action", "When vacant"], ["vacant_mood", "Vacant mood"], ["vacancy_at", "Vacant at (if quiet)"],
+  ["cancelled_by", "Cancelled by"], ["overrides_cleared", "Manual overrides ended"],
   ["lights_on", "Lights on"], ["targets", "Lights"], ["assigned_action", "Assigned action"],
   ["global_values", "Global adjustment"], ["captured", "Captured buttons"],
   ["service", "Requested action"], ["result", "Result"], ["verification", "Verification"], ["errors", "Error"],
@@ -230,6 +244,38 @@ const detailValue = (k, v) => {
   if (v && typeof v === "object") return `<ul class="dlist">${Object.entries(v).map(([a, b]) => `<li>${esc(a)}: ${esc(typeof b === "object" ? JSON.stringify(b) : b)}</li>`).join("")}</ul>`;
   return esc(v);
 };
+
+// Room card tabs (0.3.8): compact icons. The name is the tooltip and the accessible label, and is shown beside
+// the selected icon (below the bar on narrow cards), so no tab depends on hover alone. Order as before.
+const ROOM_TABS = [
+  ["overview", "Overview", "mdi:view-dashboard-outline"],
+  ["log", "Log", "mdi:history"],
+  ["lights", "Lights", "mdi:lightbulb-group-outline"],
+  ["automatic", "Automatic", "mdi:lightbulb-auto-outline"],
+  ["presence", "Presence", "mdi:motion-sensor"],
+  ["switches", "Switches", "mdi:light-switch"],
+  ["overrides", "Overrides", "mdi:hand-back-right-outline"],
+  ["preview", "Preview", "mdi:eye-outline"],
+  ["advanced", "Advanced", "mdi:tune-variant"],
+];
+// Presence tab: what each signal contributes now (word + icon + tone, never colour alone).
+const PRESENCE = {
+  active: ["Active", "ok", "mdi:check-circle-outline"],
+  clear: ["Clear", "muted", "mdi:circle-outline"],
+  disabled: ["Not used here", "muted", "mdi:minus-circle-outline"],
+  ignored: ["Role Ignore", "muted", "mdi:minus-circle-outline"],
+  unavailable: ["Unavailable", "warn", "mdi:lan-disconnect"],
+  invalid: ["Unexpected state", "bad", "mdi:help-circle-outline"],
+  stuck: ["Stuck (ignored)", "warn", "mdi:timer-alert-outline"],
+};
+const KIND_ICONS = { pir: "mdi:motion-sensor", radar: "mdi:radar", door: "mdi:door", pc_activity: "mdi:monitor",
+  bed: "mdi:bed", other: "mdi:checkbox-blank-circle-outline" };
+const VACANCY = [
+  ["turn_off", "Turn off", "mdi:lightbulb-off-outline"],
+  ["vacant_mood", "Vacant mood", "mdi:weather-night"],
+  ["leave", "Leave unchanged", "mdi:lightbulb-on-outline"],
+];
+const fmtSecs = (s) => (s == null ? "—" : s >= 3600 && s % 3600 === 0 ? `${s / 3600} h` : s >= 60 && s % 60 === 0 ? `${s / 60} min` : `${s} s`);
 
 const OCC = {
   vacant: "Vacant", possible_occupancy: "Possible occupancy", confirmed_occupancy: "Confirmed occupancy",
@@ -277,6 +323,7 @@ class SoLightingBase extends HTMLElement {
     this.shadowRoot.addEventListener("click", (ev) => this._onClick(ev));
     this.shadowRoot.addEventListener("change", (ev) => this._onChange(ev));
     this.shadowRoot.addEventListener("input", (ev) => this._onInput(ev));
+    this.shadowRoot.addEventListener("keydown", (ev) => this._onKey && this._onKey(ev));
   }
 
   set hass(hass) {
@@ -291,7 +338,7 @@ class SoLightingBase extends HTMLElement {
     const key = this._liveKey();
     if (key !== this._lastLiveKey) {
       this._lastLiveKey = key;
-      this._requestRender();
+      if (this._onLive) this._onLive(); else this._requestRender();
     }
   }
 
@@ -958,7 +1005,13 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
 
   _request() { return { type: `${WS}/editor`, area_id: this._config.area, mood: this._mood || null }; }
 
-  _liveEntities() { return (this._model?.room?.lights || []).map((l) => l.entity_id); }
+  _liveEntities() {
+    const r = this._model?.room;
+    return [...(r?.lights || []).map((l) => l.entity_id), ...(r?.presence?.sensors || []).map((s) => s.entity_id)];
+  }
+
+  // A light or presence sensor changed: the Presence tab shows the integration's view, so it is fetched again.
+  _onLive() { if ((this._ui.tab || "overview") === "presence") this._scheduleFetch(); else this._requestRender(); }
 
   _body() {
     const r = this._model.room;
@@ -966,18 +1019,44 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const d = r.diagnostics;
     const active = d.control_mode === "active";
     const st = this._roomModeState(r);
-    const tab = this._ui.tab || "overview";
-    const tabs = [["overview", "Overview"], ["log", "Log"], ["lights", "Lights"], ["automatic", "Automatic"], ["switches", "Switches"],
-      ["overrides", "Overrides"], ["preview", "Preview"], ["advanced", "Advanced"]];
+    const tab = ROOM_TABS.some(([k]) => k === this._ui.tab) ? this._ui.tab : "overview";
     const content = { overview: () => this._overview(r), log: () => this._log(r), lights: () => this._lights(r), automatic: () => this._automatic(r),
-      switches: () => this._switches(r), overrides: () => this._overrides(r), preview: () => this._preview(r),
+      presence: () => this._presence(r), switches: () => this._switches(r), overrides: () => this._overrides(r), preview: () => this._preview(r),
       advanced: () => this._advanced(r) }[tab]();
+    const current = ROOM_TABS.find(([k]) => k === tab);
     return `<div class="header"><ha-icon icon="${active ? "mdi:lightbulb-auto" : "mdi:lightbulb-outline"}" class="${active ? "lit" : ""}"></ha-icon>
         <div class="titles"><div class="title">${esc(this._config.title || r.name)}</div>
         <div class="sub">${esc(OCC[r.occupancy.state] || "Occupancy unknown")}</div></div>
         <span class="badge ${st.tone === "muted" ? "" : st.tone}" title="Automatic lighting: ${esc(st.word)}">${esc(st.short)}</span></div>
-      <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === tab}" class="tab ${k === tab ? "on" : ""}" data-action="tab" data-tab="${k}">${l}</button>`).join("")}</div>
-      <div class="pad">${manualBanner(this._model)}${content}</div>`;
+      <div class="tabs" role="tablist" aria-label="${esc(r.name)}: sections">${ROOM_TABS.map(([k, l, icon]) => {
+        const on = k === tab;
+        return `<button role="tab" id="tab-${k}" aria-selected="${on}" aria-controls="so-tabpanel" tabindex="${on ? 0 : -1}" class="tab ${on ? "on" : ""}"
+          data-action="tab" data-tab="${k}" aria-label="${l}" data-tip="${l}"><ha-icon icon="${icon}"></ha-icon><span class="tlabel" aria-hidden="true">${l}</span></button>`;
+      }).join("")}</div>
+      <div class="tabcap" aria-hidden="true">${esc(current[1])}</div>
+      <div class="pad" role="tabpanel" id="so-tabpanel" aria-labelledby="tab-${tab}">${manualBanner(this._model)}${content}</div>`;
+  }
+
+  // Tabs: arrow keys, Home and End move to (and open) the next tab; Enter and Space work as on every button.
+  _onKey(ev) {
+    const tab = ev.target.closest && ev.target.closest('[role="tab"][data-tab]');
+    if (!tab) return;
+    const keys = ROOM_TABS.map(([k]) => k);
+    const i = keys.indexOf(tab.dataset.tab);
+    const next = { ArrowRight: i + 1, ArrowDown: i + 1, ArrowLeft: i - 1, ArrowUp: i - 1, Home: 0, End: keys.length - 1 }[ev.key];
+    if (next === undefined) return;
+    ev.preventDefault();
+    this._openTab(keys[(next + keys.length) % keys.length]);
+    this.shadowRoot.querySelector(`[role="tab"][data-tab="${this._ui.tab}"]`)?.focus();
+  }
+
+  _openTab(key) {
+    const ui = this._ui;
+    ui.tab = key; ui.edit = null; ui.swEdit = null; ui.swAdd = false;
+    if (key === "preview") ui.previewData = null;
+    if (key === "advanced") ui.review = null;
+    if (key === "presence") this._scheduleFetch();  // fresh sensor states
+    this._render();
   }
 
   // "Brightness: Global · Temperature: Global · Effective now: 62 % / 3200 K"
@@ -1036,6 +1115,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     return `${this._lastDecisionHtml(r.decisions, "log")}<div class="kvs">
         <div><span>Mood</span><b>${d.follows_global ? `follows global ${esc(d.room_mood || "—")}` : `room mood ${esc(d.room_mood)}`}</b></div>
         <div><span>Automatic lighting</span><b>${esc(this._roomModeState(r).word)}</b></div>
+        <div><span>When vacant</span><b>${esc(this._vacancyWord(r))}</b></div>
         <div><span>Occupancy</span><b>${hv(h.occupancy)}</b></div>
         <div><span>Lighting</span><b>${hv(h.lighting, nConf ? ` <span class="sub">(${nConf} conflict${nConf === 1 ? "" : "s"})</span>` : "")}</b></div>
         <div><span>Managed lights</span><b>${d.managed_lights}</b></div>
@@ -1115,9 +1195,9 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
   // Automatic tab: the simple settings and the decision now; the details are collapsed below.
   _automatic(r) {
     if (!r.daylight) return `<div class="section auto">${this._lightingModeHtml(r)}
-      <div class="muted">Daylight information is not available for this room.</div></div>`;
+      <div class="muted">Daylight information is not available for this room.</div></div>${this._vacancyHtml(r)}`;
     const open = this._ui.dlAdv;
-    return `${this._autoHtml(r)}
+    return `${this._autoHtml(r)}${this._vacancyHtml(r)}
       <details class="dladv" ${open ? "open" : ""}><summary data-action="toggle-dl-adv">Advanced daylight settings</summary>
         <div class="section">${this._daylightAdvanced(r)}</div></details>`;
   }
@@ -1157,6 +1237,104 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       <div class="sub">${esc(st.natural_light)}${st.estimated ? " (an estimate, not a measured value)" : ""}</div>
       ${st.contaminated && st.contamination ? `<div class="sub">Indoor readings are not used as daylight now · ${esc(st.contamination)}</div>` : ""}
       ${act ? `<div class="sub">Last decision: <b>${esc(act.text.split(" · ")[0])}</b> · ${fmtTime(act.at)}</div>` : ""}</div>`;
+  }
+
+  _vacancyWord(r) {
+    const v = r.vacancy || {};
+    if (v.action === "vacant_mood") return v.mood ? `Vacant mood ${v.mood}` : "Vacant mood (not chosen)";
+    return v.action === "leave" ? "Leave lights unchanged" : "Turn lights off";
+  }
+
+  // "When the room becomes vacant" (0.3.8): the room's vacancy action, from the integration.
+  _vacancyHtml(r) {
+    const v = r.vacancy || { action: "turn_off" };
+    const ro = !this._canEdit;
+    const off = ro || this._status.vacancy?.busy;
+    const picking = this._ui.vacPick && v.action !== "vacant_mood";
+    const shown = picking ? "vacant_mood" : v.action;
+    const t = (r.presence?.timing || []).find((x) => x.key === "inactivity_timeout");
+    const moods = (this._model.moods || []).filter((m) => m.in_main || m.has_profile || m.name === v.mood);
+    const seg = ([a, label, icon]) => `<button class="seg ${shown === a ? "on" : ""}" aria-pressed="${shown === a}" data-action="vac-action" data-value="${a}" ${off ? "disabled" : ""}><ha-icon icon="${icon}"></ha-icon>${label}</button>`;
+    const explain = {
+      turn_off: "Lights that are on are switched off when the vacancy timeout ends. Ambient lights keep following the mood.",
+      vacant_mood: "The chosen mood's light settings are applied to lights that are on (On, Off or Leave unchanged per light type); no light is switched on in the empty room.",
+      leave: "Lights are left as they are when the room becomes vacant.",
+    }[shown];
+    const timeout = t ? ` Vacancy timeout ${fmtSecs(t.value)} (${t.overridden ? "this room" : "global default"}) · Presence tab.` : "";
+    return `<div class="section vac"><div class="stitle">When the room becomes vacant</div>
+      <div class="modebar"><div class="segs small mode" role="group" aria-label="When the room becomes vacant">${VACANCY.map(seg).join("")}</div>${this._statusHtml("vacancy")}</div>
+      ${shown === "vacant_mood" ? `<div class="frow"><label for="so-vac-mood">Vacant mood</label><div class="fval"><select id="so-vac-mood" data-control="vac-mood" ${ro ? "disabled" : ""}>
+        ${!v.mood || picking ? `<option value="" ${v.mood && !picking ? "" : "selected"}>Choose a mood…</option>` : ""}
+        ${moods.map((m) => `<option value="${esc(m.name)}" ${m.name === v.mood && !picking ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select></div></div>` : ""}
+      <div class="sub">${esc(explain + timeout)}</div>
+      ${v.last ? `<div class="sub">Last vacancy: ${esc(v.last.text)} · ${fmtTime(v.last.at)}</div>` : ""}</div>`;
+  }
+
+  _setVacancy(action) {
+    const r = this._model?.room;
+    if (!r) return;
+    const v = r.vacancy || {};
+    if (action === "vacant_mood" && !v.mood) { this._ui.vacPick = true; this._render(); return; }  // choose the mood first
+    this._ui.vacPick = false;
+    if (action === v.action) { this._render(); return; }
+    this._save("vacancy", { type: `${WS}/room/set`, area_id: this._config.area, vacancy_action: action },
+      { turn_off: "Turns lights off when vacant", vacant_mood: "Applies the vacant mood", leave: "Leaves lights unchanged" }[action]);
+  }
+
+  // Presence tab (0.3.8): the room's occupancy inputs with their live states, and its presence settings.
+  _presence(r) {
+    const p = r.presence;
+    if (!p) return `<div class="muted">Presence information is available for enabled rooms only.</div>`;
+    const ro = !this._canEdit;
+    const occ = p.occupancy || {};
+    const sensors = p.sensors.map((s) => {
+      const [word, tone, icon] = PRESENCE[s.condition] || [s.condition, "muted", "mdi:help-circle-outline"];
+      const raw = s.state != null && s.label.toLowerCase() !== String(s.state).toLowerCase() ? ` <span class="sub">(${esc(s.state)})</span>` : "";
+      const note = s.condition === "invalid" ? `<div class="sub bad">Home Assistant reports “${esc(s.state)}”, which is neither active nor clear for this sensor: it is not used as evidence.</div>` : "";
+      return `<li class="psens ${s.enabled ? "" : "off"}">
+        <ha-icon icon="${KIND_ICONS[s.kind] || KIND_ICONS.other}"></ha-icon>
+        <div class="psmain"><b>${esc(s.name)}</b> <code>${esc(s.entity_id)}</code>
+          <div class="sub">${esc(s.kind_name)} · ${esc(s.role_name)}</div>
+          <div class="psstate"><span class="pill ${tone} dstat"><ha-icon icon="${icon}"></ha-icon>${esc(word)}</span>
+            <span>${esc(s.label)}${raw}</span>${s.last_changed ? `<span class="sub">since <time datetime="${esc(s.last_changed)}">${fmtTime(s.last_changed)}</time></span>` : ""}</div>${note}</div>
+        <label class="switch ptoggle"><input type="checkbox" role="switch" data-control="pr-enabled" data-entity="${esc(s.entity_id)}" ${s.enabled ? "checked" : ""} ${ro ? "disabled" : ""}
+          aria-label="Use ${esc(s.name)} for the occupancy of ${esc(r.name)}"> Use${this._statusHtml(`pr-${s.entity_id}`)}</label></li>`;
+    }).join("");
+    const row = (t) => `<div class="prow2"><label for="so-pr-${t.key}">${esc(t.label)}</label>
+        <div class="fval"><input id="so-pr-${t.key}" type="number" class="num" min="${t.min}" max="${t.max}" step="1" value="${esc(t.value)}" data-control="pr-time" data-key="${t.key}" ${ro ? "disabled" : ""}> s
+          <span class="sub">${esc(fmtSecs(t.value))}</span>
+          <span class="pill ${t.overridden ? "info" : "muted"}">${t.overridden ? "Room override" : "Global default"}</span>
+          ${t.overridden && !ro ? `<button class="link" data-action="pr-inherit" data-key="${t.key}">Use global default (${esc(fmtSecs(t.global))})</button>` : ""}
+          ${this._statusHtml(`pr-${t.key}`)}</div>
+        <div class="sub">${esc(t.help)}${t.overridden ? ` Global default: ${esc(fmtSecs(t.global))}.` : ""}</div></div>`;
+    const grow = (t) => `<div class="prow2"><label for="so-prg-${t.key}">${esc(t.label)}</label>
+        <div class="fval"><input id="so-prg-${t.key}" type="number" class="num" min="${t.min}" max="${t.max}" step="1" value="${esc(t.global)}" data-control="pr-global" data-key="${t.key}" ${ro ? "disabled" : ""}> s
+          <span class="sub">${esc(fmtSecs(t.global))}${t.global !== t.default ? ` · built-in ${esc(fmtSecs(t.default))}` : ""}</span>
+          ${t.global !== t.default && !ro ? `<button class="link" data-action="pr-global-reset" data-key="${t.key}">Use built-in</button>` : ""}
+          ${this._statusHtml(`prg-${t.key}`)}</div></div>`;
+    const basic = p.timing.filter((t) => t.basic);
+    const more = p.timing.filter((t) => !t.basic);
+    const nOver = p.timing.filter((t) => t.overridden).length;
+    return `<div class="stitle">Occupancy now</div>
+      <div><span class="pill info">${esc(OCC[occ.state] || occ.state || "unknown")}</span> <span class="sub">${esc(occ.reason || "")}</span>
+        ${occ.vacancy_at ? `<span class="sub">· vacant at <time datetime="${esc(occ.vacancy_at)}">${fmtTime(occ.vacancy_at)}</time> if nothing is detected</span>` : ""}</div>
+      <div class="stitle">Presence sensors</div>
+      <div class="sub">Every signal assigned to ${esc(r.name)}. Switch one off to leave it out of this room's occupancy: its configuration is kept, and the entity, other rooms and automations are not changed. Kinds, roles and assignments: Settings → Smart Occupancy → Configure → Rooms.</div>
+      ${sensors ? `<ul class="plist">${sensors}</ul>` : `<div class="muted">No sensors are assigned to this room.</div>`}
+      <div class="stitle">Presence settings</div>
+      <div class="sub">${nOver ? `${nOver} setting${nOver === 1 ? "" : "s"} overridden for this room; the others follow the global defaults.` : "Every setting follows the global defaults."} A change applies at once, without a restart.</div>
+      ${basic.map(row).join("")}
+      <details class="dladv" ${this._ui.prMore ? "open" : ""}><summary data-action="toggle-pr-more">More presence settings</summary>${more.map(row).join("")}</details>
+      ${nOver && !ro ? `<div><button class="btn ghost small" data-action="pr-reset-all">Use global defaults for all</button>${this._statusHtml("pr-all")}</div>` : ""}
+      <details class="dladv" ${this._ui.prGlobal ? "open" : ""}><summary data-action="toggle-pr-global">Global defaults (all rooms)</summary>
+        <div class="global"><div class="sub"><b>Global setting</b> — every room that does not override a value follows it. Room overrides are not changed.</div>
+        ${p.timing.map(grow).join("")}</div></details>`;
+  }
+
+  _savePresenceTime(area, values, key, ok, resetAll = false) {
+    const msg = { type: `${WS}/presence/timing`, area_id: area, values };
+    if (resetAll) msg.reset_all = true;
+    this._save(key, msg, ok);
   }
 
   // The room's automatic lighting mode as the integration reports it (never a UI-only state).
@@ -1785,7 +1963,12 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const area = this._config.area;
     const ui = this._ui;
     if (a.startsWith("sw-")) { this._onSwitchAction(a, el); return; }
-    if (a === "tab") { ui.tab = el.dataset.tab; ui.edit = null; ui.swEdit = null; ui.swAdd = false; if (ui.tab === "preview") ui.previewData = null; if (ui.tab === "advanced") ui.review = null; this._render(); }
+    if (a === "tab") this._openTab(el.dataset.tab);
+    else if (a === "vac-action") this._setVacancy(el.dataset.value);
+    else if (a === "pr-inherit") this._savePresenceTime(area, { [el.dataset.key]: null }, `pr-${el.dataset.key}`, "Uses the global default");
+    else if (a === "pr-reset-all") {
+      if (confirm(`Use the global defaults for every presence setting of ${this._model.room.name}?`)) this._savePresenceTime(area, {}, "pr-all", "Global defaults", true);
+    } else if (a === "pr-global-reset") this._savePresenceTime(null, { [el.dataset.key]: null }, `prg-${el.dataset.key}`, "Built-in default");
     else if (a === "dec-toggle") {
       const id = el.dataset.id;
       ui.decOpen = { ...(ui.decOpen || {}), [id]: !(ui.decOpen || {})[id] };
@@ -1806,6 +1989,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     } else if (a === "deactivate") this._save("activation", { type: `${WS}/room/deactivate`, area_id: area }, "Observing").then(() => this._loadReview());
     else if (a === "clear-override") this._save("activation", { type: `${WS}/override/clear`, area_id: area, entity_id: el.dataset.entity }, "Cleared");
     else if (a === "toggle-dl-adv") { ui.dlAdv = !el.parentElement.open; }
+    else if (a === "toggle-pr-more") { ui.prMore = !el.parentElement.open; }
+    else if (a === "toggle-pr-global") { ui.prGlobal = !el.parentElement.open; }
     else if (a === "dl-outdoor-edit") { ui.outdoorEdit = !ui.outdoorEdit; this._render(); }
     else if (a === "dl-up" || a === "dl-remove") {
       const list = this._sensors();
@@ -1838,7 +2023,16 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         el.checked ? "Allowed" : "No longer allowed").then(() => this._loadReview());
     } else if (c === "room-minutes") this._save("room-minutes", { type: `${WS}/room/set`, area_id: area, manual_override_minutes: el.value === "" ? null : Number(el.value) });
     else if (c === "switches") this._save("switches", { type: `${WS}/room/set`, area_id: area, manual_switches: el.value.split(/[\s,]+/).filter(Boolean) });
-    else if (c === "dl-auto") this._saveDaylight({ auto_on: el.checked ? "dark" : "never" });
+    else if (c === "vac-mood" && el.value) {
+      this._ui.vacPick = false;
+      this._save("vacancy", { type: `${WS}/room/set`, area_id: area, vacancy_action: "vacant_mood", vacancy_mood: el.value }, `Vacant mood: ${el.value}`);
+    } else if (c === "pr-enabled") {
+      this._save(`pr-${el.dataset.entity}`, { type: `${WS}/presence/sensor`, area_id: area, entity_id: el.dataset.entity, enabled: el.checked },
+        el.checked ? "Used" : "Not used here");
+    } else if ((c === "pr-time" || c === "pr-global") && el.value !== "") {
+      const room = c === "pr-time";
+      this._savePresenceTime(room ? area : null, { [el.dataset.key]: Number(el.value) }, `${room ? "pr" : "prg"}-${el.dataset.key}`, room ? "Room override" : "Global default");
+    } else if (c === "dl-auto") this._saveDaylight({ auto_on: el.checked ? "dark" : "never" });
     else if (c === "dl-policy") this._saveDaylight({ auto_on: el.value });
     else if (c === "dl-motion") this._saveDaylight({ on_first_motion: el.value === "motion" });
     else if (c === "dl-uncertain") this._saveDaylight({ uncertain: el.value });
@@ -1952,8 +2146,31 @@ const STYLE = `<style>
   .btn.primary { font-weight: 500; }
   .link { border: none; background: none; color: var(--primary-color); padding: 0 4px; text-decoration: underline; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-  .tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--divider-color); overflow-x: auto; scrollbar-width: none; }
-  .tab { padding: 8px 12px; border: none; border-radius: 8px 8px 0 0; background: none; white-space: nowrap; }
+  /* Icon tabs (0.3.8): they wrap instead of scrolling out of sight; nothing is hidden behind the card's edge. */
+  .tabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--divider-color); }
+  .tab { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 40px; min-height: 40px;
+    padding: 6px 10px; border: none; border-radius: 8px 8px 0 0; background: none; white-space: nowrap; touch-action: manipulation; }
+  .tab ha-icon { --mdc-icon-size: 22px; }
+  .tab:not(.on) .tlabel { display: none; }
+  .tab:not(.on):hover { background: var(--secondary-background-color); }
+  .tab:focus-visible { outline: 2px solid var(--primary-color); outline-offset: -2px; }
+  .tab[data-tip]:not(.on):hover::after, .tab[data-tip]:not(.on):focus-visible::after { content: attr(data-tip); position: absolute; top: calc(100% + 4px);
+    left: 50%; transform: translateX(-50%); z-index: 3; padding: 3px 8px; border-radius: 6px; font-size: 0.8em; pointer-events: none;
+    background: var(--primary-text-color); color: var(--card-background-color, #fff); }
+  .tab[data-tip]:first-child::after { left: 0; transform: none; }
+  .tab[data-tip]:last-child::after { left: auto; right: 0; transform: none; }
+  .tabcap { display: none; padding: 6px 16px 0; font-weight: 500; }
+  .plist { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .psens { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 8px; border: 1px solid var(--divider-color); border-radius: 8px; }
+  .psens.off { opacity: 0.75; border-style: dashed; }
+  .psens > ha-icon { --mdc-icon-size: 22px; color: var(--secondary-text-color); padding-top: 2px; }
+  .psmain { min-width: 0; overflow-wrap: anywhere; }
+  .psstate { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }
+  .ptoggle { min-height: 40px; }
+  .ptoggle input { width: 20px; height: 20px; }
+  .prow2 { display: grid; gap: 2px; padding: 6px 0; border-bottom: 1px solid var(--divider-color); }
+  .prow2 > label { font-weight: 500; }
+  .section.vac { margin-top: 12px; }
   .rows { display: grid; }
   .trow { display: flex; gap: 10px; align-items: center; width: 100%; padding: 10px 4px; border: none; border-bottom: 1px solid var(--divider-color);
     background: none; text-align: left; }
@@ -2084,8 +2301,19 @@ const STYLE = `<style>
   .segs.mode .seg { display: inline-flex; align-items: center; gap: 4px; touch-action: manipulation; }
   .segs.mode ha-icon { --mdc-icon-size: 16px; }
   .seg:focus-visible, .mode-chip:focus-visible, .btn:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+  @container (max-width: 520px) {
+    .tabs { flex-wrap: nowrap; padding: 0 4px; }
+    .tab { flex: 1 1 0; min-width: 34px; padding: 6px 0; }
+    .tab.on .tlabel { display: none; }
+    .tabcap { display: block; }
+  }
+  @container (max-width: 320px) {
+    .tabs { flex-wrap: wrap; }
+    .tab { flex: 0 0 34px; }
+  }
   @container (max-width: 480px) {
-    .tab { padding: 8px 9px; }
+    .psens { grid-template-columns: auto minmax(0, 1fr); }
+    .ptoggle { grid-column: 2; }
     .kvs { grid-template-columns: 1fr; }
     .frow { grid-template-columns: 1fr; gap: 4px; }
     .tval { max-width: 50%; }

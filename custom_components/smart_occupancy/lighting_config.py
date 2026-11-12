@@ -31,7 +31,8 @@ Persisted shape (store version 1)::
           "manual_switches": [entity ids],
           "dismissed": [problem subjects],
           "daylight": {...},                           # 0.3.3: daylight-aware switch-on (daylight.RoomDaylight)
-          "switches": [{...}]}},                       # 0.3.5: wall switches / remotes (switches.SwitchConfig)
+          "switches": [{...}],                         # 0.3.5: wall switches / remotes (switches.SwitchConfig)
+          "vacancy": {"action": "turn_off", "mood": null}}},  # 0.3.8: when the room becomes vacant
       "daylight": {"outdoor_entity": null, ...},     # 0.3.3: global daylight settings (daylight.DaylightConfig)
       "switch_settings": {"mqtt_base_topic": "zigbee2mqtt"}  # 0.3.5 (switches.SwitchSettings)
     }
@@ -57,6 +58,14 @@ migration) and the global ``switch_settings``. The existing wall switch
 entities (``manual_switches``) are kept unchanged and stay listen-only
 sources: nothing is converted into a command source. A 0.3.4 install reads a
 1.3 store as is and ignores the new keys.
+
+Store 1.4 (0.3.8) adds ``vacancy`` per room: what automatic lighting does
+when the room becomes vacant (Turn off, a vacant mood, or Leave unchanged).
+Before 0.3.8 nothing was done (the room's lights were left on), and there was
+no setting to keep. The migration gives every room without one the default,
+Turn off; ambient (persistent) lights are never switched off by it, and rooms
+in Observing still send nothing. A room that has a setting keeps it. A 0.3.7
+install reads a 1.4 store as is and ignores the new key.
 """
 
 from __future__ import annotations
@@ -84,9 +93,11 @@ from .const import (
     LIGHTING_STORE_VERSION,
     MANUAL_OVERRIDE_MAX_MINUTES,
     TRANSITION_MAX,
+    DEFAULT_VACANCY_ACTION,
     SourceScale,
     UnattributedPolicy,
     UnrepresentableMode,
+    VacancyAction,
 )
 from .const import LIGHTING_STORE_MINOR_VERSION
 from .daylight import DaylightConfig, RoomDaylight
@@ -233,6 +244,31 @@ class UnrepresentableHandling:
 
 
 @dataclass(frozen=True, slots=True)
+class RoomVacancy:
+    """What automatic lighting does when the room becomes vacant (0.3.8).
+
+    ``mood`` is the mood whose profile is applied for ``vacant_mood`` (the
+    existing profile system: light types, room and light overrides). It is
+    kept when another action is chosen, so switching back restores it.
+    """
+
+    action: VacancyAction = DEFAULT_VACANCY_ACTION
+    mood: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: Any) -> RoomVacancy:
+        data = data if isinstance(data, dict) else {}
+        mood = data.get("mood")
+        return cls(
+            action=_enum_or(VacancyAction, data.get("action"), DEFAULT_VACANCY_ACTION),
+            mood=(mood.strip() or None) if isinstance(mood, str) else None,
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"action": self.action.value, "mood": self.mood}
+
+
+@dataclass(frozen=True, slots=True)
 class RoomLighting:
     """Mood lighting settings of one room."""
 
@@ -259,6 +295,8 @@ class RoomLighting:
     daylight: RoomDaylight = field(default_factory=RoomDaylight)
     # Wall switches and remotes (0.3.5); each starts Observing (mode "listen").
     switches: tuple[SwitchConfig, ...] = ()
+    # When the room becomes vacant (0.3.8).
+    vacancy: RoomVacancy = field(default_factory=RoomVacancy)
 
     def switch(self, switch_id: str) -> SwitchConfig | None:
         return next((s for s in self.switches if s.id == switch_id), None)
@@ -290,6 +328,7 @@ class RoomLighting:
             dismissed=_ids(data.get("dismissed")),
             daylight=RoomDaylight.from_dict(data.get("daylight")),
             switches=switches_from(data.get("switches")),
+            vacancy=RoomVacancy.from_dict(data.get("vacancy")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -308,6 +347,7 @@ class RoomLighting:
             "dismissed": list(self.dismissed),
             "daylight": self.daylight.as_dict(),
             "switches": [s.as_dict() for s in self.switches],
+            "vacancy": self.vacancy.as_dict(),
         }
 
 
@@ -566,6 +606,16 @@ def migrate_store(old_major: int, old_minor: int, data: dict[str, Any]) -> dict[
         for area_id, room in (data.get("rooms") or {}).items():
             room = dict(room) if isinstance(room, dict) else {}
             room.setdefault("switches", [])
+            rooms[area_id] = room
+        data["rooms"] = rooms
+    if old_minor < 4:
+        # Vacancy action (0.3.8): there was no setting before (lights were left on). Rooms get the default,
+        # Turn off; ambient (persistent) lights are never switched off by it. An existing value is kept.
+        rooms = {}
+        for area_id, room in (data.get("rooms") or {}).items():
+            room = dict(room) if isinstance(room, dict) else {}
+            if not isinstance(room.get("vacancy"), dict):
+                room["vacancy"] = {"action": DEFAULT_VACANCY_ACTION.value, "mood": None}
             rooms[area_id] = room
         data["rooms"] = rooms
     return data

@@ -290,6 +290,9 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
             function=self._async_registry_refresh,
         )
         self._reported: set[str] = set()
+        # Options written by async_apply_presence (already applied; the update listener must not reload).
+        self._live_options: dict[str, Any] | None = None
+        self._live_pending = 0
         # A reload while Home Assistant is running needs no start-up grace.
         self._started = hass.state is CoreState.running
         self._settled = self._started
@@ -389,6 +392,39 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
             data.status, len(data.rooms), data.count(CONFIG_ERROR), data.count(UNAVAILABLE),
             data.count(WARNING),
         )
+
+    @callback
+    def async_apply_presence(self, config: IntegrationConfig) -> bool:
+        """Save changed presence settings and apply them at once, without reloading (0.3.8).
+
+        Only for signals that are already assigned (enabled / excluded) and
+        timing values: the occupancy engines keep every signal's value, so the
+        rooms are re-evaluated with the new settings, no restart hold applies
+        and no command is sent by the change itself. Returns False when the
+        change needs a reload (other rooms or signals), which then happens
+        through the options update listener as before.
+        """
+        if not self.occupancy.same_signals(config):
+            return False
+        options = config.as_dict()
+        self.config = config
+        self.occupancy.async_reconfigure(config)
+        # The update listener may run during async_update_entry (eagerly): count it before.
+        self._live_options = options
+        self._live_pending += 1
+        if not self.hass.config_entries.async_update_entry(self.config_entry, options=options):
+            self._live_pending -= 1  # nothing changed: no listener call to absorb
+        self.lighting.async_presence_changed()
+        self.async_schedule_refresh()
+        _LOGGER.info("presence_settings_applied rooms=%d (no reload)", len(config.enabled_rooms))
+        return True
+
+    def consume_live_options(self, options: dict[str, Any]) -> bool:
+        """The options update listener: was this update applied live already?"""
+        if self._live_pending and self._live_options == dict(options):
+            self._live_pending -= 1
+            return True
+        return False
 
     async def async_recheck(self) -> None:
         """User-requested re-evaluation; always republishes entity states."""

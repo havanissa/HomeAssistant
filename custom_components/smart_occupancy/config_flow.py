@@ -319,6 +319,8 @@ class RoomFlowMixin:
                         entity_id, kind,
                         old.role if old else DEFAULT_ROLE_FOR_KIND[kind],
                         old.inverted if old else False,
+                        # Excluded in the Presence tab (0.3.8): editing the room keeps it excluded.
+                        old.enabled if old else True,
                     ))
             if not errors:
                 self._pending_room = replace(

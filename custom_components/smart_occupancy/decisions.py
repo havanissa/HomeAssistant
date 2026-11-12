@@ -26,7 +26,10 @@ Statuses:
 * ``blocked``    - a condition prevented an otherwise valid action;
 * ``no_change``  - nothing needed to change;
 * ``no_action``  - nothing is configured for this (a button without an action);
-* ``noted``      - a recorded fact that changes later decisions (a manual override).
+* ``suppressed`` - intentionally not done because of a setting (0.3.8: a room whose
+  vacancy behaviour is Leave unchanged);
+* ``noted``      - a recorded fact that changes later decisions (a manual override,
+  a vacancy timeout that started or was cancelled).
 
 Bounded and quiet: at most ``DECISION_LOG_SIZE`` records per room or switch.
 A decision that repeats the newest record of its subject (same ``key``, same
@@ -66,8 +69,9 @@ OBSERVED = "observed"
 BLOCKED = "blocked"
 NO_CHANGE = "no_change"
 NO_ACTION = "no_action"
+SUPPRESSED = "suppressed"
 NOTED = "noted"
-STATUSES = (EXECUTED, DISPATCHED, PARTIAL, FAILED, OBSERVED, BLOCKED, NO_CHANGE, NO_ACTION, NOTED)
+STATUSES = (EXECUTED, DISPATCHED, PARTIAL, FAILED, OBSERVED, BLOCKED, NO_CHANGE, NO_ACTION, SUPPRESSED, NOTED)
 
 # Results that are the same "kind of outcome" for merging (a dispatched record may become executed).
 _GROUPS = {EXECUTED: "sent", DISPATCHED: "sent"}
@@ -291,6 +295,26 @@ class DecisionLog:
                 self._schedule_verify(subject, decision.id, checks, verify_after)
         _LOGGER.debug("decision subject=%s kind=%s action=%s status=%s count=%d", subject, kind, action,
                       decision.status, decision.count)
+        self._on_change()
+        return decision
+
+    @callback
+    def amend(self, subject: str, decision_id: str, *, action: str | None = None, explanation: str | None = None,
+              status: str | None = None, details: dict[str, Any] | None = None) -> Decision | None:
+        """Update a recorded decision in place (its time and position stay), e.g. a wait that ended."""
+        decision = self.get(subject, decision_id)
+        if decision is None:
+            return None
+        if status is not None:
+            if status not in STATUSES:
+                raise ValueError(f"unknown decision status {status}")
+            decision.status = status
+        if action is not None:
+            decision.action = action
+        if explanation is not None:
+            decision.explanation = explanation
+        if details is not None:
+            decision.details = _clip({**decision.details, **details})
         self._on_change()
         return decision
 
