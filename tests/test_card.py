@@ -93,12 +93,14 @@ def test_card_javascript_parses(path: Path) -> None:
 def test_room_card_layout() -> None:
     """Tabs are the single navigation; daylight settings live in the Automatic tab only; one outdoor editor.
 
-    0.3.5 adds the Switches tab after Automatic; everything else of the 0.3.4 layout is unchanged.
+    0.3.5 adds the Switches tab after Automatic, 0.3.7 the Log tab after Overview; everything else of the
+    0.3.4 layout is unchanged.
     """
     source = LIGHTING_FILE.read_text(encoding="utf-8")
     tabs = re.search(r"const tabs = (\[.*?\]);", source, re.S).group(1)
     order = re.findall(r'\["([a-z]+)", "([A-Za-z]+)"\]', tabs)
-    assert [k for k, _ in order] == ["overview", "lights", "automatic", "switches", "overrides", "preview", "advanced"]
+    assert [k for k, _ in order] == ["overview", "log", "lights", "automatic", "switches", "overrides", "preview",
+                                     "advanced"]
     # No duplicate navigation buttons at the bottom of Overview.
     for label in ("Review lights", "Configure overrides", "Preview room"):
         assert label not in source
@@ -117,7 +119,8 @@ def test_room_card_layout() -> None:
                  "Observing", "Active", "Listener diagnostics"):
         assert text in switches, text
     assert "callService" not in switches and "dl-" not in switches
-    assert source.count('data-action="tab"') == 2  # the tab bar and the conflicts "Review" link, as in 0.3.4
+    # The tab bar, the conflicts "Review" link (0.3.4) and the Last decision's "Log" link (0.3.7).
+    assert source.count('data-action="tab"') == 3
 
 
 def test_operating_modes_on_the_main_screens() -> None:
@@ -157,3 +160,28 @@ def test_operating_modes_on_the_main_screens() -> None:
     tap = source[source.index("  _tap(el) {"):source.index("  _switchRgb(key, on) {")]
     assert "this._onDouble" in tap and "500" in tap
     assert 'closest("[data-dbl]")' in source and "touch-action: manipulation" in source
+
+
+def test_decision_log_ui() -> None:
+    """0.3.7: Last decision on the Overview, a Log tab, and a log per switch, all from the integration's records."""
+    source = LIGHTING_FILE.read_text(encoding="utf-8")
+    overview = source[source.index("  _overview(r) {"):source.index("  // Overview: the latest decision")]
+    assert "this._lastDecisionHtml(r.decisions" in overview
+    last = source[source.index("  _lastDecisionHtml(dec"):source.index("  // Log tab:")]
+    assert "No decisions recorded yet." in last and "d.explanation" in last and "d.action" in last
+    assert "fmtTime(d.at)" in last and "decisionPill(d)" in last
+    # Every status the integration records has a word and an icon (never colour alone).
+    table = source[source.index("const DECISION = {"):source.index("const decisionStatus")]
+    for status in ("executed", "dispatched", "partial", "failed", "observed", "blocked", "no_change", "no_action",
+                   "noted"):
+        assert re.search(rf'{status}: \["[A-Z][^"]+", "[a-z]+", "mdi:[a-z-]+"\]', table), status
+    assert "<ha-icon icon=" in source[source.index("const decisionPill"):source.index("const DECISION_MODES")]
+    assert "not confirmed" in source  # sent but not reported back is not shown as executed
+    entries = source[source.index("  _decisionList(entries, scope) {"):source.index("  // Only what the integration")]
+    assert "aria-expanded" in entries and 'data-action="dec-toggle"' in entries and "<button" in entries
+    details = source[source.index("  _decisionDetails(d) {"):source.index("  // One Overview line")]
+    assert "d.details" in details and "callWS" not in details
+    card = source[source.index("  _switchCard(r, sw, x) {"):source.index("  _learningHtml(x) {")]
+    assert "Last decision" in card and "x.decisions" in card and 'data-action="sw-log"' in card
+    # The log link is outside the administrator-only buttons: read-only users see the log too.
+    assert card.index('data-action="sw-log"') < card.index('${ro ? "" : `<div class="ibtns">')

@@ -8,7 +8,7 @@ from typing import Final
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
 PHASE: Final = "0.3.5"
-VERSION: Final = "0.3.6"
+VERSION: Final = "0.3.7"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -230,6 +230,14 @@ LIGHTING_SAVE_DELAY_SECONDS: Final = 1
 LIGHTING_STATE_STORE_VERSION: Final = 1
 LIGHTING_STATE_STORE_KEY: Final = "smart_occupancy.lighting_state"
 LIGHTING_STATE_SAVE_DELAY_SECONDS: Final = 10
+# Decision log (0.3.7): kept per room and per switch in the lighting state store.
+DECISION_LOG_SIZE: Final = 10
+# A decision that repeats the newest one of its room or switch within this time updates it (count, time).
+DECISION_MERGE_SECONDS: Final = 15 * 60
+# Repeated presses of the same button with the same result within this time are one log entry.
+DECISION_PRESS_MERGE_SECONDS: Final = 60
+# After a command is accepted, its targets get this long to report the requested state (plus any transition).
+DECISION_VERIFY_SECONDS: Final = 5
 
 # Coalesces Manual Mood -> Main Mood propagation and bursts of triggers.
 APPLY_DEBOUNCE_SECONDS: Final = 1.0

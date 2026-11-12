@@ -489,6 +489,8 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
         "group_issues": _group_issues(ctrl, area_id),
         "daylight": daylight_model(hass, ctrl, area_id) if area_id in ctrl.config.enabled_rooms else None,
         "switches": switches_model(hass, ctrl, area_id),
+        # Decision log (0.3.7): the latest decision and the last ones, newest first (backend records only).
+        "decisions": ctrl.decisions.model(area_id),
         "occupancy": {
             "state": result.state.value if result else None,
             "occupied": result.occupied if result else None,

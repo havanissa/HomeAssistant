@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.7 — Decision log: what Smart Occupancy decided, why, and whether it worked
+
+Observability only: automatic lighting, occupancy, daylight, overrides, switch mappings and operating modes behave as in 0.3.6. No setting is changed by the upgrade; the decision log starts empty.
+
+### Added
+
+- **Decision log** (`decisions.py`, `lighting_decisions.py`): a structured record (id, timezone-aware time, module, room or switch, trigger, kind, action, explanation, mode at that time, result, target, details) for each meaningful decision, built by the backend from the inputs it actually used (plan and per-light decisions, occupancy result and its inputs, daylight gate and light level, mood, overrides, commands sent, Home Assistant's errors). At most 10 per room and 10 per switch.
+- **Results**: `executed` (accepted, and the targets reported the requested state; checked at once and again after 5 s plus any transition), `dispatched` (accepted, not confirmed), `partial`, `failed`, `observed`, `blocked`, `no_change`, `no_action`, `noted`. Nothing is shown as executed only because it was sent.
+- **Observing rooms** also log what a mood change or a room mood would do (evaluated only, nothing is sent).
+- **Room card**: *Last decision* at the top of Overview; a new **Log** tab (after Overview) with the last 10 decisions and their details on demand (keyboard accessible). **Switch cards**: *Last decision* and a **Log** of the switch's last 10 presses. Updates live in every open dashboard.
+- Websocket: the `editor` room model has `decisions` (`latest`, `entries`, `size`), and each switch item too.
+
+### Logging rules
+
+- Logged: lighting applied or evaluated (visit, darkness, mood, room mood, profile change, activation, reconnection), gradual updates, manual overrides (also from switches), vacancy with lights left on or overrides cleared, a queued change dropped by Manual mood, Observing being set, switch presses and learning.
+- Folded: the same decision with the same result updates the newest entry (count, time; within 15 min; gradual updates always; button repeats within 1 min); a confirmed occupancy after the first motion of the same visit adds nothing; several state reports of one manual change are one entry; a learning session is one entry.
+
+### Storage
+
+- Kept in the existing lighting state store (`smart_occupancy.lighting_state`, key `decisions`), written by its delayed, atomic save. No entity, helper or Recorder history; decisions are not entity attributes. A removed switch's log is removed with it.
+
+### Changed
+
+- Room card tabs: Overview · **Log** · Lights · Automatic · Switches · Overrides · Preview · Advanced. The switch card's *Result* row became *Last decision* (the old row is shown until the first logged press).
+
 ## 0.3.6 — Operating modes on the main screens; wall switch actions no longer suppressed by Observe
 
 ### Fixed

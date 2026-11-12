@@ -679,6 +679,17 @@ class SwitchInputs:
         status.last_result, status.last_result_ok = "Captured by Learn buttons (no command)", None
         status.history.append({"at": event.when, "raw": event.raw, "label": action_label(event.raw),
                                "result": "learned", "source": event.source})
+        label = action_label(event.raw)
+        # One log entry per learning session (each capture updates it), so learning never floods the log.
+        self.ctrl.decisions.record(
+            f"{key[0]}/{key[1]}", module="switch", trigger="learn", kind="learn", action="Learn buttons",
+            explanation=(f"Learn buttons: {label} captured ({'new button' if new else 'already known'}); "
+                         "nothing is executed while learning."),
+            mode="active" if switch.controls else "observing", status="no_action", target=None,
+            details={"trigger": "learn buttons", "switch": switch.name, "button": event.raw, "input": event.source,
+                     "captured": [c.get("raw") for c in session.captured]},
+            key=("learn",), merge_seconds=MAX_LEARN_SECONDS,
+        )
         if new:
             area_id = key[0]
             lighting = self.ctrl.lighting
