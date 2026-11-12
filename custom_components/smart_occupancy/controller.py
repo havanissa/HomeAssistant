@@ -142,6 +142,7 @@ from .const import (
     LIGHTING_STATE_STORE_VERSION,
     MANUAL_PAUSED_TEXT,
     OWN_CHANGE_WINDOW_SECONDS,
+    CONFIRM_ON_WAIT_SECONDS,
     PRELIMINARY_CLEANUP_MAX_TRIES,
     PRELIMINARY_TRACE_SIZE,
     PRELIMINARY_CLEANUP_RETRY_SECONDS,
@@ -1993,6 +1994,12 @@ class LightingController:
         Hand over leaves it on (now part of the room's lighting; the vacancy
         action handles it); Turn off switches it off - unless no other light
         of the room is on, so the room is never left dark on confirmation.
+
+        "On" means reported on by Home Assistant (0.3.13): when the only other
+        lights are the ones the normal lighting has just switched on, Turn off
+        waits until one of them reports on (a Zigbee2MQTT group reports a
+        moment after the call returns), at most ``CONFIRM_ON_WAIT_SECONDS`` plus
+        their transition. If none does, the preliminary lights are kept on.
         """
         episode = self._close_preliminary(area_id)
         if episode is None:
@@ -2005,13 +2012,14 @@ class LightingController:
         settings = self.preliminary_settings(area_id)
         items = {i.entity_id: i for i in plan.items}
         controlled = self.managed_room(area_id).controlled
-        # Is another light of the room on (so Turn off cannot leave the room dark)? The lights the normal
-        # lighting has just switched on count as on: the command was accepted, but a device (e.g. a
-        # Zigbee2MQTT group) reports its new state only a moment later, so its state may still read "off" (0.3.12).
+        # Is another light of the room on (so Turn off cannot leave the room dark)? Only a light that Home
+        # Assistant reports on counts. The lights the normal lighting has just switched on may not have reported
+        # yet (a Zigbee2MQTT group reports a moment after the call returns): Turn off then waits for them below.
         scene_on = sorted(e for e in sent if (i := items.get(e)) is not None and i.service == "turn_on"
                           and e not in owned)
         lit_now = sorted(e for e in controlled if e not in owned and self.hass.states.is_state(e, "on"))
-        others_on = bool(scene_on or lit_now)
+        others_on = bool(lit_now)
+        waiting: list[str] = []
         outcome: dict[str, str] = {}
         turn_off: dict[str, dict[str, Any]] = {}
         for entity_id, data in owned.items():
@@ -2035,14 +2043,33 @@ class LightingController:
             elif action == ConfirmAction.HANDOVER:
                 outcome[entity_id] = "handed_over"
                 continue
+            elif not others_on and scene_on:
+                waiting.append(entity_id)  # decided once the normal lighting reports on (below)
+                continue
             elif not others_on:
                 outcome[entity_id] = "kept_dark"
                 continue
             else:
                 outcome[entity_id] = "turned_off"
-            caps = light_capabilities(self.hass, entity_id)
-            transition = target.transition if target else None
-            turn_off[entity_id] = {"transition": transition} if transition and caps.transition else {}
+            turn_off[entity_id] = self._preliminary_off_data(settings, entity_id)
+        waited = None
+        if waiting:
+            timeout = CONFIRM_ON_WAIT_SECONDS + max(
+                (float(items[e].data.get("transition") or 0) for e in scene_on), default=0.0)
+            self._trace(area_id, "waiting_for_normal_lighting", lights=scene_on, timeout_s=timeout,
+                        preliminary=waiting)
+            came_on = await self._wait_for_on(scene_on, timeout)
+            waited = {"lights": scene_on, "came_on": came_on, "timeout_s": timeout}
+            self._trace(area_id, "normal_lighting_reported" if came_on else "normal_lighting_not_reported",
+                        lit=[e for e in scene_on if self.hass.states.is_state(e, "on")])
+            for entity_id in waiting:
+                if not came_on:
+                    outcome[entity_id] = "kept_not_on"  # the normal lights did not report on: never dark
+                elif self._preliminary_holds(area_id, entity_id, owned[entity_id], episode.get("taken")) is not None:
+                    outcome[entity_id] = "changed"  # a person changed it while waiting
+                else:
+                    outcome[entity_id] = "turned_off"
+                    turn_off[entity_id] = self._preliminary_off_data(settings, entity_id)
         errors: dict[str, str] = {}
         if turn_off and not self._manual and self.room_active(area_id):
             assert_room_control_permitted(self.room_active(area_id), area_id)
@@ -2058,8 +2085,39 @@ class LightingController:
                 outcome[entity_id] = "kept_paused"
         self._trace(area_id, "confirmed", outcome=outcome, errors=errors, scene_switched_on=scene_on,
                     other_lights_on=lit_now, states={e: self._light_snapshot(e) for e in owned})
-        self.explain.preliminary_confirmed(area_id, plan, outcome, errors=errors, episode=episode)
+        self.explain.preliminary_confirmed(area_id, plan, outcome, errors=errors, episode=episode, waited=waited)
         _LOGGER.debug("lighting_preliminary_confirmed area=%s outcome=%s", area_id, outcome)
+
+    def _preliminary_off_data(self, settings: EffectivePreliminary, entity_id: str) -> dict[str, Any]:
+        target = settings.target(entity_id)
+        transition = target.transition if target else None
+        return {"transition": transition} if transition and light_capabilities(self.hass, entity_id).transition \
+            else {}
+
+    async def _wait_for_on(self, entities: list[str], timeout: float) -> bool:
+        """True as soon as one of the lights reports on; False after ``timeout`` seconds (Home Assistant's clock)."""
+        if any(self.hass.states.is_state(e, "on") for e in entities):
+            return True
+        future: asyncio.Future[bool] = self.hass.loop.create_future()
+
+        @callback
+        def changed(event: Event[EventStateChangedData]) -> None:
+            new = event.data["new_state"]
+            if new is not None and new.state == "on" and not future.done():
+                future.set_result(True)
+
+        @callback
+        def expired(_now: datetime) -> None:
+            if not future.done():
+                future.set_result(False)
+
+        unsub = async_track_state_change_event(self.hass, entities, changed)
+        cancel = async_call_later(self.hass, timeout, expired)
+        try:
+            return await future
+        finally:
+            unsub()
+            cancel()
 
     @callback
     def _resume_preliminary(self, area_id: str, result: RoomResult | None) -> None:

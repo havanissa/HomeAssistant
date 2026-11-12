@@ -820,7 +820,8 @@ class LightingDecisions:
                 "ended": f"Occupancy confirmed after {_waited(episode)}: the preliminary timeout was cancelled."})
 
     def preliminary_confirmed(self, area_id: str, plan: Plan, outcome: dict[str, str], *,
-                              errors: dict[str, str], episode: dict[str, Any] | None = None) -> Decision | None:
+                              errors: dict[str, str], episode: dict[str, Any] | None = None,
+                              waited: dict[str, Any] | None = None) -> Decision | None:
         """Occupancy confirmed after a preliminary light: handed over to the normal lighting or switched off."""
         if not outcome:
             return None
@@ -851,6 +852,10 @@ class LightingDecisions:
                              f"is not needed ({daylight or 'daylight is enough'})")
         if by.get("kept_dark"):
             parts.append(f"{names('kept_dark')} kept on: no other light of the room is on")
+        if by.get("kept_not_on"):
+            parts.append(f"{names('kept_not_on')} kept on: {_names([_name(ctrl.hass, e) for e in (waited or {}).get('lights', [])])} "
+                         f"did not report on within {_duration(int((waited or {}).get('timeout_s') or 0))}, "
+                         "so the room is not left dark")
         if by.get("kept_failed"):
             parts.append(f"{names('kept_failed')} kept as it is: the normal lighting could not be applied to it")
         if by.get("kept_paused"):
@@ -866,6 +871,10 @@ class LightingDecisions:
         details["trigger"] = TRIGGER_WORDS["occupancy_confirmed"]
         details["mood"] = plan.mood
         details["preliminary_outcome"] = {_name(ctrl.hass, e): w.replace("_", " ") for e, w in outcome.items()}
+        if waited:
+            details["waited_for_normal_lighting"] = (
+                f"{_names([_name(ctrl.hass, e) for e in waited['lights']])}: "
+                + ("reported on" if waited["came_on"] else f"not on within {_duration(int(waited['timeout_s']))}"))
         if episode:
             details["started"], details["deadline"] = episode.get("started"), episode.get("deadline")
         checks = None

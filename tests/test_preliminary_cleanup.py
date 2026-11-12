@@ -540,3 +540,32 @@ async def test_turn_off_on_confirmation_when_the_scene_lights_report_late(hass: 
     confirmed = next(t for t in ctrl.preliminary_trace(lit.area) if t["event"] == "confirmed")
     assert confirmed["outcome"] == {lit.lamp: "turned_off", lit.strip: "turned_off"}, confirmed
     assert confirmed["scene_switched_on"] == [lit.group]
+    events = [t["event"] for t in ctrl.preliminary_trace(lit.area)]
+    assert events.index("waiting_for_normal_lighting") < events.index("normal_lighting_reported") < \
+        events.index("confirmed")  # 0.3.13: switched off only after the spots reported on
+    d = next(d for d in log(ctrl, lit.area) if d["action"] == "Preliminary light off")
+    assert d["details"]["waited_for_normal_lighting"] == "light.kno_spots: reported on"
+
+
+async def test_turn_off_waits_and_keeps_the_light_when_the_scene_never_reports_on(hass: HomeAssistant, lit: Lit,
+                                                                                  freezer) -> None:
+    """0.3.13: the spots accept the command but never report on (a device that did not react): after the wait
+    the preliminary lights stay on, so the room is never dark; the log says why."""
+    zb = SlowGroupLights(hass, {lit.group}, groups={lit.group: [lit.spot_1, lit.spot_2]})
+    zb.report = lambda e, on, pct=None, raw=None: None if e in (lit.group, lit.spot_1, lit.spot_2) \
+        else ZigbeeLights.report(zb, e, on, pct, raw=raw)
+    targets = (PreliminaryTarget(lit.lamp, 100, None, None, ConfirmAction.TURN_OFF),)
+    _entry, ctrl = await setup(hass, lit, freezer, zb, targets=targets)
+    ctrl.store.async_set(ctrl.with_room(lit.area, light_overrides={"Dagur": {
+        lit.lamp: _ignore(), lit.strip: _ignore(), lit.desk: _ignore(), lit.plug: _ignore()}}))
+    await hass.async_block_till_done()
+    await motion(hass, lit, freezer)
+    await presence(hass, lit, freezer)
+    for _ in range(12):
+        await advance(hass, freezer, 1)
+    assert hass.states.is_state(lit.group, "off")  # never reported on
+    assert [s for s, _ in zb.of(lit.lamp)] == ["turn_on"] and hass.states.is_state(lit.lamp, "on")
+    d = next(d for d in log(ctrl, lit.area) if d["kind"] == "preliminary" and d["trigger"] == "occupancy_confirmed")
+    assert "light.kno_lamp kept on: light.kno_spots did not report on within 10 s, so the room is not left dark" \
+        in d["explanation"], d
+    assert "normal_lighting_not_reported" in [t["event"] for t in ctrl.preliminary_trace(lit.area)]
