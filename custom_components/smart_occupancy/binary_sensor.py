@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import SmartOccupancyConfigEntry, SmartOccupancyCoordinator
+from .forecast_entities import RoomPredictedSensor
 from .entity import RoomOccupancyEntity, SmartOccupancyEntity, global_unique_id
 
 PARALLEL_UPDATES = 0
@@ -26,6 +27,8 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
     entities: list[BinarySensorEntity] = [MoodMismatchSensor(coordinator)]
     entities += [RoomOccupiedSensor(coordinator, a) for a in sorted(coordinator.config.enabled_rooms)]
+    # Occupancy forecast (0.5.0, observation only).
+    entities += [RoomPredictedSensor(coordinator, a) for a in sorted(coordinator.config.enabled_rooms)]
     async_add_entities(entities)
 
 

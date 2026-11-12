@@ -77,13 +77,22 @@
  * vacant" has the Vacant profile's settings (lights it does not set, its own
  * light level) as room values or global defaults.
  *
+ * 0.5.0: occupancy forecast (observation only). The room card's Overview shows
+ * the room's forecast (probability by horizon, confidence, the reason); the
+ * Presence tab shows its details: learning status and history coverage, the
+ * usual occupancy by hour and weekday (learned history only), movement between
+ * rooms, accuracy against the usual-occupancy and "stays as it is" baselines,
+ * learned influences, forecast settings (room override or global default),
+ * room connections and the forecast log. Nothing here can make a forecast
+ * control a device.
+ *
  * The cards are editors only: the integration owns the configuration
  * (websocket API, admin-only writes). The cards never call a light service
  * (a profile test asks the integration to) and a preview never changes a light. They refetch only when the integration
  * reports a change.
  */
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -339,6 +348,56 @@ function subscribe(hass, callback) {
       Promise.resolve(entry.unsub).then((u) => typeof u === "function" && u());
     }
   };
+}
+
+// Occupancy forecast (0.5.0) ---------------------------------------------------------------------------------
+const FC_WS = "smart_occupancy/forecast";
+const FC_CONF = { insufficient_data: "Insufficient data", low: "Low", moderate: "Moderate", high: "High" };
+const FC_FACTOR = { schedule: "Usual", current: "Now", movement: "Movement", context: "Influence", connected: "Connected room" };
+const FC_LEARNING = { waiting: "Waiting for Home Assistant to start", learning: "Learning", ready: "Up to date", disabled: "Switched off",
+  no_recorder: "No Recorder (no history)", error: "Failed" };
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+// A bar whose top corners are rounded (4 px) and whose foot sits square on the baseline.
+const barPath = (x, y, w, h) => {
+  const r = Math.min(4, w / 2, h);
+  return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+};
+
+// One series of 24 hourly values (0..1, or null = no data). Every bar has a tooltip; no data is shown as a dash.
+function barChart(values, { label, unit, scale }) {
+  const W = 480, H = 120, L = 30, B = 18, T = 6;
+  const bw = (W - L) / 24;
+  const y = (v) => T + (H - T - B) * (1 - v);
+  const grid = [0, 0.5, 1].map((g) => `<line x1="${L}" x2="${W}" y1="${y(g)}" y2="${y(g)}" class="grid"/><text x="${L - 4}" y="${y(g) + 3}" text-anchor="end">${Math.round(g * scale)}${unit === "%" ? "%" : ""}</text>`).join("");
+  const bars = values.map((v, h) => {
+    const x = L + h * bw + 1;
+    const tip = `${String(h).padStart(2, "0")}:00–${String((h + 1) % 24).padStart(2, "0")}:00: ${v == null ? "no data" : `${label.toLowerCase()} ${Math.round(v * scale)}${unit === "%" ? " %" : ""}`}`;
+    const mark = v == null ? `<line x1="${x + 2}" x2="${x + bw - 4}" y1="${y(0) - 1}" y2="${y(0) - 1}" class="nodata"/>`
+      : v > 0 ? `<path d="${barPath(x, y(v), bw - 2, y(0) - y(v))}" class="bar"/>` : "";
+    return `<g><title>${esc(tip)}</title><rect x="${x - 1}" y="${T}" width="${bw}" height="${H - T - B}" class="hit"/>${mark}</g>`;
+  }).join("");
+  const ticks = [0, 6, 12, 18].map((h) => `<text x="${L + h * bw + bw / 2}" y="${H - 4}" text-anchor="middle">${h}:00</text>`).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)} by hour">${grid}${bars}${ticks}</svg>`;
+}
+
+// A few series over days (lower is better). Legend + direct label at the line end; tooltips on every point.
+function lineChart(rows, series) {
+  const W = 480, H = 130, L = 40, R = 70, B = 18, T = 8;
+  const max = Math.max(0.05, ...rows.flatMap((r) => series.map(([k]) => r[k] ?? 0))) * 1.1;
+  const x = (i) => L + (rows.length === 1 ? 0 : (i * (W - L - R)) / (rows.length - 1));
+  const y = (v) => T + (H - T - B) * (1 - v / max);
+  const grid = [0, max / 2, max].map((g) => `<line x1="${L}" x2="${W - R}" y1="${y(g)}" y2="${y(g)}" class="grid"/><text x="${L - 4}" y="${y(g) + 3}" text-anchor="end">${g.toFixed(2)}</text>`).join("");
+  const lines = series.map(([k, name, color]) => {
+    const pts = rows.map((r, i) => (r[k] == null ? null : [x(i), y(r[k]), r])).filter(Boolean);
+    const last = pts[pts.length - 1];
+    return `<polyline points="${pts.map((p) => `${p[0]},${p[1]}`).join(" ")}" fill="none" stroke="var(${color})" stroke-width="2" stroke-linejoin="round"/>
+      ${pts.map((p) => `<g><title>${esc(`${p[2].date}: ${name} ${Number(p[2][k]).toFixed(3)} (${p[2].forecasts} forecasts)`)}</title><circle cx="${p[0]}" cy="${p[1]}" r="10" class="hit"/><circle cx="${p[0]}" cy="${p[1]}" r="4" fill="var(${color})" class="pt"/></g>`).join("")}
+      ${last ? `<text x="${last[0] + 8}" y="${last[1] + 4}" class="dl">${esc(name)}</text>` : ""}`;
+  }).join("");
+  const ticks = [0, rows.length - 1].filter((v, i, a) => a.indexOf(v) === i).map((i) => `<text x="${x(i)}" y="${H - 4}" text-anchor="middle">${esc(rows[i].date.slice(5))}</text>`).join("");
+  const legend = `<div class="legend">${series.map(([, name, color]) => `<span><i style="background: var(${color})"></i>${esc(name)}</span>`).join("")}</div>`;
+  return `${legend}<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Brier score per day">${grid}${lines}${ticks}</svg>`;
 }
 
 // --------------------------------------------------------------- base card
@@ -1232,6 +1291,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
           <span class="sub ${this._model.adaptive.status === "connected" ? "" : "warn"}">${esc(STATUS_WORDS[this._model.adaptive.status])}</span></b></div>` : ""}
         ${this._daylightSummary(r)}
       </div>
+      ${this._forecastOverviewHtml(r)}
       ${this._switchQuickHtml(r)}
       ${issues ? `<div class="issues">${issues}</div>` : `<div class="note ok">No warnings.</div>`}
       ${this._statusHtml("group")}`;
@@ -1609,7 +1669,282 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       ${nOver && !ro ? `<div><button class="btn ghost small" data-action="pr-reset-all">Use global defaults for all</button>${this._statusHtml("pr-all")}</div>` : ""}
       <details class="dladv" ${this._ui.prGlobal ? "open" : ""}><summary data-action="toggle-pr-global">Global defaults (all rooms)</summary>
         <div class="global"><div class="sub"><b>Global setting</b> — every room that does not override a value follows it. Room overrides are not changed.</div>
-        ${p.timing.map(grow).join("")}</div></details>`;
+        ${p.timing.map(grow).join("")}</div></details>
+      ${this._forecastHtml(r)}`;
+  }
+
+  // ------------------------------------------------------------------ occupancy forecast (0.5.0)
+  // Observation only: forecasts are shown, explained and scored; nothing here (or in the backend) acts on them.
+  _fcHorizons(f, key = "probabilities") {
+    const p = f?.[key];
+    if (!p) return "";
+    return Object.entries(p).map(([h, v]) => `<span class="fch ${Number(h) === f.horizon ? "on" : ""}" title="${esc(`Probability that the room is occupied ${h} minutes from now`)}">
+      <span class="sub">${h} min</span><b>${v} %</b></span>`).join("");
+  }
+
+  // Overview: the room's forecast in three lines.
+  _forecastOverviewHtml(r) {
+    const f = r.forecast;
+    if (!f) return "";
+    const head = `<div class="modehead"><div class="stitle">Occupancy forecast</div>
+      <button class="link" data-action="fc-open">Forecast details</button></div>`;
+    if (f.status !== "ok") {
+      const word = { insufficient_data: "Not enough history yet", unavailable: "Not available now", disabled: "Switched off for this room",
+        learning: "Learning from history…" }[f.status] || f.status;
+      return `<div class="section fc">${head}<div><span class="pill muted">${esc(word)}</span></div><div class="sub">${esc(f.explanation)}</div></div>`;
+    }
+    const conf = f.confidence?.level;
+    return `<div class="section fc">${head}
+      <div class="fchs">${this._fcHorizons(f)}</div>
+      <div class="sub"><b>In ${f.horizon} min: ${f.probability} %</b> · Confidence: ${esc(FC_CONF[conf] || conf)}
+        ${f.predicted ? ` · <span class="pill info"><ha-icon icon="mdi:crystal-ball"></ha-icon>Predicted occupied</span>` : ""}</div>
+      <div class="sub">${esc(f.explanation)}${f.window?.text ? ` ${esc(f.window.text)}.` : ""}</div></div>`;
+  }
+
+  async _loadForecast() {
+    if (this._ui.fcLoading) return;
+    this._ui.fcLoading = true;
+    try {
+      this._ui.fc = await this._ws({ type: FC_WS + "/room", area_id: this._config.area });
+      this._ui.fcError = null;
+    } catch (err) { this._ui.fcError = err?.message || String(err); }
+    this._ui.fcLoading = false;
+    this._ui.fcStamp = this._model?.room?.forecast?.updated || "";
+    this._requestRender();
+  }
+
+  async _fcSave(key, msg, ok) {
+    await this._save(key, msg, ok);
+    this._ui.fcStamp = null;
+    this._loadForecast();
+  }
+
+  _fcDetails(key, title, body) {
+    const open = !!(this._ui.fcOpen || {})[key];
+    return `<details class="dladv" ${open ? "open" : ""}><summary data-action="fc-toggle" data-key="${key}">${esc(title)}</summary>${open ? body() : ""}</details>`;
+  }
+
+  // Presence tab: everything about the room's forecast.
+  _forecastHtml(r) {
+    const stamp = r.forecast?.updated || "";
+    if (!this._ui.fcLoading && (this._ui.fcStamp !== stamp || !this._ui.fc)) this._loadForecast();
+    const d = this._ui.fc;
+    const title = `<div class="stitle" id="so-forecast">Occupancy forecast</div>
+      <div class="note"><ha-icon icon="mdi:eye-outline"></ha-icon> Observation only: forecasts are learned, shown and scored, but they never switch a light, heating or anything else.</div>`;
+    if (this._ui.fcError) return `${title}<div class="bad">${esc(this._ui.fcError)}</div>`;
+    if (!d || d.area_id !== this._config.area) return `${title}<div class="muted">Loading…</div>`;
+    const f = d.now || {};
+    const conf = f.confidence;
+    const rows = f.probabilities ? Object.keys(f.probabilities).map((h) => `<tr class="${Number(h) === f.horizon ? "on" : ""}"><td>${h} min</td><td><b>${f.probabilities[h]} %</b></td>
+        <td>${f.schedule?.[h] ?? "—"} %</td>${f.entry ? `<td>${f.entry[h]} %</td>` : ""}</tr>`).join("") : "";
+    const now = f.status === "ok" ? `<div class="tscroll"><table class="fct"><thead><tr><th>Ahead</th><th>Occupied then</th><th>Usual at that time</th>${f.entry ? "<th>Entered by then</th>" : ""}</tr></thead><tbody>${rows}</tbody></table></div>
+        <div class="sub">${esc(f.explanation)}</div>
+        ${f.window?.text ? `<div class="sub">${esc(f.window.text)}${f.window.source === "schedule" ? " (from the usual pattern)" : ""}.</div>` : ""}
+        <div class="sub">Predicted occupancy (in ${f.horizon} min, at least ${f.threshold} % and ${esc(FC_CONF[f.confidence_threshold] || f.confidence_threshold)} confidence):
+          <b>${f.predicted ? "yes" : "no"}</b></div>
+        ${(f.factors || []).length ? `<ul class="fcf">${f.factors.map((x) => `<li><span class="pill muted">${esc(FC_FACTOR[x.kind] || x.kind)}</span> ${esc(x.text)}${Math.abs(x.impact) >= 1 && x.kind !== "schedule" ? ` <span class="sub">(${x.impact > 0 ? "+" : ""}${x.impact} points)</span>` : ""}</li>`).join("")}</ul>` : ""}`
+      : `<div><span class="pill muted">${esc({ insufficient_data: "Not enough history yet", unavailable: "Not available now", disabled: "Switched off", learning: "Learning…" }[f.status] || f.status)}</span></div>
+         <div class="sub">${esc(f.explanation)}</div>`;
+    const confHtml = conf ? `<div class="sub"><b>Confidence: ${esc(FC_CONF[conf.level] || conf.level)}</b>${conf.score ? ` (${conf.score}/100)` : ""}${conf.reasons?.length ? ` · ${esc(conf.reasons.join("; "))}` : ""}</div>` : "";
+    return `${title}${now}${confHtml}${this._fcLearningHtml(d)}
+      ${this._fcDetails("patterns", "Usual occupancy (hourly and weekly)", () => this._fcPatternsHtml(d))}
+      ${this._fcDetails("movement", "Movement between rooms", () => this._fcMovementHtml(d))}
+      ${this._fcDetails("accuracy", "Forecast accuracy", () => this._fcAccuracyHtml(d))}
+      ${this._fcDetails("contexts", "What else influences this room", () => this._fcContextsHtml(d))}
+      ${this._fcDetails("settings", "Forecast settings", () => this._fcSettingsHtml(d))}
+      ${this._fcDetails("connections", "Room connections", () => this._fcConnectionsHtml(d))}
+      ${this._fcDetails("log", "Forecast log", () => this._fcLogHtml(d))}`;
+  }
+
+  _fcLearningHtml(d) {
+    const l = d.learning;
+    const ro = !this._canEdit;
+    const state = FC_LEARNING[l.state] || l.state;
+    return `<div class="sub fclearn"><b>Learning: ${esc(state)}</b>${l.detail ? ` · ${esc(l.detail)}` : ""}${l.last_error ? ` · <span class="bad">${esc(l.last_error)}</span>` : ""}<br>
+      History in the Recorder from ${l.recorder_oldest ? fmtTime(l.recorder_oldest) : "unknown"} · ${l.days_learned} day${l.days_learned === 1 ? "" : "s"} learned (window ${l.window_days} days)${l.today_included ? " + today so far" : ""}<br>
+      This room: ${l.room_days} day${l.room_days === 1 ? "" : "s"} observed, ${l.room_weekdays} of 7 weekdays, ${l.room_observed_hours} h, ${l.room_entries} visits${l.room_first_date ? ` · ${esc(l.room_first_date)} – ${esc(l.room_last_date)}` : ""}<br>
+      Last update ${l.last_update ? fmtTime(l.last_update) : "never"}${l.last_duration_seconds != null ? ` (took ${l.last_duration_seconds} s)` : ""}</div>
+      ${ro ? "" : `<div class="ibtns"><button class="btn small ghost" data-action="fc-learn">Update now</button>
+        <button class="btn small ghost" data-action="fc-rebuild">Re-learn from history…</button>${this._statusHtml("fc-learn")}</div>`}`;
+  }
+
+  _fcPatternsHtml(d) {
+    const p = d.patterns;
+    if (!p.days) return `<div class="muted">No learned days yet.</div>`;
+    const weekly = p.weekly;
+    const cell = (v, day, h) => {
+      const title = `${DAYS[day]} ${String(h).padStart(2, "0")}:00 – ${v == null ? "no data" : `occupied ${Math.round(v * 100)} % of the time`} (${p.weekly_observed_hours[day][h]} h observed)`;
+      const style = v == null ? "" : `style="background: color-mix(in oklab, var(--fc-seq) ${Math.round(8 + v * 92)}%, var(--card-background-color, #fff))"`;
+      return `<span class="hm ${v == null ? "none" : ""}" ${style} title="${esc(title)}" role="img" aria-label="${esc(title)}"></span>`;
+    };
+    const table = `<table class="fct small"><thead><tr><th></th>${Array.from({ length: 24 }, (_, h) => `<th>${h}</th>`).join("")}</tr></thead>
+      <tbody>${weekly.map((row, i) => `<tr><th>${DAYS[i]}</th>${row.map((v) => `<td>${v == null ? "·" : Math.round(v * 100)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    return `<div class="sub">From ${p.days} learned day${p.days === 1 ? "" : "s"} of this room (real history, nothing estimated where no data exists).</div>
+      <div class="chartcap">Share of the time occupied, by hour (all days)</div>
+      ${barChart(p.hourly_observed, { label: "Occupied", unit: "%", scale: 100 })}
+      <div class="chartcap">By weekday and hour</div>
+      <div class="heat" role="group" aria-label="Weekly occupancy heatmap">
+        <div class="hmx"><span></span>${[0, 6, 12, 18].map((h) => `<span style="grid-column: ${h + 2}">${h}:00</span>`).join("")}</div>
+        ${weekly.map((row, i) => `<div class="hmr"><span class="hml">${DAYS[i]}</span>${row.map((v, h) => cell(v, i, h)).join("")}</div>`).join("")}
+        <div class="hmlegend sub"><span class="hm none"></span> no data <span class="hmramp"></span> 0 → 100 %</div></div>
+      <details class="dladv"><summary>Table</summary><div class="tscroll">${table}</div></details>`;
+  }
+
+  _fcMovementHtml(d) {
+    const m = d.movement;
+    const pct = (v) => (v == null ? "—" : `${Math.round(v * 100)} %`);
+    const next = m.next.length ? `<div class="tscroll"><table class="fct"><thead><tr><th>Next room</th><th>Probability</th><th>Moves</th><th>Typical delay</th></tr></thead>
+      <tbody>${m.next.map((x) => `<tr><td>${esc(x.name)}</td><td>${pct(x.probability)}</td><td>${x.count}</td><td>${x.median_delay} s</td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="muted">No movement out of this room learned yet.</div>`;
+    const prev = m.previous.length ? `<div class="tscroll"><table class="fct"><thead><tr><th>Came from</th><th>Share</th><th>Moves</th><th>Typical delay</th></tr></thead>
+      <tbody>${m.previous.map((x) => `<tr><td>${esc(x.name)}</td><td>${pct(x.share)}</td><td>${x.count}</td><td>${x.median_delay} s</td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="muted">No movement into this room learned yet.</div>`;
+    return `<div class="sub">A movement is new activity in another room within 3 minutes of new activity here. Detections of one person by a sensor shared with another room (an open-plan radar) are not counted as movements. With several people at home some moves are mixed up; the numbers show what was seen. Weighted towards recent days; ${m.arrivals} arrivals.</div>
+      ${next}${prev}`;
+  }
+
+  _fcAccuracyHtml(d) {
+    const a = d.accuracy;
+    const n = (v, digits = 3) => (v == null ? "—" : Number(v).toFixed(digits));
+    const skill = (v) => (v == null ? "—" : `${v > 0 ? "+" : ""}${Math.round(v * 100)} %`);
+    const rows = Object.entries(a.by_horizon).map(([h, x]) => `<tr class="${Number(h) === a.horizon ? "on" : ""}"><td>${h} min</td><td>${x.forecasts}</td>
+      <td>${n(x.brier)}</td><td>${n(x.brier_schedule)}</td><td>${n(x.brier_persistence)}</td><td>${skill(x.skill_vs_schedule)}</td></tr>`).join("");
+    const cur = a.by_horizon[String(a.horizon)];
+    const cal = (cur?.calibration || []).map((c) => `<tr><td>${esc(c.bin)}</td><td>${c.forecasts}</td><td>${c.mean_forecast == null ? "—" : Math.round(c.mean_forecast * 100) + " %"}</td><td>${c.observed == null ? "—" : Math.round(c.observed * 100) + " %"}</td></tr>`).join("");
+    return `<div class="sub">${esc(a.method)}. Brier score: lower is better (0 = perfect). “Schedule” is the usual occupancy at that hour; “persistence” assumes the room stays as it is. Skill above 0 means the forecast is better than the schedule.</div>
+      ${cur?.forecasts ? "" : `<div class="note">No forecast has been scored yet: a day is scored once the model of the days before it has enough history.</div>`}
+      <div class="tscroll"><table class="fct"><thead><tr><th>Ahead</th><th>Scored</th><th>Brier</th><th>Schedule</th><th>Persistence</th><th>Skill</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${cur?.forecasts ? `<div class="sub">At ${Math.round(cur.threshold * 100)} % (${a.horizon} min): ${cur.true_positive} correct predictions, ${cur.false_positive} false alarms, ${cur.false_negative} missed, ${cur.true_negative} correctly not predicted.</div>` : ""}
+      ${a.daily.length > 1 ? `<div class="chartcap">Brier score per day (${a.horizon} min ahead)</div>${lineChart(a.daily, [["brier", "Forecast", "--fc-s1"], ["brier_schedule", "Schedule", "--fc-s2"]])}` : ""}
+      ${cal ? `<details class="dladv"><summary>Calibration (${a.horizon} min)</summary><div class="tscroll"><table class="fct"><thead><tr><th>Forecast</th><th>Scored</th><th>Mean forecast</th><th>Actually occupied</th></tr></thead><tbody>${cal}</tbody></table></div></details>` : ""}`;
+  }
+
+  _fcContextsHtml(d) {
+    const items = d.contexts.map((c) => {
+      const f = c.factor;
+      const txt = f ? `entries ${f.entry_on}× while on, ${f.entry_off}× while off · leaving ${f.exit_on}× while on (${f.hours_on} h on)` : "not learned yet";
+      return `<li><b>${esc(c.name)}</b>${c.state ? ` <span class="sub">now ${esc(c.state)}</span>` : ""}<div class="sub">${esc(txt)}</div></li>`;
+    }).join("");
+    return `<div class="sub">Rates relative to what the time of day alone would predict (1× = no influence). The influence is learned from history, never assumed; a phone being away is not taken as proof that nobody is home.</div><ul class="fcf">${items}</ul>`;
+  }
+
+  _fcSettingsHtml(d) {
+    const ro = !this._canEdit ? "disabled" : "";
+    const s = d.settings;
+    const g = s.global;
+    const room = s.room;
+    const pill = (k) => `<span class="pill ${s.overridden.includes(k) ? "info" : "muted"}">${s.overridden.includes(k) ? "Room override" : "Global default"}</span>
+      ${s.overridden.includes(k) && !ro ? `<button class="link" data-action="fc-room-inherit" data-key="${k}">Use global default</button>` : ""}${this._statusHtml(`fcr-${k}`)}`;
+    const opt = (v, label, cur) => `<option value="${esc(v)}" ${String(cur) === String(v) ? "selected" : ""}>${esc(label)}</option>`;
+    const roomRows = `
+      <div class="prow2"><label for="so-fcr-en">Forecasts for this room</label><div class="fval">
+        <select id="so-fcr-en" data-control="fc-room" data-key="enabled" ${ro}>${opt("", `Global default (${g.enabled ? "on" : "off"})`, room.enabled == null ? "" : null)}${opt("on", "On", room.enabled === true ? "on" : null)}${opt("off", "Off", room.enabled === false ? "off" : null)}</select> ${pill("enabled")}</div></div>
+      <div class="prow2"><label for="so-fcr-h">Forecast horizon</label><div class="fval">
+        <select id="so-fcr-h" data-control="fc-room" data-key="horizon_minutes" ${ro}>${s.horizons.map((h) => opt(h, `${h} min`, s.effective.horizon_minutes)).join("")}</select> ${pill("horizon_minutes")}</div>
+        <div class="sub">The horizon of the entity state and of “predicted occupancy”. Every horizon stays in the attributes.</div></div>
+      <div class="prow2"><label for="so-fcr-t">Probability threshold</label><div class="fval">
+        <input id="so-fcr-t" type="number" class="num" min="5" max="99" value="${s.effective.probability_threshold}" data-control="fc-room" data-key="probability_threshold" ${ro}> % ${pill("probability_threshold")}</div></div>
+      <div class="prow2"><label for="so-fcr-c">Minimum confidence</label><div class="fval">
+        <select id="so-fcr-c" data-control="fc-room" data-key="confidence_threshold" ${ro}>${s.confidence_options.map((c) => opt(c, FC_CONF[c], s.effective.confidence_threshold)).join("")}</select> ${pill("confidence_threshold")}</div>
+        <div class="sub">Predicted occupancy is on only when both the probability and the confidence reach these values.</div></div>
+      ${s.overridden.length && !ro ? `<div><button class="btn ghost small" data-action="fc-room-reset">Use global defaults for all</button>${this._statusHtml("fcr-all")}</div>` : ""}`;
+    const num = (k, label, unit, help) => `<div class="prow2"><label for="so-fcg-${k}">${esc(label)}</label><div class="fval">
+      <input id="so-fcg-${k}" type="number" class="num" min="${s.limits[k].min}" max="${s.limits[k].max}" value="${g[k]}" data-control="fc-global" data-key="${k}" ${ro}> ${esc(unit)}
+      ${g[k] !== s.limits[k].default ? `<span class="sub">built-in ${s.limits[k].default}</span>` : ""}${this._statusHtml(`fcg-${k}`)}</div>${help ? `<div class="sub">${esc(help)}</div>` : ""}</div>`;
+    const cands = d.context_candidates || [];
+    const ctx = s.contexts.map((c) => `<li>${esc(c.name)} <code>${esc(c.entity_id)}</code>
+      ${ro ? "" : `<button class="link" data-action="fc-ctx-remove" data-entity="${esc(c.entity_id)}">remove</button>`}</li>`).join("");
+    const globalRows = `<div class="global"><div class="sub"><b>Global setting</b> — every room that does not override a value follows it.</div>
+      <label class="switch"><input type="checkbox" data-control="fc-global" data-key="enabled" ${g.enabled ? "checked" : ""} ${ro}> Learn and forecast occupancy${this._statusHtml("fcg-enabled")}</label>
+      ${num("window_days", "Learning window", "days", "History older than this is forgotten; learned daily summaries are kept this long.")}
+      ${num("half_life_days", "Adapt to changes (half-life)", "days", "A day this old counts half as much as today. 0 = every day counts the same.")}
+      ${num("refresh_minutes", "Read new history every", "min", "")}
+      <div class="prow2"><label for="so-fcg-h">Forecast horizon</label><div class="fval"><select id="so-fcg-h" data-control="fc-global" data-key="horizon_minutes" ${ro}>${s.horizons.map((h) => opt(h, `${h} min`, g.horizon_minutes)).join("")}</select>${this._statusHtml("fcg-horizon_minutes")}</div></div>
+      ${num("probability_threshold", "Probability threshold", "%", "")}
+      <div class="prow2"><label for="so-fcg-c">Minimum confidence</label><div class="fval"><select id="so-fcg-c" data-control="fc-global" data-key="confidence_threshold" ${ro}>${s.confidence_options.map((c) => opt(c, FC_CONF[c], g.confidence_threshold)).join("")}</select>${this._statusHtml("fcg-confidence_threshold")}</div></div>
+      ${num("min_days", "Minimum history", "days", "Fewer observed days: no forecast (insufficient data).")}
+      ${num("min_entries", "Minimum visits", "", "Fewer observed visits of a room: no forecast (insufficient data).")}
+      <div class="prow2"><label>Influences (sleep, PC, home / away, …)</label>
+        <div class="sub">${g.contexts == null ? "Automatic: the bed and PC activity sensors of the configured rooms." : "Chosen entities."} Applies to newly learned days; use Re-learn to apply it to the history.</div>
+        <ul class="fcf">${ctx || `<li class="muted">None</li>`}</ul>
+        ${ro ? "" : `<div class="fval"><select data-control="fc-ctx-add" aria-label="Add an influence"><option value="">Add an entity…</option>${cands.filter((c) => !s.contexts.some((x) => x.entity_id === c.entity_id)).map((c) => `<option value="${esc(c.entity_id)}">${esc(c.name)} (${esc(c.entity_id)})</option>`).join("")}</select>
+          ${g.contexts != null ? `<button class="link" data-action="fc-ctx-auto">Automatic</button>` : ""}${this._statusHtml("fcg-contexts")}</div>`}</div>
+      <div class="prow2"><label for="so-fcg-wd">Workday sensor</label><div class="fval">
+        <select id="so-fcg-wd" data-control="fc-workday" ${ro}>${opt("__auto", `Automatic${g.workday_entity == null && s.workday_entity ? ` (${s.workday_name || s.workday_entity})` : ""}`, g.workday_entity == null ? "__auto" : null)}
+          ${opt("__none", "None (Monday–Friday are workdays)", g.workday_entity === "" ? "__none" : null)}
+          ${cands.filter((c) => c.entity_id.startsWith("binary_sensor.")).map((c) => opt(c.entity_id, `${c.name}${c.workday ? " (Workday)" : ""}`, g.workday_entity)).join("")}</select>${this._statusHtml("fcg-workday_entity")}</div></div></div>`;
+    return `${roomRows}<details class="dladv" ${this._ui.fcGlobal ? "open" : ""}><summary data-action="fc-toggle-global">Global defaults (all rooms)</summary>${globalRows}</details>`;
+  }
+
+  _fcConnectionsHtml(d) {
+    const c = d.connections;
+    const ro = !this._canEdit;
+    const kinds = (cur, a, b) => `<select data-control="fc-conn-kind" data-a="${esc(a)}" data-b="${esc(b)}" ${ro ? "disabled" : ""} aria-label="Kind of connection">${c.kinds.map((k) => `<option value="${k.key}" ${k.key === cur ? "selected" : ""}>${esc(k.name)}</option>`).join("")}</select>`;
+    const items = c.items.map((x) => `<li><b>${esc(x.other_name)}</b> ${kinds(x.kind, x.a, x.b)}
+      ${ro ? "" : `<button class="link" data-action="fc-conn-remove" data-a="${esc(x.a)}" data-b="${esc(x.b)}">remove</button>`}</li>`).join("");
+    const sugg = c.suggestions.map((x) => `<li>${esc(x.other_name)} <span class="sub">${x.reason === "learned" ? `${x.moves} moves seen` : "from the room configuration"}</span>
+      ${ro ? "" : `<button class="link" data-action="fc-conn-add" data-a="${esc(x.a)}" data-b="${esc(x.b)}" data-kind="${esc(x.kind)}">add</button>`}</li>`).join("");
+    return `<div class="sub">Which rooms people walk between directly. Used to tell one person seen by two sensors (open plan, shared hall or stairs) from a real movement, and to learn how “a connected room is occupied” changes this room. ${c.configured ? "Edited by you." : "Suggested from the adjacent rooms and shared sensors in the configuration; any change saves your own list."}</div>
+      <ul class="fcf">${items || `<li class="muted">No connections.</li>`}</ul>
+      ${ro ? "" : `<div class="fval"><select id="so-fc-conn-room" aria-label="Room">${c.rooms.map((x) => `<option value="${esc(x.area_id)}">${esc(x.name)}</option>`).join("")}</select>
+        <select id="so-fc-conn-kind" aria-label="Kind">${c.kinds.map((k) => `<option value="${k.key}">${esc(k.name)}</option>`).join("")}</select>
+        <button class="btn small ghost" data-action="fc-conn-new">Add connection</button>
+        ${c.configured ? `<button class="link" data-action="fc-conn-reset">Use the suggested connections</button>` : ""}${this._statusHtml("fc-conn")}</div>`}
+      ${sugg ? `<div class="sub"><b>Suggestions</b></div><ul class="fcf">${sugg}</ul>` : ""}`;
+  }
+
+  _fcLogHtml(d) {
+    const entries = [...(d.log?.entries || []), ...(d.house_log?.entries || []).filter((e) => (e.details?.source === d.area_id || e.details?.target === d.area_id || e.details?.predicted === d.area_id || e.details?.actual === d.area_id))]
+      .sort((x, y) => (x.at < y.at ? 1 : -1));
+    if (!entries.length) return `<div class="muted">Nothing logged yet.</div>`;
+    return `<ul class="fcf">${entries.map((e) => `<li><span class="sub"><time datetime="${esc(e.at)}">${fmtTime(e.at)}</time>${e.count > 1 ? ` · ${e.count}×` : ""}</span> <b>${esc(e.action)}</b><div class="sub">${esc(e.explanation)}</div></li>`).join("")}</ul>`;
+  }
+
+  _onForecastAction(a, el) {
+    const area = this._config.area;
+    const ui = this._ui;
+    if (a === "fc-open") { ui.fcOpen = { ...(ui.fcOpen || {}) }; this._openTab("presence"); setTimeout(() => this.shadowRoot.getElementById("so-forecast")?.scrollIntoView({ block: "start" }), 50); }
+    else if (a === "fc-toggle") { ui.fcOpen = { ...(ui.fcOpen || {}), [el.dataset.key]: !el.parentElement.open }; this._requestRender(); }
+    else if (a === "fc-toggle-global") ui.fcGlobal = !el.parentElement.open;
+    else if (a === "fc-learn") this._fcSave("fc-learn", { type: `${FC_WS}/learn` }, "Updated");
+    else if (a === "fc-rebuild") {
+      if (!confirm("Forget everything learned and learn again from the Recorder's history? Days the Recorder no longer has are lost.")) return;
+      this._fcSave("fc-learn", { type: `${FC_WS}/rebuild` }, "Learned again");
+    } else if (a === "fc-room-inherit") this._fcSave(`fcr-${el.dataset.key}`, { type: `${FC_WS}/settings`, area_id: area, values: { [el.dataset.key]: null } }, "Uses the global default");
+    else if (a === "fc-room-reset") this._fcSave("fcr-all", { type: `${FC_WS}/settings`, area_id: area, reset_all: true }, "Global defaults");
+    else if (a === "fc-ctx-remove") this._fcSave("fcg-contexts", { type: `${FC_WS}/settings`, values: { contexts: (ui.fc.settings.contexts || []).map((c) => c.entity_id).filter((e) => e !== el.dataset.entity) } }, "Removed");
+    else if (a === "fc-ctx-auto") this._fcSave("fcg-contexts", { type: `${FC_WS}/settings`, values: { contexts: null } }, "Automatic");
+    else if (a === "fc-conn-remove") this._fcSave("fc-conn", { type: `${FC_WS}/connection`, action: "remove", a: el.dataset.a, b: el.dataset.b }, "Removed");
+    else if (a === "fc-conn-add") this._fcSave("fc-conn", { type: `${FC_WS}/connection`, action: "add", a: el.dataset.a, b: el.dataset.b, kind: el.dataset.kind || "door" }, "Added");
+    else if (a === "fc-conn-new") {
+      const other = this.shadowRoot.getElementById("so-fc-conn-room")?.value;
+      const kind = this.shadowRoot.getElementById("so-fc-conn-kind")?.value || "door";
+      if (other) this._fcSave("fc-conn", { type: `${FC_WS}/connection`, action: "add", a: area, b: other, kind }, "Added");
+    } else if (a === "fc-conn-reset") this._fcSave("fc-conn", { type: `${FC_WS}/connection`, action: "reset" }, "Suggested connections");
+  }
+
+  _onForecastControl(c, el) {
+    const area = this._config.area;
+    const key = el.dataset.key;
+    if (c === "fc-room") {
+      let value = el.value;
+      if (key === "enabled") value = value === "" ? null : value === "on";
+      else if (key === "probability_threshold") { if (value === "") return; value = Number(value); }
+      else if (key === "horizon_minutes") value = Number(value);
+      this._fcSave(`fcr-${key}`, { type: `${FC_WS}/settings`, area_id: area, values: { [key]: value } }, "Room override");
+    } else if (c === "fc-global") {
+      let value = el.type === "checkbox" ? el.checked : el.value;
+      if (el.type === "number" || key === "horizon_minutes") { if (value === "") return; value = Number(value); }
+      this._fcSave(`fcg-${key}`, { type: `${FC_WS}/settings`, values: { [key]: value } }, "Global default");
+    } else if (c === "fc-ctx-add" && el.value) {
+      const current = (this._ui.fc.settings.contexts || []).map((x) => x.entity_id);
+      this._fcSave("fcg-contexts", { type: `${FC_WS}/settings`, values: { contexts: [...current, el.value] } }, "Added");
+    } else if (c === "fc-workday") {
+      const value = el.value === "__auto" ? null : el.value === "__none" ? "" : el.value;
+      this._fcSave("fcg-workday_entity", { type: `${FC_WS}/settings`, values: { workday_entity: value } }, "Saved");
+    } else if (c === "fc-conn-kind") {
+      this._fcSave("fc-conn", { type: `${FC_WS}/connection`, action: "add", a: el.dataset.a, b: el.dataset.b, kind: el.value }, "Saved");
+    }
   }
 
   _savePresenceTime(area, values, key, ok, resetAll = false) {
@@ -2318,6 +2653,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const area = this._config.area;
     const ui = this._ui;
     if (a.startsWith("sw-")) { this._onSwitchAction(a, el); return; }
+    if (a.startsWith("fc-")) { this._onForecastAction(a, el); return; }
     if (a === "tab") this._openTab(el.dataset.tab);
     else if (a === "vac-action") this._setVacancy(el.dataset.value);
     else if (a === "ov-profile") {
@@ -2414,6 +2750,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const c = el.dataset.control;
     const s = this._model.room.settings;
     if (c && c.startsWith("sw-")) { this._onSwitchControl(c, el); return; }
+    if (c && c.startsWith("fc-")) { this._onForecastControl(c, el); return; }
     if (c === "edit-mood") { this._mood = el.value; this._ui.edit = null; this._fetch(); }
     else if (c === "room-mood") this._save("room-mood", { type: `${WS}/room/set`, area_id: area, mood_override: el.value || null });
     else if (c === "pick-light" && el.value) { this._ui.edit = { scope: "light", target: el.value }; this._render(); }
@@ -2549,7 +2886,7 @@ const STYLE = `<style>
   .header > ha-icon.lit { color: var(--state-light-active-color, var(--amber-color, #ffc107)); }
   .titles { flex: 1; min-width: 0; }
   .title { font-size: 1.2em; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pad { padding: 4px 16px 16px; display: grid; gap: 10px; }
+  .pad { padding: 4px 16px 16px; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr); }
   .sub, .hint { color: var(--secondary-text-color); font-size: 0.85em; }
   .from { color: var(--secondary-text-color); font-size: 0.8em; font-weight: normal; }
   .muted { color: var(--secondary-text-color); }
@@ -2774,6 +3111,43 @@ const STYLE = `<style>
     .dtime { display: flex; gap: 6px; color: var(--secondary-text-color); font-size: 0.85em; }
     .ddl > div { grid-template-columns: 1fr; gap: 0; }
   }
+  /* Occupancy forecast (0.5.0) */
+  ha-card { --fc-seq: #2a78d6; --fc-s1: #2a78d6; --fc-s2: #eb6834; }
+  .fchs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .fch { display: grid; justify-items: center; padding: 4px 10px; border: 1px solid var(--divider-color); border-radius: 8px; min-width: 56px; }
+  .fch.on { border-color: var(--primary-color); border-width: 2px; }
+  .fch b { font-size: 1.1em; font-weight: 500; }
+  .fct { border-collapse: collapse; width: 100%; font-size: 0.9em; }
+  .fct th, .fct td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--divider-color); }
+  .fct th { color: var(--secondary-text-color); font-weight: 500; }
+  .fct tr.on td { font-weight: 500; }
+  .fct td:first-child, .fct td:last-child, .fct th:first-child { white-space: nowrap; }
+  .fct.small { font-size: 0.75em; }
+  .fct.small th, .fct.small td { padding: 2px; text-align: center; }
+  .tscroll { overflow-x: auto; }
+  .fcf { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+  .fclearn { line-height: 1.5; }
+  .chartcap { font-size: 0.85em; font-weight: 500; margin-top: 4px; }
+  svg.chart { width: 100%; height: auto; display: block; overflow: visible; }
+  svg.chart text { fill: var(--secondary-text-color); font-size: 10px; }
+  svg.chart text.dl { fill: var(--primary-text-color); font-size: 10px; }
+  svg.chart .grid { stroke: var(--divider-color); stroke-width: 1; }
+  svg.chart .bar { fill: var(--fc-seq); }
+  svg.chart .nodata { stroke: var(--secondary-text-color); stroke-width: 1; stroke-dasharray: 2 2; }
+  svg.chart .hit { fill: transparent; }
+  svg.chart g:hover .bar { opacity: 0.8; }
+  svg.chart .pt { stroke: var(--card-background-color, #fff); stroke-width: 2; }
+  .legend { display: flex; gap: 12px; font-size: 0.85em; color: var(--secondary-text-color); }
+  .legend i { display: inline-block; width: 12px; height: 3px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+  .heat { display: grid; gap: 2px; font-size: 0.75em; color: var(--secondary-text-color); }
+  .hmr, .hmx { display: grid; grid-template-columns: 34px repeat(24, minmax(0, 1fr)); gap: 2px; align-items: center; }
+  .hmx span { grid-row: 1; }
+  .hm { display: block; height: 14px; border-radius: 3px; }
+  .hm.none { background: transparent; border: 1px dashed var(--divider-color); box-sizing: border-box; }
+  .hmlegend { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+  .hmlegend .hm { width: 14px; }
+  .hmramp { display: inline-block; width: 80px; height: 10px; border-radius: 3px;
+    background: linear-gradient(to right, color-mix(in oklab, var(--fc-seq) 8%, var(--card-background-color, #fff)), var(--fc-seq)); }
 </style>`;
 
 if (!customElements.get(MOOD_CARD)) {

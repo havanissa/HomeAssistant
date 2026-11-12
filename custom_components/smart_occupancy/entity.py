@@ -43,6 +43,13 @@ ROOM_COMPARISON_ENTITY: tuple[str, str, str] = ("helper_comparison", "sensor", "
 ROOM_LIGHTING_ENTITY: tuple[str, str, str] = ("mood_lighting", "sensor", "room_mood_lighting")
 # Daylight decision of every enabled room (Phase 0.3.3).
 ROOM_DAYLIGHT_ENTITY: tuple[str, str, str] = ("daylight", "sensor", "room_daylight")
+# Occupancy forecast of every enabled room (0.5.0): key -> (platform, translation key).
+ROOM_FORECAST_ENTITIES: dict[str, tuple[str, str]] = {
+    "forecast": ("sensor", "room_forecast"),
+    "forecast_confidence": ("sensor", "room_forecast_confidence"),
+    "predicted": ("binary_sensor", "room_predicted"),
+}
+GLOBAL_FORECAST_SENSOR_KEYS = ("predicted_next_room", "forecast_learning")
 
 
 def global_unique_id(key: str) -> str:
@@ -58,13 +65,14 @@ def room_unique_id(area_id: str) -> str:
 def expected_unique_ids(config: IntegrationConfig) -> set[str]:
     ids = {
         global_unique_id(k)
-        for k in GLOBAL_SENSOR_KEYS + GLOBAL_BINARY_SENSOR_KEYS + GLOBAL_BUTTON_KEYS
+        for k in GLOBAL_SENSOR_KEYS + GLOBAL_BINARY_SENSOR_KEYS + GLOBAL_BUTTON_KEYS + GLOBAL_FORECAST_SENSOR_KEYS
     }
     for area_id, room in config.enabled_rooms.items():
         ids.add(room_unique_id(area_id))
         ids |= {room_entity_unique_id(area_id, key) for key in ROOM_OCCUPANCY_ENTITIES}
         ids.add(room_entity_unique_id(area_id, ROOM_LIGHTING_ENTITY[0]))
         ids.add(room_entity_unique_id(area_id, ROOM_DAYLIGHT_ENTITY[0]))
+        ids |= {room_entity_unique_id(area_id, key) for key in ROOM_FORECAST_ENTITIES}
         if room.reference_occupancy_entity:
             ids.add(room_entity_unique_id(area_id, ROOM_COMPARISON_ENTITY[0]))
     return ids

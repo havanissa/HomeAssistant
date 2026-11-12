@@ -48,6 +48,12 @@ from .entity import (
     room_entity_unique_id,
     room_unique_id,
 )
+from .forecast_entities import (
+    ForecastLearningSensor,
+    PredictedNextRoomSensor,
+    RoomForecastConfidenceSensor,
+    RoomForecastSensor,
+)
 from .health import room_health
 from .occupancy import AVAILABLE, PENDING
 from .const import SIGNAL_LIGHTING_UPDATED, Darkness, LightingMode
@@ -205,6 +211,9 @@ async def async_setup_entry(
             entities.append(RoomHelperComparisonSensor(coordinator, area_id))
         entities.append(RoomMoodLightingSensor(coordinator, area_id))
         entities.append(RoomDaylightSensor(coordinator, area_id))
+        # Occupancy forecast (0.5.0, observation only).
+        entities += [RoomForecastSensor(coordinator, area_id), RoomForecastConfidenceSensor(coordinator, area_id)]
+    entities += [PredictedNextRoomSensor(coordinator), ForecastLearningSensor(coordinator)]
     async_add_entities(entities)
 
 

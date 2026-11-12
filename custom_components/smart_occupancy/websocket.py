@@ -526,6 +526,8 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
         "vacancy": {**room_lighting.vacancy.as_dict(), "last": rt.last_vacancy if rt else None},
         # Possible occupancy lighting (0.3.9): settings (room and global), lights, signals, the running stage.
         "preliminary": _preliminary_model(hass, ctrl, area_id) if area_id in ctrl.config.enabled_rooms else None,
+        # Occupancy forecast (0.5.0, observation only): the room's current forecast (details: forecast/room).
+        "forecast": ctrl.coordinator.forecast.summary(area_id) if area_id in ctrl.config.enabled_rooms else None,
         "occupancy": {
             "state": result.state.value if result else None,
             "occupied": result.occupied if result else None,
@@ -1152,11 +1154,12 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     if hass.data.get(_REGISTERED):
         return
     hass.data[_REGISTERED] = True
+    from .forecast_websocket import FORECAST_HANDLERS
     from .preliminary_websocket import PRELIMINARY_HANDLERS
     from .profile_websocket import PROFILE_HANDLERS
     from .switch_websocket import SWITCH_HANDLERS
 
-    for handler in (*SWITCH_HANDLERS, *PRESENCE_HANDLERS, *PRELIMINARY_HANDLERS, *PROFILE_HANDLERS):
+    for handler in (*SWITCH_HANDLERS, *PRESENCE_HANDLERS, *PRELIMINARY_HANDLERS, *PROFILE_HANDLERS, *FORECAST_HANDLERS):
         websocket_api.async_register_command(hass, handler)
     for handler in (
         ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_adaptive_set, ws_room_set,

@@ -21,7 +21,9 @@ from custom_components.smart_occupancy.coordinator import STATUS_OPTIONS
 from custom_components.smart_occupancy.entity import (
     GLOBAL_BINARY_SENSOR_KEYS,
     GLOBAL_BUTTON_KEYS,
+    GLOBAL_FORECAST_SENSOR_KEYS,
     GLOBAL_SENSOR_KEYS,
+    ROOM_FORECAST_ENTITIES,
     ROOM_COMPARISON_ENTITY,
     ROOM_DAYLIGHT_ENTITY,
     ROOM_LIGHTING_ENTITY,
@@ -78,8 +80,10 @@ def test_selectors_and_entities_translated() -> None:
     assert set(sel["profile_scope"]["options"]) == {"global", "room", "light"}
     room_keys = {tk for platform, tk in ROOM_OCCUPANCY_ENTITIES.values() if platform == "sensor"}
     room_keys |= {ROOM_COMPARISON_ENTITY[2], ROOM_LIGHTING_ENTITY[2], ROOM_DAYLIGHT_ENTITY[2], "room_observation"}
-    assert set(GLOBAL_SENSOR_KEYS) | room_keys == set(STRINGS["entity"]["sensor"])
+    room_keys |= {tk for platform, tk in ROOM_FORECAST_ENTITIES.values() if platform == "sensor"}
+    assert set(GLOBAL_SENSOR_KEYS) | set(GLOBAL_FORECAST_SENSOR_KEYS) | room_keys == set(STRINGS["entity"]["sensor"])
     room_binary = {tk for platform, tk in ROOM_OCCUPANCY_ENTITIES.values() if platform == "binary_sensor"}
+    room_binary |= {tk for platform, tk in ROOM_FORECAST_ENTITIES.values() if platform == "binary_sensor"}
     assert set(GLOBAL_BINARY_SENSOR_KEYS) | room_binary == set(STRINGS["entity"]["binary_sensor"])
     assert set(STRINGS["entity"]["sensor"]["room_state"]["state"]) == {s.value for s in OccupancyState}
     assert set(STRINGS["entity"]["sensor"]["room_helper_comparison"]["state"]) == set(COMPARISON_OPTIONS)
@@ -90,5 +94,9 @@ def test_selectors_and_entities_translated() -> None:
     for step in timing_steps:
         assert set(TIMING_PARAMETERS) <= set(step["data"])
     assert set(GLOBAL_BUTTON_KEYS) == set(STRINGS["entity"]["button"])
+    from custom_components.smart_occupancy.forecast_entities import LEARNING_STATES
+    from custom_components.smart_occupancy.forecast_model import CONFIDENCE_LEVELS
+    assert set(STRINGS["entity"]["sensor"]["room_forecast_confidence"]["state"]) == set(CONFIDENCE_LEVELS)
+    assert set(STRINGS["entity"]["sensor"]["forecast_learning"]["state"]) == set(LEARNING_STATES)
     for key in ("status", "room_observation"):
         assert set(STRINGS["entity"]["sensor"][key]["state"]) == set(STATUS_OPTIONS)
