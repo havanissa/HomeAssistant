@@ -201,7 +201,7 @@ async def test_unconfirmed_motion_removes_only_the_preliminary_light(hass: HomeA
     assert hass.states.is_state(lit.strip, "on") and calls_for(lights, lit.strip) == []
     d = log(ctrl, lit.area)[0]
     assert (d["action"], d["status"], d["trigger"]) == ("Preliminary light off", "executed", "preliminary_end"), d
-    assert d["explanation"] == ("Possible occupancy was not confirmed within 30 s: light.kno_lamp switched off "
+    assert d["explanation"] == ("Possible occupancy was not confirmed within 30 s (timeout expired): light.kno_lamp switched off "
                                 "(preliminary light removed).")
     # The room becomes vacant later (exit confirmation: the visit was never confirmed): the lamp gets nothing
     # more. The strip is the vacancy action's (Turn off; the person moved in the room after switching it on).
@@ -222,7 +222,7 @@ async def test_a_light_changed_by_a_person_is_left_alone(hass: HomeAssistant, li
     assert calls_for(lights, lit.lamp) == [("turn_on", LAMP_10)]
     assert hass.states.is_state(lit.lamp, "on")
     d = log(ctrl, lit.area)[0]
-    assert d["action"] == "No change" and "Left as it is: light.kno_lamp (changed since)" in d["explanation"], d
+    assert d["action"] == "No change" and "light.kno_lamp left as it is: changed by a person" in d["explanation"], d
 
 
 async def test_door_only_evidence_ends_when_the_room_is_vacant(hass: HomeAssistant, pilot: Pilot, freezer,
@@ -310,7 +310,8 @@ async def test_observing_sends_nothing(hass: HomeAssistant, lit: Lit, freezer, l
     assert "would switch on light.kno_lamp at 10 %, 2200 K as a preliminary light. Observing: nothing was sent." \
         in entries[1]["explanation"]
     assert (entries[0]["status"], entries[0]["explanation"]) == ("observed", (
-        "Possible occupancy was not confirmed within 30 s: would switch off light.kno_lamp (preliminary light). "
+        "Possible occupancy was not confirmed within 30 s (timeout expired): would switch off light.kno_lamp "
+        "(preliminary light). "
         "Observing: nothing was sent."))
 
 

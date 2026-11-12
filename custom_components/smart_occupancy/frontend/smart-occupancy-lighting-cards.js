@@ -71,7 +71,7 @@
  * reports a change.
  */
 
-const VERSION = "0.3.9";
+const VERSION = "0.3.10";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -1365,6 +1365,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
           value="${esc(set.on_below ?? "")}" placeholder="${esc(e.on_below ?? p.normal_on_below)}" data-control="pre-num" data-key="on_below" ${dis}> lx
           <span class="sub">${set.on_below == null ? `now ${esc(luxText)}` : ""}</span> ${pill(src("on_below"))} ${inherit("on_below", g.on_below == null ? "same as normal" : `${g.on_below} lx`)}${this._statusHtml("pre-on_below")}</div></div>
       <div class="sub">Uses this room's daylight rules (sensor, fallback when the reading is unknown); only the threshold can differ. Empty: ${esc(g.on_below == null ? `the normal threshold (${p.normal_on_below} lx)` : `the global default (${g.on_below} lx)`)}.</div>
+      ${(p.cleanup || []).length ? `<div class="note warn">Still to switch off: ${esc(p.cleanup.map((c) => `${c.name} (${({ observing: "the room is Observing", paused: "Main Mood is Manual", unavailable: "unavailable", failed: `failed: ${c.error || "error"}` })[c.reason] || c.reason})`).join(", "))}. Switched off as soon as that is possible.</div>` : ""}
       ${stg ? `<div class="note">Now: possible occupancy since ${fmtTime(stg.started)} (${esc(stg.evidence.join(", "))})${stg.lights.length ? ` · ${esc(stg.lights.join(", "))} on` : ""} · ends ${fmtTime(stg.deadline)} unless confirmed.</div>` : ""}
       ${this._prelimGlobalHtml(p, ro)}</div>`;
   }

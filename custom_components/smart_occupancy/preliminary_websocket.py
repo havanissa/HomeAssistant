@@ -101,6 +101,9 @@ def preliminary_model(hass: HomeAssistant, ctrl: LightingController, area_id: st
         "candidates": [light(e) for e in controlled],
         "targets": targets,
         "stage": stage,
+        # Preliminary lights whose switch-off is still due (Observing, Manual mood, unavailable, failed).
+        "cleanup": [{"entity_id": e, "name": friendly_name(hass, e) or e, "reason": i.get("reason"),
+                     "error": i.get("error")} for e, i in (rt.preliminary_cleanup.items() if rt else ())],
         "occupancy": result.state.value if result else None,
         "limits": {"timeout": [TIMEOUT_MIN, TIMEOUT_MAX], "kelvin": [KELVIN_MIN, KELVIN_MAX],
                    "lux": [LUX_MIN, LUX_MAX_THRESHOLD], "transition": [0, TRANSITION_MAX]},
