@@ -132,6 +132,9 @@ async def async_migrate_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEn
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: SmartOccupancyConfigEntry) -> None:
+    # Presence settings saved from the room card (0.3.8) are applied live; every other change reloads.
+    if entry.runtime_data.consume_live_options(dict(entry.options)):
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 

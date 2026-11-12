@@ -506,7 +506,7 @@ class RoomMoodLightingSensor(RoomOccupancyEntity, SensorEntity):
         "manual_overrides", "manual_override_minutes", "last_applied_profile", "last_applied_at",
         "last_trigger", "last_result", "last_reason", "last_counts", "last_errors", "last_decision_at",
         "integration", "manual_mode", "global_adjustment", "last_adaptive_at", "last_adaptive", "adaptive_conflicts",
-        "auto_on",
+        "auto_on", "vacancy",
     })
 
     async def async_added_to_hass(self) -> None:

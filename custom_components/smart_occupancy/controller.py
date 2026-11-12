@@ -50,6 +50,20 @@ mode (Observing / Automatic) does not block a deliberately activated switch,
 Manual mood does not pause it (a person's explicit request), and the lights it
 switches get a manual override, so automatic lighting does not undo it. A
 switch in Observing never sends anything.
+
+Vacancy (0.3.8): when the occupancy engine reports the room vacant (its
+vacancy timeout, from the room's presence settings, has expired), the room's
+vacancy action runs once: Turn off, a vacant mood, or Leave unchanged
+(``planner.build_vacancy_plan``). There is no second timer: the engine's
+possible-vacancy period is the timeout, and presence returning during it
+cancels the pending action (nothing is switched off). Manual overrides made
+before the room went quiet end with the vacancy (as before); one made while
+the room was already quiet (a person deliberately changed a light in an
+empty room) is respected until it expires, and the vacancy action then runs
+for that light if the room is still vacant. A light that was unavailable is
+handled when it comes back. Ambient lights, Observing, Manual mode and the
+other protections apply as for every mood plan. Switching a vacant room to
+Automatic does not switch anything off: the action runs on a transition.
 """
 
 from __future__ import annotations
@@ -123,6 +137,7 @@ from .const import (
     OccupancyState,
     UnattributedPolicy,
     UnrepresentableMode,
+    VacancyAction,
 )
 from .const import ALL_MOODS
 from .discovery import area_name
@@ -131,7 +146,7 @@ from .lighting_config import LightingConfig, LightingStore
 from .lighting_decisions import LightingDecisions
 from .models import IntegrationConfig
 from .occupancy import friendly_name
-from .planner import BLOCKED, CHANGE, Plan, PlanItem, Target, build_plan
+from .planner import BLOCKED, CHANGE, Plan, PlanItem, Target, build_plan, build_vacancy_plan
 from .profiles import resolve
 from .supervision import assert_room_control_permitted, assert_switch_control_permitted
 from .switch_control import SwitchControl
@@ -231,6 +246,12 @@ class RoomRuntime:
     temp_mood: dict[str, Any] | None = None
     # The visit whose activation decision was logged last (0.3.7; not persisted).
     decision_visit: int = -1
+    # Vacancy (0.3.8): lights whose vacancy action is still due (kept by a manual override, or unavailable).
+    vacancy_deferred: set[str] = field(default_factory=set)
+    # The logged "vacancy timeout started" decision and when it started (monotonic; not persisted).
+    vacancy_wait: tuple[str, float] | None = None
+    # The last vacancy action: {"at", "action", "result", "text"}.
+    last_vacancy: dict[str, Any] | None = None
 
     def persist(self) -> dict[str, Any]:
         return {
@@ -247,6 +268,8 @@ class RoomRuntime:
             "activation": self.activation,
             "last_activation_at": self.last_activation_at,
             "temp_mood": self.temp_mood,
+            "vacancy_deferred": sorted(self.vacancy_deferred),
+            "last_vacancy": self.last_vacancy,
         }
 
     @classmethod
@@ -271,6 +294,8 @@ class RoomRuntime:
             activation=activation,
             last_activation_at=data.get("last_activation_at"),
             temp_mood=data.get("temp_mood") if isinstance(data.get("temp_mood"), dict) else None,
+            vacancy_deferred={e for e in data.get("vacancy_deferred") or [] if isinstance(e, str)},
+            last_vacancy=data.get("last_vacancy") if isinstance(data.get("last_vacancy"), dict) else None,
             # Continue counting visits, so the next visit is never mistaken for the recorded one.
             visit=int(activation.get("visit") or 0) if activation else 0,
         )
@@ -808,7 +833,12 @@ class LightingController:
         force = self._adaptive_force.get(area_id, set())
         competing = self.adaptive_conflicts(area_id)
         decisions: dict[str, tuple[Target, AdaptiveDecision]] = {}
+        # A vacant room in its vacant mood (0.3.8): the current mood's global adjustment would undo it.
+        vacant_mood = (result is not None and result.occupied is False
+                       and lighting.room(area_id).vacancy.action == VacancyAction.VACANT_MOOD)
         for item, target in zip(plan.items, targets, strict=True):
+            if vacant_mood and not item.persistent:
+                continue
             if item.resolved.adaptive is None or not any(
                     e.get("mode") in ("global", "offset") for e in item.resolved.adaptive.values()):
                 continue
@@ -861,9 +891,18 @@ class LightingController:
                 return
             changed = (rt.occupancy_state, rt.occupied) != (result.state.value, result.occupied)
             was_occupied = rt.occupied
+            was_state = rt.occupancy_state
             rt.occupancy_state, rt.occupied = result.state.value, result.occupied
             if not self._running:
                 return
+            waiting = was_state == OccupancyState.POSSIBLE_VACANCY
+            if result.state == OccupancyState.POSSIBLE_VACANCY and not waiting and was_occupied:
+                self._vacancy_started(area_id, result)
+            elif waiting and result.occupied and result.state != OccupancyState.POSSIBLE_VACANCY:
+                self._vacancy_cancelled(area_id)
+            if result.occupied and rt.vacancy_deferred:
+                rt.vacancy_deferred.clear()  # someone is here: a deferred vacancy action is no longer due
+                self._mark_dirty()
             if result.state == OccupancyState.CONFIRMED_OCCUPANCY and not rt.visit_confirmed:
                 rt.visit_confirmed = True
                 new_visit = not rt.visit_started
@@ -884,19 +923,151 @@ class LightingController:
                 rt.visit_started = False
                 if rt.visit_confirmed:
                     rt.visit_confirmed = False
-                cleared = len(rt.overrides)
-                if rt.overrides:
-                    _LOGGER.debug("lighting_overrides_cleared area=%s reason=vacant", area_id)
-                    rt.overrides.clear()
-                    self._mark_dirty()
-                    self._schedule_override_expiry()
-                if was_occupied:
-                    lit = [e for e in self.managed_room(area_id).controlled if self.hass.states.is_state(e, "on")]
-                    self.explain.vacant(area_id, lit, cleared)
+                if was_occupied:  # (vacant again after e.g. a door-only movement: nothing ended)
+                    if rt.vacancy_wait:
+                        self.explain.vacancy_expired(area_id, rt.vacancy_wait[0])
+                        rt.vacancy_wait = None
+                    cleared = self._end_overrides(area_id, result)
+                    self._vacate(area_id, "vacant", cleared=cleared)
             if changed:
                 self._notify()
 
         return update
+
+    # ----------------------------------------------------------- vacancy (0.3.8)
+    def _lit(self, area_id: str) -> list[str]:
+        return [e for e in self.managed_room(area_id).controlled if self.hass.states.is_state(e, "on")]
+
+    @callback
+    def _vacancy_started(self, area_id: str, result: RoomResult) -> None:
+        """No presence any more: the vacancy timeout (the engine's possible-vacancy period) started."""
+        rt = self.runtime_for(area_id)
+        decision = self.explain.vacancy_wait(area_id, result, self._lit(area_id))
+        rt.vacancy_wait = (decision.id, time.monotonic()) if decision else None
+
+    @callback
+    def _vacancy_cancelled(self, area_id: str) -> None:
+        """Presence returned before the vacancy timeout ended: the vacancy action is not run."""
+        rt = self.runtime_for(area_id)
+        if rt.vacancy_wait:
+            decision_id, since = rt.vacancy_wait
+            self.explain.vacancy_cancelled(area_id, decision_id, time.monotonic() - since)
+        rt.vacancy_wait = None
+        _LOGGER.debug("lighting_vacancy_cancelled area=%s", area_id)
+
+    def _end_overrides(self, area_id: str, result: RoomResult) -> int:
+        """Manual overrides end with the vacancy, except one made while the room was already quiet.
+
+        A change made after the last presence (nobody was detected in the room)
+        was meant for the empty room - e.g. a light switched on from the app -
+        so it is kept until it expires, and blocks the vacancy action for that
+        light meanwhile. Returns how many overrides ended.
+        """
+        rt = self.runtime_for(area_id)
+        if not rt.overrides:
+            return 0
+        quiet = result.quiet_since
+        kept = {
+            e: o for e, o in rt.overrides.items()
+            if quiet is not None and (since := dt_util.parse_datetime(o.get("since") or "")) is not None
+            and since > quiet
+        }
+        cleared = len(rt.overrides) - len(kept)
+        if cleared:
+            _LOGGER.debug("lighting_overrides_cleared area=%s reason=vacant n=%d kept=%d", area_id, cleared, len(kept))
+            rt.overrides = kept
+            self._mark_dirty()
+            self._schedule_override_expiry()
+        return cleared
+
+    @callback
+    def _vacate(self, area_id: str, trigger: str, *, only: set[str] | None = None, cleared: int = 0) -> None:
+        if not self._running or self._stopped or area_id not in self.config.enabled_rooms:
+            return
+        self._create_task(self.async_vacate(area_id, trigger, only=only, cleared=cleared))
+
+    def vacancy_plan(self, area_id: str, trigger: str = "vacant") -> Plan:
+        """What the room's vacancy action does now. Never sends anything."""
+        status = self.mood_status()
+        mood, _ = self.room_mood(area_id, status)
+        vacancy = self.lighting.room(area_id).vacancy
+        result = self.coordinator.occupancy.result(area_id)
+        return build_vacancy_plan(
+            area_id=area_id,
+            action=vacancy.action,
+            mood=mood,
+            vacant_mood=vacancy.mood,
+            targets=self._targets(area_id),
+            resolve_current=lambda t: self.resolve(mood or "", area_id, t.entity_id, t.targets),
+            resolve_vacant=lambda t: self.resolve(vacancy.mood or "", area_id, t.entity_id, t.targets),
+            occupancy_state=result.state.value if result else None,
+            occupied=result.occupied if result else None,
+            trigger=trigger,
+            control_enabled=self.room_active(area_id),
+            note=status.detail if status.manual or not mood else None,
+            manual_mode=status.manual,
+        )
+
+    async def async_vacate(self, area_id: str, trigger: str = "vacant", *, only: set[str] | None = None,
+                           cleared: int = 0) -> Plan | None:
+        """Run the room's vacancy action (Automatic) or record what it would do (Observing, Manual)."""
+        if self._stopped:
+            return None
+        lock = self._locks.setdefault(area_id, asyncio.Lock())
+        async with lock:
+            result = self.coordinator.occupancy.result(area_id)
+            if self._stopped or result is None or result.state != OccupancyState.VACANT or result.occupied is not False:
+                return None  # occupancy returned before this ran: there is nothing to vacate
+            plan = self.vacancy_plan(area_id, trigger)
+            rt = self.runtime_for(area_id)
+            relevant = [i for i in plan.items if only is None or i.entity_id in only]
+            changes = [i for i in relevant if i.decision == CHANGE]
+            executing = plan.control_enabled and not plan.manual_mode and bool(changes)
+            ok: list[PlanItem] | None = None
+            errors: dict[str, str] = {}
+            paused: set[str] = set()
+            if executing:
+                errors = await self._execute(area_id, changes)
+                paused = {e for e, m in errors.items() if m == _PAUSED}
+                errors = {e: m for e, m in errors.items() if m != _PAUSED}
+                ok = [i for i in changes if i.entity_id not in errors and i.entity_id not in paused]
+                sent_at = time.monotonic()
+                for item in ok:
+                    rt.last_commands[item.entity_id] = (item.service or "", dict(item.data))
+                    rt.adaptive_sent[item.entity_id] = AdaptiveSent(sent_at, {
+                        k: v for k, v in item.data.items() if k in ("brightness_pct", "color_temp_kelvin")})
+            if plan.control_enabled and not plan.manual_mode:
+                # Due later: lights kept by a manual override made in the empty room, unavailable or failed ones.
+                handled = {i.entity_id for i in relevant}
+                due = {i.entity_id for i in relevant if i.decision == BLOCKED
+                       and i.reason_code in ("manual_override", "offline")} | set(errors)
+                rt.vacancy_deferred = (rt.vacancy_deferred - handled) | due
+            decision = self.explain.vacancy(area_id, trigger, plan, relevant, ok=ok, errors=errors, paused=paused,
+                                            cleared=cleared)
+            if decision is not None:
+                rt.last_vacancy = {"at": decision.at, "action": plan.vacancy, "result": decision.status,
+                                   "text": decision.explanation}
+            log = _LOGGER.warning if errors else _LOGGER.info if executing else _LOGGER.debug
+            log("lighting_vacancy area=%s action=%s trigger=%s changed=%d failed=%d deferred=%d", area_id,
+                plan.vacancy, trigger, len(ok or []), len(errors), len(rt.vacancy_deferred))
+            self._finish(area_id, plan)
+            return plan
+
+    @callback
+    def _retry_vacancy(self, area_id: str, entities: set[str], trigger: str) -> None:
+        """A deferred vacancy action becomes possible (override ended, light back) while the room is vacant."""
+        rt = self.runtime.get(area_id)
+        if rt is None or not (due := entities & rt.vacancy_deferred):
+            return
+        result = self.coordinator.occupancy.result(area_id)
+        if result is None or result.state != OccupancyState.VACANT:
+            return
+        self._vacate(area_id, trigger, only=due)
+
+    @callback
+    def async_presence_changed(self) -> None:
+        """Presence settings changed live (signals enabled or excluded, timing); occupancy was re-evaluated."""
+        self._notify()
 
     @callback
     def _visit_trigger(self, area_id: str, trigger: str) -> None:
@@ -1162,6 +1333,8 @@ class LightingController:
                     rt = self.runtime.get(area_id)
                     if rt and target in rt.pending_reconnect:
                         self._schedule_apply(area_id, "reconnected", {target})
+                    if rt and target in rt.vacancy_deferred and self.room_active(area_id) and not self._manual:
+                        self._retry_vacancy(area_id, {target}, "reconnected")
             return
         if old.attributes.get("entity_id") != new.attributes.get("entity_id"):
             self._invalidate_managed()  # group membership changed
@@ -1237,11 +1410,14 @@ class LightingController:
         self._override_timer = None
         changed = False
         for area_id, rt in self.runtime.items():
-            for entity_id in [e for e, o in rt.overrides.items()
-                              if o.get("until") and (dt_util.parse_datetime(o["until"]) or now) <= now]:
+            expired = [e for e, o in rt.overrides.items()
+                       if o.get("until") and (dt_util.parse_datetime(o["until"]) or now) <= now]
+            for entity_id in expired:
                 del rt.overrides[entity_id]
                 _LOGGER.debug("lighting_override_expired area=%s light=%s", area_id, entity_id)
                 changed = True
+            if expired:
+                self._retry_vacancy(area_id, set(expired), "override_expired")
         if changed:
             self._mark_dirty()
             self._notify()
@@ -1253,10 +1429,13 @@ class LightingController:
         if rt is None:
             return 0
         if entity_id is None:
-            n = len(rt.overrides)
+            ended = set(rt.overrides)
             rt.overrides.clear()
         else:
-            n = 1 if rt.overrides.pop(entity_id, None) else 0
+            ended = {entity_id} if rt.overrides.pop(entity_id, None) else set()
+        n = len(ended)
+        if ended:
+            self._retry_vacancy(area_id, ended, "override_expired")
         if n:
             self._mark_dirty()
             self._schedule_override_expiry()
@@ -1512,6 +1691,11 @@ class LightingController:
                 "activation": rt.activation,
             },
             "last_external_changes": rt.last_external,
+            "vacancy": {
+                **room_lighting.vacancy.as_dict(),
+                "last": rt.last_vacancy,
+                "deferred": sorted(rt.vacancy_deferred),
+            },
         }
 
     def activation_review(self, area_id: str) -> dict[str, Any]:

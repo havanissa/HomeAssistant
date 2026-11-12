@@ -113,10 +113,61 @@ class OccupancyManager:
         self._running = True
         if tracked := self.tracked_entities:
             self._unsub = async_track_state_change_event(self.hass, tracked, self._on_state_event)
+        # The states were read in async_load, before this subscription existed: a signal that changed in
+        # between (common while Home Assistant is starting, e.g. a PC bridge connecting) would otherwise stay
+        # at its old value - "unknown" for a sensor that was still unavailable - until it changed again.
+        self._resync()
         now = dt_util.utcnow()
         for area_id in self.engines:
             self._evaluate(area_id, now, notify=False)
         _LOGGER.debug("occupancy_start rooms=%d tracked=%d", len(self.engines), len(self.tracked_entities))
+
+    @callback
+    def _resync(self) -> None:
+        """Read the current state of every signal again (observations that are not newer are ignored)."""
+        now = dt_util.utcnow()
+        for engine in self.engines.values():
+            for entity_id, track in engine.tracks.items():
+                state = self.hass.states.get(entity_id)
+                value = interpret(state.state if state else None, inverted=track.assignment.inverted)
+                if value == track.value:
+                    continue
+                at = min(state.last_changed, now) if state else now
+                if track.since is not None and at < track.since:
+                    at = now  # the current state is newer than what the engine holds, whatever its timestamp
+                name = state.attributes.get("friendly_name") if state else None
+                engine.observe(entity_id, value, at, name)
+
+    @callback
+    def async_reconfigure(self, config: IntegrationConfig) -> None:
+        """Apply changed presence settings (signals enabled or excluded, timing) without a reload (0.3.8).
+
+        Only the settings of signals already assigned change here: the set of
+        rooms and of assigned entities is the same (anything else reloads the
+        integration). Every room is evaluated again at once.
+        """
+        self.config = config
+        for area_id, engine in self.engines.items():
+            room = config.room(area_id)
+            engine.reconfigure(room.sensors, config.timing_for(area_id))
+            if (tracker := self.comparisons.get(area_id)) is not None:
+                tracker.grace_seconds = engine.timing.correlation_window
+        self._resync()
+        if self._running:
+            now = dt_util.utcnow()
+            for area_id in self.engines:
+                self._evaluate(area_id, now)
+
+    def same_signals(self, config: IntegrationConfig) -> bool:
+        """The rooms and assigned signals of ``config`` are the ones this manager runs."""
+        if set(config.enabled_rooms) != set(self.engines):
+            return False
+        return all(
+            [s.entity_id for s in config.room(a).sensors] == list(engine.tracks)
+            and [(s.entity_id, s.kind) for s in config.room(a).sensors]
+            == [(t.entity_id, t.kind) for t in engine.tracks.values()]
+            for a, engine in self.engines.items()
+        )
 
     @callback
     def async_stop(self) -> None:

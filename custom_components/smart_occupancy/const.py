@@ -8,7 +8,7 @@ from typing import Final
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
 PHASE: Final = "0.3.5"
-VERSION: Final = "0.3.7"
+VERSION: Final = "0.3.8"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -223,7 +223,8 @@ CARD_FILENAMES: Final = (CARD_FILENAME, LIGHTING_CARD_FILENAME)
 LIGHTING_STORE_VERSION: Final = 1
 # Minor 2 (0.3.3): daylight settings; rooms activated before 0.3.3 keep waiting for confirmed occupancy.
 # Minor 3 (0.3.5): wall switches and remotes (every room starts with none; legacy entities kept).
-LIGHTING_STORE_MINOR_VERSION: Final = 3
+# Minor 4 (0.3.8): what automatic lighting does when a room becomes vacant (rooms without a setting: Turn off).
+LIGHTING_STORE_MINOR_VERSION: Final = 4
 LIGHTING_STORE_KEY: Final = "smart_occupancy.lighting"
 LIGHTING_SAVE_DELAY_SECONDS: Final = 1
 # Runtime state of mood lighting (manual overrides, last applied profile).
@@ -273,6 +274,17 @@ class UnattributedPolicy(StrEnum):
 
     IGNORE = "ignore"            # not a manual override (default)
     MANUAL = "manual"            # treat as a manual override
+
+
+class VacancyAction(StrEnum):
+    """What automatic lighting does when a room becomes vacant (0.3.8)."""
+
+    TURN_OFF = "turn_off"        # switch the room's lights off (ambient lights keep following the mood)
+    VACANT_MOOD = "vacant_mood"  # apply a chosen mood's profile to the lights that are on
+    LEAVE = "leave"              # leave every light as it is
+
+
+DEFAULT_VACANCY_ACTION: Final = VacancyAction.TURN_OFF
 
 
 class LightingMode(StrEnum):

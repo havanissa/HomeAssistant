@@ -31,7 +31,9 @@ Door contacts (any role except Ignore)
     starts in the room is exit evidence (fast vacancy path); movement in an
     adjacent room right after it strengthens that evidence.
 Ignore
-    Kept in the configuration, not used.
+    Kept in the configuration, not used. A signal excluded in the Presence
+    tab (``enabled: false``, 0.3.8) is treated the same way while it is
+    excluded; its value is still tracked for diagnostics.
 
 States and transitions
 ----------------------
@@ -171,7 +173,8 @@ class SignalTrack:
 
     @property
     def used(self) -> bool:
-        return self.role != SensorRole.IGNORE
+        """Takes part in occupancy (role is not Ignore and the signal is not excluded in the Presence tab)."""
+        return self.assignment.participates
 
     @property
     def capable(self) -> bool:
@@ -226,6 +229,7 @@ class SignalView:
             "kind": t.kind.value,
             "role": t.role.value,
             "inverted": t.assignment.inverted,
+            "enabled": t.assignment.enabled,
             "value": t.value.value,
             "status": self.status.value,
             "since": t.since.isoformat(timespec="seconds") if t.since else None,
@@ -303,6 +307,20 @@ class RoomEngine:
         self._last_new_activity: datetime | None = None  # latest *start* inside the room
         self._neighbour_motion: dict[str, datetime] = {}
         self.result: RoomResult | None = None
+
+    def reconfigure(self, sensors: tuple[SensorAssignment, ...], timing: OccupancyTiming) -> None:
+        """Apply changed signal assignments (enabled, role) and timing without losing what is known.
+
+        Every signal keeps its value and history, so the room is evaluated again
+        at once with the new settings: no restart hold, no new quiet period.
+        """
+        self.timing = timing
+        tracks: dict[str, SignalTrack] = {}
+        for s in sensors:
+            track = self.tracks.get(s.entity_id) or SignalTrack(s)
+            track.assignment = s
+            tracks[s.entity_id] = track
+        self.tracks = tracks
 
     # ------------------------------------------------------------ inputs
     def observe(self, entity_id: str, value: Value, at: datetime, name: str | None = None) -> bool:

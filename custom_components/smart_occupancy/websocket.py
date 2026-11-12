@@ -61,6 +61,7 @@ from .const import (
     SourceScale,
     UnattributedPolicy,
     UnrepresentableMode,
+    VacancyAction,
 )
 from .controller import LightingController
 from .daylight import DaylightConfig, RoomDaylight, parse_lux, round_lux
@@ -69,6 +70,7 @@ from .health import room_health
 from .lighting import light_capabilities
 from .lighting_config import (
     AdaptiveConfig,
+    RoomVacancy,
     UnrepresentableHandling,
     parent_cycle,
     set_profile,
@@ -77,6 +79,7 @@ from .lighting_config import (
 )
 from .models import IntegrationConfig, LightCategory, ProfileSetting, guess_kind, unique_category_key
 from .occupancy import friendly_name
+from .presence import PRESENCE_HANDLERS, presence_model
 from .profiles import validate_setting
 
 _THROTTLE_SECONDS = 0.3
@@ -491,6 +494,10 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
         "switches": switches_model(hass, ctrl, area_id),
         # Decision log (0.3.7): the latest decision and the last ones, newest first (backend records only).
         "decisions": ctrl.decisions.model(area_id),
+        # Presence tab (0.3.8): occupancy inputs, their live states, presence settings (global and room).
+        "presence": presence_model(hass, ctrl.coordinator, area_id) if area_id in ctrl.config.enabled_rooms else None,
+        # When the room becomes vacant (0.3.8), and what the last vacancy did.
+        "vacancy": {**room_lighting.vacancy.as_dict(), "last": rt.last_vacancy if rt else None},
         "occupancy": {
             "state": result.state.value if result else None,
             "occupied": result.occupied if result else None,
@@ -746,6 +753,9 @@ def ws_adaptive_set(hass: HomeAssistant, connection: websocket_api.ActiveConnect
         None, vol.All(vol.Coerce(int), vol.Range(min=0, max=MANUAL_OVERRIDE_MAX_MINUTES))
     ),
     vol.Optional("manual_switches"): [cv.entity_id],
+    # 0.3.8: when the room becomes vacant.
+    vol.Optional("vacancy_action"): vol.In([a.value for a in VacancyAction]),
+    vol.Optional("vacancy_mood"): vol.Any(None, vol.All(str, vol.Length(max=100))),
 })
 @websocket_api.require_admin
 @callback
@@ -766,6 +776,18 @@ def ws_room_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
     for key in ("excluded", "manual_switches"):
         if key in msg:
             changes[key] = tuple(dict.fromkeys(msg[key]))
+    if "vacancy_action" in msg or "vacancy_mood" in msg:
+        current = ctrl.lighting.room(area_id).vacancy
+        action = VacancyAction(msg.get("vacancy_action", current.action))
+        mood = (msg["vacancy_mood"] or "").strip() or None if "vacancy_mood" in msg else current.mood
+        if action == VacancyAction.VACANT_MOOD and not mood:
+            connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT,
+                                  "Choose the mood to apply when the room is vacant")
+            return
+        if mood and (ctrl.lighting.is_manual(mood) or mood == ALL_MOODS):
+            connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, f"{mood} is not a mood")
+            return
+        changes["vacancy"] = RoomVacancy(action, mood)
     ctrl.store.async_set(ctrl.with_room(area_id, **changes))
     connection.send_result(msg["id"], {"revision": ctrl.store.revision})
 
@@ -1093,7 +1115,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     hass.data[_REGISTERED] = True
     from .switch_websocket import SWITCH_HANDLERS
 
-    for handler in SWITCH_HANDLERS:
+    for handler in (*SWITCH_HANDLERS, *PRESENCE_HANDLERS):
         websocket_api.async_register_command(hass, handler)
     for handler in (
         ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_adaptive_set, ws_room_set,

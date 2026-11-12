@@ -4,13 +4,15 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **This is Phase 0.3.5: mood-based lighting with simple dashboard cards (Smart Lighting Profiles, Smart Room Lighting, Room Status), on top of the Phase 0.2 occupancy engine (see [CHANGELOG.md](CHANGELOG.md)).** Phase 0.3.5 adds **native wall switches and remotes** (Zigbee2MQTT, MQTT device triggers and event entities): assign a switch to a room, learn its buttons, give each button an action, and let presses count as manual changes that automatic lighting respects (see [Wall switches and remotes](#wall-switches-and-remotes-phase-035)). Phase 0.3.3 switches a room's mood lighting on when someone arrives **and it is dark**: indoor light sensors (protected against being lit by the room's own lamps), an optional outdoor sensor and the sun decide whether artificial light is needed. Phase 0.3.2 lets moods, light types and single lights follow your **existing global brightness and colour temperature adjustment**, and adds the **Manual** pause. The interface stays simple by default; everything else is under *Advanced*.
 
+**0.3.8** adds what happens when a room becomes **vacant** (*Turn off*, a *Vacant mood*, or *Leave unchanged*; see [Vacancy](#vacancy-038)), a **Presence** tab with the room's occupancy sensors, their live states, a switch to use each one or not, and the presence settings as global defaults with room overrides (see [Presence tab](#presence-tab-038)), and compact icon tabs in the room card.
+
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
 - changes the mood selectors or any other helper (they are only *read*), except when you press a wall switch button that you assigned to *Select mood (all rooms)*: that selects the option on your Manual Mood selector. Main Mood is never written
 - takes over a wall switch, changes Zigbee bindings, or publishes MQTT messages
 - controls lights in a room that was not explicitly activated
-- switches lights off because a room became vacant (that is Phase 0.4)
+- switches lights off because a room became vacant, unless the room is in **Automatic** and its vacancy behaviour is *Turn off* or a *Vacant mood* (0.3.8); ambient lights are never switched off by vacancy
 - switches lights off, or changes their brightness or colour, because of daylight or a lux reading
 - switches a light on because the global brightness or colour temperature changed
 - sends any automatic lighting command while Main Mood is **Manual**
@@ -169,6 +171,8 @@ One shared executor for every mood. In an activated room it applies the room's e
 - a profile entry changes; only the lights whose resolved setting changed get a command
 - a light that was offline during an application comes back
 
+When the room **becomes vacant**, its vacancy action runs once (see [Vacancy](#vacancy-038)).
+
 It sends nothing when:
 - the light already is in the requested state, or the same command was sent and nobody changed the light since
 - the room is **vacant**: applied when occupancy is next confirmed. *Ambient* settings are the exception.
@@ -202,11 +206,12 @@ Not set — tap to set: [Task lighting]
 - **Preview** shows what each room would do; a preview never changes a light.
 - **Advanced** (card): mood inheritance (parent and fallback mood), handling of moods Main Mood cannot represent, light types (kind, label, add/remove, suggestions), exclusion label, manual-override duration, the **outdoor light sensor (all rooms)**, and the full validation list.
 
-**Smart Room Lighting** (`custom:smart-occupancy-room-lighting-card`, pick the room in the visual editor). Six tabs (**Overview · Lights · Automatic · Overrides · Preview · Advanced**), the only navigation; only **Overview** is open by default:
+**Smart Room Lighting** (`custom:smart-occupancy-room-lighting-card`, pick the room in the visual editor). Nine tabs, shown as compact icons (**Overview · Log · Lights · Automatic · Presence · Switches · Overrides · Preview · Advanced**), the only navigation; only **Overview** is open by default. A tab's name appears as a tooltip on hover and on keyboard focus, is read by screen readers, and is written beside the selected icon (below the icons on narrow cards). Arrow keys, Home and End move between tabs. The bar wraps rather than hiding tabs.
 
 - **Overview**: mood (follows global or room mood), automatic lighting mode (Observing / Automatic / Paused / Blocked), occupancy and lighting health, managed lights, last applied, the daylight decision in one line, then one line per issue: a group question with its three buttons, "2 lighting conflicts · Review", short health lines. No settings forms.
 - **Lights**: one line per light type ("Spottar · 6 lights · follows global · Off"); tap to see its lights, or tick *Show every light*. *Managed* toggles exclusion.
-- **Automatic**: the room's **operating mode** first (see [Operating modes](#operating-modes-036)), then automatic switch-on when occupied and dark (see [Daylight](#daylight-aware-automatic-lighting-phase-033)), with the details collapsed under *Advanced daylight settings*.
+- **Automatic**: the room's **operating mode** first (see [Operating modes](#operating-modes-036)), then automatic switch-on when occupied and dark (see [Daylight](#daylight-aware-automatic-lighting-phase-033)), then **When the room becomes vacant** (see [Vacancy](#vacancy-038)), with the daylight details collapsed under *Advanced daylight settings*.
+- **Presence**: the room's occupancy sensors, their live states, a *Use* switch per sensor, and the presence settings (see [Presence tab](#presence-tab-038)).
 - **Overrides**: room mood; per type *follows global* or *overridden* (tap to override, the same editor with *Follow global*); single-light overrides.
 - **Preview**: what this room would do in a mood.
 - **Advanced**: activation with the full review (Observing / Automatic), automations that also control the lights (allow both or leave them alone), group decisions, manual overrides, wall-switch entities, discovery, last decision and the full diagnostics.
@@ -254,11 +259,27 @@ Smart Occupancy records why it did (or did not) do something, while it decides. 
 - **Log tab** (Overview · **Log** · Lights · …): the room's last 10 decisions, newest first. Select an entry (mouse, or Tab + Enter) for its details: trigger, triggering entity and state, occupancy and its inputs, mood, daylight and light level, manual overrides, every light's decision, the requested service call, the result and any error. Only what the integration actually used is shown.
 - **Switches → each switch card**: *Last decision* with its result, and **Log** with the switch's last 10 presses (button, assigned action, why, result).
 
-Results (always a word with an icon, never colour alone): **Executed** (Home Assistant accepted the command and the lights reported the requested state), **Sent** / **Sent · not confirmed** (accepted, but the lights did not report the requested state within a few seconds; scenes and scripts cannot be confirmed), **Partly failed**, **Failed** (with Home Assistant's error), **Observed only** (Observing: what would have been done; nothing was sent), **Blocked** (a condition prevented it: manual override, Manual mood, automatic switch-on off, uncertain daylight, an automation conflict, an offline light), **No change needed**, **No action** (a button without an action), **Noted** (e.g. a person's change that automatic lighting now respects).
+Results (always a word with an icon, never colour alone): **Executed** (Home Assistant accepted the command and the lights reported the requested state), **Sent** / **Sent · not confirmed** (accepted, but the lights did not report the requested state within a few seconds; scenes and scripts cannot be confirmed), **Partly failed**, **Failed** (with Home Assistant's error), **Observed only** (Observing: what would have been done; nothing was sent), **Blocked** (a condition prevented it: manual override, Manual mood, automatic switch-on off, uncertain daylight, an automation conflict, an offline light), **No change needed**, **No action** (a button without an action), **Not done (setting)** (0.3.8: switched off by a setting, e.g. *Leave unchanged* when vacant), **Noted** (e.g. a person's change that automatic lighting now respects).
 
-What is logged: lighting applied or evaluated for a visit, a mood change, a room mood, a profile change, Automatic being switched on, a light coming back; gradual updates of the global adjustment; manual overrides; a room becoming vacant with lights still on (Smart Occupancy does not switch lights off on vacancy); a queued change dropped because Manual mood started; Observing being set; every switch press and learning session. Not logged: sensor updates that change no decision. Repeats are folded: occupancy confirmed after the first motion of the same visit adds nothing, and the same decision again (same result) updates the newest entry with a count (×3) instead of adding one; global adjustment updates are one entry, button repeats within a minute too.
+What is logged: lighting applied or evaluated for a visit, a mood change, a room mood, a profile change, Automatic being switched on, a light coming back; gradual updates of the global adjustment; manual overrides; a vacancy timeout that starts while lights are on (updated in place to *cancelled* or *expired*) and what the vacancy action did (0.3.8; *Not done (setting)* for Leave unchanged); a queued change dropped because Manual mood started; Observing being set; every switch press and learning session. Not logged: sensor updates that change no decision. Repeats are folded: occupancy confirmed after the first motion of the same visit adds nothing, and the same decision again (same result) updates the newest entry with a count (×3) instead of adding one; global adjustment updates are one entry, button repeats within a minute too.
 
 The log is kept in the integration's existing state file (`.storage/smart_occupancy.lighting_state`, written with its usual delayed save; survives restarts and mode changes). It creates no entity, no helper and no Recorder history. Removing a switch removes its log.
+
+### Vacancy (0.3.8)
+
+**Automatic → When the room becomes vacant**, per room:
+
+| Choice | What happens when the room becomes vacant |
+|---|---|
+| **Turn off** (default) | Lights that are on are switched off. |
+| **Vacant mood** | The chosen mood's light settings are applied to the lights that are on: per light type On (with its brightness and colour), Off, or left unchanged. Nothing is switched on in the empty room. Use a mood such as *Nátt* with dim lamps and the spots off. |
+| **Leave unchanged** | Nothing is changed. The log says so: *Lights left unchanged: room vacancy behavior is configured to Leave Unchanged.* |
+
+- **When.** The action runs when the occupancy engine confirms vacancy, after the room's **vacancy timeout** (see [Presence tab](#presence-tab-038)). There is no extra timer. Presence that returns during the timeout cancels it: nothing is switched off, so nothing has to be switched on again. The log shows *Vacancy timeout started* and then *Vacancy cancelled* or *Vacancy timeout expired*.
+- **Protections.** Only in **Automatic**: Observing logs what would happen, Manual mood blocks it. **Ambient** lights keep following the mood. Exclusions, groups and unacknowledged automation conflicts apply as for every mood command. Without an effective mood nothing is switched off (ambient lights could not be told apart).
+- **Manual overrides.** An override made while the room was occupied ends with the vacancy (as before), so that light is switched off too. An override made after the room went quiet (someone changed a light in the empty room, e.g. from the app) is respected until it expires. If the room is still vacant then, the vacancy action runs for that light.
+- **Unavailable lights** are reported (*Partly failed*, *Failed*) and handled when they come back, if the room is still vacant.
+- Switching a vacant room to Automatic switches nothing off. The action runs when a room *becomes* vacant.
 
 ### Activation (pilot: Kamar Norður)
 
@@ -280,7 +301,7 @@ The log is kept in the integration's existing state file (`.storage/smart_occupa
 
 ### Manual overrides
 
-A light changed by a person is respected for a while (default 60 min; per room or globally; 0 = until the room is vacant). Overrides are cleared when the room becomes vacant, or from the card. How a change is classified:
+A light changed by a person is respected for a while (default 60 min; per room or globally; 0 = until the room is vacant). Overrides are cleared when the room becomes vacant, or from the card. One made after the room went quiet is kept until it expires (see [Vacancy](#vacancy-038)). How a change is classified:
 
 | Change | Treated as |
 |---|---|
@@ -634,9 +655,25 @@ Occupied → vacant always needs at least *exit confirmation* of quiet, and pres
 
 **Restart and reload.** The previous decision is restored from `.storage`. An occupied room stays occupied during the *start-up hold*, and its quiet period starts again from the restart, because nothing is known about the time Home Assistant was down. So a restart can't cause a false vacancy.
 
+### Presence tab (0.3.8)
+
+The room card's **Presence** tab shows, for every signal assigned to the room:
+- its name, entity id, kind and role (roles and assignments stay in *Configure → Rooms*);
+- its current state, labelled by device class (*Detected / Clear*, *Open / Closed*, *On / Off*), with the raw state beside it. The engine decides on the raw state (`on`, `off`, `unknown`, `unavailable`), never on the label;
+- what it contributes now: **Active**, **Clear**, **Not used here** (excluded), **Unavailable**, **Unexpected state** (available, but its state is neither active nor clear, so it is not evidence), **Stuck**;
+- when it last changed;
+- a **Use** switch. Off excludes the signal from this room's occupancy only. Its assignment, kind and role are kept, so switching it on restores it exactly. The entity, other rooms and automations are not changed, and its state is still shown.
+
+Below are the room's **presence settings** (the timing below; *Vacancy timeout* is the inactivity timeout). Each is marked **Global default** or **Room override**:
+- typing a value overrides it for this room;
+- **Use global default** returns one setting to the global value; **Use global defaults for all** returns every setting;
+- **Global defaults (all rooms)** edits the global values. Rooms that follow a global value change with it; room overrides stay.
+
+Changes apply at once without a reload or restart. The engines keep every signal's value and re-evaluate, so a pending vacancy uses the new timeout and is not restarted. Values are validated before saving (the ranges below; *stuck after* is 0 or at least 60 s). They are stored in the integration's existing options, the same values as *Configure → Occupancy timing* and *Configure → Rooms → Occupancy*.
+
 ### Timing
 
-Every value can be set globally and overridden per room.
+Every value can be set globally and overridden per room (in the Presence tab, or in *Configure*).
 
 | Parameter | Default | Meaning |
 |---|---|---|
@@ -902,11 +939,21 @@ The suite covers:
 - wall switches (0.3.5):
   - pure tests: action names and press types, suggested defaults, Zigbee2MQTT payloads (battery/link-quality updates, cleared and malformed actions, oversized messages), event-entity actions, topic validation (no wildcards, no bridge topics), deduplication across paths with deliberate repeats, the bridge device list and bindings, the model's bounds and the store migration
   - in Home Assistant with the real MQTT integration (mocked broker) and simulated Wiser `avb_ksu` events: discovery and assignment, learning (retained, status, malformed), persistence over restarts, ON/OFF of the room group with manual overrides, occupancy and mood changes not undoing a manual OFF, ON despite the daylight gate, Manual mood, Observe, Listen only with a direct binding, MQTT device triggers, event entities (split and stale events), one press through three paths, deliberate repeats and debounce, availability, MQTT reconnects, Zigbee2MQTT renames and removal, competing automations, hold-to-dim with STOP, without STOP, limits and pacing, brightness steps and capabilities, room and global moods, temporary room moods, websocket validation and permissions, listener cleanup on reload and unload, activity evidence
+- vacancy and presence (0.3.8):
+  - in Home Assistant with simulated lights: Turn off after the timeout (and not before), presence returning before the timeout (no off/on, one counted log entry), Vacant mood (Off / On with values / left unchanged, never switching on), Leave unchanged, ambient lights, manual overrides ending with the vacancy or kept when made in the empty room (then applied when they expire), Manual mood, Observing set during the timeout, unavailable and missing lights handled when they come back, failed commands, the store migration and the websocket settings
+  - presence: live states and device-class labels, binary sensor normalisation, unexpected states, include/exclude without reload (configuration kept, other rooms untouched, kept by the options flow), global defaults with room overrides, reset per setting and for all, validation and persistence, a shorter timeout applied to a pending vacancy, and the start-up race (a sensor that changed before the subscription existed)
+  - Kamar Norður scenarios with the pilot's entity IDs: enter (PIR), working at the PC while radar and PIR clear, leaving, returning before the timeout, a wall switch change not undone, the PC bridge disconnecting
+  - the room card's icon tabs (labels, keyboard, wrapping), Presence tab and vacancy controls
 - card serving through the real frontend component
 
 Observe rooms are asserted never to call a light service. Any test that logs an ERROR, or in which Home Assistant reports deprecated usage, fails. CI (`.github/workflows/validate.yml`) runs hassfest, HACS validation and the tests on Home Assistant 2026.10.4 and 2026.11.1.
 
 ## Upgrading
+
+**From 0.3.7.** Nothing to configure. What changes:
+- The lighting store is migrated from 1.3 to 1.4. Every room gets the vacancy action **Turn off**, the default (there was no setting before). **Rooms in Automatic now switch their lights off when they become vacant.** Choose *Leave unchanged* in the Automatic tab to keep the previous behaviour. Ambient lights are never switched off, and Observing rooms still send nothing.
+- Sensors, roles, timing, moods, profiles, overrides, switches and the decision log are kept. No signal is excluded until you switch one off in the Presence tab.
+- 0.3.7 can still read the store and the options after a downgrade: it ignores the vacancy action, and an excluded signal is used again.
 
 **From 0.3.5.** Nothing to do, and no mode is changed by the upgrade: rooms that were Observing stay Observing, switches keep their mode, buttons and actions. There is no store migration. What changes in behaviour: a switch that was already in *Smart Occupancy control* (now *Active*) in a room whose mood lighting was not enabled now **executes its actions** (before, they were silently suppressed). Set it to Observing if you do not want that.
 
@@ -942,6 +989,12 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 
 ## Known limitations (Phase 0.3.5)
 
+### From 0.3.8
+
+- **Not verified on the production Home Assistant.** Vacancy, the Presence tab and the icon tabs were tested with the automated suite (simulated sensors and lights that report their state back) and rendered in a headless browser at desktop and phone widths with a mocked Home Assistant connection. Not tested with real lights, real presence sensors, or the real Home Assistant frontend.
+- **The vacancy action runs on the transition to vacant.** A room that is already vacant when it is switched to Automatic, or after a restart, is not switched off until it is next occupied and vacated.
+- **The cause of the Nobara "state not understood" message was found in the code** (a start-up race, now fixed and covered by a test). It could not be confirmed on the live system, where the PC bridge's entity and its timing were not visible.
+
 - **Not tested with a physical Wiser switch.** The wall switch support was tested with the automated suite on Home Assistant 2026.10.4 and 2026.11.1, with the real MQTT integration, a mocked broker and simulated Zigbee2MQTT messages, device triggers and event entities. Not hardware verified; not deployed to the production Home Assistant.
 - **Zigbee bindings are known only from Zigbee2MQTT's device list.** Bindings made another way (Touchlink, a different coordinator) are invisible: if lights react to a switch by themselves, keep it Observing.
 - **Competing automations are found by their triggers** (device triggers, event entity, the MQTT topic). Node-RED, AppDaemon and templated triggers are invisible.
@@ -957,7 +1010,7 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 - **The sun thresholds are fixed**: dark after civil dusk (−6°), low light after sunset. In Faroese summer nights the sun does not reach −6°, so an outdoor or indoor sensor decides then.
 - **The daylight factor needs an outdoor sensor** and at least three trusted samples in daylight (outdoor ≥ 200 lx). It is a single number per room: it does not model the sun's direction or blinds.
 - **A manual change while the room is empty** is respected for the override time, as since 0.3.0, so a person switching lights off from the app in an empty room also keeps them off at the next arrival within that time.
-- **No automatic switch-off when it gets bright**, and no vacancy shutdown: Phase 0.4.
+- **No automatic switch-off when it gets bright** (vacancy switch-off was added in 0.3.8).
 
 ### From Phase 0.3.2
 

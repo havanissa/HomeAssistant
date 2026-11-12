@@ -85,10 +85,11 @@ class SignalHealth:
     kind: str
     role: str
     health: str
+    enabled: bool = True
 
     @property
     def essential(self) -> bool:
-        return self.role in ESSENTIAL_ROLES
+        return self.enabled and self.role in ESSENTIAL_ROLES
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -96,12 +97,14 @@ class SignalHealth:
             "kind": self.kind,
             "role": self.role,
             "health": self.health,
+            "enabled": self.enabled,
         }
 
 
 def signal_health(hass: HomeAssistant, room: RoomConfig, *, settled: bool = True) -> list[SignalHealth]:
     return [
-        SignalHealth(s.entity_id, s.kind.value, s.role.value, entity_health(hass, s.entity_id, settled=settled))
+        SignalHealth(s.entity_id, s.kind.value, s.role.value, entity_health(hass, s.entity_id, settled=settled),
+                     s.enabled)
         for s in room.sensors
     ]
 

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.8 — Vacancy lighting, Presence tab, icon tabs
+
+### Fixed
+
+- **Lights stayed on after a room became vacant.** Root cause: there was no vacancy action at all. The controller cleared manual overrides on vacancy and logged *"Smart Occupancy does not switch lights off when a room becomes vacant"*; vacancy shutdown had been left for a later phase. No setting was being ignored, no override or profile was holding the lights, and it affected every room, not only Kamar Norður.
+- **A presence sensor could show "reports a state that is not understood" until it was removed and re-added** (seen with the Nobara PC activity sensor). Root cause: each signal's state was read when the occupancy engines loaded, but the state subscription started only later, after the lighting store and the first refresh. A signal that changed in between (typical while Home Assistant starts and a PC bridge connects) kept its old value in the engine (*unknown* while still unavailable) until it changed again. Home Assistant meanwhile showed it as available, so the health check flagged it. Removing and re-adding it reloaded the integration, which hid the problem. The engines now read every signal again when the subscription starts. Binary sensors were always interpreted from their raw `on` / `off` / `unknown` / `unavailable` state; display labels are never used for decisions.
+
+### Added
+
+- **When the room becomes vacant** (per room, *Automatic* tab): **Turn off** (lights that are on are switched off), **Vacant mood** (a chosen mood's profile is applied to the lights that are on: On with its brightness and colour, Off, or left unchanged per light type; no light is switched on in an empty room), or **Leave unchanged**. The action runs once, when the occupancy engine confirms vacancy. Its timeout is the room's existing vacancy timeout (*inactivity timeout*, or *exit confirmation* with exit evidence), so there is no second timer. Presence that returns during the timeout cancels it, and nothing is switched off and on again. Ambient (persistent) lights keep following the mood. Manual mood, Observing, unacknowledged automation conflicts, exclusions and groups apply as for every mood command.
+- **Manual overrides at vacancy**: an override made while the room was occupied ends with the vacancy, as before, and the vacancy action then applies to that light. An override made after the room went quiet (a person changed a light in the empty room, e.g. from the app) is respected until it expires; then the vacancy action runs for that light if the room is still vacant. A light that was unavailable at vacancy is handled when it comes back.
+- **Presence tab** (room card, after Automatic): every signal assigned to the room, with its name, entity id, kind, role, live state (labelled by device class, e.g. *Detected / Clear*, *Open / Closed*, with the raw state beside it), what it contributes now (*Active, Clear, Not used here, Unavailable, Unexpected state, Stuck*), and when it last changed. A switch per signal **includes or excludes it from this room's occupancy** without deleting it, changing the entity, or touching other rooms. The room's **presence settings** (vacancy timeout, fast vacancy timeout, occupancy confirmation, radar dropout bridge; more under *More presence settings*) are each marked **Global default** or **Room override**, with *Use global default* per setting, *Use global defaults for all*, and the **global defaults** (all rooms) in the same tab.
+- **Decision log**: *Vacancy timeout started* (only when lights are on and the action would change them), updated in place to *Vacancy cancelled* (presence returned, with how long the room was quiet) or *Vacancy timeout expired*; then the vacancy result: *Lights off*, *Apply vacant mood …* or *Leave lights unchanged*, with the result *Executed*, *Sent · not confirmed*, *Partly failed*, *Failed* (unavailable or missing lights, Home Assistant errors), *Blocked* (manual override, Manual mood, no mood), *Observed only*, *No change needed*, or the new **Not done (setting)** for Leave unchanged (*"Lights left unchanged: room vacancy behavior is configured to Leave Unchanged."*). Repeated interruptions of the timeout fold into one counted entry. A deferred action that runs later (override ended, light back) is logged with that trigger.
+- Websocket: `room/set` takes `vacancy_action` and `vacancy_mood`; `presence/sensor` (include/exclude) and `presence/timing` (global or room values, `null` = use the default, `reset_all`); the `editor` room model has `presence` and `vacancy`. All writes are admin only.
+
+### Changed
+
+- **Room card tabs are compact icons** (Overview · Log · Lights · Automatic · **Presence** · Switches · Overrides · Preview · Advanced, same order). The name is shown in a tooltip on hover and keyboard focus, is the accessible label, and is written beside the selected icon (below the bar on narrow cards). Arrow keys, Home and End move between tabs. The bar wraps instead of scrolling, so tabs after *Overrides* are no longer cut off.
+- Presence settings changed in the card are applied at once, without reloading the integration. The engines keep every signal's value and re-evaluate, so there is no start-up hold and the quiet period is not restarted. Changes made in *Configure* still reload, as before.
+- An excluded signal no longer counts for room health or the "no occupancy signals" check.
+
+### Upgrade and compatibility
+
+- The lighting store is migrated from 1.3 to 1.4: every room gets **Turn off** as its vacancy action (there was no setting to keep). Everything else is unchanged. **Rooms in Automatic will now switch their lights off when they become vacant.** Choose *Leave unchanged* in the Automatic tab to keep the old behaviour. Ambient lights are never switched off by vacancy, and Observing rooms send nothing.
+- Switching a vacant room to Automatic does not switch anything off. The action runs when a room *becomes* vacant.
+- Options: a signal's `enabled: false` is written only for excluded signals, so options saved before 0.3.8 keep their exact shape. 0.3.7 ignores the key after a downgrade (an excluded signal would be used again) and ignores the store's `vacancy` key.
+
 ## 0.3.7 — Decision log: what Smart Occupancy decided, why, and whether it worked
 
 Observability only: automatic lighting, occupancy, daylight, overrides, switch mappings and operating modes behave as in 0.3.6. No setting is changed by the upgrade; the decision log starts empty.
