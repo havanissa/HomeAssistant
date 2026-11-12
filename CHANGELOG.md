@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.13 — Turn off on confirmation waits until the normal lighting is really on
+
+### Changed
+
+- *Turn off* on confirmation no longer counts the normal lighting as on just because its command was accepted (0.3.12). It waits until at least one of those lights **reports on** (up to 10 s plus their transition), then switches the preliminary lights off. A light changed by a person during the wait is left alone. If none reports on in time (a device that did not react), the preliminary lights stay on, so the room is never left dark, and the log says so: *kept on: … did not report on within 10 s*. The trace records `waiting_for_normal_lighting` and then `normal_lighting_reported` or `normal_lighting_not_reported`.
+
 ## 0.3.12 — Fix: Turn off on confirmation kept the preliminary lights on
 
 ### Fixed

@@ -8,7 +8,7 @@ from typing import Final
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
 PHASE: Final = "0.3.5"
-VERSION: Final = "0.3.12"
+VERSION: Final = "0.3.13"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -258,6 +258,8 @@ BRIGHTNESS_TOLERANCE_PCT: Final = 2
 KELVIN_TOLERANCE: Final = 60
 # Possible occupancy (0.3.10/0.3.11): retries of a failed switch-off, and the size of the developer trace per room.
 PRELIMINARY_TRACE_SIZE: Final = 80
+# Turn off on confirmation (0.3.13): how long to wait for the normal lighting to report on (plus its transition).
+CONFIRM_ON_WAIT_SECONDS: Final = 10
 PRELIMINARY_CLEANUP_RETRY_SECONDS: Final = 60
 PRELIMINARY_CLEANUP_MAX_TRIES: Final = 5
 RGB_TOLERANCE: Final = 4
