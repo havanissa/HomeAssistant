@@ -1,4 +1,4 @@
-"""Smart Occupancy & Lighting - Phase 0.3 (mood lighting, per-room activation, wall switches).
+"""Smart Occupancy & Lighting - mood lighting, per-room activation, wall switches and occupancy forecasts.
 
 This integration reads states and registries, computes its own occupancy
 per room, exposes diagnostics, and plans mood lighting for every room. Light
@@ -11,6 +11,10 @@ Manual Mood selector when a person presses it. Main Mood is never written.
 Wall switch presses arrive through Home Assistant's MQTT integration
 (subscriptions to the assigned switches' topics only), MQTT device triggers or
 event entities; nothing is ever published.
+
+Occupancy forecasts (0.5.0) learn from the Recorder's history (read only) and
+are observation only: no forecast ever controls a light, heating or any other
+device, and none changes an occupancy state.
 """
 
 from __future__ import annotations
@@ -61,13 +65,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntr
     await coordinator.occupancy.async_load()
     # Mood lighting configuration (seeded from the options on first start).
     await coordinator.lighting.async_load()
+    # Occupancy forecast (0.5.0): settings and the learned daily summaries.
+    await coordinator.forecast.async_load()
     await coordinator.async_config_entry_first_refresh()
     coordinator.async_start()
     coordinator.occupancy.async_start()
     coordinator.lighting.async_start()
+    coordinator.forecast.async_start()
     entry.async_on_unload(coordinator.async_stop)
     entry.async_on_unload(coordinator.occupancy.async_stop)
     entry.async_on_unload(coordinator.lighting.async_stop)
+    entry.async_on_unload(coordinator.forecast.async_stop)
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     entry.async_on_unload(
@@ -87,6 +95,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
         await entry.runtime_data.tracker.async_flush()
         await entry.runtime_data.occupancy.async_flush()
         await entry.runtime_data.lighting.async_flush()
+        await entry.runtime_data.forecast.async_flush()
     return unloaded
 
 
@@ -94,7 +103,14 @@ async def async_remove_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
     """Delete this integration's own stored data when it is removed."""
     from homeassistant.helpers.storage import Store
 
-    from .const import LIGHTING_STATE_STORE_KEY, LIGHTING_STORE_KEY
+    from .const import (
+        FORECAST_DAYS_STORE_KEY,
+        FORECAST_DAYS_STORE_VERSION,
+        FORECAST_SETTINGS_STORE_KEY,
+        FORECAST_SETTINGS_STORE_VERSION,
+        LIGHTING_STATE_STORE_KEY,
+        LIGHTING_STORE_KEY,
+    )
     from .lighting_config import LightingStore
     from .occupancy_manager import OccupancyManager
     from .problems import ProblemTracker
@@ -103,6 +119,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
     await OccupancyManager(hass, IntegrationConfig()).async_remove()
     await LightingStore(hass).async_remove()
     await Store(hass, 1, LIGHTING_STATE_STORE_KEY).async_remove()
+    await Store(hass, FORECAST_SETTINGS_STORE_VERSION, FORECAST_SETTINGS_STORE_KEY).async_remove()
+    await Store(hass, FORECAST_DAYS_STORE_VERSION, FORECAST_DAYS_STORE_KEY).async_remove()
     _LOGGER.debug("removed_storage keys=%s,%s", LIGHTING_STORE_KEY, LIGHTING_STATE_STORE_KEY)
 
 

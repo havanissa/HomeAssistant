@@ -59,8 +59,8 @@ from .occupancy import (
     friendly_name,
     signal_health,
 )
+from .forecast import ForecastManager
 from .occupancy_manager import OccupancyManager
-from .prediction import NullPredictor
 from .problems import ProblemTracker
 from .supervision import effective_mode
 from .validation import ENTITY_PROBLEM_CODES, Problem, validate, validate_daylight, validate_lighting
@@ -273,9 +273,10 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
             always_update=False,
         )
         self.config = IntegrationConfig.from_dict(dict(entry.options))
-        self.predictor = NullPredictor()
         self.occupancy = OccupancyManager(hass, self.config)
         self.lighting = LightingController(hass, self)
+        # Occupancy forecast (0.5.0): observation only, it never controls anything.
+        self.forecast = ForecastManager(hass, self)
         self.tracker = ProblemTracker(hass)
         self._unsubs: list[CALLBACK_TYPE] = []
         self._started_unsub: CALLBACK_TYPE | None = None

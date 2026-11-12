@@ -7,8 +7,8 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.4.0"
-VERSION: Final = "0.4.0"
+PHASE: Final = "0.5.0"
+VERSION: Final = "0.5.0"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -513,3 +513,17 @@ class OnValues(StrEnum):
     MOOD = "mood"      # the currently effective mood's values (default)
     LAST = "last"      # the light's own last values
     FIXED = "fixed"    # the brightness / colour temperature of the mapping
+
+# Occupancy forecast (0.5.0, Phase 4) ---------------------------------------
+# Observation only: forecasts are published and evaluated, never used to control a device.
+# Settings (small, written when a person changes one) and learned daily summaries (aggregates only).
+FORECAST_SETTINGS_STORE_VERSION: Final = 1
+FORECAST_SETTINGS_STORE_KEY: Final = "smart_occupancy.forecast_settings"
+FORECAST_DAYS_STORE_VERSION: Final = 1
+FORECAST_DAYS_STORE_KEY: Final = "smart_occupancy.forecast_days"
+FORECAST_SAVE_DELAY_SECONDS: Final = 60
+# Live forecasts are recalculated this often (and at once after an arrival or an occupancy change).
+FORECAST_TICK_MINUTES: Final = 5
+# Learning starts this long after Home Assistant has started (the Recorder is busy while starting).
+FORECAST_START_DELAY_SECONDS: Final = 90
+SIGNAL_FORECAST_UPDATED: Final = f"{DOMAIN}_forecast_updated"

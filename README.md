@@ -10,6 +10,8 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **0.4.0** adds **Occupied and Vacant lighting profiles**. The mood profiles you already have are the room's *Occupied* profile. Each room (and the global defaults) can also have a *Vacant* profile per mood: what each light type or single light does while the room is empty, for example the LEGO cabinet at 20 % and the floor lamps off in *Kvøld*. It re-applies when the mood or the daylight changes while the room stays empty, and goes straight from one profile to the other without switching everything off first. Editing a profile no longer changes any light: changes are used at the next trigger, or when you explicitly **Test** a profile (see [Occupied and Vacant profiles](#occupied-and-vacant-profiles-040)).
 
+**0.5.0 (Phase 4)** adds an **occupancy forecast**: learned from your Recorder history, per room, 5–60 minutes ahead, with confidence, explanations, movement between rooms and measured accuracy, in **observation mode only**: no forecast ever controls anything (see [Occupancy forecast](#occupancy-forecast-phase-4-050)).
+
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
@@ -24,7 +26,8 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - switches a light on because the global brightness or colour temperature changed
 - sends any automatic lighting command while Main Mood is **Manual**
 - calculates its own adaptive lighting: it only reads the values your existing system publishes
-- polls, uses the internet, or writes to the Recorder database directly
+- polls, uses the internet, or writes to the Recorder database directly (0.5.0 reads the Recorder's history, read only)
+- controls a light, heating or any other device because of an occupancy forecast, or changes an occupancy state because of one (0.5.0: forecasts are observation only)
 
 ## Requirements
 
@@ -777,6 +780,125 @@ With that:
 
 The existing lighting automation and helper are not touched. Compare them with `sensor.smart_occupancy_kamar_nordur_helper_comparison`.
 
+## Occupancy forecast (Phase 4, 0.5.0)
+
+The integration learns, from your Recorder history, when each room is usually used and how people move between rooms, and forecasts each room's occupancy 5, 15, 30 and 60 minutes ahead.
+
+**Observation only.** Forecasts are published as entities, shown in the room card, explained, logged and scored against what actually happened. Nothing acts on them: no light, heating or other device is ever controlled by a forecast. A forecast never changes a room's occupancy state, never starts *possible occupancy* lighting, and never overrides radar, PIR or a manual change. Automatic lighting, possible occupancy, Vacant profiles, manual overrides and wall switches work exactly as before.
+
+*Predicted* occupancy is a separate concept from the occupancy states. **Possible occupancy** means a sensor has just seen preliminary evidence that someone may be in the room *now*. **Predicted occupancy** means the history says someone is likely to be in the room *soon*.
+
+### Audit (before implementation)
+
+- **"History Forecast" devices** (manufacturer *Local Occupancy Analytics*): not part of this integration. Nothing in this repository or its git history creates them, so they come from another integration on your Home Assistant. They could not be inspected, because the HA connection was unavailable while this was built. A different integration's code cannot be extended from here. This forecast therefore lives in Smart Occupancy and uses its own room configuration. If those devices duplicate it, you can remove them; nothing here depends on them.
+- **Existing prediction code:** `prediction.py` held only interfaces (`NullPredictor`, `NullHistory`) from Phase 0.2. The forecast is new code that reuses the existing parts: the room sensor configuration, the occupancy engine (`engine.RoomEngine`), the adjacent rooms, the shared decision log and the Presence tab's *global default / room override* pattern.
+
+### How it learns
+
+1. **History from the Recorder.** For each local day, the integration asks the Recorder for the states of the configured room signals (PIR, radar, door, PC activity, bed …) and of the *influences* (see below). This is read only, through `recorder.history`, in the Recorder's own executor, and the database is never written. The oldest state the Recorder still has bounds the backfill, so a 90-day window with 10 days of history learns those 10 days, and nothing is invented for the missing ones.
+2. **Replay through the occupancy engine.** The recorded states are fed through the same engine that runs live, with the same timing and adjacency, so the learned occupancy is what this integration would have reported, including stuck-sensor handling, radar dropout bridging and vacancy confirmation. Time when every signal of a room was unavailable counts as *not observed*: it is neither occupied nor vacant.
+3. **Daily summaries.** Each day becomes aggregates per room and local hour: occupied and vacant seconds, entries and exits (by visit age and vacancy age), the same under each influence, arrivals, and counts and delays of movements between rooms. No sequence of individual movements is stored. One day can count at most 12 entries per room and hour, and at most 40 moves per pair of rooms, so an unusual day (a party, a faulty sensor) cannot dominate.
+4. **Incremental.** After the first backfill only today (from midnight) and newly completed days are read. Learned days are kept in `.storage/smart_occupancy.forecast_days` for the learning window, beyond the Recorder's purge, so learning keeps growing as days pass. After a restart the stored days are reused, not queried again.
+
+### The model
+
+Each room is a two-state chain (vacant ↔ occupied) stepped forward one minute at a time:
+
+- **Entry rate** = usual rate for this weekday, day type and hour × vacancy-age factor × influences × recent movement.
+- **Exit rate** = usual rate for this weekday, day type and hour × visit-age factor × influences.
+
+*Usual rates* are hierarchical: one weekday's hour is shrunk towards the same hour on that day type (workday or day off), then towards the same hour on every day, then towards neighbouring hours. Little data therefore means "like this room usually is", never 0 % or 100 %. The age factors capture that people often come back right after leaving and that short visits end sooner. *Influences* (sleep, PC active, home/away, "a connected room is occupied") are learned by comparing entries and exits while they were on with what the time of day alone would expect. They are never assumed. *Movement*: after new activity in room A, the probability that room B is the next room entered within 3 minutes, and how long that usually takes, by part of day and day type. Recent days count more (the *half-life* setting), so changed routines take over gradually.
+
+Each room gets:
+
+- **P(occupied *n* minutes from now)** for every horizon (the entity state uses the room's horizon). This is about the future: an occupied room late in its usual visit is forecast to empty, and a vacant room before its usual time is forecast to fill.
+- For a vacant room, **P(entered within *n* minutes)**.
+- **Usual occupancy** at that time (the schedule baseline), the **likely window** ("Likely occupied within 4 min", "Usually occupied 16:00–19:00") and the **most likely next rooms** after an arrival.
+- **Confidence** and an **explanation**: the pattern, the current visit or vacancy, movement and influences, each with its effect in percentage points.
+
+**Several people** are expected: nothing assumes one occupant, and nobody is identified. A phone that is away is only an influence whose effect is learned; it is never taken as proof that the house is empty. When several people move at once, some moves are attributed to the wrong pair of rooms; the statistics show what was seen.
+
+**Open plan and shared sensors.** Two rooms whose signals belong to the same device (for example one FP2 radar with zones in Stova and Køkur), or whose connection is *Open plan* or *Shared transition area*, often report one person at the same moment. Arrivals within 3 seconds in such rooms count as one detection, not as a movement.
+
+### Room connections
+
+Room connections live in the room card: Settings → Presence → Occupancy forecast → *Room connections*. A connection is *Through a door*, *Open plan (no door)* or *Shared transition area (hall, stairs)*. Until you edit them, connections are suggested from the configuration: the *adjacent rooms* (door) and rooms whose signals share a device (open plan). Movements learned between rooms that are not connected are offered as suggestions. Nothing is derived from entity names, and no house layout is built in. For your home, sensible choices are: Bakhurð, Trappa and Inngongd as *Shared transition area* with each other; Køkur and Stova *Open plan*; the other rooms *Through a door* to their hall.
+
+### Confidence
+
+| Level | When |
+|---|---|
+| Insufficient data | Fewer than *Minimum history* days (default 3) or fewer than *Minimum visits* (default 10) observed, or the room's occupancy sensors are unavailable now. **No probability is published** (state `unknown`, status `insufficient_data`). |
+| Low / Moderate / High | Score 0–100 = 45 % days observed (up to 21) + 15 % weekdays covered + 20 % visits (up to 50) + 20 % measured skill against the schedule (needs ≥ 100 scored forecasts), × the share of the room's signals available now. *Moderate* needs ≥ 40 and a week of history; *High* needs ≥ 70, 14 days and forecasts that proved better than the schedule. |
+
+### Accuracy (no look-ahead)
+
+Each completed day is scored *before* it is learned from (prequential evaluation). A forecast is issued every 15 minutes of that day with a model built from the earlier days only, using only what was known at that moment, and is compared with the replayed occupancy 5/15/30/60 minutes later. Per room and horizon the integration keeps:
+
+- the **Brier score** of the forecast;
+- two **baselines**: the *schedule* (usual occupancy at that hour) and *persistence* (the room stays as it is);
+- the **skill** (1 − Brier / schedule Brier);
+- **calibration bins**, giving correct predictions, false alarms, misses and correct non-predictions at any threshold;
+- a **Brier score per day**.
+
+These scores are the evidence that the forecast beats a plain schedule; they are not assumed. A day whose earlier history is still too short is not scored.
+
+### Entities (per enabled room, plus two house-wide)
+
+| Entity | State | Notes |
+|---|---|---|
+| `sensor.smart_occupancy_<room>_forecast` | 0–100 % or unknown | P(occupied at the room's horizon, default 15 min). Attributes: `probability_5_min` … `probability_60_min`, `status` (`ok` / `insufficient_data` / `learning`), `confidence`, `predicted`, `threshold`, `horizon_minutes`, `observation_only: true`, and (not recorded) `explanation`, `factors`, `window`, `schedule`, `entry_probability`. Unavailable while the room's own sensors are, or when forecasts are off for the room. |
+| `binary_sensor.smart_occupancy_<room>_predicted` | on / off / unknown | On when the probability reaches the room's **threshold** (default 60 %) **and** the confidence reaches the **minimum confidence** (default Moderate). Never on just because a probability is above zero. |
+| `sensor.smart_occupancy_<room>_forecast_confidence` | insufficient_data / low / moderate / high | `score`, `reasons`, `components` (days, weekdays, visits, scored forecasts, skill, signals available). |
+| `sensor.smart_occupancy_predicted_next_room` | room name or `none` | After an arrival anywhere: the room most likely entered next (≥ 25 %), `from`, `probability`, `candidates`. |
+| `sensor.smart_occupancy_forecast_learning` | waiting / learning / ready / disabled / no_recorder / error | Diagnostic: days learned, history start, last update, Recorder queries. |
+
+**For other modules** (and Phase 5): `coordinator.forecast.room(area_id)` returns the room's `RoomForecast` (probabilities per horizon, entry probabilities, schedule, predicted, confidence, explanation, window). The websocket command `smart_occupancy/forecast/room` returns the same with history, accuracy and settings. Longer horizons need only a different `horizons` argument: the model works for any horizon.
+
+### Settings
+
+They are in the room card: Settings → Presence → Occupancy forecast → *Forecast settings*. Room values override the global defaults, or follow them (*Use global default*). Every setting is used by the backend.
+
+| Setting | Default | Room override |
+|---|---|---|
+| Learn and forecast occupancy | on | on / off |
+| Learning window (also how long learned days are kept) | 90 days | — |
+| Adapt to changes (half-life; 0 = every day counts the same) | 30 days | — |
+| Read new history every | 60 min | — |
+| Forecast horizon | 15 min | ✓ |
+| Probability threshold | 60 % | ✓ |
+| Minimum confidence | Moderate | ✓ |
+| Minimum history / Minimum visits | 3 days / 10 | — |
+| Influences | Automatic: the bed and PC activity signals of the configured rooms | — |
+| Workday sensor | Automatic: a *Workday* integration sensor if there is one, else Monday–Friday | — |
+
+Add *Sleep* (`input_boolean.sleep`), `person.*` or a home/away group as influences if you want them learned. Influences, connections and workday changes apply to newly learned days. **Re-learn from history** applies them to everything the Recorder still has; days it no longer has are lost.
+
+### Inspecting it
+
+- **Overview** (room card): probability per horizon, confidence, predicted yes/no and the reason.
+- **Settings → Presence → Occupancy forecast**: the forecast with every factor, learning status and history coverage. The collapsible sections are usual occupancy by hour and a weekday × hour heatmap (learned days only; empty cells mean no data), movement into and out of the room, accuracy against both baselines with a daily Brier chart and calibration, learned influences, settings, connections and the forecast log. *Update now* reads new history at once.
+- **Forecast log** (shared decision log, own subjects, at most 10 per room and 10 house-wide, repeats merged). It records:
+  - a prediction crossing its threshold, and whether it came true (*Prediction confirmed* / *did not materialise*);
+  - the predicted next room changing, and whether that movement was confirmed;
+  - a forecast becoming unavailable because the room's sensors are;
+  - confidence rising or falling;
+  - a learned pattern that changed by 15 points or more.
+
+  Recalculating the same forecast logs nothing. Forecast entries never push automatic lighting decisions out of a room's own Log tab.
+- **Download diagnostics**: section `forecast` (settings, status, learned dates, connections, current forecasts).
+
+### Performance and Recorder impact
+
+- **Queries.** One Recorder query per learned day plus one for today at each refresh (default hourly), for the configured signals only. No full-history queries are repeated.
+- **Processing.** Runs in an executor thread. Measured on a simulated house of 15 rooms, 60 signals and about 5,500 state changes a day:
+  - replay: about 0.2 s per day;
+  - scoring a day: about 1.5 s;
+  - live recalculation of every room: about 20 ms (every 5 minutes, and after an arrival or occupancy change).
+- **Storage.** Learned days take about 1.5 kB per room and day, so 15 rooms over 90 days is about 2 MB. They are written at most about once an hour, with a delay. Settings are a separate small file.
+- **Recorder writes.** An entity writes a state only when the rounded forecast changes: whole percent for the state, 5 % steps for the other horizons, the prediction, the status or the confidence level. Explanations and other detail attributes are not recorded, and there is no `state_class`, so no long-term statistics are created.
+- **Privacy.** Everything runs locally; no history leaves Home Assistant.
+
 ## Room Status card
 
 The integration serves and loads the card itself: there is no resource to add and nothing to install. After updating, reload the browser once.
@@ -1005,6 +1127,8 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 
 ## Upgrading
 
+**From 0.4.0.** Nothing to configure, and nothing changes in occupancy or lighting. New entities appear (forecast, predicted occupancy and forecast confidence per room; predicted next room and forecast learning). About 90 seconds after Home Assistant has started, the forecast reads the Recorder's history (once per available day), then refreshes hourly; until then the forecast entities show `learning`. Two new store files: `smart_occupancy.forecast_settings` and `smart_occupancy.forecast_days`. To switch forecasts off: Settings → Presence → Occupancy forecast → Forecast settings → Global defaults → *Learn and forecast occupancy*. 0.4.0 can be reinstalled; it ignores the new files (remove the new entities by hand if you go back).
+
 **From 0.3.7.** Nothing to configure. What changes:
 - The lighting store is migrated from 1.3 to 1.4. Every room gets the vacancy action **Turn off**, the default (there was no setting before). **Rooms in Automatic now switch their lights off when they become vacant.** Choose *Leave unchanged* in the Automatic tab to keep the previous behaviour. Ambient lights are never switched off, and Observing rooms still send nothing.
 - Sensors, roles, timing, moods, profiles, overrides, switches and the decision log are kept. No signal is excluded until you switch one off in the Presence tab.
@@ -1043,6 +1167,14 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 **From 0.1.x.** Configuration version 1.1 is migrated to 1.2 on the first start, keeping everything you configured; then the 0.2 step above applies.
 
 ## Known limitations (Phase 0.3.5)
+
+### From 0.5.0 (occupancy forecast)
+
+- **Not verified on the production Home Assistant, and no real forecasts have been produced yet**: the HA connection was unavailable while this was built. Every number in the tests and in the screenshots used during development comes from simulated histories.
+- **Downtime looks like quiet time.** The Recorder does not expose when Home Assistant was off, so a period without any state change is replayed as the last known states. Sensors that report *unavailable* after a restart are handled correctly (not observed).
+- **Configuration changes apply to newly learned days.** Days learned with other sensors, influences or connections keep their summaries until *Re-learn from history*, which can only re-learn what the Recorder still has. A room added later learns from that day on (or from the Recorder's history after a re-learn).
+- **Several people moving at the same time** can mix up movement statistics (no person is identified).
+- **Pending outcome checks of predictions** (for the log) are kept in memory and are lost on restart; the accuracy statistics are not affected.
 
 ### From 0.3.8
 
@@ -1108,5 +1240,5 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 | Lighting | Plans per room with a reason for every light; per-room activation; manual overrides with expiry; conflict detection; daylight-aware switch-on with recorded reasons | Light supervision: compare plans with actual states periodically, correct misfires, expand override handling |
 | Configuration | Lighting store (versioned) owned by the integration; websocket API with admin-only writes | Add fields with defaults and a store migration |
 | Dashboard | Smart Lighting Profiles, Smart Room Lighting and Room Status cards (simple by default, Advanced on request) | Supervision views |
-| Prediction | `OccupancyHistory` receives every transition (`NullHistory`) | Phase 0.5 learning |
+| Prediction | 0.5.0: learned forecasts per room (observation only), confidence, prequential accuracy, `ForecastManager.room()` API | Phase 5: predictive heating may read forecasts behind its own explicit opt-in |
 | Safety | `assert_room_control_permitted()` gates every command; integration-wide mode stays Observe | Supervise / Full Control modes with their own tests |

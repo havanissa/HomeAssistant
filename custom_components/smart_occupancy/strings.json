@@ -434,6 +434,32 @@
           "bright": "Bright",
           "uncertain": "Uncertain"
         }
+      },
+      "room_forecast": {
+        "name": "{room} occupancy forecast"
+      },
+      "room_forecast_confidence": {
+        "name": "{room} forecast confidence",
+        "state": {
+          "insufficient_data": "Insufficient data",
+          "low": "Low",
+          "moderate": "Moderate",
+          "high": "High"
+        }
+      },
+      "predicted_next_room": {
+        "name": "Predicted next room"
+      },
+      "forecast_learning": {
+        "name": "Forecast learning",
+        "state": {
+          "waiting": "Waiting",
+          "learning": "Learning",
+          "ready": "Ready",
+          "disabled": "Disabled",
+          "no_recorder": "No Recorder",
+          "error": "Error"
+        }
       }
     },
     "binary_sensor": {
@@ -442,6 +468,9 @@
       },
       "room_occupied": {
         "name": "{room} occupied"
+      },
+      "room_predicted": {
+        "name": "{room} predicted occupancy"
       }
     },
     "button": {

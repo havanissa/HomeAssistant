@@ -1,9 +1,11 @@
-"""Predictive occupancy - interfaces only.
+"""Predictive occupancy - interfaces from Phase 0.2.
 
-Not implemented in Phase 0.2 (no historical learning). The occupancy engine
-already reports every state transition to an ``OccupancyHistory`` sink, so
-a later phase can plug in a recorder of transitions and a predictor without
-restructuring the runtime.
+The occupancy forecast itself is implemented in 0.5.0 (``forecast.py``,
+``forecast_model.py``, ``forecast_history.py``). It does not need the
+``OccupancyHistory`` sink below: it learns from the Recorder's history by
+replaying the configured signals through the same occupancy engine, and reads
+the live engines through their listeners. ``ForecastManager.room(area_id)``
+is the API for other modules. These interfaces stay for compatibility.
 """
 
 from __future__ import annotations

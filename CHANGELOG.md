@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.0 — Occupancy forecast (Phase 4, observation only)
+
+### Added
+
+- **Occupancy forecast per room**: P(occupied 5, 15, 30 and 60 minutes from now), P(entered within the horizon) for vacant rooms, the usual occupancy at that time, a likely window and the most likely next rooms. Learned from the Recorder's history by replaying the configured signals through the same occupancy engine; a time-inhomogeneous two-state Markov chain with hierarchical (shrunk) rates by weekday, day type and hour, visit-age and vacancy-age factors, learned influences (bed and PC activity signals automatically; sleep, person or any entity on request; a connected room occupied) and room-to-room movement statistics. Recent days weigh more (half-life).
+- **Room connections** (door / open plan / shared transition area), suggested from adjacent rooms and shared sensor devices; detections of one person by a shared sensor are not counted as movements.
+- **Confidence** (insufficient data / low / moderate / high) from days and weekdays observed, visits, measured skill and sensor availability. With insufficient data no probability is published.
+- **Prequential accuracy**: each completed day is scored before it is learned from, against the schedule and persistence baselines (Brier score, skill, calibration, confusion at the threshold, daily series).
+- **Entities**: `sensor.smart_occupancy_<room>_forecast`, `binary_sensor.smart_occupancy_<room>_predicted` (probability **and** confidence thresholds), `sensor.smart_occupancy_<room>_forecast_confidence`, `sensor.smart_occupancy_predicted_next_room`, `sensor.smart_occupancy_forecast_learning`.
+- **Room card**: an *Occupancy forecast* block on the Overview; Settings → Presence → *Occupancy forecast* with explanation, learning status and history coverage, hourly chart and weekday × hour heatmap, movement, accuracy, influences, settings (room overrides and global defaults), connections and the forecast log.
+- **Forecast log** in the shared decision log (subjects `forecast:<area>` and `forecast:house`): threshold crossings, confirmed or missed predictions, predicted movements and their outcome, unavailable forecasts, confidence changes, changed learned patterns. Bounded and merged.
+- Websocket commands `smart_occupancy/forecast/room`, `/settings`, `/connection`, `/learn`, `/rebuild`; diagnostics section `forecast`; `ForecastManager.room()` for other modules.
+
+### Not changed
+
+- Occupancy detection, automatic lighting, possible occupancy, Vacant profiles, manual overrides and wall switches. No forecast controls any device or changes any occupancy state.
+
+### Not included
+
+- Predictive heating (Phase 5) and any active use of forecasts.
+- Reuse of the "History Forecast" devices (*Local Occupancy Analytics*): they belong to another integration, not this repository (see the README audit).
+
 ## 0.4.0 — Occupied and Vacant lighting profiles
 
 ### Added

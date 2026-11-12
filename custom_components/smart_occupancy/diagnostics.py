@@ -55,4 +55,6 @@ async def async_get_config_entry_diagnostics(
         "tracked_entities": coordinator.tracked_entities,
         "occupancy": coordinator.occupancy.diagnostics(),
         "lighting": lighting.diagnostics(),
+        # Occupancy forecast (0.5.0): settings, learning status, current forecasts (aggregates only).
+        "forecast": coordinator.forecast.diagnostics(),
     }
