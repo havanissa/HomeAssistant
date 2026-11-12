@@ -105,6 +105,7 @@ from .adaptive import (
 from .conflicts import AutomationInfo, Conflict, collect_automations, find_conflicts
 from .daylight import GATE_CODES, GATE_NEVER, GATE_NOT_NEEDED, GATE_UNCERTAIN, DaylightGate
 from .daylight_monitor import DaylightMonitor, DaylightStatus
+from .decisions import DecisionLog
 from .engine import RoomResult, SignalStatus
 from .const import (
     ADAPTIVE_DEBOUNCE_SECONDS,
@@ -127,6 +128,7 @@ from .const import ALL_MOODS
 from .discovery import area_name
 from .lighting import LightIndex, expand_group, light_capabilities
 from .lighting_config import LightingConfig, LightingStore
+from .lighting_decisions import LightingDecisions
 from .models import IntegrationConfig
 from .occupancy import friendly_name
 from .planner import BLOCKED, CHANGE, Plan, PlanItem, Target, build_plan
@@ -227,6 +229,8 @@ class RoomRuntime:
     last_activation_at: str | None = None
     # A temporary room mood set by a wall switch (0.3.5): {"mood", "until"}.
     temp_mood: dict[str, Any] | None = None
+    # The visit whose activation decision was logged last (0.3.7; not persisted).
+    decision_visit: int = -1
 
     def persist(self) -> dict[str, Any]:
         return {
@@ -331,6 +335,9 @@ class LightingController:
         self._restored_switches: dict[str, Any] = {}
         self.switch_control = SwitchControl(hass, self)
         self.switch_inputs = SwitchInputs(hass, self, self._on_button)
+        # Decision log (0.3.7): rooms and switches, saved with this state store.
+        self.decisions = DecisionLog(hass, self._on_decision)
+        self.explain = LightingDecisions(self)
 
     # ------------------------------------------------------------ properties
     @property
@@ -384,6 +391,7 @@ class LightingController:
         self.adaptive.async_configure(self.lighting.adaptive)
         self.daylight.restore(data.get("daylight"))
         self._restored_switches = data.get("switches") if isinstance(data.get("switches"), dict) else {}
+        self.decisions.restore(data.get("decisions"))
         now = dt_util.utcnow()
         for area_id in self.config.enabled_rooms:
             rt = RoomRuntime.restore(rooms.get(area_id))
@@ -462,6 +470,7 @@ class LightingController:
         self.daylight.async_stop()
         self.switch_control.async_stop()
         self.switch_inputs.async_stop()
+        self.decisions.async_stop()
         for task in list(self._tasks):
             task.cancel()
         self._tasks.clear()
@@ -851,6 +860,7 @@ class LightingController:
             if result is None:
                 return
             changed = (rt.occupancy_state, rt.occupied) != (result.state.value, result.occupied)
+            was_occupied = rt.occupied
             rt.occupancy_state, rt.occupied = result.state.value, result.occupied
             if not self._running:
                 return
@@ -874,11 +884,15 @@ class LightingController:
                 rt.visit_started = False
                 if rt.visit_confirmed:
                     rt.visit_confirmed = False
+                cleared = len(rt.overrides)
                 if rt.overrides:
                     _LOGGER.debug("lighting_overrides_cleared area=%s reason=vacant", area_id)
                     rt.overrides.clear()
                     self._mark_dirty()
                     self._schedule_override_expiry()
+                if was_occupied:
+                    lit = [e for e in self.managed_room(area_id).controlled if self.hass.states.is_state(e, "on")]
+                    self.explain.vacant(area_id, lit, cleared)
             if changed:
                 self._notify()
 
@@ -891,7 +905,9 @@ class LightingController:
             self._schedule_apply(area_id, trigger)
         else:
             # Kept in memory (saved with the next state write): no extra storage write per visit.
-            self._record_activation(area_id, trigger, self.plan(area_id, trigger, fresh=True), None)
+            plan = self.plan(area_id, trigger, fresh=True)
+            self._record_activation(area_id, trigger, plan, None)
+            self.explain.plan(area_id, trigger, plan, plan.items)
             self._notify()
 
     @callback
@@ -986,7 +1002,18 @@ class LightingController:
             for area_id in self.lighting.active_rooms:
                 if not self.lighting.room(area_id).mood_override:
                     self._schedule_apply(area_id, "mood_change")
+            if self._running:
+                # Observing rooms: what the new mood would do (evaluated, logged, nothing is sent).
+                for area_id in sorted(self.config.enabled_rooms):
+                    if not self.room_active(area_id) and not self.lighting.room(area_id).mood_override:
+                        self._observe(area_id, "mood_change")
         self._notify()
+
+    @callback
+    def _observe(self, area_id: str, trigger: str) -> None:
+        """Evaluate a trigger in an Observing room and log what would happen. Never sends anything."""
+        plan = self.plan(area_id, trigger)
+        self.explain.plan(area_id, trigger, plan, plan.items)
 
     @callback
     def _pause(self) -> None:
@@ -995,6 +1022,8 @@ class LightingController:
         if self._apply_timer:
             self._apply_timer()
             self._apply_timer = None
+        for area_id, (triggers, _only) in self._pending.items():
+            self.explain.paused(area_id, triggers)
         self._pending.clear()
         self._cancel_adaptive()
         _LOGGER.info("lighting_manual_mode_started dropped_pending=%d (%s)", dropped, MANUAL_PAUSED_TEXT)
@@ -1051,7 +1080,7 @@ class LightingController:
             if self._stopped or self._manual or not self.room_active(area_id):
                 return None
             _plan, decisions = self._plan(area_id, "adaptive")
-            self._adaptive_force.pop(area_id, None)
+            forced = self._adaptive_force.pop(area_id, None) or set()
             rt = self.runtime.setdefault(area_id, RoomRuntime())
             sends = {e: d for e, (_t, d) in decisions.items() if d.decision == SEND}
             deferred = [d.due for _t, d in decisions.values() if d.decision == DEFERRED and d.due]
@@ -1067,6 +1096,10 @@ class LightingController:
                     if prev := rt.last_commands.get(entity_id):
                         rt.last_commands[entity_id] = (prev[0], {**prev[1], **fields})
                 ok = len(sends) - len([e for e in errors if errors[e] != _PAUSED])
+                sent_data = {e: d.data for e, d in sends.items() if errors.get(e) != _PAUSED}
+                if sent_data:
+                    self.explain.adaptive(area_id, sent_data,
+                                          {e: m for e, m in errors.items() if m != _PAUSED}, forced)
                 rt.last_adaptive_at = _iso(dt_util.utcnow())
                 rt.last_adaptive = f"{ok} light(s) followed the global adjustment" + (
                     f", {len(errors)} failed: " + "; ".join(f"{e}: {m}" for e, m in errors.items())
@@ -1179,6 +1212,7 @@ class LightingController:
                 }
                 _LOGGER.info("lighting_manual_override area=%s light=%s source=%s until=%s",
                              area_id, target, source, rt.overrides[target]["until"])
+                self.explain.override(area_id, [target], source, new.state, minutes)
                 self._mark_dirty()
                 self._schedule_override_expiry()
             self._notify()
@@ -1254,6 +1288,7 @@ class LightingController:
             if plan.mood is None:
                 rt.last_result, rt.last_reason, rt.last_errors = "no_mood", plan.note or "No effective mood", []
                 self._record_activation(area_id, trigger, plan, [])
+                self.explain.plan(area_id, trigger, plan, relevant)
                 self._finish(area_id, plan)
                 return plan
             if not changes:
@@ -1261,6 +1296,7 @@ class LightingController:
                 rt.last_reason = _summary(plan.mood, relevant, trigger)
                 rt.last_errors = []
                 self._record_activation(area_id, trigger, plan, [])
+                self.explain.plan(area_id, trigger, plan, relevant)
                 self._finish(area_id, plan)
                 return plan
             errors = await self._execute(area_id, changes)
@@ -1280,6 +1316,7 @@ class LightingController:
                 rt.last_applied_at = _iso(dt_util.utcnow())
             self._record_activation(area_id, trigger, plan, [
                 i for i in ok if i.service == "turn_on" and i.current.get("state") != "on"])
+            self.explain.plan(area_id, trigger, plan, relevant, ok=ok, errors=errors, paused=paused)
             log = _LOGGER.warning if errors else _LOGGER.info
             log("lighting_applied area=%s mood=%s trigger=%s result=%s changed=%d failed=%d",
                 area_id, plan.mood, trigger, rt.last_result, len(ok), len(errors))
@@ -1348,6 +1385,9 @@ class LightingController:
         if old.switch_settings != new.switch_settings or any(
                 old.room(a).switches != new.room(a).switches for a in {*old.rooms, *new.rooms}):
             self.switch_inputs.async_config_changed()
+            # A removed switch's log goes with it; rooms keep theirs.
+            self.decisions.prune(lambda s: "/" not in s or new.room(s.split("/", 1)[0]).switch(
+                s.split("/", 1)[1]) is not None)
         if self._running and (old.unrepresentable != new.unrepresentable or old.manual_option != new.manual_option):
             # The handling of a mood Main Mood cannot represent changes the effective mood.
             self._on_mood_event()
@@ -1355,6 +1395,10 @@ class LightingController:
             for area_id in self.config.enabled_rooms:
                 o, n = old.room(area_id), new.room(area_id)
                 if not n.control_enabled:
+                    if o.control_enabled:
+                        self.explain.deactivated(area_id)
+                    elif o.mood_override != n.mood_override:
+                        self._observe(area_id, "room_mood_override")
                     continue
                 if not o.control_enabled:
                     self._schedule_apply(area_id, "activated")
@@ -1508,6 +1552,12 @@ class LightingController:
             async_dispatcher_send(self.hass, SIGNAL_LIGHTING_UPDATED)
 
     @callback
+    def _on_decision(self) -> None:
+        """A decision was recorded or updated: saved with the next (delayed) state write; cards refetch."""
+        self._mark_dirty()
+        self._notify()
+
+    @callback
     def _mark_dirty(self) -> None:
         self._dirty = True
         self._state_store.async_delay_save(self._state_data, LIGHTING_STATE_SAVE_DELAY_SECONDS)
@@ -1515,7 +1565,8 @@ class LightingController:
     def _state_data(self) -> dict[str, Any]:
         self._dirty = False
         return {"rooms": {a: rt.persist() for a, rt in self.runtime.items()}, "adaptive": self.adaptive.persist(),
-                "daylight": self.daylight.persist(), "switches": self.switch_inputs.persist()}
+                "daylight": self.daylight.persist(), "switches": self.switch_inputs.persist(),
+                "decisions": self.decisions.persist()}
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -1627,6 +1678,7 @@ class LightingController:
             }
         _LOGGER.info("lighting_manual_override area=%s lights=%s source=wall_switch switch=%s action=%s",
                      area_id, ",".join(targets), switch.id, raw)
+        self.explain.override(area_id, targets, "wall_switch", state, minutes, switch=switch.name, action=raw)
         self._mark_dirty()
         self._schedule_override_expiry()
         self._notify()

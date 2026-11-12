@@ -36,13 +36,19 @@
  * has the same for Observing / Active. A switch set to Active works whatever
  * the room's automatic lighting mode is.
  *
+ * 0.3.7: decision log. The Overview shows the room's last decision (what,
+ * why, when, and whether it worked); the Log tab lists the last 10, newest
+ * first, each with its details on demand; every switch card shows its last
+ * decision and has its own log. Every word of a decision comes from the
+ * integration, which records it while deciding; the card only formats it.
+ *
  * The cards are editors only: the integration owns the configuration
  * (websocket API, admin-only writes). The cards never call a light service and
  * a preview never changes a light. They refetch only when the integration
  * reports a change.
  */
 
-const VERSION = "0.3.6";
+const VERSION = "0.3.7";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -179,6 +185,51 @@ const OUTCOMES = {
 const outcomeOf = (st) => st.last_outcome || (st.last_result_ok === true ? "succeeded" : st.last_result_ok === false ? "failed" : null);
 const outcomePill = (st) => { const o = OUTCOMES[outcomeOf(st)]; return o ? `<span class="pill ${o[1]}">${o[0]}</span>` : ""; };
 const outcomeTone = (st) => ({ failed: "bad", blocked: "warn" }[outcomeOf(st)] || "");
+
+// Decision log (0.3.7): status words with an icon, never colour alone.
+const DECISION = {
+  executed: ["Executed", "ok", "mdi:check-circle-outline"],
+  dispatched: ["Sent", "info", "mdi:send-outline"],
+  partial: ["Partly failed", "bad", "mdi:alert-outline"],
+  failed: ["Failed", "bad", "mdi:close-circle-outline"],
+  observed: ["Observed only", "muted", "mdi:eye-outline"],
+  blocked: ["Blocked", "warn", "mdi:cancel"],
+  no_change: ["No change needed", "muted", "mdi:check"],
+  no_action: ["No action", "muted", "mdi:minus-circle-outline"],
+  noted: ["Noted", "muted", "mdi:information-outline"],
+};
+const decisionStatus = (d) => {
+  // Sent and accepted, but the lights did not report the requested state in time.
+  if (d.status === "dispatched" && d.details?.verification) return ["Sent · not confirmed", "warn", "mdi:send-clock-outline"];
+  return DECISION[d.status] || [d.status, "muted", "mdi:help-circle-outline"];
+};
+const decisionPill = (d) => { const [w, tone, icon] = decisionStatus(d); return `<span class="pill ${tone} dstat"><ha-icon icon="${icon}"></ha-icon>${esc(w)}</span>`; };
+// The target beside the action, unless the action already names it.
+const targetText = (d) => (d.target && !d.action.includes(d.target) ? ` <span class="sub">${esc(d.target)}</span>` : "");
+const DECISION_MODES = { observing: "Observing", automatic: "Automatic", paused: "Automatic · paused (Manual mood)", active: "Active" };
+const fullTime = (iso) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? String(iso || "") : d.toLocaleString(); };
+const DETAIL_LABELS = [
+  ["trigger", "Trigger"], ["trigger_entity", "Triggering entity"], ["trigger_state", "Triggering state"],
+  ["switch", "Switch"], ["button", "Button"], ["press", "Press type"], ["input", "Received through"],
+  ["occupancy", "Occupancy"], ["occupancy_reason", "Occupancy reason"], ["occupancy_inputs", "Occupancy inputs"],
+  ["mood", "Mood / profile"], ["mood_detail", "Mood source"],
+  ["daylight", "Daylight"], ["lux", "Light level (lx)"], ["on_below_lux", "Darkness threshold (lx)"],
+  ["daylight_detail", "Daylight detail"], ["auto_on", "Automatic switch-on"],
+  ["manual_overrides", "Manual overrides"], ["manual_override", "Manual override registered"],
+  ["override_source", "Changed by"], ["override_minutes", "Respected for (min)"],
+  ["lights_on", "Lights on"], ["targets", "Lights"], ["assigned_action", "Assigned action"],
+  ["global_values", "Global adjustment"], ["captured", "Captured buttons"],
+  ["service", "Requested action"], ["result", "Result"], ["verification", "Verification"], ["errors", "Error"],
+];
+const detailValue = (k, v) => {
+  if (v === true) return "Yes";
+  if (v === false) return "No";
+  if (k === "occupancy") return esc(OCC[v] || v);
+  if (k === "daylight") return esc(DL_WORDS[v] || v);
+  if (Array.isArray(v)) return v.length ? `<ul class="dlist">${v.map((x) => `<li>${esc(typeof x === "object" ? JSON.stringify(x) : x)}</li>`).join("")}</ul>` : "—";
+  if (v && typeof v === "object") return `<ul class="dlist">${Object.entries(v).map(([a, b]) => `<li>${esc(a)}: ${esc(typeof b === "object" ? JSON.stringify(b) : b)}</li>`).join("")}</ul>`;
+  return esc(v);
+};
 
 const OCC = {
   vacant: "Vacant", possible_occupancy: "Possible occupancy", confirmed_occupancy: "Confirmed occupancy",
@@ -916,16 +967,16 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const active = d.control_mode === "active";
     const st = this._roomModeState(r);
     const tab = this._ui.tab || "overview";
-    const tabs = [["overview", "Overview"], ["lights", "Lights"], ["automatic", "Automatic"], ["switches", "Switches"],
+    const tabs = [["overview", "Overview"], ["log", "Log"], ["lights", "Lights"], ["automatic", "Automatic"], ["switches", "Switches"],
       ["overrides", "Overrides"], ["preview", "Preview"], ["advanced", "Advanced"]];
-    const content = { overview: () => this._overview(r), lights: () => this._lights(r), automatic: () => this._automatic(r),
+    const content = { overview: () => this._overview(r), log: () => this._log(r), lights: () => this._lights(r), automatic: () => this._automatic(r),
       switches: () => this._switches(r), overrides: () => this._overrides(r), preview: () => this._preview(r),
       advanced: () => this._advanced(r) }[tab]();
     return `<div class="header"><ha-icon icon="${active ? "mdi:lightbulb-auto" : "mdi:lightbulb-outline"}" class="${active ? "lit" : ""}"></ha-icon>
         <div class="titles"><div class="title">${esc(this._config.title || r.name)}</div>
         <div class="sub">${esc(OCC[r.occupancy.state] || "Occupancy unknown")}</div></div>
         <span class="badge ${st.tone === "muted" ? "" : st.tone}" title="Automatic lighting: ${esc(st.word)}">${esc(st.short)}</span></div>
-      <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" class="tab ${k === tab ? "on" : ""}" data-action="tab" data-tab="${k}">${l}</button>`).join("")}</div>
+      <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === tab}" class="tab ${k === tab ? "on" : ""}" data-action="tab" data-tab="${k}">${l}</button>`).join("")}</div>
       <div class="pad">${manualBanner(this._model)}${content}</div>`;
   }
 
@@ -982,7 +1033,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const hv = (x, extra = "") => { const i = HEALTH[x?.status] || HEALTH.healthy; return `<span class="${i.tone}">${i.label}</span>${extra}`; };
     const nConf = new Set((d.conflicts || []).filter((c) => c.enabled && !c.acknowledged).map((c) => c.automation)).size;
     const issues = this._issues(r);
-    return `<div class="kvs">
+    return `${this._lastDecisionHtml(r.decisions, "log")}<div class="kvs">
         <div><span>Mood</span><b>${d.follows_global ? `follows global ${esc(d.room_mood || "—")}` : `room mood ${esc(d.room_mood)}`}</b></div>
         <div><span>Automatic lighting</span><b>${esc(this._roomModeState(r).word)}</b></div>
         <div><span>Occupancy</span><b>${hv(h.occupancy)}</b></div>
@@ -996,6 +1047,59 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       </div>
       ${issues ? `<div class="issues">${issues}</div>` : `<div class="note ok">No warnings.</div>`}
       ${this._statusHtml("group")}`;
+  }
+
+  // Overview: the latest decision of the room (or a switch), compact: what, result, why, when.
+  _lastDecisionHtml(dec, logTab = null) {
+    const d = dec?.latest;
+    const open = logTab ? `<button class="link" data-action="tab" data-tab="${logTab}">Log</button>` : "";
+    if (!d) return `<div class="decision"><div class="dhead"><span class="stitle">Last decision</span></div><div class="muted">No decisions recorded yet.</div></div>`;
+    return `<div class="decision"><div class="dhead"><span class="stitle">Last decision</span>
+        <span class="sub" title="${esc(fullTime(d.at))}"><time datetime="${esc(d.at)}">${fmtTime(d.at)}</time>${d.count > 1 ? ` · ×${d.count}` : ""}</span></div>
+      <div class="dline"><b>${esc(d.action)}</b>${targetText(d)} ${decisionPill(d)}</div>
+      <div class="dexp">${esc(d.explanation)}</div>${open ? `<div>${open}</div>` : ""}</div>`;
+  }
+
+  // Log tab: the room's last decisions, newest first.
+  _log(r) {
+    const dec = r.decisions || { entries: [], size: 10 };
+    return `<div class="stitle">Decision log</div>
+      <div class="sub">The last ${dec.size || 10} decisions of automatic lighting in ${esc(r.name)}, newest first. Recorded by Smart Occupancy while it decides; updates by itself. Select an entry for its details.</div>
+      ${this._decisionList(dec.entries || [], "room")}`;
+  }
+
+  _decisionList(entries, scope) {
+    if (!entries.length) return `<div class="muted">No decisions recorded yet.</div>`;
+    const open = this._ui.decOpen || {};
+    return `<ul class="dlog">${entries.map((d) => {
+      const id = `${scope}-${d.id}`;
+      const isOpen = !!open[id];
+      return `<li class="drow ${isOpen ? "open" : ""}"><button class="dbtn" data-action="dec-toggle" data-id="${esc(id)}" aria-expanded="${isOpen}" aria-controls="dd-${esc(id)}">
+          <span class="dtime" title="${esc(fullTime(d.at))}"><time datetime="${esc(d.at)}">${fmtTime(d.at)}</time>${d.count > 1 ? `<span class="sub">×${d.count}</span>` : ""}</span>
+          <span class="dact"><b>${esc(d.action)}</b>${targetText(d)}</span>
+          <span class="dres">${decisionPill(d)}</span>
+          <span class="dexp">${esc(d.explanation)}</span></button>
+        ${isOpen ? `<div class="ddet" id="dd-${esc(id)}">${this._decisionDetails(d)}</div>` : ""}</li>`;
+    }).join("")}</ul>`;
+  }
+
+  // Only what the integration recorded: the card adds no diagnosis of its own.
+  _decisionDetails(d) {
+    const det = d.details || {};
+    const rows = [
+      ["Time", esc(fullTime(d.at)) + (d.count > 1 && d.first_at ? ` <span class="sub">(${d.count}× since ${esc(fullTime(d.first_at))})</span>` : "")],
+      ["Mode at that time", esc(DECISION_MODES[d.mode] || d.mode || "—")],
+      ["Result", decisionPill(d)],
+    ];
+    if (d.target) rows.push(["Target", esc(d.target)]);
+    const known = new Set(DETAIL_LABELS.map(([k]) => k));
+    for (const [k, label] of DETAIL_LABELS) {
+      const v = det[k];
+      if (v === undefined || v === null || v === "" || (k === "trigger_entity" && !v)) continue;
+      rows.push([label, detailValue(k, v)]);
+    }
+    for (const [k, v] of Object.entries(det)) if (!known.has(k) && v !== null && v !== undefined) rows.push([esc(k.replace(/_/g, " ")), detailValue(k, v)]);
+    return `<dl class="ddl">${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("")}</dl>`;
   }
 
   // One Overview line: the daylight decision and whether occupancy switches lights on.
@@ -1363,18 +1467,24 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const what = [x.manufacturer, x.model].filter(Boolean).join(" ") || x.description || "";
     const avail = st.availability === "offline" || st.availability === "unavailable" ? ` · <span class="warn">${esc(st.availability)}</span>` : st.availability === "online" ? " · online" : "";
     const controls = new Set((x.buttons_list || []).filter((b) => b.mapping && b.mapping.action !== "none").map((b) => (b.mapping.target === "room" ? "Room lights" : this._name(r, b.mapping.target))));
+    const dl = x.decisions?.latest;
+    const logOpen = !!(this._ui.swLog || {})[x.id];
     return `<div class="section swc">
       ${this._swModeHtml(x, `<div class="lmain"><b>${esc(x.name)}</b>${what ? `<div class="sub">${esc(what)}</div>` : ""}</div>`)}
       <div class="kvs">
         <div><span>Last event</span><b>${ev ? `${esc(ev.label)} · ${fmtTime(ev.at)}` : "—"}</b></div>
-        ${st.last_result ? `<div><span>Result</span><b>${outcomePill(st)} <span class="${outcomeTone(st)}">${esc(st.last_result)}</span></b></div>` : ""}
+        ${dl ? `<div><span>Last decision</span><b>${esc(dl.action)} ${decisionPill(dl)}</b></div>`
+    : st.last_result ? `<div><span>Result</span><b>${outcomePill(st)} <span class="${outcomeTone(st)}">${esc(st.last_result)}</span></b></div>` : ""}
         <div><span>Connection</span><b>${esc(x.connection)}${avail}</b></div>
         <div><span>Controls</span><b>${controls.size ? esc([...controls].join(", ")) : "nothing assigned"}</b></div>
         <div><span>Buttons configured</span><b>${mapped} of ${(x.buttons_list || []).length}</b></div>
         ${st.override ? `<div><span>Manual override</span><b>Active</b></div>` : ""}
       </div>
+      ${dl ? `<div class="dexp sub">${esc(dl.explanation)} <span title="${esc(fullTime(dl.at))}">· ${fmtTime(dl.at)}</span></div>` : ""}
       ${(x.warnings || []).map((w) => `<div class="note warn">${esc(w.text)}</div>`).join("")}
       ${learning ? this._learningHtml(x) : ""}
+      <div><button class="link" data-action="sw-log" data-switch="${esc(x.id)}" aria-expanded="${logOpen}">${logOpen ? "Hide log" : `Log (${(x.decisions?.entries || []).length})`}</button></div>
+      ${logOpen ? `<div class="swlog"><div class="sub">The last ${x.decisions?.size || 10} presses and decisions of ${esc(x.name)}, newest first.</div>${this._decisionList(x.decisions?.entries || [], `sw-${x.id}`)}</div>` : ""}
       ${ro ? "" : `<div class="ibtns"><button class="btn small" data-action="sw-configure" data-switch="${esc(x.id)}">Configure</button>
         ${learning ? "" : `<button class="btn small ghost" data-action="sw-learn" data-switch="${esc(x.id)}">Learn buttons</button>`}
         <button class="link" data-action="sw-remove" data-switch="${esc(x.id)}">Remove</button></div>`}
@@ -1558,7 +1668,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const ui = this._ui;
     const area = this._config.area;
     const id = el.dataset.switch;
-    if (a === "sw-add-open") { ui.swAdd = true; ui.swCands = null; this._render(); }
+    if (a === "sw-log") { ui.swLog = { ...(ui.swLog || {}), [id]: !(ui.swLog || {})[id] }; this._render(); }
+    else if (a === "sw-add-open") { ui.swAdd = true; ui.swCands = null; this._render(); }
     else if (a === "sw-add-close") { ui.swAdd = false; this._render(); }
     else if (a === "sw-refresh") { ui.swCands = null; this._render(); }
     else if (a === "sw-add-adv") { ui.swAddAdv = !el.parentElement.open; }
@@ -1675,7 +1786,12 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const ui = this._ui;
     if (a.startsWith("sw-")) { this._onSwitchAction(a, el); return; }
     if (a === "tab") { ui.tab = el.dataset.tab; ui.edit = null; ui.swEdit = null; ui.swAdd = false; if (ui.tab === "preview") ui.previewData = null; if (ui.tab === "advanced") ui.review = null; this._render(); }
-    else if (a === "open-group") { ui.openGroup = ui.openGroup === el.dataset.group ? null : el.dataset.group; this._render(); }
+    else if (a === "dec-toggle") {
+      const id = el.dataset.id;
+      ui.decOpen = { ...(ui.decOpen || {}), [id]: !(ui.decOpen || {})[id] };
+      this._render();
+      this.shadowRoot.querySelector(`[data-action="dec-toggle"][data-id="${CSS.escape(id)}"]`)?.focus();
+    } else if (a === "open-group") { ui.openGroup = ui.openGroup === el.dataset.group ? null : el.dataset.group; this._render(); }
     else if (a === "edit-room") { ui.edit = { scope: "room", target: el.dataset.target }; this._render(); }
     else if (a === "edit-light") { ui.edit = { scope: "light", target: el.dataset.target }; this._render(); }
     else if (a === "preview-detail") { ui.previewDetail = !ui.previewDetail; this._render(); }
@@ -1918,6 +2034,31 @@ const STYLE = `<style>
   .auto.warn { border-color: var(--warning-color, #ff9800); color: var(--primary-text-color); }
   .li { padding: 2px 0; overflow-wrap: anywhere; }
   .swc { border: 1px solid var(--divider-color); border-radius: 8px; padding: 8px; display: grid; gap: 6px; }
+  .decision { display: grid; gap: 4px; padding: 8px 10px; margin-bottom: 10px; border-radius: 8px; background: var(--secondary-background-color); }
+  .dhead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .dhead .stitle { margin-top: 0; }
+  .dline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .dexp { overflow-wrap: anywhere; }
+  .dstat { display: inline-flex; align-items: center; gap: 3px; }
+  .dstat ha-icon { --mdc-icon-size: 14px; }
+  .dlog { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
+  .drow { border: 1px solid var(--divider-color); border-radius: 8px; }
+  .drow.open { border-color: var(--primary-color); }
+  .dbtn { display: grid; grid-template-columns: 5.6em minmax(0, 1fr) auto; grid-template-areas: "time act res" "time exp exp"; gap: 2px 8px;
+    width: 100%; text-align: left; background: none; border: none; padding: 6px 8px; color: inherit; font: inherit; cursor: pointer; border-radius: 8px; }
+  .dbtn:hover { background: var(--secondary-background-color); }
+  .dbtn:focus-visible { outline: 2px solid var(--primary-color); outline-offset: -2px; }
+  .dtime { grid-area: time; display: grid; align-content: start; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .dact { grid-area: act; min-width: 0; overflow-wrap: anywhere; }
+  .dres { grid-area: res; text-align: right; }
+  .dbtn .dexp { grid-area: exp; color: var(--secondary-text-color); font-size: 0.9em; }
+  .ddet { padding: 4px 10px 8px; border-top: 1px solid var(--divider-color); }
+  .ddl { margin: 0; display: grid; gap: 2px; font-size: 0.9em; }
+  .ddl > div { display: grid; grid-template-columns: 11em minmax(0, 1fr); gap: 8px; padding: 2px 0; }
+  .ddl dt { color: var(--secondary-text-color); }
+  .ddl dd { margin: 0; overflow-wrap: anywhere; }
+  .dlist { margin: 0; padding-left: 16px; }
+  .swlog { display: grid; gap: 4px; }
   .swrow { display: grid; gap: 4px; padding: 6px 0; border-bottom: 1px solid var(--divider-color); }
   .swrow .fval { flex-wrap: wrap; }
   code { font-size: 0.85em; opacity: 0.8; }
@@ -1948,6 +2089,9 @@ const STYLE = `<style>
     .kvs { grid-template-columns: 1fr; }
     .frow { grid-template-columns: 1fr; gap: 4px; }
     .tval { max-width: 50%; }
+    .dbtn { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "act res" "time time" "exp exp"; }
+    .dtime { display: flex; gap: 6px; color: var(--secondary-text-color); font-size: 0.85em; }
+    .ddl > div { grid-template-columns: 1fr; gap: 0; }
   }
 </style>`;
 

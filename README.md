@@ -246,6 +246,20 @@ Setting a switch to Active is refused while Zigbee2MQTT reports a direct binding
 
 Each press ends with one outcome, shown on the card (*Result*) and in *Advanced switch settings → Recent presses*: **Observed** (Observing), **Not assigned** (the button has no action), **Blocked** (Active, but the room is not enabled, too many presses queued, or the switch was set to Observing before the press ran), **Executed** or **Failed** (with Home Assistant's error, or *No light to control (2 lights offline)*). Executed, failed and blocked presses are logged at info level (`switch_press … outcome=…`); observed ones only at debug level.
 
+### Decision log (0.3.7)
+
+Smart Occupancy records why it did (or did not) do something, while it decides. You never need Home Assistant's traces or logs to find out.
+
+- **Overview → Last decision**: what was decided, the result, one sentence why, and when. Example: *Apply Kvøld · Executed — Mood changed to Kvøld: Ceiling Lights and Kitchen Lights switched on (Kvøld).* Before the first decision: *No decisions recorded yet.*
+- **Log tab** (Overview · **Log** · Lights · …): the room's last 10 decisions, newest first. Select an entry (mouse, or Tab + Enter) for its details: trigger, triggering entity and state, occupancy and its inputs, mood, daylight and light level, manual overrides, every light's decision, the requested service call, the result and any error. Only what the integration actually used is shown.
+- **Switches → each switch card**: *Last decision* with its result, and **Log** with the switch's last 10 presses (button, assigned action, why, result).
+
+Results (always a word with an icon, never colour alone): **Executed** (Home Assistant accepted the command and the lights reported the requested state), **Sent** / **Sent · not confirmed** (accepted, but the lights did not report the requested state within a few seconds; scenes and scripts cannot be confirmed), **Partly failed**, **Failed** (with Home Assistant's error), **Observed only** (Observing: what would have been done; nothing was sent), **Blocked** (a condition prevented it: manual override, Manual mood, automatic switch-on off, uncertain daylight, an automation conflict, an offline light), **No change needed**, **No action** (a button without an action), **Noted** (e.g. a person's change that automatic lighting now respects).
+
+What is logged: lighting applied or evaluated for a visit, a mood change, a room mood, a profile change, Automatic being switched on, a light coming back; gradual updates of the global adjustment; manual overrides; a room becoming vacant with lights still on (Smart Occupancy does not switch lights off on vacancy); a queued change dropped because Manual mood started; Observing being set; every switch press and learning session. Not logged: sensor updates that change no decision. Repeats are folded: occupancy confirmed after the first motion of the same visit adds nothing, and the same decision again (same result) updates the newest entry with a count (×3) instead of adding one; global adjustment updates are one entry, button repeats within a minute too.
+
+The log is kept in the integration's existing state file (`.storage/smart_occupancy.lighting_state`, written with its usual delayed save; survives restarts and mode changes). It creates no entity, no helper and no Recorder history. Removing a switch removes its log.
+
 ### Activation (pilot: Kamar Norður)
 
 1. Open the Smart Room Lighting card for Kamar Norður → **Advanced**. The review shows:

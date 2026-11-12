@@ -296,6 +296,7 @@ async def test_reload_keeps_occupancy_and_cleans_up(hass: HomeAssistant, pilot: 
     entry = await start(hass, pilot, freezer)
     await set_state(hass, pilot.radar, "on")
     await tick(hass, freezer, 15)
+    await tick(hass, freezer, 11)  # the visit's decision log entry is saved (delayed write), not a subscription
     listeners_before = hass.bus.async_listeners()
     for _ in range(3):
         assert await hass.config_entries.async_reload(entry.entry_id)

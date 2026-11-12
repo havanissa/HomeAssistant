@@ -37,6 +37,14 @@ and logged. Every press ends with one outcome (diagnostics):
   set to Observing before the press ran);
 * ``succeeded`` / ``failed`` - the action was dispatched and Home Assistant
   accepted it or reported an error (an unavailable target is a failure).
+
+Decision log (0.3.7): every press also becomes one decision record of the
+switch (``decisions.py``): the button, the assigned action, the explanation,
+the switch's mode and a status. A succeeded light command is *dispatched*
+until the lights report the requested state (then *executed*); scenes and
+scripts stay *dispatched* (their effect cannot be observed); presses that
+changed nothing are *no change*. Repeats of the same button with the same
+result within a minute are one entry.
 """
 
 from __future__ import annotations
@@ -56,10 +64,25 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     COMMAND_TIMEOUT_SECONDS,
+    DECISION_PRESS_MERGE_SECONDS,
     LEVEL_MEMORY_SECONDS,
     MAX_QUEUED_PRESSES,
     ButtonAction,
     OnValues,
+)
+from .decisions import (
+    BLOCKED,
+    DISPATCHED,
+    EXECUTED,
+    FAILED,
+    MODULE_SWITCH,
+    NO_ACTION,
+    NO_CHANGE,
+    OBSERVED,
+    PARTIAL,
+    Check,
+    light_checks,
+    minutes_text,
 )
 from .lighting import light_capabilities
 from .supervision import assert_switch_control_permitted
@@ -105,9 +128,13 @@ OUTCOME_FAILED = "failed"
 
 class _Result:
     def __init__(self, text: str, ok: bool | None, command: str | None = None, override: bool = False,
-                 outcome: str | None = None) -> None:
+                 outcome: str | None = None, *, unchanged: bool = False, internal: bool = False,
+                 partial: bool = False, checks: list[Check] | None = None) -> None:
         self.text, self.ok, self.command, self.override = text, ok, command, override
         self.outcome = outcome or (OUTCOME_SUCCEEDED if ok else OUTCOME_FAILED if ok is False else OUTCOME_OBSERVED)
+        # For the decision log: nothing needed to change / done inside Smart Occupancy (a room mood) /
+        # some targets failed / what the targets should report afterwards.
+        self.unchanged, self.internal, self.partial, self.checks = unchanged, internal, partial, checks
 
 
 def _plural(n: int, word: str = "light") -> str:
@@ -125,6 +152,8 @@ class SwitchControl:
         self._dims: dict[Key, _DimRun] = {}
         self._levels: dict[str, tuple[int, float]] = {}  # entity -> (brightness %, monotonic)
         self._mood_timers: dict[str, CALLBACK_TYPE] = {}
+        # What the light commands of the press being executed should leave behind (per switch).
+        self._sent: dict[Key, dict[str, Check]] = {}
         self._tasks: set[asyncio.Task] = set()
         self._stopped = False
 
@@ -188,7 +217,8 @@ class SwitchControl:
             return
         if mapping.action == ButtonAction.DIM_STOP:
             stopped = self._stop_dim(key)
-            self._record(key, event, _Result("Dimming stopped" if stopped else "Stop: nothing was dimming", True))
+            self._record(key, event, _Result("Dimming stopped" if stopped else "Stop: nothing was dimming", True,
+                                             internal=stopped, unchanged=not stopped))
             return
         self._stop_dim(key)  # any other press ends hold-to-dim
         if mapping.action in (ButtonAction.DIM_UP, ButtonAction.DIM_DOWN):
@@ -212,6 +242,7 @@ class SwitchControl:
                 if not self.ctrl.switch_active(event.area_id, event.switch_id):
                     result = _Result(IGNORED_WORDS["switched_to_observe"], None, outcome=OUTCOME_BLOCKED)
                 else:
+                    self._sent.pop(key, None)
                     try:
                         result = await self._execute(event, switch, mapping, context)
                     except Exception as err:  # noqa: BLE001 - one switch never stops the controller
@@ -223,8 +254,11 @@ class SwitchControl:
 
     def _record(self, key: Key, event: ButtonEvent, result: _Result) -> None:
         status = self.ctrl.switch_inputs.status.get(key)
+        # Only an executed command collects light checks (a STOP press must not take the dimming run's).
+        sent = self._sent.pop(key, {}) if result.command is not None else {}
         if status is None:
             return
+        self._decide(key, event, result, list(sent.values()))
         status.last_result, status.last_result_ok = result.text, result.ok
         status.last_outcome = result.outcome
         if result.command is not None:
@@ -239,6 +273,67 @@ class SwitchControl:
             event.switch_id, event.raw, event.source, result.outcome, result.text)
         self.ctrl.mark_dirty()
         self.ctrl.notify()
+
+    def _decide(self, key: Key, event: ButtonEvent, result: _Result, sent: list[Check]) -> None:
+        """The press as a decision record of the switch (built from what was actually done)."""
+        area_id, switch_id = key
+        switch = self.ctrl.lighting.room(area_id).switch(switch_id)
+        if switch is None:
+            return
+        mapping = switch.mapping(event.raw)
+        label = action_label(event.raw)
+        planned = mapping.describe() if mapping else "No action"
+        outcome = result.outcome
+        checks = result.checks or sent
+        if outcome == OUTCOME_OBSERVED:
+            status = OBSERVED
+            text = (f"Button {label}: the switch is Observing, so "
+                    + (f"{planned} is assigned but not executed." if mapping else "nothing is assigned to it.")
+                    + " Registered as a manual action.")
+        elif outcome == OUTCOME_NOT_MAPPED:
+            status = NO_ACTION
+            text = f"Button {label}: no action is assigned to this button (registered as a manual action)."
+        elif outcome == OUTCOME_BLOCKED:
+            status = BLOCKED
+            text = f"Button {label}: not executed — {result.text}."
+        elif outcome == OUTCOME_FAILED:
+            status = PARTIAL if result.partial else FAILED
+            text = f"Button {label}: {result.text}."
+        elif result.unchanged:
+            status = NO_CHANGE
+            text = f"Button {label}: {result.text}."
+        else:
+            status = DISPATCHED if checks or not result.internal else EXECUTED
+            text = f"Button {label}: {result.text}."
+        if result.override and outcome in (OUTCOME_SUCCEEDED, OUTCOME_FAILED):
+            minutes = switch.override_minutes if switch.override_minutes is not None else \
+                self.ctrl.lighting.override_minutes(area_id)
+            text += f" Automatic lighting leaves these lights as set {minutes_text(minutes)}."
+        details: dict[str, Any] = {
+            "trigger": "button press", "switch": switch.name, "button": event.raw, "press": event.press,
+            "input": event.source, "trigger_entity": switch.event_entity if event.source == "event_entity" else None,
+            "assigned_action": planned, "result": result.text,
+        }
+        if result.command:
+            details["service"] = result.command
+        if status in (FAILED, PARTIAL):
+            details["errors"] = result.text
+        if result.override:
+            details["manual_override"] = True
+        target = None
+        if mapping is not None:
+            if mapping.target and mapping.action in LIGHT_ACTIONS:
+                target = "Room lights" if mapping.target == ROOM_TARGET else self._names([mapping.target])
+            elif mapping.entity:
+                target = self._names([mapping.entity])
+            elif mapping.mood:
+                target = mapping.mood
+        self.ctrl.decisions.record(
+            f"{area_id}/{switch_id}", module=MODULE_SWITCH, trigger="button", kind="press", action=planned,
+            explanation=text, mode="active" if switch.controls else "observing", status=status, target=target,
+            details=details, key=("press", event.raw, planned, status), merge_seconds=DECISION_PRESS_MERGE_SECONDS,
+            checks=checks if status == DISPATCHED else None,
+        )
 
     # --------------------------------------------------------------- targets
     def _targets(self, area_id: str, mapping: ButtonMapping) -> tuple[list[str], list[str]]:
@@ -272,6 +367,9 @@ class SwitchControl:
             return {}
         errors = await self.ctrl.async_switch_lights(area_id, service, data_by_entity, context, switch_id=switch.id)
         sent = [e for e in data_by_entity if e not in errors]
+        expected = self._sent.setdefault((area_id, switch.id), {})
+        for check in light_checks(service, {e: data_by_entity[e] for e in sent}):
+            expected[check.entity_id] = check  # the last command per light (hold-to-dim sends several)
         now = time.monotonic()
         for entity_id in sent:
             data = data_by_entity[entity_id]
@@ -348,7 +446,7 @@ class SwitchControl:
             return _Result(f"Failed: {next(iter(errors.values()))}", False, command)
         names = self._names(entities)
         text = f"{names} {verb}" + (f" · {len(errors)} failed" if errors else "") + note
-        return _Result(text, not errors, command, override=ok > 0)
+        return _Result(text, not errors, command, override=ok > 0, partial=bool(errors))
 
     def _names(self, entities: list[str]) -> str:
         if len(entities) == 1:
@@ -410,7 +508,8 @@ class SwitchControl:
                     continue
             data[e] = {"brightness_pct": new}
         if not data:
-            return _Result("Already at the " + ("maximum" if direction > 0 else "minimum") + " brightness" + note, True)
+            return _Result("Already at the " + ("maximum" if direction > 0 else "minimum") + " brightness" + note, True,
+                           unchanged=True)
         errors = await self._lights(area_id, "turn_on", data, context, switch, event,
                                     f"Physical switch brightness {'up' if direction > 0 else 'down'}")
         values = sorted({d["brightness_pct"] for d in data.values()})
@@ -430,6 +529,7 @@ class SwitchControl:
         final: list[int] = []
         try:
             async with self._locks.setdefault(key, asyncio.Lock()):
+                self._sent.pop(key, None)
                 online, _offline = self._targets(area_id, mapping)
                 lights = [e for e in online if light_capabilities(self.hass, e).brightness]
                 levels: dict[str, int | None] = {e: self._level(e) for e in lights}
@@ -523,19 +623,20 @@ class SwitchControl:
             if domain not in ("input_select", "select"):
                 return _Result(f"{helper} is not a selector", False)
             if state.state == option:
-                return _Result(f"Mood is already {option}", True)
+                return _Result(f"Mood is already {option}", True, unchanged=True)
             await self._call(domain, "select_option", {"entity_id": helper, "option": option}, context)
             return _Result(f"Mood selector set to {option} (all rooms follow through Main Mood)", True,
-                           f"{domain}.select_option {option}")
+                           f"{domain}.select_option {option}", checks=[Check(helper, option)])
         room = ctrl.lighting.room(area_id)
         rt = ctrl.runtime_for(area_id)
         if auto:
             rt.temp_mood = None
             self._cancel_mood_timer(area_id)
             if room.mood_override is None:
-                return _Result("The room already follows the automatic mood", True)
+                return _Result("The room already follows the automatic mood", True, unchanged=True)
             ctrl.store.async_set(ctrl.with_room(area_id, mood_override=None))
-            return _Result("Room mood returned to Auto (follows the global mood)", True, "room mood: Auto")
+            return _Result("Room mood returned to Auto (follows the global mood)", True, "room mood: Auto",
+                           internal=True)
         mood = next((m["name"] for m in ctrl.discovered_moods() if m["name"].casefold() == (mapping.mood or "").casefold()),
                     None)
         if mood is None:
@@ -551,7 +652,7 @@ class SwitchControl:
         if room.mood_override != mood:
             ctrl.store.async_set(ctrl.with_room(area_id, mood_override=mood))
         suffix = f" for {mapping.minutes} min" if mapping.minutes else ""
-        return _Result(f"Room mood set to {mood}{suffix}", True, f"room mood: {mood}")
+        return _Result(f"Room mood set to {mood}{suffix}", True, f"room mood: {mood}", internal=True)
 
     def _cancel_mood_timer(self, area_id: str) -> None:
         if cancel := self._mood_timers.pop(area_id, None):
@@ -595,7 +696,8 @@ class SwitchControl:
             if option not in (state.attributes.get("options") or []):
                 return _Result(f"WLED preset '{option}' does not exist", False)
             await self._call("select", "select_option", {"entity_id": entity, "option": option}, context)
-            return _Result(f"WLED preset {option} activated", True, f"select.select_option {option}")
+            return _Result(f"WLED preset {option} activated", True, f"select.select_option {option}",
+                           checks=[Check(entity, option)])
         return _Result(f"{entity} cannot be used for {mapping.action.value}", False)
 
     async def _call(self, domain: str, service: str, data: dict[str, Any], context: Context) -> None:

@@ -175,6 +175,7 @@ def switch_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, sw
     return {
         **switch.as_dict(),
         "status": status.as_dict(),
+        "decisions": ctrl.decisions.model(f"{area_id}/{switch.id}"),
         "device": device,
         "manufacturer": device.get("manufacturer") or (z2m.vendor if z2m else None),
         "model": device.get("model") or (z2m.model if z2m else None),
