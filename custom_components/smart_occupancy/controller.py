@@ -2005,7 +2005,13 @@ class LightingController:
         settings = self.preliminary_settings(area_id)
         items = {i.entity_id: i for i in plan.items}
         controlled = self.managed_room(area_id).controlled
-        others_on = any(self.hass.states.is_state(e, "on") for e in controlled if e not in owned)
+        # Is another light of the room on (so Turn off cannot leave the room dark)? The lights the normal
+        # lighting has just switched on count as on: the command was accepted, but a device (e.g. a
+        # Zigbee2MQTT group) reports its new state only a moment later, so its state may still read "off" (0.3.12).
+        scene_on = sorted(e for e in sent if (i := items.get(e)) is not None and i.service == "turn_on"
+                          and e not in owned)
+        lit_now = sorted(e for e in controlled if e not in owned and self.hass.states.is_state(e, "on"))
+        others_on = bool(scene_on or lit_now)
         outcome: dict[str, str] = {}
         turn_off: dict[str, dict[str, Any]] = {}
         for entity_id, data in owned.items():
@@ -2050,8 +2056,8 @@ class LightingController:
         elif turn_off:
             for entity_id in turn_off:
                 outcome[entity_id] = "kept_paused"
-        self._trace(area_id, "confirmed", outcome=outcome, errors=errors,
-                    states={e: self._light_snapshot(e) for e in owned})
+        self._trace(area_id, "confirmed", outcome=outcome, errors=errors, scene_switched_on=scene_on,
+                    other_lights_on=lit_now, states={e: self._light_snapshot(e) for e in owned})
         self.explain.preliminary_confirmed(area_id, plan, outcome, errors=errors, episode=episode)
         _LOGGER.debug("lighting_preliminary_confirmed area=%s outcome=%s", area_id, outcome)
 

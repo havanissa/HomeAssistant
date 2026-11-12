@@ -13,7 +13,7 @@
  */
 
 const CARD_TYPE = "smart-occupancy-room-card";
-const CARD_VERSION = "0.3.11";
+const CARD_VERSION = "0.3.12";
 
 const STATE_LABELS = {
   vacant: "Vacant",

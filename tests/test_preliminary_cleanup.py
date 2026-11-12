@@ -491,3 +491,52 @@ async def test_held_pir_then_radar_confirms_and_hands_over(hass: HomeAssistant, 
     await advance(hass, freezer, 60)
     assert [s for s, _ in zb.of(lit.lamp)] == ["turn_on", "turn_on"] and hass.states.is_state(lit.lamp, "on")
     assert "timeout_cancelled" in [t["event"] for t in ctrl.preliminary_trace(lit.area)]
+
+
+# ---------------------------------- 0.3.12: Turn off on confirmation while the normal lights have not reported yet
+class SlowGroupLights(ZigbeeLights):
+    """Like Zigbee2MQTT: the service call returns before the device (here: the spots group) reports its new state."""
+
+    def __init__(self, hass: HomeAssistant, slow: set[str], **kw: Any) -> None:
+        super().__init__(hass, **kw)
+        self.slow = slow
+
+    def report(self, entity_id: str, on: bool, pct: float | None = None, *, raw: int | None = None) -> None:
+        if entity_id not in self.slow:
+            super().report(entity_id, on, pct, raw=raw)
+            return
+        from homeassistant.core import callback
+        from homeassistant.helpers.event import async_call_later
+
+        @callback
+        def later(_now) -> None:
+            ZigbeeLights.report(self, entity_id, on, pct, raw=raw)
+
+        async_call_later(self.hass, 0.5, later)
+
+
+async def test_turn_off_on_confirmation_when_the_scene_lights_report_late(hass: HomeAssistant, lit: Lit,
+                                                                         freezer) -> None:
+    """The live trace of 2026-11-12 18:38: preliminary lamp and LED strip (Turn off), not controlled by the mood;
+    the mood switches the spots group on, and the group reports 'on' only after the call returned. Both
+    preliminary lights must go off after the spots are on (0.3.11 kept them on: 'kept_dark')."""
+    zb = SlowGroupLights(hass, {lit.group}, groups={lit.group: [lit.spot_1, lit.spot_2]})
+    targets = (PreliminaryTarget(lit.lamp, 100, None, None, ConfirmAction.TURN_OFF),
+               PreliminaryTarget(lit.strip, 100, None, None, ConfirmAction.TURN_OFF))
+    _entry, ctrl = await setup(hass, lit, freezer, zb, targets=targets)
+    ctrl.store.async_set(ctrl.with_room(lit.area, light_overrides={"Dagur": {
+        lit.lamp: _ignore(), lit.strip: _ignore(), lit.desk: _ignore(), lit.plug: _ignore()}}))
+    await hass.async_block_till_done()
+    await motion(hass, lit, freezer)
+    assert [s for s, _ in zb.of(lit.lamp)] == ["turn_on"] and [s for s, _ in zb.of(lit.strip)] == ["turn_on"]
+    await presence(hass, lit, freezer)
+    assert state(ctrl, lit.area) == "confirmed_occupancy"
+    await advance(hass, freezer)  # the group's own report arrives
+    assert hass.states.is_state(lit.group, "on")
+    assert [s for s, _ in zb.of(lit.lamp)] == ["turn_on", "turn_off"], zb.of(lit.lamp)
+    assert [s for s, _ in zb.of(lit.strip)] == ["turn_on", "turn_off"], zb.of(lit.strip)
+    order = [(c.service, c.data["entity_id"]) for c in zb.calls]
+    assert order.index(("turn_on", [lit.group])) < order.index(("turn_off", [lit.lamp]))  # no dark moment
+    confirmed = next(t for t in ctrl.preliminary_trace(lit.area) if t["event"] == "confirmed")
+    assert confirmed["outcome"] == {lit.lamp: "turned_off", lit.strip: "turned_off"}, confirmed
+    assert confirmed["scene_switched_on"] == [lit.group]
