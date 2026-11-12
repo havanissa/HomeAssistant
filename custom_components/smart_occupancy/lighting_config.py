@@ -32,9 +32,12 @@ Persisted shape (store version 1)::
           "dismissed": [problem subjects],
           "daylight": {...},                           # 0.3.3: daylight-aware switch-on (daylight.RoomDaylight)
           "switches": [{...}],                         # 0.3.5: wall switches / remotes (switches.SwitchConfig)
-          "vacancy": {"action": "turn_off", "mood": null}}},  # 0.3.8: when the room becomes vacant
+          "vacancy": {"action": "turn_off", "mood": null},  # 0.3.8: when the room becomes vacant
+          "preliminary": {"enabled": null, "timeout": null, "on_below": null,   # 0.3.9: possible occupancy
+                          "signals": null, "targets": [{...}]}}},          #   lighting (preliminary.RoomPreliminary)
       "daylight": {"outdoor_entity": null, ...},     # 0.3.3: global daylight settings (daylight.DaylightConfig)
-      "switch_settings": {"mqtt_base_topic": "zigbee2mqtt"}  # 0.3.5 (switches.SwitchSettings)
+      "switch_settings": {"mqtt_base_topic": "zigbee2mqtt"},  # 0.3.5 (switches.SwitchSettings)
+      "preliminary": {"enabled": false, "timeout": 30, ...}   # 0.3.9: global defaults (preliminary.PreliminaryDefaults)
     }
 
 Profile tables may contain the pseudo mood ``"*"`` (every mood, 0.3.2).
@@ -66,6 +69,13 @@ no setting to keep. The migration gives every room without one the default,
 Turn off; ambient (persistent) lights are never switched off by it, and rooms
 in Observing still send nothing. A room that has a setting keeps it. A 0.3.7
 install reads a 1.4 store as is and ignores the new key.
+
+Store 1.5 (0.3.9) adds possible occupancy lighting: the global defaults
+(``preliminary``, disabled) and, per room, ``preliminary`` without any
+light. A room changes nothing until it is enabled *and* has a preliminary
+light, so no room gets extra lighting from the migration, and later changes
+of the global defaults never overwrite a room's own values. A 0.3.8 install
+reads a 1.5 store as is and ignores the new keys.
 """
 
 from __future__ import annotations
@@ -102,6 +112,7 @@ from .const import (
 from .const import LIGHTING_STORE_MINOR_VERSION
 from .daylight import DaylightConfig, RoomDaylight
 from .models import IntegrationConfig, ProfileSetting, ProfileTable, _enum_or
+from .preliminary import PreliminaryDefaults, RoomPreliminary
 from .switches import ROOM_TARGET, SwitchConfig, SwitchSettings, switches_from
 
 _LOGGER = logging.getLogger(__name__)
@@ -297,6 +308,8 @@ class RoomLighting:
     switches: tuple[SwitchConfig, ...] = ()
     # When the room becomes vacant (0.3.8).
     vacancy: RoomVacancy = field(default_factory=RoomVacancy)
+    # Possible occupancy lighting (0.3.9).
+    preliminary: RoomPreliminary = field(default_factory=RoomPreliminary)
 
     def switch(self, switch_id: str) -> SwitchConfig | None:
         return next((s for s in self.switches if s.id == switch_id), None)
@@ -329,6 +342,7 @@ class RoomLighting:
             daylight=RoomDaylight.from_dict(data.get("daylight")),
             switches=switches_from(data.get("switches")),
             vacancy=RoomVacancy.from_dict(data.get("vacancy")),
+            preliminary=RoomPreliminary.from_dict(data.get("preliminary")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -348,6 +362,7 @@ class RoomLighting:
             "daylight": self.daylight.as_dict(),
             "switches": [s.as_dict() for s in self.switches],
             "vacancy": self.vacancy.as_dict(),
+            "preliminary": self.preliminary.as_dict(),
         }
 
 
@@ -368,6 +383,8 @@ class LightingConfig:
     adaptive: AdaptiveConfig = field(default_factory=AdaptiveConfig)
     daylight: DaylightConfig = field(default_factory=DaylightConfig)
     switch_settings: SwitchSettings = field(default_factory=SwitchSettings)
+    # Possible occupancy lighting: global defaults (0.3.9).
+    preliminary: PreliminaryDefaults = field(default_factory=PreliminaryDefaults)
 
     @classmethod
     def from_dict(cls, data: Any) -> LightingConfig:
@@ -390,6 +407,7 @@ class LightingConfig:
             adaptive=AdaptiveConfig.from_dict(data.get("adaptive")),
             daylight=DaylightConfig.from_dict(data.get("daylight")),
             switch_settings=SwitchSettings.from_dict(data.get("switch_settings")),
+            preliminary=PreliminaryDefaults.from_dict(data.get("preliminary")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -406,6 +424,7 @@ class LightingConfig:
             "adaptive": self.adaptive.as_dict(),
             "daylight": self.daylight.as_dict(),
             "switch_settings": self.switch_settings.as_dict(),
+            "preliminary": self.preliminary.as_dict(),
         }
 
     def room(self, area_id: str) -> RoomLighting:
@@ -562,9 +581,19 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
             changed = True
         return updated
 
+    def sub_preliminary(prelim: RoomPreliminary) -> RoomPreliminary:
+        nonlocal changed
+        targets = prelim.targets
+        if any(t.entity_id == old for t in targets):
+            changed = True
+            targets = tuple(replace(t, entity_id=new) if t.entity_id == old else t for t in targets)
+        signals = sub_ids(prelim.signals) if prelim.signals is not None else None
+        return replace(prelim, targets=targets, signals=signals)
+
     rooms = {
         area_id: replace(
             room,
+            preliminary=sub_preliminary(room.preliminary),
             acknowledged=sub_ids(room.acknowledged),
             excluded=sub_ids(room.excluded),
             manual_switches=sub_ids(room.manual_switches),
@@ -616,6 +645,17 @@ def migrate_store(old_major: int, old_minor: int, data: dict[str, Any]) -> dict[
             room = dict(room) if isinstance(room, dict) else {}
             if not isinstance(room.get("vacancy"), dict):
                 room["vacancy"] = {"action": DEFAULT_VACANCY_ACTION.value, "mood": None}
+            rooms[area_id] = room
+        data["rooms"] = rooms
+    if old_minor < 5:
+        # Possible occupancy lighting (0.3.9): disabled, and no room has a preliminary light, so nothing changes.
+        if not isinstance(data.get("preliminary"), dict):
+            data["preliminary"] = PreliminaryDefaults().as_dict()
+        rooms = {}
+        for area_id, room in (data.get("rooms") or {}).items():
+            room = dict(room) if isinstance(room, dict) else {}
+            if not isinstance(room.get("preliminary"), dict):
+                room["preliminary"] = RoomPreliminary().as_dict()
             rooms[area_id] = room
         data["rooms"] = rooms
     return data

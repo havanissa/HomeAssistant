@@ -415,6 +415,12 @@ def _group_issues(ctrl: LightingController, area_id: str) -> list[dict[str, Any]
     return out
 
 
+def _preliminary_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> dict[str, Any]:
+    from .preliminary_websocket import preliminary_model
+
+    return preliminary_model(hass, ctrl, area_id)
+
+
 def switches_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> dict[str, Any]:
     from .switch_websocket import switches_model as model
 
@@ -498,6 +504,8 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
         "presence": presence_model(hass, ctrl.coordinator, area_id) if area_id in ctrl.config.enabled_rooms else None,
         # When the room becomes vacant (0.3.8), and what the last vacancy did.
         "vacancy": {**room_lighting.vacancy.as_dict(), "last": rt.last_vacancy if rt else None},
+        # Possible occupancy lighting (0.3.9): settings (room and global), lights, signals, the running stage.
+        "preliminary": _preliminary_model(hass, ctrl, area_id) if area_id in ctrl.config.enabled_rooms else None,
         "occupancy": {
             "state": result.state.value if result else None,
             "occupied": result.occupied if result else None,
@@ -1113,9 +1121,10 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     if hass.data.get(_REGISTERED):
         return
     hass.data[_REGISTERED] = True
+    from .preliminary_websocket import PRELIMINARY_HANDLERS
     from .switch_websocket import SWITCH_HANDLERS
 
-    for handler in (*SWITCH_HANDLERS, *PRESENCE_HANDLERS):
+    for handler in (*SWITCH_HANDLERS, *PRESENCE_HANDLERS, *PRELIMINARY_HANDLERS):
         websocket_api.async_register_command(hass, handler)
     for handler in (
         ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_adaptive_set, ws_room_set,

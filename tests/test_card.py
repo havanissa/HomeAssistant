@@ -83,6 +83,8 @@ def test_lighting_cards_never_control_lights() -> None:
         "switch/remove", "switch/settings",
         # 0.3.8 Presence tab (settings only: include/exclude a signal, presence timing)
         "presence/sensor", "presence/timing",
+        # 0.3.9 Possible occupancy (settings only)
+        "preliminary/set",
     }, commands
 
 
@@ -93,16 +95,18 @@ def test_card_javascript_parses(path: Path) -> None:
 
 
 def test_room_card_layout() -> None:
-    """Tabs are the single navigation; daylight settings live in the Automatic tab only; one outdoor editor.
+    """Tabs are the single navigation; daylight settings live in the Automatic section only; one outdoor editor.
 
-    0.3.5 adds the Switches tab after Automatic, 0.3.7 the Log tab after Overview, 0.3.8 the Presence tab
-    after Automatic; everything else of the 0.3.4 layout is unchanged.
+    0.3.5 adds the Switches tab, 0.3.7 the Log tab after Overview, 0.3.8 the Presence tab. 0.3.9 moves the
+    configuration sections (Automatic, Presence, Switches, Advanced) into the Settings submenu.
     """
     source = LIGHTING_FILE.read_text(encoding="utf-8")
-    tabs = re.search(r"const ROOM_TABS = (\[.*?\]);", source, re.S).group(1)
-    order = re.findall(r'\["([a-z]+)", "([A-Za-z]+)", "mdi:[a-z-]+"\]', tabs)
-    assert [k for k, _ in order] == ["overview", "log", "lights", "automatic", "presence", "switches", "overrides",
-                                     "preview", "advanced"]
+    main = re.search(r"const MAIN_TABS = (\[.*?\]);", source, re.S).group(1)
+    assert [k for k, _ in re.findall(r'\["([a-z]+)", "([A-Za-z]+)", "mdi:[a-z-]+"\]', main)] == [
+        "overview", "log", "lights", "overrides", "preview", "settings"]
+    settings = re.search(r"const SETTINGS_TABS = (\[.*?\]);", source, re.S).group(1)
+    assert [k for k, _ in re.findall(r'\["([a-z]+)", "([A-Za-z]+)", "mdi:[a-z-]+"', settings)] == [
+        "automatic", "presence", "switches", "advanced"]
     # No duplicate navigation buttons at the bottom of Overview.
     for label in ("Review lights", "Configure overrides", "Preview room"):
         assert label not in source
@@ -121,8 +125,9 @@ def test_room_card_layout() -> None:
                  "Observing", "Active", "Listener diagnostics"):
         assert text in switches, text
     assert "callService" not in switches and "dl-" not in switches
-    # The tab bar, the conflicts "Review" link (0.3.4) and the Last decision's "Log" link (0.3.7).
-    assert source.count('data-action="tab"') == 3
+    # The tab bar, the conflicts "Review" link (0.3.4), the Last decision's "Log" link (0.3.7), and (0.3.9) the
+    # Settings submenu (Back and its sections) and the Overview's "Switch settings" link.
+    assert source.count('data-action="tab"') == 6
 
 
 def test_operating_modes_on_the_main_screens() -> None:
@@ -136,7 +141,7 @@ def test_operating_modes_on_the_main_screens() -> None:
     assert '<div class="section auto">${this._lightingModeHtml(r)}' in auto  # first thing in the box
     automatic = source[source.index("  _automatic(r) {"):source.index("  _autoHtml(r) {")]
     assert "this._lightingModeHtml(r)" in automatic  # also when no daylight information exists
-    mode = source[source.index("  _lightingModeHtml(r) {"):source.index("  _setRoomMode(mode) {")]
+    mode = source[source.index("  _lightingModeHtml(r, compact = false) {"):source.index("  _setRoomMode(mode) {")]
     assert "Double-click to switch between Observing and Automatic." in mode
     assert '<div class="stitle">Automatic lighting</div>' in mode  # the box's title, with the status beside it
     assert 'data-dbl="room-mode"' in mode and 'data-action="room-mode"' in mode
@@ -158,6 +163,11 @@ def test_operating_modes_on_the_main_screens() -> None:
     assert 'data-dbl="sw-mode"' in sw and 'data-action="sw-mode-set"' in sw and "x.operating" in sw
     setter = source[source.index("  _setSwitchMode(id, mode) {"):source.index("  _switchCard(r, sw, x) {")]
     assert "switch/mode" in setter and "confirm: true" in setter and "can_control" in setter
+    # 0.3.9: both stay on the main screen (Overview) although their sections moved into Settings.
+    overview = source[source.index("  _overview(r) {"):source.index("  // Overview: the latest decision")]
+    assert "this._lightingModeHtml(r, true)" in overview and "this._switchQuickHtml(r)" in overview
+    quick = source[source.index("  _switchQuickHtml(r) {"):source.index("  _prelimNow(r) {")]
+    assert "this._swModeHtml(x, " in quick
     # Double-click is detected from two clicks on the same status (a re-render between them is harmless).
     tap = source[source.index("  _tap(el) {"):source.index("  _switchRgb(key, on) {")]
     assert "this._onDouble" in tap and "500" in tap
@@ -193,24 +203,35 @@ def test_icon_tabs_are_accessible_and_never_hidden() -> None:
     """0.3.8: compact icon tabs with names (tooltip, accessible label, visible for the selected tab), keyboard
     navigation, and a bar that wraps instead of scrolling tabs out of sight."""
     source = LIGHTING_FILE.read_text(encoding="utf-8")
-    tabs = re.search(r"const ROOM_TABS = (\[.*?\]);", source, re.S).group(1)
-    entries = re.findall(r'\["([a-z]+)", "([A-Za-z]+)", "(mdi:[a-z-]+)"\]', tabs)
-    assert len(entries) == 9 and len({icon for *_, icon in entries}) == 9  # one distinct icon per tab
+    main = re.search(r"const MAIN_TABS = (\[.*?\]);", source, re.S).group(1)
+    sub = re.search(r"const SETTINGS_TABS = (\[.*?\]);", source, re.S).group(1)
+    entries = re.findall(r'\["([a-z]+)", "([A-Za-z]+)", "(mdi:[a-z-]+)"', main + sub)
+    assert len(entries) == 10 and len({icon for *_, icon in entries}) == 10  # one distinct icon per tab
+    assert ("settings", "Settings", "mdi:cog-outline") in entries
+    # Every settings section has a descriptive tooltip.
+    assert len(re.findall(r'"mdi:[a-z-]+", "[A-Z][a-z]+: [^"]+"\]', sub)) == 4
     body = source[source.index("  _body() {", source.index("class SmartOccupancyRoomLightingCard")):
                   source.index("  // Tabs: arrow keys")]
-    for text in ('role="tablist"', 'role="tab"', 'aria-selected="${on}"', 'aria-label="${l}"', 'data-tip="${l}"',
+    for text in ('role="tablist"', 'role="tab"', 'aria-selected="${on}"', 'aria-label="${esc(label)}"', "data-tip=",
                  'tabindex="${on ? 0 : -1}"', 'role="tabpanel"', 'aria-labelledby="tab-${tab}"', 'class="tabcap"',
-                 '<span class="tlabel"'):
+                 '<span class="tlabel"',
+                 # 0.3.9 Settings submenu: its own tab list, icon and name, a tooltip, and a Back button.
+                 'aria-label="Settings sections"', 'class="subback"', 'aria-label="Back to the main sections',
+                 'class="stab ${on ? "on" : ""}"', 'title="${esc(tip)}"', "<span>${l}</span>"):
         assert text in body, text
     keys = source[source.index("  _onKey(ev) {"):source.index("  _openTab(key) {")]
-    for key in ("ArrowRight", "ArrowLeft", "Home", "End", "preventDefault", ".focus()"):
+    for key in ("ArrowRight", "ArrowLeft", "Home", "End", "preventDefault", ".focus()", "Escape", ".subtabs"):
         assert key in keys, key
+    opener = source[source.index("  _openTab(key) {"):source.index("  // \"Brightness: Global")]
+    assert "ui.settingsTab" in opener  # the gear reopens the last settings section
     assert 'addEventListener("keydown"' in source
     css = source[source.index("const STYLE = `<style>"):]
     tab_css = css[css.index("  .tabs {"):css.index("  .tabcap {")]
     assert "flex-wrap: wrap" in tab_css and "overflow-x" not in tab_css and "scrollbar-width" not in tab_css
     assert ":hover::after" in tab_css and ":focus-visible::after" in tab_css and "attr(data-tip)" in tab_css
     assert "min-height: 40px" in tab_css and "touch-action: manipulation" in tab_css  # touch targets
+    subnav = css[css.index("  .subnav {"):css.index("  .plist {")]
+    assert subnav.count("flex-wrap: wrap") == 2 and "overflow-x" not in subnav and "touch-action: manipulation" in subnav
     narrow = css[css.index("@container (max-width: 520px)"):]
     assert ".tabcap { display: block; }" in narrow  # the selected name stays visible without hover
     assert "@container (max-width: 320px)" in narrow and "flex-wrap: wrap" in narrow.split("@container (max-width: 320px)")[1]
@@ -238,3 +259,18 @@ def test_presence_tab_and_vacancy_controls() -> None:
     assert automatic.count("this._vacancyHtml(r)") == 2  # with and without daylight information
     overview = source[source.index("  _overview(r) {"):source.index("  // Overview: the latest decision")]
     assert "When vacant" in overview
+
+
+def test_possible_occupancy_controls() -> None:
+    """0.3.9: Settings → Automatic → Possible occupancy, configuration only, inherited vs overridden values."""
+    source = LIGHTING_FILE.read_text(encoding="utf-8")
+    automatic = source[source.index("  _automatic(r) {"):source.index("  _autoHtml(r) {")]
+    assert automatic.count("this._prelimHtml(r)") == 2  # with and without daylight information
+    prelim = source[source.index("  _prelimHtml(r) {"):source.index("  _vacancyWord(r) {")]
+    for text in ("Possible occupancy", 'data-control="pre-enabled"', 'data-control="pre-add"', 'data-action="pre-remove"',
+                 'data-key="brightness_pct"', 'data-key="color_temp_kelvin"', 'data-key="transition"',
+                 'data-action="pre-confirm"', "Hand over", "Turn off", 'data-control="pre-signal"',
+                 'data-key="timeout"', 'data-key="on_below"', '"Room override"', '"Global default"',
+                 "Use global default", "Global defaults (all rooms)", "precedence", "same as normal", "aria-pressed"):
+        assert text in prelim, text
+    assert "callService" not in prelim and "preliminary/set" in prelim

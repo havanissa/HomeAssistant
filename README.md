@@ -6,6 +6,8 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **0.3.8** adds what happens when a room becomes **vacant** (*Turn off*, a *Vacant mood*, or *Leave unchanged*; see [Vacancy](#vacancy-038)), a **Presence** tab with the room's occupancy sensors, their live states, a switch to use each one or not, and the presence settings as global defaults with room overrides (see [Presence tab](#presence-tab-038)), and compact icon tabs in the room card.
 
+**0.3.9** adds **possible occupancy lighting**: a dim, temporary light at the first sign of someone (for example PIR motion) while occupancy is being confirmed, handed over to the normal lighting or switched off on confirmation, and removed again if occupancy is not confirmed (see [Possible occupancy](#possible-occupancy-039)). The room card's configuration sections moved into a **Settings** submenu (gear icon); the Overview keeps the Observing / Automatic control and every wall switch's Observing / Active control.
+
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
@@ -13,6 +15,7 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - takes over a wall switch, changes Zigbee bindings, or publishes MQTT messages
 - controls lights in a room that was not explicitly activated
 - switches lights off because a room became vacant, unless the room is in **Automatic** and its vacancy behaviour is *Turn off* or a *Vacant mood* (0.3.8); ambient lights are never switched off by vacancy
+- switches a light on for *possible* occupancy, unless the room is in **Automatic** and that light was chosen as its preliminary light (0.3.9); it switches off only a preliminary light it switched on itself and nobody changed since
 - switches lights off, or changes their brightness or colour, because of daylight or a lux reading
 - switches a light on because the global brightness or colour temperature changed
 - sends any automatic lighting command while Main Mood is **Manual**
@@ -206,15 +209,16 @@ Not set — tap to set: [Task lighting]
 - **Preview** shows what each room would do; a preview never changes a light.
 - **Advanced** (card): mood inheritance (parent and fallback mood), handling of moods Main Mood cannot represent, light types (kind, label, add/remove, suggestions), exclusion label, manual-override duration, the **outdoor light sensor (all rooms)**, and the full validation list.
 
-**Smart Room Lighting** (`custom:smart-occupancy-room-lighting-card`, pick the room in the visual editor). Nine tabs, shown as compact icons (**Overview · Log · Lights · Automatic · Presence · Switches · Overrides · Preview · Advanced**), the only navigation; only **Overview** is open by default. A tab's name appears as a tooltip on hover and on keyboard focus, is read by screen readers, and is written beside the selected icon (below the icons on narrow cards). Arrow keys, Home and End move between tabs. The bar wraps rather than hiding tabs.
+**Smart Room Lighting** (`custom:smart-occupancy-room-lighting-card`, pick the room in the visual editor). The main bar has compact icons for **Overview · Log · Lights · Overrides · Preview** and a **Settings** gear (0.3.9). Settings opens a second row with **Automatic · Presence · Switches · Advanced**, each with its icon and name, the selected one highlighted, and a **Back** button to the main sections. You can move between the settings sections without returning to the Overview, and the gear reopens the last one. Only **Overview** is open by default. A main tab's name appears as a tooltip on hover and on keyboard focus, is read by screen readers, and is written beside the selected icon (below the icons on narrow cards). Arrow keys, Home and End move within a bar; in the Settings row, Escape returns to the gear. Both bars wrap rather than hiding anything.
 
-- **Overview**: mood (follows global or room mood), automatic lighting mode (Observing / Automatic / Paused / Blocked), occupancy and lighting health, managed lights, last applied, the daylight decision in one line, then one line per issue: a group question with its three buttons, "2 lighting conflicts · Review", short health lines. No settings forms.
+- **Overview**: the room's **Observing / Automatic** control (double-click the status, or use the selector), the last decision, occupancy now (with a running possible occupancy stage), mood, possible occupancy, when vacant, health, managed lights, last applied, the daylight decision in one line, every wall switch with its **Observing / Active** control, then one line per issue: a group question with its three buttons, "2 lighting conflicts · Review", short health lines.
 - **Lights**: one line per light type ("Spottar · 6 lights · follows global · Off"); tap to see its lights, or tick *Show every light*. *Managed* toggles exclusion.
-- **Automatic**: the room's **operating mode** first (see [Operating modes](#operating-modes-036)), then automatic switch-on when occupied and dark (see [Daylight](#daylight-aware-automatic-lighting-phase-033)), then **When the room becomes vacant** (see [Vacancy](#vacancy-038)), with the daylight details collapsed under *Advanced daylight settings*.
-- **Presence**: the room's occupancy sensors, their live states, a *Use* switch per sensor, and the presence settings (see [Presence tab](#presence-tab-038)).
+- **Settings → Automatic**: the room's **operating mode** first (see [Operating modes](#operating-modes-036)), then automatic switch-on when occupied and dark (see [Daylight](#daylight-aware-automatic-lighting-phase-033)), then **Possible occupancy** (see [Possible occupancy](#possible-occupancy-039)), then **When the room becomes vacant** (see [Vacancy](#vacancy-038)), with the daylight details collapsed under *Advanced daylight settings*.
+- **Settings → Presence**: the room's occupancy sensors, their live states, a *Use* switch per sensor, and the presence settings (see [Presence tab](#presence-tab-038)).
+- **Settings → Switches**: the room's wall switches and remotes, their buttons and actions (see [Wall switches](#wall-switches-and-remotes-phase-035)).
 - **Overrides**: room mood; per type *follows global* or *overridden* (tap to override, the same editor with *Follow global*); single-light overrides.
 - **Preview**: what this room would do in a mood.
-- **Advanced**: activation with the full review (Observing / Automatic), automations that also control the lights (allow both or leave them alone), group decisions, manual overrides, wall-switch entities, discovery, last decision and the full diagnostics.
+- **Settings → Advanced**: activation with the full review (Observing / Automatic), automations that also control the lights (allow both or leave them alone), group decisions, manual overrides, wall-switch entities, discovery, last decision and the full diagnostics.
 
 **Room Status** (`custom:smart-occupancy-room-card`): occupancy state, evidence quality, active sensors, three health chips (Occupancy / Lighting / Configuration), one short line per warning (*Details* for the full explanations), and the existing-helper comparison in one line.
 
@@ -280,6 +284,26 @@ The log is kept in the integration's existing state file (`.storage/smart_occupa
 - **Manual overrides.** An override made while the room was occupied ends with the vacancy (as before), so that light is switched off too. An override made after the room went quiet (someone changed a light in the empty room, e.g. from the app) is respected until it expires. If the room is still vacant then, the vacancy action runs for that light.
 - **Unavailable lights** are reported (*Partly failed*, *Failed*) and handled when they come back, if the room is still vacant.
 - Switching a vacant room to Automatic switches nothing off. The action runs when a room *becomes* vacant.
+
+### Possible occupancy (0.3.9)
+
+**Settings → Automatic → Possible occupancy**, per room. The occupancy engine already distinguishes **possible occupancy** (new, uncorroborated evidence: one PIR event, a presence sensor that has just turned on, a door movement) from **confirmed occupancy** (a second signal agrees, or the evidence lasts for the *occupancy confirmation* window, 10 s by default). This setting gives the possible stage its own dim light:
+
+1. A selected signal reports the first evidence (default: the room's motion sensors with the *Trigger* role; tick radar, PC activity or a door to use them too). The room is in possible occupancy.
+2. Each **preliminary light** that is **off** is switched on at its own brightness (default 10 %), optional colour temperature and transition. A light that is already on is left alone. The normal lighting waits for confirmation; in a room with a preliminary light this replaces switching on at the first motion.
+3. **Confirmed**: the normal occupied lighting is applied first. Then each preliminary light is either **handed over** (the occupied scene decides its final level; a light the scene does not control stays on and the vacancy action handles it later) or **switched off**. The occupied scene has precedence: a preliminary light that the scene switches on keeps the scene's setting and is never switched off. *Turn off* keeps the light on when no other light of the room is on, so the room is not left dark.
+4. **Not confirmed**: after the **timeout** (default 30 s, counted from the start; more motion does not extend it), or as soon as the room is vacant again, the preliminary lights are switched off. Only lights this stage switched on, and that nobody changed since, are switched off. A light a person or another automation changed meanwhile is left alone.
+
+A room that confirms occupancy at once (two sensors together) skips the stage: the normal lighting is applied directly. The stage runs once per visit.
+
+- **Daylight.** The room's own daylight rules apply: its automatic switch-on policy, light sensor, and fallback when the reading is unknown, stale or unavailable (such a reading is never taken as darkness). By default the normal threshold applies too. A **light level** of its own (room, or a global default) can be set for the preliminary light only. The decision is taken when the stage starts, and again if the room becomes dark during it. Nothing is switched off because of daylight. On confirmation, a preliminary light that the normal lighting would not switch on (daylight is enough at the normal threshold) is switched off.
+- **Manual changes.** A preliminary light with a manual override is not switched. If a person switched any light of the room off (an active override), no preliminary light comes on.
+- **Modes.** *Observing* evaluates and logs what would happen; nothing is sent. *Automatic* switches. Main Mood = *Manual* sends nothing. Without an effective mood nothing changes.
+- **Defaults and overrides.** *Global defaults (all rooms)*: enabled, brightness, transition, timeout, light level, and what happens on confirmation. A room value is marked *Room override* (or *this light*), with *Use global default*. Changing a global default never changes a room's own values. A room changes nothing until it has a preliminary light, so enabling the global default alone does not change any room.
+- **Log.** *Preliminary light on* (or *Keep preliminary light off*: daylight, uncertain daylight, manual override, Manual mood, unavailable light), *Preliminary light handed over* / *Preliminary light off* on confirmation, and *Preliminary light off* when possible occupancy was not confirmed. Every entry says why and has the details: evidence, light level, settings and the commands sent.
+- **Restart.** A stage that was running when Home Assistant stopped still ends: its lights are switched off at the original deadline unless the room is occupied by then.
+
+Not included: movement in an *adjacent* room as preliminary evidence. The engine uses it only as exit evidence, and using it would switch on a light in a room nobody has entered.
 
 ### Activation (pilot: Kamar Norður)
 

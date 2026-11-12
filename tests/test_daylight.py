@@ -38,6 +38,7 @@ from custom_components.smart_occupancy.daylight import (
     read_sensor,
     round_lux,
 )
+from custom_components.smart_occupancy.preliminary import PreliminaryDefaults
 from custom_components.smart_occupancy.lighting_config import LightingConfig, migrate_store
 
 T0 = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
@@ -349,7 +350,8 @@ def test_store_migration_keeps_activated_rooms_on_confirmed_occupancy() -> None:
     assert config.room("observe").daylight.on_first_motion is True
     assert config.room("done").daylight.on_first_motion is True
     assert config.room("active").daylight.auto_on == AutoOn.DARK
-    assert migrate_store(1, 2, {"rooms": {}}) == {"rooms": {}}
+    # Later minors only add keys (1.5, 0.3.9: possible occupancy lighting, disabled).
+    assert migrate_store(1, 2, {"rooms": {}}) == {"rooms": {}, "preliminary": PreliminaryDefaults().as_dict()}
     with pytest.raises(NotImplementedError):
         migrate_store(2, 1, {})
 

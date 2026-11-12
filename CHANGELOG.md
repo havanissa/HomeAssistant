@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.9 — Settings submenu and possible occupancy lighting
+
+### Added
+
+- **Possible occupancy lighting** (per room, *Settings → Automatic → Possible occupancy*; `preliminary.py`). When the occupancy engine reports **possible occupancy** from a selected signal (default: the room's Trigger/PIR sensors; radar, PC activity and doors can be ticked), chosen lights that are off are switched on dimly: brightness, optional colour temperature, transition, per light. The normal lighting waits for confirmation. This replaces the first-motion switch-on in that room. On **confirmation** the normal lighting is applied first, then each preliminary light is **handed over** or **switched off**. The occupied scene has precedence: a light it switches on is never switched off. A light it would not switch on because of daylight is switched off. *Turn off* keeps the light when nothing else in the room is on. **Without confirmation** the lights it switched on are switched off after the timeout (default 30 s, not extended by more motion) or when the room is vacant again, whichever is first. Lights a person or another automation changed meanwhile are left alone. One stage per visit; a room that confirms at once skips it.
+- **Daylight for the preliminary light**: the room's daylight policy, sensors and fallback for unknown readings, and by default its threshold. An optional preliminary threshold (room, or global default) inherits the normal value when empty. Decided at the start of the stage and again if the room becomes dark during it. Nothing is switched off because of daylight.
+- **Global defaults** (enabled, brightness, transition, timeout, light level, confirmation behaviour) with room and per-light overrides, shown as *Room override* / *Global default* with *Use global default*.
+- **Decision log**: *Preliminary light on* / *Keep preliminary light off* (daylight, uncertain daylight, manual override, a person switched the room off, Manual mood, unavailable or failing light, Observing), *Preliminary light handed over* / *Preliminary light off* on confirmation, and *Preliminary light off* when possible occupancy was not confirmed.
+- Websocket: `smart_occupancy/lighting/preliminary/set` (admin; with `area_id` a room's values, `null` = global default; without it the global defaults). The `editor` room model has `preliminary` (settings, global defaults, effective values with their sources, candidate lights, signals, the running stage). Room diagnostics include the effective settings and the stage.
+
+### Changed
+
+- **Room card navigation**: the main bar is **Overview · Log · Lights · Overrides · Preview · Settings** (gear). Settings opens a compact second row, **Automatic · Presence · Switches · Advanced**, with an icon and name each, the selected one highlighted, a **Back** button, tooltips, arrow keys / Home / End, and Escape back to the gear. It remembers the last section. Nothing wraps out of sight on narrow cards.
+- The **Overview** shows the room's **Observing / Automatic** control (double-click the status, or the selector), and every wall switch's **Observing / Active** control. Switch settings stay in *Settings → Switches*, with the same controls. It also shows *Occupancy now* (with a running possible occupancy stage) and *Possible occupancy*.
+- While a preliminary light is on, gradual global-adjustment updates and mood changes leave it alone until occupancy is confirmed. The vacancy action leaves it to its own stage, so no light gets two commands.
+
+### Upgrade and compatibility
+
+- The lighting store is migrated from 1.4 to 1.5: global defaults with possible occupancy lighting **disabled**, and every room without a preliminary light. **No room's behaviour changes** until a preliminary light is chosen and the setting is enabled. A 0.3.8 install reads a 1.5 store and ignores the new keys.
+- Tested with simulated sensors and lights only; not verified on real devices.
+
 ## 0.3.8 — Vacancy lighting, Presence tab, icon tabs
 
 ### Fixed

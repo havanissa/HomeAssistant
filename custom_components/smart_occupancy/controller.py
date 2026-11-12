@@ -64,6 +64,17 @@ for that light if the room is still vacant. A light that was unavailable is
 handled when it comes back. Ambient lights, Observing, Manual mode and the
 other protections apply as for every mood plan. Switching a vacant room to
 Automatic does not switch anything off: the action runs on a transition.
+
+Possible occupancy (0.3.9, ``preliminary.py``): in a room with preliminary
+lighting, the engine's possible occupancy (from a selected signal) switches
+the chosen lights on dimly, once per visit, when the daylight rules allow it.
+Meanwhile the normal lighting waits for confirmation (the first-motion switch-on
+is replaced). On confirmation the normal lighting is applied first; then each
+preliminary light is handed over or switched off (the occupied scene has
+precedence). Without confirmation, the lights it switched on, and that nobody
+changed since, are switched off after the preliminary timeout or when the room
+becomes vacant (the vacancy action leaves them to it). The stage is kept in
+the runtime state, so a restart in the middle of it still ends it.
 """
 
 from __future__ import annotations
@@ -146,7 +157,19 @@ from .lighting_config import LightingConfig, LightingStore
 from .lighting_decisions import LightingDecisions
 from .models import IntegrationConfig
 from .occupancy import friendly_name
-from .planner import BLOCKED, CHANGE, Plan, PlanItem, Target, build_plan, build_vacancy_plan
+from .planner import (
+    BLOCKED,
+    CHANGE,
+    UNCHANGED,
+    Plan,
+    PlanItem,
+    Target,
+    build_plan,
+    build_preliminary_plan,
+    build_vacancy_plan,
+)
+from .preliminary import TRIGGER as PRELIMINARY, ConfirmAction, EffectivePreliminary, effective as prelim_effective
+from .preliminary import evidence as prelim_evidence, preliminary_gate
 from .profiles import resolve
 from .supervision import assert_room_control_permitted, assert_switch_control_permitted
 from .switch_control import SwitchControl
@@ -252,6 +275,13 @@ class RoomRuntime:
     vacancy_wait: tuple[str, float] | None = None
     # The last vacancy action: {"at", "action", "result", "text"}.
     last_vacancy: dict[str, Any] | None = None
+    # The current possible occupancy stage (0.3.9): {"started", "deadline", "timeout", "evidence", "owned"
+    # (entity -> the turn_on data this stage sent), "would" (Observing: lights it would switch on), "visit"}.
+    preliminary: dict[str, Any] | None = None
+
+    @property
+    def preliminary_owned(self) -> dict[str, dict[str, Any]]:
+        return dict((self.preliminary or {}).get("owned") or {})
 
     def persist(self) -> dict[str, Any]:
         return {
@@ -270,6 +300,7 @@ class RoomRuntime:
             "temp_mood": self.temp_mood,
             "vacancy_deferred": sorted(self.vacancy_deferred),
             "last_vacancy": self.last_vacancy,
+            "preliminary": self.preliminary,
         }
 
     @classmethod
@@ -296,6 +327,7 @@ class RoomRuntime:
             temp_mood=data.get("temp_mood") if isinstance(data.get("temp_mood"), dict) else None,
             vacancy_deferred={e for e in data.get("vacancy_deferred") or [] if isinstance(e, str)},
             last_vacancy=data.get("last_vacancy") if isinstance(data.get("last_vacancy"), dict) else None,
+            preliminary=_restore_preliminary(data.get("preliminary")),
             # Continue counting visits, so the next visit is never mistaken for the recorded one.
             visit=int(activation.get("visit") or 0) if activation else 0,
         )
@@ -341,6 +373,7 @@ class LightingController:
         self._started_unsub: CALLBACK_TYPE | None = None
         self._apply_timer: CALLBACK_TYPE | None = None
         self._override_timer: CALLBACK_TYPE | None = None
+        self._prelim_timers: dict[str, CALLBACK_TYPE] = {}  # area -> end of its possible occupancy stage
         self._automation_timer: CALLBACK_TYPE | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -468,6 +501,8 @@ class LightingController:
                 rt.visit_confirmed = bool(result.occupied) and result.state != OccupancyState.POSSIBLE_OCCUPANCY
                 # Someone already in the room at start is not a new visit.
                 rt.visit_started = bool(result.occupied)
+            if rt.preliminary is not None:
+                self._resume_preliminary(area_id, result)
         self._automations = None
         self._conflicts = None
         _LOGGER.debug(
@@ -491,6 +526,9 @@ class LightingController:
                 cancel()
                 setattr(self, attr, None)
         self._cancel_adaptive()
+        for cancel in self._prelim_timers.values():
+            cancel()
+        self._prelim_timers.clear()
         self.adaptive.async_stop()
         self.daylight.async_stop()
         self.switch_control.async_stop()
@@ -815,6 +853,8 @@ class LightingController:
         result = self.coordinator.occupancy.result(area_id)
         note = status.detail if status.manual or not mood else None
         targets = self._targets(area_id)
+        rt = self.runtime.get(area_id) or RoomRuntime()
+        owned = set(rt.preliminary_owned)
         plan = build_plan(
             area_id=area_id,
             mood=mood,
@@ -827,8 +867,9 @@ class LightingController:
             note=note,
             manual_mode=status.manual,
             gate=self.daylight_gate(area_id, fresh=fresh),
+            await_confirmation=self.preliminary_settings(area_id, lighting).active,
+            preliminary=owned,
         )
-        rt = self.runtime.get(area_id) or RoomRuntime()
         now = time.monotonic()
         force = self._adaptive_force.get(area_id, set())
         competing = self.adaptive_conflicts(area_id)
@@ -836,9 +877,12 @@ class LightingController:
         # A vacant room in its vacant mood (0.3.8): the current mood's global adjustment would undo it.
         vacant_mood = (result is not None and result.occupied is False
                        and lighting.room(area_id).vacancy.action == VacancyAction.VACANT_MOOD)
+        confirmed = result is not None and result.state == OccupancyState.CONFIRMED_OCCUPANCY
         for item, target in zip(plan.items, targets, strict=True):
             if vacant_mood and not item.persistent:
                 continue
+            if item.entity_id in owned and not confirmed:
+                continue  # a preliminary light keeps its dim setting until occupancy is confirmed
             if item.resolved.adaptive is None or not any(
                     e.get("mode") in ("global", "offset") for e in item.resolved.adaptive.values()):
                 continue
@@ -872,6 +916,13 @@ class LightingController:
         self._apply_timer = None
         pending, self._pending = self._pending, {}
         for area_id, (triggers, only) in pending.items():
+            if PRELIMINARY in triggers:
+                triggers = triggers - {PRELIMINARY}
+                if "occupancy_confirmed" not in triggers:
+                    # (Confirmed at once: the normal lighting is applied without a preliminary stage.)
+                    self._create_task(self.async_preliminary(area_id))
+                if not triggers:
+                    continue
             trigger = next((t for t in ("room_mood_override", "mood_change", "activated", "occupancy_confirmed",
                                         "motion", "became_dark", "profile_change", "reconnected")
                             if t in triggers), sorted(triggers)[0])
@@ -896,6 +947,7 @@ class LightingController:
             if not self._running:
                 return
             waiting = was_state == OccupancyState.POSSIBLE_VACANCY
+            prelim = self.preliminary_settings(area_id)
             if result.state == OccupancyState.POSSIBLE_VACANCY and not waiting and was_occupied:
                 self._vacancy_started(area_id, result)
             elif waiting and result.occupied and result.state != OccupancyState.POSSIBLE_VACANCY:
@@ -911,7 +963,13 @@ class LightingController:
                     rt.visit += 1
                 _LOGGER.debug("lighting_visit_confirmed area=%s", area_id)
                 self._visit_trigger(area_id, "occupancy_confirmed")
-            elif (not rt.visit_started and result.occupied
+            elif (not rt.visit_started and prelim.active and result.state == OccupancyState.POSSIBLE_OCCUPANCY
+                  and (found := prelim_evidence(result, prelim.signals))):
+                # Possible occupancy from a selected signal: a dim preliminary light; the normal lighting waits.
+                rt.visit_started = True
+                rt.visit += 1
+                self._start_preliminary(area_id, prelim, found)
+            elif (not rt.visit_started and result.occupied and not prelim.active
                   and result.state == OccupancyState.POSSIBLE_OCCUPANCY
                   and self.lighting.room(area_id).daylight.on_first_motion and _motion(result)):
                 # A trigger sensor (PIR) saw motion: respond now, radar/presence keeps the room occupied.
@@ -923,12 +981,16 @@ class LightingController:
                 rt.visit_started = False
                 if rt.visit_confirmed:
                     rt.visit_confirmed = False
+                # A possible occupancy stage that is still running ends: its lights are its own to remove.
+                skip = set(rt.preliminary_owned)
+                if rt.preliminary is not None:
+                    self._end_preliminary(area_id, "vacant")
                 if was_occupied:  # (vacant again after e.g. a door-only movement: nothing ended)
                     if rt.vacancy_wait:
                         self.explain.vacancy_expired(area_id, rt.vacancy_wait[0])
                         rt.vacancy_wait = None
                     cleared = self._end_overrides(area_id, result)
-                    self._vacate(area_id, "vacant", cleared=cleared)
+                    self._vacate(area_id, "vacant", cleared=cleared, skip=skip)
             if changed:
                 self._notify()
 
@@ -942,7 +1004,8 @@ class LightingController:
     def _vacancy_started(self, area_id: str, result: RoomResult) -> None:
         """No presence any more: the vacancy timeout (the engine's possible-vacancy period) started."""
         rt = self.runtime_for(area_id)
-        decision = self.explain.vacancy_wait(area_id, result, self._lit(area_id))
+        lit = [e for e in self._lit(area_id) if e not in rt.preliminary_owned]  # (removed by their own stage)
+        decision = self.explain.vacancy_wait(area_id, result, lit)
         rt.vacancy_wait = (decision.id, time.monotonic()) if decision else None
 
     @callback
@@ -981,10 +1044,11 @@ class LightingController:
         return cleared
 
     @callback
-    def _vacate(self, area_id: str, trigger: str, *, only: set[str] | None = None, cleared: int = 0) -> None:
+    def _vacate(self, area_id: str, trigger: str, *, only: set[str] | None = None, cleared: int = 0,
+                skip: set[str] | None = None) -> None:
         if not self._running or self._stopped or area_id not in self.config.enabled_rooms:
             return
-        self._create_task(self.async_vacate(area_id, trigger, only=only, cleared=cleared))
+        self._create_task(self.async_vacate(area_id, trigger, only=only, cleared=cleared, skip=skip))
 
     def vacancy_plan(self, area_id: str, trigger: str = "vacant") -> Plan:
         """What the room's vacancy action does now. Never sends anything."""
@@ -1009,8 +1073,12 @@ class LightingController:
         )
 
     async def async_vacate(self, area_id: str, trigger: str = "vacant", *, only: set[str] | None = None,
-                           cleared: int = 0) -> Plan | None:
-        """Run the room's vacancy action (Automatic) or record what it would do (Observing, Manual)."""
+                           cleared: int = 0, skip: set[str] | None = None) -> Plan | None:
+        """Run the room's vacancy action (Automatic) or record what it would do (Observing, Manual).
+
+        ``skip``: preliminary lights of a possible occupancy stage that ended with the vacancy (that stage
+        removes them, so no light gets two commands).
+        """
         if self._stopped:
             return None
         lock = self._locks.setdefault(area_id, asyncio.Lock())
@@ -1020,7 +1088,8 @@ class LightingController:
                 return None  # occupancy returned before this ran: there is nothing to vacate
             plan = self.vacancy_plan(area_id, trigger)
             rt = self.runtime_for(area_id)
-            relevant = [i for i in plan.items if only is None or i.entity_id in only]
+            relevant = [i for i in plan.items if (only is None or i.entity_id in only)
+                        and not (skip and i.entity_id in skip)]
             changes = [i for i in relevant if i.decision == CHANGE]
             executing = plan.control_enabled and not plan.manual_mode and bool(changes)
             ok: list[PlanItem] | None = None
@@ -1079,6 +1148,11 @@ class LightingController:
             plan = self.plan(area_id, trigger, fresh=True)
             self._record_activation(area_id, trigger, plan, None)
             self.explain.plan(area_id, trigger, plan, plan.items)
+            if trigger == "occupancy_confirmed" and (rt := self.runtime.get(area_id)) and rt.preliminary:
+                # Observing (or Manual): nothing was sent by the stage, or a light it sent stays on
+                # (the room is occupied now; the vacancy action handles it).
+                self._close_preliminary(area_id)
+                self._mark_dirty()
             self._notify()
 
     @callback
@@ -1091,6 +1165,11 @@ class LightingController:
                 OccupancyState.CONFIRMED_OCCUPANCY, OccupancyState.POSSIBLE_OCCUPANCY):
             return
         _LOGGER.debug("lighting_became_dark area=%s %s", area_id, status.estimate.text)
+        rt = self.runtime.get(area_id)
+        if rt is not None and rt.preliminary is not None and result.state != OccupancyState.CONFIRMED_OCCUPANCY:
+            # Possible occupancy: the preliminary lighting is evaluated again (the normal lighting still waits).
+            self._preliminary_trigger(area_id)
+            return
         self._visit_trigger(area_id, "became_dark")
 
     def _record_activation(self, area_id: str, trigger: str, plan: Plan, switched_on: list[PlanItem] | None) -> None:
@@ -1468,6 +1547,8 @@ class LightingController:
                 rt.last_result, rt.last_reason, rt.last_errors = "no_mood", plan.note or "No effective mood", []
                 self._record_activation(area_id, trigger, plan, [])
                 self.explain.plan(area_id, trigger, plan, relevant)
+                if trigger == "occupancy_confirmed":
+                    await self._confirm_preliminary(area_id, plan, set())
                 self._finish(area_id, plan)
                 return plan
             if not changes:
@@ -1476,6 +1557,8 @@ class LightingController:
                 rt.last_errors = []
                 self._record_activation(area_id, trigger, plan, [])
                 self.explain.plan(area_id, trigger, plan, relevant)
+                if trigger == "occupancy_confirmed":
+                    await self._confirm_preliminary(area_id, plan, set())
                 self._finish(area_id, plan)
                 return plan
             errors = await self._execute(area_id, changes)
@@ -1499,8 +1582,270 @@ class LightingController:
             log = _LOGGER.warning if errors else _LOGGER.info
             log("lighting_applied area=%s mood=%s trigger=%s result=%s changed=%d failed=%d",
                 area_id, plan.mood, trigger, rt.last_result, len(ok), len(errors))
+            if trigger == "occupancy_confirmed":
+                # After the normal lighting: no gap in the light, and never two commands for one light.
+                await self._confirm_preliminary(area_id, plan, {i.entity_id for i in ok})
             self._finish(area_id, plan)
             return plan
+
+    # ------------------------------------------------- possible occupancy (0.3.9)
+    def preliminary_settings(self, area_id: str, lighting: LightingConfig | None = None) -> EffectivePreliminary:
+        """A room's possible occupancy lighting, with the global defaults filled in."""
+        lighting = lighting or self.lighting
+        return prelim_effective(lighting.room(area_id).preliminary, lighting.preliminary,
+                                self.config.room(area_id).sensors)
+
+    def preliminary_plan(self, area_id: str, *, fresh: bool = False) -> Plan:
+        """What the preliminary stage sends to each preliminary light now. Never sends anything."""
+        settings = self.preliminary_settings(area_id)
+        status = self.mood_status()
+        mood, _ = self.room_mood(area_id, status)
+        result = self.coordinator.occupancy.result(area_id)
+        controlled = set(self.managed_room(area_id).controlled)
+        targets = {t.entity_id: t for t in self._targets(area_id) if t.entity_id in controlled}
+        rt = self.runtime.get(area_id) or RoomRuntime()
+        manual_off = sorted(friendly_name(self.hass, e) or e for e, o in rt.overrides.items()
+                            if o.get("state") == "off" and e in controlled)
+        gate = preliminary_gate(self.daylight_gate(area_id, fresh=fresh), self.daylight.status(area_id).estimate,
+                                settings.on_below)
+        state = result.state.value if result else None
+        if rt.preliminary is not None and state == OccupancyState.POSSIBLE_VACANCY:
+            # The stage started in possible occupancy; motion that stopped at once does not cancel it.
+            state = OccupancyState.POSSIBLE_OCCUPANCY.value
+        return build_preliminary_plan(
+            area_id=area_id, settings=settings, targets=targets, mood=mood, occupancy_state=state,
+            occupied=result.occupied if result else None, control_enabled=self.room_active(area_id), gate=gate,
+            manual_mode=status.manual, note=status.detail if status.manual or not mood else None,
+            manual_off=manual_off,
+        )
+
+    @callback
+    def _start_preliminary(self, area_id: str, settings: EffectivePreliminary, found: list[str]) -> None:
+        """Possible occupancy from a selected signal: the stage starts (once per visit)."""
+        rt = self.runtime_for(area_id)
+        now = dt_util.utcnow()
+        rt.preliminary = {
+            "started": _iso(now), "deadline": _iso(now + timedelta(seconds=settings.timeout)),
+            "timeout": settings.timeout, "evidence": list(found), "owned": {}, "would": [], "visit": rt.visit,
+        }
+        _LOGGER.debug("lighting_preliminary_started area=%s evidence=%s", area_id, ",".join(found))
+        self._schedule_preliminary_end(area_id, now + timedelta(seconds=settings.timeout))
+        self._preliminary_trigger(area_id)
+        self._mark_dirty()
+
+    @callback
+    def _preliminary_trigger(self, area_id: str) -> None:
+        if self.room_active(area_id) and not self._manual:
+            self._schedule_apply(area_id, PRELIMINARY)
+        else:
+            plan = self.preliminary_plan(area_id, fresh=True)
+            rt = self.runtime_for(area_id)
+            if rt.preliminary is not None:
+                rt.preliminary["would"] = sorted({*rt.preliminary.get("would", []),
+                                                  *(i.entity_id for i in plan.changes)})
+            self.explain.preliminary_start(area_id, plan, rt.preliminary or {})
+            self._notify()
+
+    async def async_preliminary(self, area_id: str) -> Plan | None:
+        """Switch the preliminary lights on (Automatic). Records the outcome."""
+        if self._stopped:
+            return None
+        lock = self._locks.setdefault(area_id, asyncio.Lock())
+        async with lock:
+            rt = self.runtime_for(area_id)
+            result = self.coordinator.occupancy.result(area_id)
+            if (self._stopped or rt.preliminary is None or result is None
+                    or result.state in (OccupancyState.CONFIRMED_OCCUPANCY, OccupancyState.VACANT)):
+                return None  # confirmed (the normal lighting applies) or vacant meanwhile
+            if self._manual or not self.room_active(area_id):
+                return None
+            plan = self.preliminary_plan(area_id, fresh=True)
+            changes = plan.changes
+            # The stage's record (also when it ends while the commands are being sent: whoever ends it then
+            # waits for this lock and finds every light that was switched on).
+            episode = rt.preliminary
+            ok: list[PlanItem] = []
+            errors: dict[str, str] = {}
+            paused: set[str] = set()
+            if changes:
+                errors = await self._execute(area_id, changes)
+                paused = {e for e, m in errors.items() if m == _PAUSED}
+                errors = {e: m for e, m in errors.items() if m != _PAUSED}
+                ok = [i for i in changes if i.entity_id not in errors and i.entity_id not in paused]
+                for item in ok:
+                    rt.last_commands[item.entity_id] = (item.service or "", dict(item.data))
+                    episode.setdefault("owned", {})[item.entity_id] = dict(item.data)
+            self.explain.preliminary_start(area_id, plan, episode, ok=ok if changes else None,
+                                           errors=errors, paused=paused)
+            log = _LOGGER.warning if errors else _LOGGER.info if ok else _LOGGER.debug
+            log("lighting_preliminary area=%s changed=%d failed=%d", area_id, len(ok), len(errors))
+            self._finish(area_id, plan)
+            return plan
+
+    def _still_preliminary(self, area_id: str, entity_id: str, data: dict[str, Any]) -> bool:
+        """The light still is as the stage set it: on, no manual change, no other command since."""
+        rt = self.runtime_for(area_id)
+        return (self.hass.states.is_state(entity_id, "on") and entity_id not in rt.overrides
+                and rt.last_commands.get(entity_id) == ("turn_on", data))
+
+    @callback
+    def _schedule_preliminary_end(self, area_id: str, when: datetime) -> None:
+        if cancel := self._prelim_timers.pop(area_id, None):
+            cancel()
+        if self._stopped:
+            return
+
+        @callback
+        def fire(_now: datetime) -> None:
+            self._prelim_timers.pop(area_id, None)
+            if self._running and not self._stopped:
+                self._end_preliminary(area_id, "timeout")
+
+        self._prelim_timers[area_id] = async_track_point_in_utc_time(self.hass, fire, when)
+
+    @callback
+    def _close_preliminary(self, area_id: str) -> dict[str, Any] | None:
+        """The stage ends (its record is returned); its timer is cancelled."""
+        if cancel := self._prelim_timers.pop(area_id, None):
+            cancel()
+        rt = self.runtime.get(area_id)
+        if rt is None:
+            return None
+        episode, rt.preliminary = rt.preliminary, None
+        return episode
+
+    @callback
+    def _end_preliminary(self, area_id: str, reason: str) -> None:
+        """Occupancy was not confirmed (timeout, or the room became vacant): the stage removes its lights."""
+        rt = self.runtime.get(area_id)
+        if rt is None or rt.preliminary is None:
+            return
+        result = self.coordinator.occupancy.result(area_id)
+        if reason == "timeout" and result is not None and result.state == OccupancyState.CONFIRMED_OCCUPANCY:
+            return  # confirmed: the confirmation (queued) hands the lights over
+        episode = self._close_preliminary(area_id)
+        self._mark_dirty()
+        if episode is not None:
+            self._create_task(self.async_end_preliminary(area_id, reason, episode))
+
+    async def async_end_preliminary(self, area_id: str, reason: str, episode: dict[str, Any]) -> None:
+        lock = self._locks.setdefault(area_id, asyncio.Lock())
+        async with lock:
+            if self._stopped:
+                return
+            owned = dict(episode.get("owned") or {})
+            remove = {e: d for e, d in owned.items() if self._still_preliminary(area_id, e, d)}
+            left = [e for e in owned if e not in remove and self.hass.states.is_state(e, "on")]
+            settings = self.preliminary_settings(area_id)
+            ok: list[str] = []
+            errors: dict[str, str] = {}
+            blocked = None
+            if remove and (self._manual or not self.room_active(area_id)):
+                blocked = "manual" if self._manual else "observing"
+            elif remove:
+                data = {}
+                for e in remove:
+                    t = settings.target(e)
+                    transition = t.transition if t else None
+                    caps = light_capabilities(self.hass, e)
+                    data[e] = {"transition": transition} if transition and caps.transition else {}
+                assert_room_control_permitted(self.room_active(area_id), area_id)
+                errors = {}
+                for e, d in data.items():
+                    errors |= await self._send(area_id, "turn_off", {e: d})
+                errors = {e: m for e, m in errors.items() if m != _PAUSED}
+                ok = [e for e in remove if e not in errors]
+                rt = self.runtime_for(area_id)
+                for e in ok:
+                    rt.last_commands[e] = ("turn_off", data[e])
+            self.explain.preliminary_end(area_id, reason, episode, removed=ok, errors=errors, left=left,
+                                         blocked=blocked)
+            _LOGGER.debug("lighting_preliminary_ended area=%s reason=%s removed=%d left=%d", area_id, reason,
+                          len(ok), len(left))
+            self._mark_dirty()
+            self.coordinator.async_schedule_refresh()
+            self._notify()
+
+    async def _confirm_preliminary(self, area_id: str, plan: Plan, sent: set[str]) -> None:
+        """Occupancy confirmed and the normal lighting applied: each preliminary light is handed over or switched off.
+
+        Precedence: the occupied scene. A preliminary light it switches on (or
+        already has as it wants) stays on with the scene's settings; one it
+        sets Off was switched off by it. Otherwise: if the normal lighting
+        would not switch it on because daylight is enough, it is switched off;
+        Hand over leaves it on (now part of the room's lighting; the vacancy
+        action handles it); Turn off switches it off - unless no other light
+        of the room is on, so the room is never left dark on confirmation.
+        """
+        episode = self._close_preliminary(area_id)
+        if episode is None:
+            return
+        self._mark_dirty()
+        owned = dict(episode.get("owned") or {})
+        if not owned:
+            return
+        settings = self.preliminary_settings(area_id)
+        items = {i.entity_id: i for i in plan.items}
+        controlled = self.managed_room(area_id).controlled
+        others_on = any(self.hass.states.is_state(e, "on") for e in controlled if e not in owned)
+        outcome: dict[str, str] = {}
+        turn_off: dict[str, dict[str, Any]] = {}
+        for entity_id, data in owned.items():
+            item = items.get(entity_id)
+            target = settings.target(entity_id)
+            action = target.on_confirm if target else ConfirmAction.HANDOVER
+            if entity_id in sent and item is not None:
+                outcome[entity_id] = "scene_off" if item.service == "turn_off" else "scene"
+                continue
+            if not self._still_preliminary(area_id, entity_id, data):
+                outcome[entity_id] = "changed"  # a person or another command changed it: left as it is
+                continue
+            if item is not None and item.reason_code in GATE_CODES:
+                outcome[entity_id] = "not_needed"
+            elif item is not None and item.decision == UNCHANGED and item.service == "turn_on":
+                outcome[entity_id] = "scene"
+                continue
+            elif item is not None and item.decision == CHANGE:
+                outcome[entity_id] = "kept_failed"  # the scene's command failed: kept rather than dark
+                continue
+            elif action == ConfirmAction.HANDOVER:
+                outcome[entity_id] = "handed_over"
+                continue
+            elif not others_on:
+                outcome[entity_id] = "kept_dark"
+                continue
+            else:
+                outcome[entity_id] = "turned_off"
+            caps = light_capabilities(self.hass, entity_id)
+            transition = target.transition if target else None
+            turn_off[entity_id] = {"transition": transition} if transition and caps.transition else {}
+        errors: dict[str, str] = {}
+        if turn_off and not self._manual and self.room_active(area_id):
+            assert_room_control_permitted(self.room_active(area_id), area_id)
+            for entity_id, data in turn_off.items():
+                errors |= await self._send(area_id, "turn_off", {entity_id: data})
+            errors = {e: m for e, m in errors.items() if m != _PAUSED}
+            rt = self.runtime_for(area_id)
+            for entity_id, data in turn_off.items():
+                if entity_id not in errors:
+                    rt.last_commands[entity_id] = ("turn_off", data)
+        elif turn_off:
+            for entity_id in turn_off:
+                outcome[entity_id] = "kept_paused"
+        self.explain.preliminary_confirmed(area_id, plan, outcome, errors=errors)
+        _LOGGER.debug("lighting_preliminary_confirmed area=%s outcome=%s", area_id, outcome)
+
+    @callback
+    def _resume_preliminary(self, area_id: str, result: RoomResult | None) -> None:
+        """A stage that was running when Home Assistant stopped: it still ends (nothing is switched on)."""
+        rt = self.runtime_for(area_id)
+        if result is None or result.state == OccupancyState.CONFIRMED_OCCUPANCY:
+            self._close_preliminary(area_id)  # someone is in the room: its lights belong to the room now
+            self._mark_dirty()
+            return
+        deadline = dt_util.parse_datetime((rt.preliminary or {}).get("deadline") or "")
+        now = dt_util.utcnow()
+        self._schedule_preliminary_end(area_id, max(deadline or now, now + timedelta(seconds=1)))
 
     def _finish(self, area_id: str, plan: Plan) -> None:
         for item in plan.items:
@@ -1695,6 +2040,10 @@ class LightingController:
                 **room_lighting.vacancy.as_dict(),
                 "last": rt.last_vacancy,
                 "deferred": sorted(rt.vacancy_deferred),
+            },
+            "preliminary": {
+                **self.preliminary_settings(area_id).as_dict(),
+                "stage": rt.preliminary,
             },
         }
 
@@ -1900,3 +2249,12 @@ def _summary(mood: str | None, items, trigger: str, *, failed: int = 0) -> str:
 def _motion(result: RoomResult) -> bool:
     """A trigger sensor (PIR or other motion, not a door) is active now."""
     return any(v.track.is_trigger and v.status == SignalStatus.ACTIVE for v in result.signals)
+
+
+def _restore_preliminary(data: Any) -> dict[str, Any] | None:
+    if not isinstance(data, dict) or not isinstance(data.get("deadline"), str):
+        return None
+    owned = data.get("owned") if isinstance(data.get("owned"), dict) else {}
+    return {**data, "owned": {e: dict(d) for e, d in owned.items() if isinstance(e, str) and isinstance(d, dict)},
+            "would": [e for e in data.get("would") or [] if isinstance(e, str)],
+            "evidence": [e for e in data.get("evidence") or [] if isinstance(e, str)]}
