@@ -71,7 +71,7 @@
  * reports a change.
  */
 
-const VERSION = "0.3.10";
+const VERSION = "0.3.11";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -1358,6 +1358,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       <div class="stitle small">Started by</div>
       <div class="sub">Signals whose first evidence starts it. ${e.signals_default ? "Default: the room's motion (Trigger) sensors." : `Custom selection${ro ? "" : ` · <button class="link" data-action="pre-signals-default">use the default</button>`}`}${this._statusHtml("pre-signals")}</div>
       <div class="plist pre-sens">${sens || `<div class="muted">No sensors are assigned to this room.</div>`}</div>
+      ${(p.confirmed_by || []).length ? `<div class="sub">These signals cannot confirm occupancy by themselves. Confirmed by: ${esc(p.confirmed_by.join(", "))}.</div>`
+        : `<div class="note warn">No other signal can confirm occupancy in this room: the preliminary light goes off after the timeout and the normal lighting never switches on. Keep at least one sensor unticked (for example the radar).</div>`}
       <div class="frow"><label for="so-pre-timeout">Timeout</label><div class="fval"><input id="so-pre-timeout" type="number" class="num" min="${p.limits.timeout[0]}" max="${p.limits.timeout[1]}" step="1"
           value="${esc(e.timeout)}" data-control="pre-num" data-key="timeout" ${dis}> s ${pill(src("timeout"))} ${inherit("timeout", fmtSecs(g.timeout))}${this._statusHtml("pre-timeout")}</div></div>
       <div class="sub">Switched off this long after it started if occupancy is not confirmed (more motion does not extend it).</div>${timeoutWarn}

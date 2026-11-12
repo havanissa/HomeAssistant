@@ -80,6 +80,7 @@ the runtime state, so a restart in the middle of it still ends it.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
@@ -141,8 +142,8 @@ from .const import (
     LIGHTING_STATE_STORE_VERSION,
     MANUAL_PAUSED_TEXT,
     OWN_CHANGE_WINDOW_SECONDS,
-    PRELIMINARY_BRIGHTNESS_TOLERANCE_PCT,
     PRELIMINARY_CLEANUP_MAX_TRIES,
+    PRELIMINARY_TRACE_SIZE,
     PRELIMINARY_CLEANUP_RETRY_SECONDS,
     SIGNAL_LIGHTING_UPDATED,
     SWITCH_ATTRIBUTION_SECONDS,
@@ -388,6 +389,9 @@ class LightingController:
         self._override_timer: CALLBACK_TYPE | None = None
         self._prelim_timers: dict[str, CALLBACK_TYPE] = {}  # area -> end of its possible occupancy stage
         self._cleanup_timers: dict[str, CALLBACK_TYPE] = {}  # area -> retry of a failed preliminary cleanup
+        # Developer trace of the possible occupancy pipeline (0.3.11): bounded, in memory, in the diagnostics.
+        self._prelim_trace: dict[str, deque[dict[str, Any]]] = {}
+        self._prelim_removed: dict[tuple[str, str], float] = {}  # (area, light) -> when the stage switched it off
         self._automation_timer: CALLBACK_TYPE | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -473,6 +477,16 @@ class LightingController:
                 if not o.get("until") or (dt_util.parse_datetime(o["until"]) or now) > now
             }
             self.runtime[area_id] = rt
+        self._sync_preliminary_signals()  # before the engines' first evaluation
+
+    @callback
+    def _sync_preliminary_signals(self) -> None:
+        """Tell the occupancy engines which signals start preliminary lighting (they cannot confirm alone)."""
+        signals = {}
+        for area_id in self.config.enabled_rooms:
+            settings = self.preliminary_settings(area_id)
+            signals[area_id] = frozenset(settings.signals) if settings.active else frozenset()
+        self.coordinator.occupancy.async_set_preliminary(signals)
 
     @callback
     def async_start(self) -> None:
@@ -988,7 +1002,7 @@ class LightingController:
                 # Possible occupancy from a selected signal: a dim preliminary light; the normal lighting waits.
                 rt.visit_started = True
                 rt.visit += 1
-                self._start_preliminary(area_id, prelim, found)
+                self._start_preliminary(area_id, prelim, found, was_state)
             elif (not rt.visit_started and result.occupied and not prelim.active
                   and result.state == OccupancyState.POSSIBLE_OCCUPANCY
                   and self.lighting.room(area_id).daylight.on_first_motion and _motion(result)):
@@ -1156,6 +1170,7 @@ class LightingController:
     @callback
     def async_presence_changed(self) -> None:
         """Presence settings changed live (signals enabled or excluded, timing); occupancy was re-evaluated."""
+        self._sync_preliminary_signals()
         self._notify()
 
     @callback
@@ -1467,8 +1482,11 @@ class LightingController:
             manual = source in ("ui", "wall_switch") or (
                 source == "unattributed" and self.lighting.unattributed == UnattributedPolicy.MANUAL
             )
-            if manual or source == "automation":
+            if manual:
                 self._note_preliminary_taken(area_id, target, source)
+            if switched_on and (area_id, target) in self._prelim_removed:
+                self._trace(area_id, "light_on_again_after_cleanup", light=target, source=source,
+                            context=ctx.id, parent=ctx.parent_id, user=bool(ctx.user_id))
             if not manual and switched_on and target == entity_id:
                 # Switched on by something else: give it the current global values right away.
                 self._schedule_adaptive(area_id, ADAPTIVE_DEBOUNCE_SECONDS, {target})
@@ -1646,10 +1664,15 @@ class LightingController:
         )
 
     @callback
-    def _start_preliminary(self, area_id: str, settings: EffectivePreliminary, found: list[str]) -> None:
+    def _start_preliminary(self, area_id: str, settings: EffectivePreliminary, found: list[str],
+                           before: str | None = None) -> None:
         """Possible occupancy from a selected signal: the stage starts (once per visit)."""
         rt = self.runtime_for(area_id)
         now = dt_util.utcnow()
+        self._trace(area_id, "stage_start", occupancy_before=before, trigger=found,
+                    mode="automatic" if self.room_active(area_id) else "observing", manual_mood=self._manual,
+                    timeout_s=settings.timeout, deadline=_iso(now + timedelta(seconds=settings.timeout)),
+                    targets={t.entity_id: self._light_snapshot(t.entity_id) for t in settings.targets})
         rt.preliminary = {
             "started": _iso(now), "deadline": _iso(now + timedelta(seconds=settings.timeout)),
             "timeout": settings.timeout, "evidence": list(found), "owned": {}, "would": [], "visit": rt.visit,
@@ -1695,14 +1718,28 @@ class LightingController:
             ok: list[PlanItem] = []
             errors: dict[str, str] = {}
             paused: set[str] = set()
+            self._trace(area_id, "activation_plan", occupancy=result.state.value, items={
+                i.entity_id: f"{i.decision}: {i.reason}" for i in plan.items})
             if changes:
-                errors = await self._execute(area_id, changes)
+                assert_room_control_permitted(self.room_active(area_id), area_id)
+                for item in changes:  # one light per command: a failing light cannot hide another
+                    errors |= await self._send(area_id, item.service or "turn_on", {item.entity_id: item.data})
                 paused = {e for e, m in errors.items() if m == _PAUSED}
                 errors = {e: m for e, m in errors.items() if m != _PAUSED}
                 ok = [i for i in changes if i.entity_id not in errors and i.entity_id not in paused]
-                for item in ok:
-                    rt.last_commands[item.entity_id] = (item.service or "", dict(item.data))
-                    episode.setdefault("owned", {})[item.entity_id] = dict(item.data)
+                owned = episode.setdefault("owned", {})
+                for item in changes:
+                    if item.entity_id in paused:
+                        continue
+                    # Commanded on from off: the stage's, also when the call reported an error (a slow or failing
+                    # device may still have switched it on). The switch-off checks the actual state.
+                    owned[item.entity_id] = dict(item.data)
+                    if item.entity_id not in errors:
+                        rt.last_commands[item.entity_id] = (item.service or "", dict(item.data))
+                    self._trace(area_id, "activation_call", light=item.entity_id, service=f"light.{item.service}",
+                                data=item.data, result=errors.get(item.entity_id, "accepted"),
+                                state_after=self._light_snapshot(item.entity_id))
+                self._mark_dirty()
             decision = self.explain.preliminary_start(area_id, plan, episode, ok=ok if changes else None,
                                                       errors=errors, paused=paused)
             if decision is not None:
@@ -1714,15 +1751,16 @@ class LightingController:
 
     def _preliminary_holds(self, area_id: str, entity_id: str, data: dict[str, Any],
                            taken: dict[str, str] | None = None) -> str | None:
-        """None when the light is still as the stage set it (so the stage may switch it off); otherwise why not.
+        """None when the stage still owns the light (so it switches it off); otherwise why not.
 
-        Ownership ends only on evidence that someone else took the light: a
-        manual override, a change attributed to a person or an automation
-        (``taken``), or a brightness that no longer is the one the stage set.
-        A device reporting its new state (a Zigbee light or a group member
-        reporting with a context of its own, a late or rounded brightness) is
-        not such evidence. Reasons: ``off`` (already off), ``unavailable``,
-        ``manual``, ``taken``, ``changed``.
+        The stage owns every light it switched on (also one whose command
+        reported an error: it was off before and was commanded on). Only an
+        explicitly recorded change by a person ends that: a manual override
+        (app, wall switch, or an unattributed change when the room treats those
+        as manual), or such a change recorded while overrides are not kept
+        (``taken``: Manual mood). Device reports, brightness corrections and
+        automations do not. Reasons: ``off`` (already off), ``unavailable``,
+        ``manual``, ``taken``.
         """
         rt = self.runtime_for(area_id)
         state = self.hass.states.get(entity_id)
@@ -1734,11 +1772,6 @@ class LightingController:
             return "manual"
         if taken and entity_id in taken:
             return "taken"
-        want = data.get("brightness_pct")
-        brightness = state.attributes.get("brightness")
-        if want is not None and isinstance(brightness, (int, float)) and \
-                abs(brightness / 255 * 100 - float(want)) > PRELIMINARY_BRIGHTNESS_TOLERANCE_PCT:
-            return "changed"
         return None
 
     @callback
@@ -1764,16 +1797,21 @@ class LightingController:
         @callback
         def fire(_now: datetime) -> None:
             self._prelim_timers.pop(area_id, None)
+            result = self.coordinator.occupancy.result(area_id)
+            self._trace(area_id, "timeout_fired", occupancy=result.state.value if result else None,
+                        running=self._running)
             if self._running and not self._stopped:
                 self._end_preliminary(area_id, "timeout")
 
         self._prelim_timers[area_id] = async_track_point_in_utc_time(self.hass, fire, when)
+        self._trace(area_id, "timeout_scheduled", deadline=_iso(when))
 
     @callback
     def _close_preliminary(self, area_id: str) -> dict[str, Any] | None:
         """The stage ends (its record is returned); its timer is cancelled."""
         if cancel := self._prelim_timers.pop(area_id, None):
             cancel()
+            self._trace(area_id, "timeout_cancelled")
         rt = self.runtime.get(area_id)
         if rt is None:
             return None
@@ -1788,8 +1826,11 @@ class LightingController:
             return
         result = self.coordinator.occupancy.result(area_id)
         if reason == "timeout" and result is not None and result.state == OccupancyState.CONFIRMED_OCCUPANCY:
+            self._trace(area_id, "stage_end_skipped", reason="occupancy confirmed: the confirmation hands over")
             return  # confirmed: the confirmation (queued) hands the lights over
         episode = self._close_preliminary(area_id)
+        self._trace(area_id, "stage_end", reason=reason, owned=sorted((episode or {}).get("owned") or {}),
+                    occupancy=result.state.value if result else None)
         self._mark_dirty()
         if episode is not None:
             self._create_task(self.async_end_preliminary(area_id, reason, episode))
@@ -1833,6 +1874,9 @@ class LightingController:
             else:
                 outcome[entity_id] = {"result": "already_off" if why == "off" else why}
         blocked = "paused" if self._manual else "observing" if not self.room_active(area_id) else None
+        self._trace(area_id, "cleanup_decision", blocked=blocked, switch_off=sorted(remove),
+                    keep={e: o["result"] for e, o in outcome.items()},
+                    states={e: self._light_snapshot(e) for e in items})
         due: dict[str, dict[str, Any]] = {}
         for entity_id, item in remove.items():
             if blocked:
@@ -1846,6 +1890,10 @@ class LightingController:
             assert_room_control_permitted(self.room_active(area_id), area_id)
             errors = await self._send(area_id, "turn_off", {entity_id: data})
             error = errors.get(entity_id)
+            self._trace(area_id, "cleanup_call", light=entity_id, service="light.turn_off", data=data,
+                        result=error or "accepted", state_after=self._light_snapshot(entity_id))
+            if not error:
+                self._prelim_removed[(area_id, entity_id)] = time.monotonic()
             if error == _PAUSED:
                 outcome[entity_id] = {"result": "paused"}
                 due[entity_id] = {**item, "reason": "paused"}
@@ -1912,6 +1960,28 @@ class LightingController:
                                          outcome, retry=True)
             self.coordinator.async_schedule_refresh()
             self._notify()
+
+    @callback
+    def _trace(self, area_id: str, event: str, **data: Any) -> None:
+        """One step of the possible occupancy pipeline (developer diagnostics; bounded, debug log only)."""
+        entry = {"at": dt_util.utcnow().isoformat(timespec="milliseconds"), "event": event, **data}
+        self._prelim_trace.setdefault(area_id, deque(maxlen=PRELIMINARY_TRACE_SIZE)).append(entry)
+        _LOGGER.debug("preliminary_trace area=%s event=%s %s", area_id, event, data)
+        horizon = time.monotonic() - 600
+        for key in [k for k, t in self._prelim_removed.items() if t < horizon]:
+            del self._prelim_removed[key]
+
+    def _light_snapshot(self, entity_id: str) -> str:
+        """"on 10 %", "off", "unavailable" - the light as Home Assistant reports it now."""
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return "missing"
+        b = state.attributes.get("brightness")
+        return f"{state.state} {round(b / 255 * 100)} %" if state.state == "on" and isinstance(b, (int, float)) \
+            else state.state
+
+    def preliminary_trace(self, area_id: str) -> list[dict[str, Any]]:
+        return list(self._prelim_trace.get(area_id, ()))
 
     async def _confirm_preliminary(self, area_id: str, plan: Plan, sent: set[str]) -> None:
         """Occupancy confirmed and the normal lighting applied: each preliminary light is handed over or switched off.
@@ -1980,6 +2050,8 @@ class LightingController:
         elif turn_off:
             for entity_id in turn_off:
                 outcome[entity_id] = "kept_paused"
+        self._trace(area_id, "confirmed", outcome=outcome, errors=errors,
+                    states={e: self._light_snapshot(e) for e in owned})
         self.explain.preliminary_confirmed(area_id, plan, outcome, errors=errors, episode=episode)
         _LOGGER.debug("lighting_preliminary_confirmed area=%s outcome=%s", area_id, outcome)
 
@@ -2049,6 +2121,7 @@ class LightingController:
     @callback
     def _on_lighting_config_changed(self, old: LightingConfig, new: LightingConfig) -> None:
         self._invalidate_managed()
+        self._sync_preliminary_signals()
         self.daylight.async_config_changed()
         self.coordinator.async_schedule_refresh()
         if old.adaptive != new.adaptive:
@@ -2194,6 +2267,8 @@ class LightingController:
                 **self.preliminary_settings(area_id).as_dict(),
                 "stage": rt.preliminary,
                 "cleanup_due": rt.preliminary_cleanup,
+                # Developer trace (0.3.11): the last steps of the possible occupancy pipeline, oldest first.
+                "trace": self.preliminary_trace(area_id),
             },
         }
 

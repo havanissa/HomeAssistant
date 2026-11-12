@@ -99,6 +99,9 @@ def preliminary_model(hass: HomeAssistant, ctrl: LightingController, area_id: st
                      "used": s.participates, "selected": s.entity_id in eff.signals,
                      "default": s.entity_id in defaults} for s in sensors],
         "candidates": [light(e) for e in controlled],
+        # Signals that can confirm occupancy while preliminary lighting is on: every used signal that does not start it.
+        "confirmed_by": [friendly_name(hass, s.entity_id) or s.entity_id for s in sensors
+                         if s.participates and s.entity_id not in eff.signals],
         "targets": targets,
         "stage": stage,
         # Preliminary lights whose switch-off is still due (Observing, Manual mood, unavailable, failed).

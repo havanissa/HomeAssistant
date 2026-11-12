@@ -375,16 +375,17 @@ async def test_immediate_confirmation_skips_the_preliminary_stage(hass: HomeAssi
     assert not [d for d in log(ctrl, lit.area) if d["kind"] == "preliminary"]
 
 
-async def test_sustained_motion_confirms_without_a_second_sensor(hass: HomeAssistant, lit: Lit, freezer,
-                                                                 lights: FakeLights) -> None:
-    """A PIR that stays active for the correlation window confirms occupancy on its own (engine rule)."""
+async def test_held_motion_does_not_confirm_on_its_own(hass: HomeAssistant, lit: Lit, freezer,
+                                                       lights: FakeLights) -> None:
+    """0.3.10: the PIR starts the preliminary light, so it cannot confirm occupancy by staying active; the radar
+    (not a preliminary signal) confirms."""
     _entry, ctrl = await setup(hass, lit, freezer, lights)
-    await motion(hass, lit, freezer, wait=5)
+    await motion(hass, lit, freezer, wait=25)
     assert state(ctrl, lit.area) == "possible_occupancy" and hass.states.is_state(lit.group, "off")
-    await advance(hass, freezer, 7)
+    await presence(hass, lit, freezer)
     assert state(ctrl, lit.area) == "confirmed_occupancy"
-    await advance(hass, freezer)  # (the normal lighting is applied after the short coalescing delay)
     assert hass.states.is_state(lit.group, "on")
+    assert ctrl.coordinator.occupancy.engines[lit.area].preliminary == frozenset({lit.pir})
 
 
 async def test_disabled_or_without_lights_keeps_the_previous_behaviour(hass: HomeAssistant, lit: Lit, freezer,
@@ -461,16 +462,20 @@ async def test_pilot_nobara_activity_sustains_occupancy(hass: HomeAssistant, pil
 
 
 async def test_pilot_radar_selected_as_evidence(hass: HomeAssistant, pilot: Pilot, freezer, lights: FakeLights) -> None:
-    """Radar selected: radar alone is possible occupancy (dim); after the correlation window it confirms."""
+    """Radar selected: radar alone is possible occupancy (dim) and, as a preliminary signal, does not confirm by
+    staying active; the Nobara PC (not selected) confirms."""
     ctrl = await pilot_room(hass, pilot, freezer, signals=(pilot.radar,))
     lights.clear()
     hass.states.async_set(pilot.radar, "on")
     await hass.async_block_till_done()
     await advance(hass, freezer)
     assert calls_for(lights, pilot.light) == [("turn_on", {"brightness_pct": 10})]
-    await advance(hass, freezer, 10)
-    assert state(ctrl, pilot.area) == "confirmed_occupancy"
+    await advance(hass, freezer, 15)
+    assert state(ctrl, pilot.area) == "possible_occupancy"
+    hass.states.async_set(pilot.pc, "on")
+    await hass.async_block_till_done()
     await advance(hass, freezer)
+    assert state(ctrl, pilot.area) == "confirmed_occupancy"
     assert calls_for(lights, pilot.light)[-1] == ("turn_on", {"brightness_pct": 100, "color_temp_kelvin": 3500})
 
 

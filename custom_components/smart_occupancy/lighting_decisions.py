@@ -790,9 +790,7 @@ class LightingDecisions:
         if by.get("manual"):
             parts.append(f"{names(by['manual'])} left as it is: changed by a person (manual override)")
         if by.get("taken"):
-            parts.append(f"{names(by['taken'])} left as it is: changed by a person or an automation since")
-        if by.get("changed"):
-            parts.append(f"{names(by['changed'])} left as it is: its brightness was changed since")
+            parts.append(f"{names(by['taken'])} left as it is: changed by a person since")
         text = f"{why}: " + "; ".join(parts) + "."
         checks = None
         if off or failed:
