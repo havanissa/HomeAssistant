@@ -8,7 +8,7 @@ from typing import Final
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
 PHASE: Final = "0.3.5"
-VERSION: Final = "0.3.9"
+VERSION: Final = "0.3.10"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -256,6 +256,11 @@ MANUAL_OVERRIDE_MAX_MINUTES: Final = 1440
 # Light state tolerances when deciding whether a light already matches.
 BRIGHTNESS_TOLERANCE_PCT: Final = 2
 KELVIN_TOLERANCE: Final = 60
+# Possible occupancy (0.3.10): a preliminary light still counts as the stage's while its brightness is within this
+# of what the stage set (devices round and report on their own); retries of a failed switch-off.
+PRELIMINARY_BRIGHTNESS_TOLERANCE_PCT: Final = 5
+PRELIMINARY_CLEANUP_RETRY_SECONDS: Final = 60
+PRELIMINARY_CLEANUP_MAX_TRIES: Final = 5
 RGB_TOLERANCE: Final = 4
 HS_TOLERANCE: Final = 2.0
 

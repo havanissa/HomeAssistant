@@ -57,6 +57,7 @@ TRIGGER_WORDS = {
     "set to Observing", "vacancy_wait": "no presence (vacancy timeout started)",
     "override_expired": "manual override ended",
     "possible_occupancy": "possible occupancy", "preliminary_end": "possible occupancy not confirmed",
+    "retry": "retry of a preliminary light switch-off", "manual_ended": "Manual mood ended",
 }
 VACANCY_WORDS = {"turn_off": "Turn off", "vacant_mood": "Vacant mood", "leave": "Leave unchanged"}
 _SOURCE_WORDS = {
@@ -75,6 +76,13 @@ _BLOCK_WORDS = {
     "not_possible": "the room is no longer in possible occupancy",
     "no_mood": "there is no effective mood",
 }
+
+
+def _waited(episode: dict[str, Any] | None) -> str:
+    started = dt_util.parse_datetime((episode or {}).get("started") or "")
+    if started is None:
+        return "a moment"
+    return _duration(max(1, int((dt_util.utcnow() - started).total_seconds())))
 
 
 def _plural(n: int, word: str = "light") -> str:
@@ -649,8 +657,11 @@ class LightingDecisions:
             + (f", {i.data['color_temp_kelvin']} K" if i.data.get("color_temp_kelvin") else ""))
         lights = lambda items: _names([f"{i.name or i.entity_id} at {level(i)}" for i in items])  # noqa: E731
         light_clause = f", {daylight}" if daylight and (changes or gated) else ""
+        deadline = dt_util.parse_datetime(episode.get("deadline") or "")
+        at = f" at {dt_util.as_local(deadline).strftime('%H:%M:%S')}" if deadline else ""
         after = (f" The normal lighting follows when occupancy is confirmed; otherwise it is switched off after "
-                 f"{_duration(int(timeout))}." if timeout else "")
+                 f"{_duration(int(timeout))}{at}." if timeout else "")
+        details["deadline"] = episode.get("deadline")
         action = "Preliminary light on"
         checks: list[Check] | None = None
         target = _names([i.name or i.entity_id for i in changes]) if changes else None
@@ -719,65 +730,99 @@ class LightingDecisions:
             verify_after=self._verify_delay(changes),
         )
 
-    def preliminary_end(self, area_id: str, reason: str, episode: dict[str, Any], *, removed: list[str],
-                        errors: dict[str, str], left: list[str], blocked: str | None) -> Decision | None:
-        """Possible occupancy was not confirmed: the preliminary lights it switched on are removed."""
+    def preliminary_end(self, area_id: str, reason: str, episode: dict[str, Any],
+                        outcome: dict[str, dict[str, Any]], *, retry: bool = False) -> Decision | None:
+        """Possible occupancy was not confirmed (or a due cleanup was tried again): what happened to each light
+        the stage switched on. ``outcome`` comes from the controller's cleanup (empty: the stage switched nothing on)."""
         ctrl = self.ctrl
         names = lambda ids: _names([_name(ctrl.hass, e) for e in ids])  # noqa: E731
         would = list(episode.get("would") or [])
-        owned = list((episode.get("owned") or {}).keys())
-        if not owned and not would:
-            return None  # nothing was (or would have been) switched on: nothing to undo or explain
         timeout = episode.get("timeout")
-        if reason == "timeout":
-            why = f"Possible occupancy was not confirmed within {_duration(int(timeout or 0))}"
+        _occ, details = self.occupancy(area_id)
+        if retry:
+            why = {"reconnected": "A preliminary light that was unavailable is available again",
+                   "activated": "The room is set to Automatic again", "manual_ended": "Main Mood is no longer Manual",
+                   "retry": "Retrying the switch-off of a preliminary light"}.get(reason, "Retrying the switch-off")
+        elif reason == "timeout":
+            why = f"Possible occupancy was not confirmed within {_duration(int(timeout or 0))} (timeout expired)"
         else:
             why = "Possible occupancy ended without confirmation (the room is vacant)"
-        _occ, details = self.occupancy(area_id)
-        details["trigger"] = TRIGGER_WORDS["preliminary_end"]
+        details["trigger"] = TRIGGER_WORDS.get(reason, reason) if retry else TRIGGER_WORDS["preliminary_end"]
         details["evidence"] = [_name(ctrl.hass, e) for e in episode.get("evidence") or []]
         details["preliminary_timeout_s"] = timeout
         details["started"] = episode.get("started")
-        mode = self.mode(area_id)
-        failed = [e for e in removed if e in errors] + [e for e in errors if e not in removed]
-        sent = [e for e in removed if e not in errors]
+        details["deadline"] = episode.get("deadline")
+        if not outcome:
+            if not would:
+                # Nothing was switched on: the start entry gets the end, no new entry.
+                if episode.get("decision"):
+                    self.log.amend(area_id, episode["decision"], details={"ended": f"{why}."})
+                return None
+            return self.log.record(
+                area_id, module=MODULE_LIGHTING, trigger="preliminary_end", kind="preliminary",
+                action="Preliminary light off", mode=MODE_OBSERVING, status=OBSERVED, target=names(would),
+                explanation=f"{why}: would switch off {names(would)} (preliminary light). Observing: nothing was sent.",
+                details=details, key=("preliminary", "end", reason, OBSERVED))
+        by: dict[str, list[str]] = {}
+        for entity_id, o in outcome.items():
+            by.setdefault(o["result"], []).append(entity_id)
+        details["cleanup"] = {_name(ctrl.hass, e): o["result"] + (f": {o['error']}" if o.get("error") else "")
+                              for e, o in outcome.items()}
+        off, failed = by.get("off", []), by.get("failed", [])
+        parts: list[str] = []
+        if off:
+            parts.append(f"{names(off)} switched off (preliminary light removed)")
+        if failed:
+            parts.append("switch-off failed for " + "; ".join(
+                f"{_name(ctrl.hass, e)}: {outcome[e]['error']}" for e in failed)
+                + (" (tried again in a minute)" if not any(outcome[e].get("gave_up") for e in failed)
+                   else " (gave up; the room's vacancy action switches it off when the room is vacant)"))
+        if by.get("already_off"):
+            parts.append(f"{names(by['already_off'])} already off")
+        if by.get("unavailable"):
+            parts.append(f"{names(by['unavailable'])} unavailable: switched off when it is available again")
+        if by.get("observing"):
+            parts.append(f"{names(by['observing'])} left on: the room is Observing, so nothing is sent; "
+                         "switched off when the room is set to Automatic again")
+        if by.get("paused"):
+            parts.append(f"{names(by['paused'])} left on: Main Mood is Manual, so nothing is sent; "
+                         "switched off when Manual ends")
+        if by.get("manual"):
+            parts.append(f"{names(by['manual'])} left as it is: changed by a person (manual override)")
+        if by.get("taken"):
+            parts.append(f"{names(by['taken'])} left as it is: changed by a person or an automation since")
+        if by.get("changed"):
+            parts.append(f"{names(by['changed'])} left as it is: its brightness was changed since")
+        text = f"{why}: " + "; ".join(parts) + "."
         checks = None
-        target = names(sent or owned or would)
-        action = "Preliminary light off"
-        if not owned and would:
-            status, mode = OBSERVED, MODE_OBSERVING
-            text = f"{why}: would switch off {names(would)} (preliminary light). Observing: nothing was sent."
-        elif blocked == "manual":
-            status, mode = BLOCKED, MODE_PAUSED
-            text = f"{why}, but Main Mood is Manual: {names(owned)} stays on (nothing is sent)."
-        elif blocked == "observing":
-            status, mode = BLOCKED, MODE_OBSERVING
-            text = f"{why}, but the room was set to Observing: {names(owned)} stays on (nothing is sent)."
-        elif sent or failed:
-            text = f"{why}: {names(sent)} switched off (preliminary light removed)." if sent else f"{why}:"
+        if off or failed:
+            status = PARTIAL if off and failed else FAILED if failed else DISPATCHED
+            action = "Preliminary light off"
+            details["service"] = [f"light.turn_off {_name(ctrl.hass, e)}" for e in [*off, *failed]]
             if failed:
-                text += " Failed: " + "; ".join(f"{_name(ctrl.hass, e)}: {errors[e]}" for e in failed) + "."
-            status = PARTIAL if failed and sent else FAILED if failed else DISPATCHED
-            details["service"] = [f"light.turn_off {_name(ctrl.hass, e)}" for e in removed]
-            if failed:
-                details["errors"] = {e: errors[e] for e in failed}
+                details["errors"] = {e: outcome[e]["error"] for e in failed}
             if status == DISPATCHED:
-                checks = light_checks("turn_off", {e: {} for e in sent})
+                checks = light_checks("turn_off", {e: {} for e in off})
+        elif by.get("observing") or by.get("paused") or by.get("unavailable"):
+            status = BLOCKED if not by.get("unavailable") else FAILED
+            action = "Preliminary light off"
         else:
-            status = NO_CHANGE
-            action = "No change"
-            text = f"{why}: the preliminary light is no longer as it set it, so it is left as it is."
-        if left:
-            text += f" Left as {'it is' if len(left) == 1 else 'they are'}: {names(left)} (changed since)."
-            details["left"] = [_name(ctrl.hass, e) for e in left]
+            status, action = NO_CHANGE, "No change"
+        mode = MODE_OBSERVING if by.get("observing") else MODE_PAUSED if by.get("paused") else self.mode(area_id)
         return self.log.record(
             area_id, module=MODULE_LIGHTING, trigger="preliminary_end", kind="preliminary", action=action,
-            explanation=text, mode=mode, status=status, target=target, details=details,
-            key=("preliminary", "end", reason, status), checks=checks,
+            explanation=text, mode=mode, status=status, target=names(outcome), details=details,
+            key=("preliminary", "end", reason, status, *sorted(by)), checks=checks,
         )
 
+    def preliminary_cancelled(self, area_id: str, episode: dict[str, Any]) -> None:
+        """Confirmed before the stage switched anything on: its timeout is cancelled (noted on its start entry)."""
+        if episode.get("decision"):
+            self.log.amend(area_id, episode["decision"], details={
+                "ended": f"Occupancy confirmed after {_waited(episode)}: the preliminary timeout was cancelled."})
+
     def preliminary_confirmed(self, area_id: str, plan: Plan, outcome: dict[str, str], *,
-                              errors: dict[str, str]) -> Decision | None:
+                              errors: dict[str, str], episode: dict[str, Any] | None = None) -> Decision | None:
         """Occupancy confirmed after a preliminary light: handed over to the normal lighting or switched off."""
         if not outcome:
             return None
@@ -815,12 +860,16 @@ class LightingDecisions:
         if by.get("changed"):
             parts.append(f"{names('changed')} left as it is (changed since)")
         signals = occupancy[len("room occupied ("):-1] if occupancy.startswith("room occupied (") else None
-        text = f"Occupancy confirmed{f' ({signals})' if signals else ''}: " + "; ".join(parts) + "."
+        after = f" after {_waited(episode)}" if episode else ""
+        text = (f"Occupancy confirmed{f' ({signals})' if signals else ''}{after} (preliminary timeout cancelled): "
+                + "; ".join(parts) + ".")
         if failed:
             text += " Failed: " + "; ".join(f"{_name(ctrl.hass, e)}: {errors[e]}" for e in failed) + "."
         details["trigger"] = TRIGGER_WORDS["occupancy_confirmed"]
         details["mood"] = plan.mood
         details["preliminary_outcome"] = {_name(ctrl.hass, e): w.replace("_", " ") for e, w in outcome.items()}
+        if episode:
+            details["started"], details["deadline"] = episode.get("started"), episode.get("deadline")
         checks = None
         if off or failed:
             status = PARTIAL if failed and off else FAILED if failed else DISPATCHED

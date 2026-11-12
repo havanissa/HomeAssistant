@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.10 — Fix: preliminary lights stayed on when possible occupancy was not confirmed
+
+### Fixed
+
+- **A light switched on for possible occupancy could stay on after the timeout.** Root cause: the stage switched a light off only while the controller still held its own last command for it. Every light state change that was not recognised as the controller's own erased that record, and so did a real device's own state report: a **member of a light group** (the Kamar Norður spots) reporting through Zigbee2MQTT with a context of its own, or a light reporting late (after 20 s) or with a rounded brightness. The timeout fired and the cleanup ran, but it concluded "changed since" and left the light on. Then nothing else switched it off: a door-only stage never makes the room occupied, and *Leave unchanged* or a *Vacant mood* leave lights on at vacancy. The 0.3.9 tests used simulated lights that reported back with the controller's own context, so they never hit this.
+- The ownership rule is now explicit. The stage owns the lights it switched on (never one that was already on). It lets go only when someone else took the light: a manual override, a change attributed to a person or an automation, or a brightness more than 5 points away from what it set. Device reports are not such evidence. The same rule applies to *Turn off* on confirmation, which had the same fault.
+- **A switch-off that could not be sent was dropped**: the room set to *Observing* or Main Mood *Manual* when the timeout came, an unavailable light, or a Home Assistant error. It is now kept as due (persisted) and sent when the room is Automatic again, when Manual ends, when the light is back, or on a retry every minute (up to 5 times). Observing still never sends anything. It is dropped when occupancy is confirmed, because the light then belongs to the room. The vacancy action leaves such lights to it, so no light gets two commands.
+
+### Added
+
+- Decision log: the start entry gives the timeout deadline. The confirmation entry says how long the room waited and that the timeout was cancelled (also noted on the start entry when nothing was switched on). The end entry gives each light's cleanup result: switched off (verified), failed (retried), already off, left (manual override / changed by a person or an automation / brightness changed), or blocked (Observing, Manual) with when it will be done. Retries get their own entries.
+- Room card (*Settings → Automatic → Possible occupancy*): *Still to switch off: …* while a switch-off is due. Room diagnostics: `preliminary.cleanup_due`.
+
+### Tests
+
+- New `tests/test_preliminary_cleanup.py` with lights that behave like Zigbee2MQTT devices (own-context reports, group members, rounded and late brightness reports, failures). It covers: the Kamar Norður spots and pilot entities timing out, repeated motion, unavailable sensors, confirmation before the timeout, a light already on, manual changes, Vacant mood, an unavailable light, a failed switch-off, Observing, Manual mood, a restart while due, and no double commands at vacancy. 9 of these 15 tests fail on 0.3.9.
+
 ## 0.3.9 — Settings submenu and possible occupancy lighting
 
 ### Added
