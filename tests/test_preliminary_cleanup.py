@@ -20,7 +20,7 @@ from typing import Any
 from homeassistant.core import Context, HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 
-from custom_components.smart_occupancy.const import VacancyAction
+from custom_components.smart_occupancy.const import VacancyAction, VacantOthers
 from custom_components.smart_occupancy.lighting_config import RoomVacancy
 from custom_components.smart_occupancy.preliminary import ConfirmAction, PreliminaryTarget
 
@@ -248,7 +248,8 @@ async def test_vacant_mood_is_restored(hass: HomeAssistant, lit: Lit, freezer) -
     state); at vacancy Nátt applies to the lit desk lamp and sends the lamp nothing."""
     zb = zigbee(hass, lit)
     _entry, ctrl = await setup(hass, lit, freezer, zb, targets=(PreliminaryTarget(lit.lamp, 30),))
-    ctrl.store.async_set(ctrl.with_room(lit.area, vacancy=RoomVacancy(VacancyAction.VACANT_MOOD, "Nátt")))
+    ctrl.store.async_set(ctrl.with_room(lit.area, vacancy=RoomVacancy(VacancyAction.VACANT_MOOD, "Nátt",
+                                                                                VacantOthers.MOOD)))
     zb.report(lit.desk, True, 10)
     await hass.async_block_till_done()
     await advance(hass, freezer)

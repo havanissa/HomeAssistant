@@ -45,6 +45,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .const import (
+    DaylightCondition,
     CONFIG_VERSION,
     FUNCTION_CATEGORY_NAMES,
     RGB_CATEGORY_NAMES,
@@ -262,6 +263,11 @@ class ProfileSetting:
     the global value plus ``brightness_offset`` (percentage points) or
     ``color_temp_offset`` (K), or leaving the property unchanged (ignore).
     Not set means inherit; a value without a mode is fixed.
+
+    ``daylight`` (0.4.0): ``dark`` switches an off light on only when the
+    room needs artificial light (its daylight rules); ``always`` is an
+    explicit exception that switches it on in daylight too. Not set:
+    inherit, and ``dark`` when no level sets it.
     """
 
     action: LightAction = LightAction.INHERIT
@@ -276,6 +282,7 @@ class ProfileSetting:
     brightness_offset: int | None = None
     color_temp_mode: AdjustMode | None = None
     color_temp_offset: int | None = None
+    daylight: DaylightCondition | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ProfileSetting:
@@ -293,6 +300,7 @@ class ProfileSetting:
             brightness_offset=_number(data.get("brightness_offset")),
             color_temp_mode=_enum_or(AdjustMode, data.get("color_temp_mode"), None),
             color_temp_offset=_number(data.get("color_temp_offset")),
+            daylight=_enum_or(DaylightCondition, data.get("daylight"), None),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -301,7 +309,7 @@ class ProfileSetting:
                     "brightness_offset", "color_temp_offset"):
             if (value := getattr(self, key)) is not None:
                 out[key] = value
-        for key in ("brightness_mode", "color_temp_mode"):
+        for key in ("brightness_mode", "color_temp_mode", "daylight"):
             if (value := getattr(self, key)) is not None:
                 out[key] = value.value
         for key in ("rgb_color", "hs_color"):

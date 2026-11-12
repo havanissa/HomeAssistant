@@ -346,8 +346,9 @@ async def test_room_mood_override_and_vacancy(hass: HomeAssistant, lit: Lit, cal
     assert ctrl.room_diagnostics(lit.area)["follows_global"] is False
 
 
-async def test_overrides_and_profile_change_only_changed_lights(hass: HomeAssistant, lit: Lit, calls: Calls,
-                                                                freezer, hass_ws_client) -> None:
+async def test_profile_edits_never_send_and_apply_at_the_next_trigger(hass: HomeAssistant, lit: Lit, calls: Calls,
+                                                                       freezer, hass_ws_client) -> None:
+    """0.4.0: editing a profile never changes a light; the next trigger (here a mood change) applies it."""
     entry = await setup_entry(hass, options(lit))
     await occupy(hass, lit, freezer)
     await activate(hass, entry, lit, freezer)
@@ -362,17 +363,24 @@ async def test_overrides_and_profile_change_only_changed_lights(hass: HomeAssist
                      target="lamps", setting={"action": "inherit", "brightness_pct": 50})
     assert reply["success"], reply
     await hass.async_block_till_done()
-    await advance(hass, freezer)
-    # Only the lamps category changed (the on/off plug's command is the same, so it is not resent).
-    assert set(calls.by_entity()) == {lit.lamp, lit.desk}
-    assert calls.by_entity()[lit.lamp][1] == {"brightness_pct": 50, "color_temp_kelvin": 3500}
-    calls.clear()
+    await advance(hass, freezer, 30)
+    assert calls.all == []  # configuration editing does not change a physical light
     reply = await ws(type="smart_occupancy/lighting/profile/set", scope="light", area_id=lit.area, mood="Dagur",
                      target=lit.desk, setting={"brightness_pct": 80})
     assert reply["success"]
     await hass.async_block_till_done()
+    await advance(hass, freezer, 30)
+    assert calls.all == []
+    # The next trigger uses the edited profile: Kvøld and back to Dagur.
+    set_moods(hass, "Kvøld", "Auto", "Kvøld")
+    await hass.async_block_till_done()
     await advance(hass, freezer)
-    assert calls.by_entity() == {lit.desk: ("turn_on", {"brightness_pct": 80, "color_temp_kelvin": 3500})}
+    calls.clear()
+    set_moods(hass, "Dagur", "Auto", "Dagur")
+    await hass.async_block_till_done()
+    await advance(hass, freezer)
+    assert calls.by_entity()[lit.lamp] == ("turn_on", {"brightness_pct": 50, "color_temp_kelvin": 3500})
+    assert calls.by_entity()[lit.desk] == ("turn_on", {"brightness_pct": 80, "color_temp_kelvin": 3500})
     reply = await ws(type="smart_occupancy/lighting/editor", area_id=lit.area, mood="Dagur")
     desk = next(li for li in reply["result"]["room"]["lights"] if li["entity_id"] == lit.desk)
     assert desk["effective"]["brightness_pct"] == 80 and desk["effective"]["sources"]["brightness_pct"]["level"] == "light"

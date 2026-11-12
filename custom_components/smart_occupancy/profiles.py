@@ -39,6 +39,19 @@ Global adjustment (0.3.2):
   room ``*`` < room mood < light ``*`` < light mood. They cannot set an
   action, so they never switch a light on or off by themselves.
 * The global values are filled in afterwards (``adaptive.apply_global``).
+
+Occupied and Vacant profiles (0.4.0): every level has a table per profile
+(``global_profiles`` / ``global_vacant``, ``mood_overrides`` /
+``vacant_overrides``, ``light_overrides`` / ``vacant_light_overrides``).
+Both resolve the same way, through the same mood chain, so each value comes
+from the most specific of: light (mood, then ``*``), room (mood, then ``*``),
+global (the mood chain, then ``*``). The two profiles never mix: a Vacant
+entry never inherits from an Occupied one. Ambient (``persistent``) belongs
+to the Occupied profile only.
+
+``daylight`` (0.4.0) is inherited like any other field: ``dark`` (or not
+set) lets an off light be switched on only when the room needs artificial
+light; ``always`` is an explicit exception.
 """
 
 from __future__ import annotations
@@ -58,14 +71,16 @@ from .const import (
     TRANSITION_MAX,
     TRANSITION_MIN,
     AdjustMode,
+    DaylightCondition,
     LightAction,
+    Profile,
 )
 from .lighting_config import LightingConfig, table_get
 from .models import ProfileSetting
 
 COLOR_FIELDS = ("color_temp_kelvin", "rgb_color", "hs_color")
 VALUE_FIELDS = ("brightness_pct", *COLOR_FIELDS, "effect", "transition", "persistent")
-MODE_FIELDS = ("brightness_mode", "brightness_offset", "color_temp_mode", "color_temp_offset")
+MODE_FIELDS = ("brightness_mode", "brightness_offset", "color_temp_mode", "color_temp_offset", "daylight")
 _CT_FIELDS = ("color_temp_kelvin", "color_temp_mode", "color_temp_offset")
 # Dropped when the action is Off.
 _ON_ONLY = ("brightness_pct", *COLOR_FIELDS, "effect", *MODE_FIELDS)
@@ -83,9 +98,12 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def validate_setting(setting: ProfileSetting, mood: str | None = None) -> dict[str, str]:
+def validate_setting(setting: ProfileSetting, mood: str | None = None,
+                     profile: Profile = Profile.OCCUPIED) -> dict[str, str]:
     """Validate one profile entry. Returns {field: error_key}."""
     errors: dict[str, str] = {}
+    if profile == Profile.VACANT and setting.persistent is not None:
+        errors["persistent"] = "vacant_ambient"
     for f, limit in (("brightness_offset", BRIGHTNESS_OFFSET_MAX), ("color_temp_offset", KELVIN_OFFSET_MAX)):
         v = getattr(setting, f)
         if v is not None and (not _is_int(v) or not -limit <= v <= limit):
@@ -141,7 +159,9 @@ def setting_from_form(data: dict[str, Any]) -> ProfileSetting:
     transition = data.get("transition")
     modes = {f: AdjustMode(data[f]) for f in ("brightness_mode", "color_temp_mode") if data.get(f)}
     persistent = data.get("persistent")
+    daylight = data.get("daylight")
     return ProfileSetting(
+        daylight=DaylightCondition(daylight) if daylight else None,
         action=LightAction(data.get("action", LightAction.INHERIT)),
         brightness_pct=_int("brightness_pct"),
         color_temp_kelvin=_int("color_temp_kelvin"),
@@ -188,6 +208,7 @@ class ResolvedSetting:
     brightness_offset: int | None = None
     color_temp_mode: AdjustMode | None = None
     color_temp_offset: int | None = None
+    daylight: DaylightCondition | None = None
     # field -> {"level": "global" | "room" | "light", "mood": mood}
     sources: dict[str, dict[str, str]] = field(default_factory=dict)
     # How the global adjustment was applied (``adaptive.apply_global``); None before.
@@ -197,12 +218,17 @@ class ResolvedSetting:
     def is_persistent(self) -> bool:
         return bool(self.persistent)
 
+    @property
+    def in_daylight(self) -> bool:
+        """An explicit exception: may switch an off light on although daylight is enough."""
+        return self.daylight == DaylightCondition.ALWAYS
+
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"action": self.action.value}
         for f in (*VALUE_FIELDS, *MODE_FIELDS):
             v = getattr(self, f)
             if v is not None:
-                out[f] = list(v) if isinstance(v, tuple) else v.value if isinstance(v, AdjustMode) else v
+                out[f] = list(v) if isinstance(v, tuple) else v.value if isinstance(v, (AdjustMode, DaylightCondition)) else v
         out["sources"] = {k: dict(v) for k, v in self.sources.items()}
         if self.adaptive is not None:
             out["adaptive"] = {k: dict(v) for k, v in self.adaptive.items()}
@@ -250,7 +276,7 @@ def _apply(result: ResolvedSetting, layer: ProfileSetting, source: dict[str, str
     elif layer.color_temp_kelvin is not None:
         result.color_temp_mode = AdjustMode.FIXED
         result.sources.pop("color_temp_mode", None)
-    for f in ("brightness_offset", "color_temp_offset"):
+    for f in ("brightness_offset", "color_temp_offset", "daylight"):
         if (v := getattr(layer, f)) is not None:
             _set(result, f, v, source)
 
@@ -272,8 +298,9 @@ def layers(
     targets: Targets,
     *,
     levels: tuple[str, ...] = LEVELS,
+    profile: Profile = Profile.OCCUPIED,
 ) -> list[tuple[dict[str, str], ProfileSetting]]:
-    """The configured entries that apply, least specific first.
+    """The configured entries of one profile that apply, least specific first.
 
     ``targets`` are the light's profile targets, least specific first (see
     ``LightIndex.profile_targets``); a single category key is accepted too.
@@ -290,23 +317,24 @@ def layers(
             if (entry := entries.get(key)) is not None:
                 out.append(({"level": level, "mood": ALL_MOODS, "target": key}, entry))
 
+    global_table = config.global_table(profile)
     if "global" in levels and keys:
-        add_all("global", config.global_profiles, keys)
+        add_all("global", global_table, keys)
         for m in reversed(mood_chain(config, mood) if every else []):
-            entries = table_get(config.global_profiles, m)
+            entries = table_get(global_table, m)
             for key in keys:
                 if (entry := entries.get(key)) is not None:
                     out.append(({"level": "global", "mood": m, "target": key}, entry))
     room = config.room(area_id) if area_id else None
     if room is not None and "room" in levels and keys:
-        add_all("room", room.mood_overrides, keys)
-        entries = table_get(room.mood_overrides, mood) if every else {}
+        add_all("room", room.type_table(profile), keys)
+        entries = table_get(room.type_table(profile), mood) if every else {}
         for key in keys:
             if (entry := entries.get(key)) is not None:
                 out.append(({"level": "room", "mood": mood, "target": key}, entry))
     if room is not None and "light" in levels and light_entity_id:
-        add_all("light", room.light_overrides, [light_entity_id])
-        if every and (entry := table_get(room.light_overrides, mood).get(light_entity_id)) is not None:
+        add_all("light", room.light_table(profile), [light_entity_id])
+        if every and (entry := table_get(room.light_table(profile), mood).get(light_entity_id)) is not None:
             out.append(({"level": "light", "mood": mood, "target": light_entity_id}, entry))
     return out
 
@@ -319,17 +347,20 @@ def resolve(
     targets: Targets,
     *,
     levels: tuple[str, ...] = LEVELS,
+    profile: Profile = Profile.OCCUPIED,
 ) -> ResolvedSetting:
-    """Resolve the effective setting through the inheritance chain.
+    """Resolve the effective setting of one profile through the inheritance chain.
 
     ``levels`` limits the levels used, e.g. ``("global",)`` gives what a room
     override would inherit.
     """
     result = ResolvedSetting()
-    for source, layer in layers(config, mood, area_id, light_entity_id, targets, levels=levels):
+    for source, layer in layers(config, mood, area_id, light_entity_id, targets, levels=levels, profile=profile):
         _apply(result, layer, source)
+    if profile == Profile.VACANT:
+        _set(result, "persistent", None, {})  # (ambient is an Occupied profile property)
     if result.action == LightAction.OFF:
-        for f in _ON_ONLY:
+        for f in (*_ON_ONLY, "daylight"):
             setattr(result, f, None)
             result.sources.pop(f, None)
     if result.brightness_mode != AdjustMode.OFFSET:
@@ -339,15 +370,31 @@ def resolve(
     return result
 
 
-def iter_profile_entries(config: LightingConfig) -> Iterator[tuple[str, str | None, str, str, ProfileSetting]]:
-    """Yield (scope, area_id|None, mood, target, setting) for every stored entry."""
-    for mood, targets in config.global_profiles.items():
+def iter_profile_entries(config: LightingConfig, profile: Profile = Profile.OCCUPIED,
+                         ) -> Iterator[tuple[str, str | None, str, str, ProfileSetting]]:
+    """Yield (scope, area_id|None, mood, target, setting) for every stored entry of one profile."""
+    for mood, targets in config.global_table(profile).items():
         for target, setting in targets.items():
             yield "global", None, mood, target, setting
     for area_id, room in config.rooms.items():
-        for mood, targets in room.mood_overrides.items():
+        for mood, targets in room.type_table(profile).items():
             for target, setting in targets.items():
                 yield "room", area_id, mood, target, setting
-        for mood, targets in room.light_overrides.items():
+        for mood, targets in room.light_table(profile).items():
             for target, setting in targets.items():
                 yield "light", area_id, mood, target, setting
+
+
+def as_entry(resolved: ResolvedSetting, profile: Profile) -> ProfileSetting | None:
+    """A resolved setting as one profile entry (Copy profile). None when it sets nothing (Ignore by default)."""
+    if resolved.action == LightAction.IGNORE and "action" not in resolved.sources:
+        return None
+    data = {k: v for k, v in resolved.as_dict().items() if k not in ("sources", "adaptive")}
+    if profile == Profile.VACANT:
+        data.pop("persistent", None)
+    # A value that only follows the global adjustment needs no fixed value next to it.
+    for value_key, mode_key in (("brightness_pct", "brightness_mode"), ("color_temp_kelvin", "color_temp_mode")):
+        if data.get(mode_key) in (AdjustMode.GLOBAL.value, AdjustMode.OFFSET.value, AdjustMode.IGNORE.value):
+            data.pop(value_key, None)
+    entry = ProfileSetting.from_dict(data)
+    return None if entry.is_empty else entry

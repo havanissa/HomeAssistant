@@ -62,6 +62,7 @@ from .const import (
     UnattributedPolicy,
     UnrepresentableMode,
     VacancyAction,
+    Profile,
 )
 from .controller import LightingController
 from .daylight import DaylightConfig, RoomDaylight, parse_lux, round_lux
@@ -70,7 +71,6 @@ from .health import room_health
 from .lighting import light_capabilities
 from .lighting_config import (
     AdaptiveConfig,
-    RoomVacancy,
     UnrepresentableHandling,
     parent_cycle,
     set_profile,
@@ -98,6 +98,7 @@ ERROR_TEXT = {
     "invalid_kelvin_offset": "Colour temperature offset must be a whole number from -5000 to +5000 K",
     "all_moods_action": "An entry for every mood cannot switch lights on or off; set that per mood",
     "all_moods_field": "An entry for every mood cannot set an effect or ambient lighting; set that per mood",
+    "vacant_ambient": "Ambient belongs to the Occupied profile; a Vacant profile cannot set it",
 }
 # Words that make an entity a likely global source (shown first in the picker).
 _SOURCE_HINTS = ("adaptive", "circadian", "bright", "birti", "ljósstyrk", "ljosstyrk", "dim", "colour_temp",
@@ -120,9 +121,10 @@ def _iso(value: datetime | None) -> str | None:
 
 # ------------------------------------------------------------------ models
 def _resolved(ctrl: LightingController, mood: str, area_id: str | None, entity_id: str | None,
-              category: str | None, levels: tuple[str, ...], config=None) -> dict[str, Any]:
+              category: str | None, levels: tuple[str, ...], config=None,
+              profile: Profile = Profile.OCCUPIED) -> dict[str, Any]:
     """Resolved setting with the current global values filled in (what the light gets now)."""
-    return ctrl.resolve(mood, area_id, entity_id, category, levels=levels, config=config).as_dict()
+    return ctrl.resolve(mood, area_id, entity_id, category, levels=levels, config=config, profile=profile).as_dict()
 
 
 def source_candidates(hass: HomeAssistant) -> dict[str, list[dict[str, Any]]]:
@@ -273,20 +275,20 @@ def _targets_for(ctrl: LightingController, mood: str | None, tables: list) -> li
 
 
 def _type_entry(hass, ctrl: LightingController, mood: str, target: str, area_id: str | None,
-                lights: list[str]) -> dict[str, Any]:
+                lights: list[str], profile: Profile = Profile.OCCUPIED) -> dict[str, Any]:
     lighting = ctrl.lighting
     config = ctrl.config
     keys = _target_keys(target)
     base = config.category(target.removesuffix(RGB_SUFFIX))
     if area_id:
-        own = table_get(lighting.room(area_id).mood_overrides, mood).get(target)
-        inherited = _resolved(ctrl, mood, area_id, None, keys, ("global",))
-        effective = _resolved(ctrl, mood, area_id, None, keys, ("global", "room"))
+        own = table_get(lighting.room(area_id).type_table(profile), mood).get(target)
+        inherited = _resolved(ctrl, mood, area_id, None, keys, ("global",), profile=profile)
+        effective = _resolved(ctrl, mood, area_id, None, keys, ("global", "room"), profile=profile)
     else:
-        own = table_get(lighting.global_profiles, mood).get(target)
-        without = set_profile(lighting, "global", mood, target, None)
-        inherited = _resolved(ctrl, mood, None, None, keys, ("global",), without)
-        effective = _resolved(ctrl, mood, None, None, keys, ("global",))
+        own = table_get(lighting.global_table(profile), mood).get(target)
+        without = set_profile(lighting, "global", mood, target, None, profile=profile)
+        inherited = _resolved(ctrl, mood, None, None, keys, ("global",), without, profile=profile)
+        effective = _resolved(ctrl, mood, None, None, keys, ("global",), profile=profile)
     return {
         "target": target,
         "key": target.removesuffix(RGB_SUFFIX),
@@ -318,7 +320,7 @@ def label_suggestions(hass: HomeAssistant, ctrl: LightingController) -> list[dic
 
 
 def editor_model(hass: HomeAssistant, ctrl: LightingController, mood: str | None, area_id: str | None,
-                 is_admin: bool) -> dict[str, Any]:
+                 is_admin: bool, profile: Profile = Profile.OCCUPIED) -> dict[str, Any]:
     status = ctrl.mood_status()
     lighting = ctrl.lighting
     config = ctrl.config
@@ -341,8 +343,8 @@ def editor_model(hass: HomeAssistant, ctrl: LightingController, mood: str | None
             "rgb_lights": len(index.target_lights(cat.key + RGB_SUFFIX)) if cat.kind != CategoryKind.RGB else len(lights),
         })
     types = [
-        _type_entry(hass, ctrl, selected, t, None, index.target_lights(t))
-        for t in _targets_for(ctrl, selected, [lighting.global_profiles])
+        _type_entry(hass, ctrl, selected, t, None, index.target_lights(t), profile)
+        for t in _targets_for(ctrl, selected, [lighting.global_table(profile)])
     ] if selected else []
 
     problems = []
@@ -362,6 +364,9 @@ def editor_model(hass: HomeAssistant, ctrl: LightingController, mood: str | None
         "mood": status.as_dict(),
         "moods": moods,
         "selected_mood": selected,
+        # Which profile the light-type and single-light entries below belong to (0.4.0).
+        "profile": profile.value,
+        "vacant_defaults": lighting.vacant.as_dict(),
         "categories": categories,
         "types": types,
         "global": {t["target"]: t for t in types},
@@ -391,7 +396,7 @@ def editor_model(hass: HomeAssistant, ctrl: LightingController, mood: str | None
         "problems": problems,
     }
     if area_id:
-        model["room"] = room_model(hass, ctrl, area_id, selected)
+        model["room"] = room_model(hass, ctrl, area_id, selected, profile)
     return model
 
 
@@ -421,13 +426,20 @@ def _preliminary_model(hass: HomeAssistant, ctrl: LightingController, area_id: s
     return preliminary_model(hass, ctrl, area_id)
 
 
+def _vacant_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> dict[str, Any]:
+    from .profile_websocket import vacant_model
+
+    return vacant_model(hass, ctrl, area_id)
+
+
 def switches_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> dict[str, Any]:
     from .switch_websocket import switches_model as model
 
     return model(hass, ctrl, area_id)
 
 
-def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood: str | None) -> dict[str, Any]:
+def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood: str | None,
+               profile: Profile = Profile.OCCUPIED) -> dict[str, Any]:
     lighting = ctrl.lighting
     room_lighting = lighting.room(area_id)
     managed = ctrl.managed_room(area_id)
@@ -437,21 +449,23 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
     in_room = set(managed.controlled)
     types: list[dict[str, Any]] = []
     if mood:
-        for target in _targets_for(ctrl, mood, [lighting.global_profiles, room_lighting.mood_overrides]):
+        for target in _targets_for(ctrl, mood, [lighting.global_table(profile), room_lighting.type_table(profile)]):
             lights = [e for e in index.target_lights(target) if e in in_room]
-            entry = _type_entry(hass, ctrl, mood, target, area_id, lights)
+            entry = _type_entry(hass, ctrl, mood, target, area_id, lights, profile)
             entry["follows_global"] = entry["own"] is None
             types.append(entry)
     conflicts = ctrl.conflicts(area_id)
     acknowledged = set(room_lighting.acknowledged)
     cat_names = {c.key: c.name for c in ctrl.config.categories}
     now_mood, _ = ctrl.room_mood(area_id)
+    # What each light gets now: the Vacant profile while it is in charge of the vacant room, else the Occupied one.
+    now_profile = Profile.VACANT if ctrl.vacant_profile_room(area_id) else Profile.OCCUPIED
     lights: list[dict[str, Any]] = []
     for entity_id in managed.targets:
         state = hass.states.get(entity_id)
         category = index.category_of(entity_id)
         targets = index.profile_targets(entity_id)
-        own = table_get(room_lighting.light_overrides, mood).get(entity_id) if mood else None
+        own = table_get(room_lighting.light_table(profile), mood).get(entity_id) if mood else None
         lights.append({
             "entity_id": entity_id,
             "name": friendly_name(hass, entity_id),
@@ -472,12 +486,13 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
             "conflicts": [{**c.as_dict(), "acknowledged": c.automation in acknowledged}
                           for c in conflicts.get(entity_id, [])],
             "own": own.as_dict() if own else None,
-            "inherited": _resolved(ctrl, mood, area_id, entity_id, targets, ("global", "room")) if mood else None,
-            "effective": _resolved(ctrl, mood, area_id, entity_id, targets, ("global", "room", "light"))
+            "inherited": _resolved(ctrl, mood, area_id, entity_id, targets, ("global", "room"), profile=profile)
             if mood else None,
+            "effective": _resolved(ctrl, mood, area_id, entity_id, targets, ("global", "room", "light"),
+                                   profile=profile) if mood else None,
             # What the light gets right now (current room mood, current global values).
-            "now": _resolved(ctrl, now_mood, area_id, entity_id, targets, ("global", "room", "light"))
-            if now_mood else None,
+            "now": _resolved(ctrl, now_mood, area_id, entity_id, targets, ("global", "room", "light"),
+                             profile=now_profile) if now_mood else None,
         })
     # Excluded lights stay listed, so they can be included again.
     for entity_id in room_lighting.excluded:
@@ -491,7 +506,12 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
         "now_mood": now_mood,
         "enabled": area_id in ctrl.config.enabled_rooms,
         "diagnostics": ctrl.room_diagnostics(area_id),
-        "settings": room_lighting.as_dict() | {"mood_overrides": None, "light_overrides": None},
+        "settings": room_lighting.as_dict() | {"mood_overrides": None, "light_overrides": None,
+                                               "vacant_overrides": None, "vacant_light_overrides": None},
+        "profile": profile.value,
+        "now_profile": now_profile.value,
+        # Vacant profile (0.4.0): settings (room and global), its daylight decision, which moods have entries.
+        "vacant": _vacant_model(hass, ctrl, area_id) if area_id in ctrl.config.enabled_rooms else None,
         "types": types,
         "categories": {t["target"]: t for t in types},
         "lights": lights,
@@ -523,6 +543,7 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
     vol.Required("type"): "smart_occupancy/lighting/editor",
     vol.Optional("mood"): vol.Any(str, None),
     vol.Optional("area_id"): vol.Any(str, None),
+    vol.Optional("profile"): vol.Any(None, vol.In([p.value for p in Profile])),
 })
 @callback
 def ws_editor(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
@@ -533,7 +554,9 @@ def ws_editor(hass: HomeAssistant, connection: websocket_api.ActiveConnection, m
     if area_id and area_id not in ctrl.config.rooms:
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"Room {area_id} is not configured")
         return
-    connection.send_result(msg["id"], editor_model(hass, ctrl, msg.get("mood"), area_id, connection.user.is_admin))
+    profile = Profile(msg.get("profile") or Profile.OCCUPIED)
+    connection.send_result(msg["id"], editor_model(hass, ctrl, msg.get("mood"), area_id, connection.user.is_admin,
+                                                   profile))
 
 
 @websocket_api.websocket_command({vol.Required("type"): "smart_occupancy/lighting/subscribe"})
@@ -570,10 +593,15 @@ def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConnection
     vol.Required("type"): "smart_occupancy/lighting/preview",
     vol.Optional("area_id"): vol.Any(str, None),
     vol.Optional("mood"): vol.Any(str, None),
+    vol.Optional("profile"): vol.Any(None, vol.In([p.value for p in Profile])),
 })
 @callback
 def ws_preview(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
-    """Plan for one room or every enabled room. Never sends a light command."""
+    """Plan for one room or every enabled room. Never sends a light command.
+
+    Without ``profile``: what lighting would do now (the Vacant profile while it is in charge of a vacant room).
+    With ``profile`` (0.4.0): that profile as if the room were occupied (confirmed) or vacant now.
+    """
     if (ctrl := _controller(hass, connection, msg)) is None:
         return
     areas = [msg["area_id"]] if msg.get("area_id") else sorted(ctrl.config.enabled_rooms)
@@ -582,8 +610,12 @@ def ws_preview(hass: HomeAssistant, connection: websocket_api.ActiveConnection, 
         if area_id not in ctrl.config.enabled_rooms:
             connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"Room {area_id} is not enabled")
             return
-        plan = ctrl.plan(area_id, "preview", msg.get("mood"))
-        plans.append({**plan.as_dict(), "room": area_name(hass, area_id) or area_id})
+        if msg.get("profile"):
+            plan = ctrl.plan(area_id, "preview", msg.get("mood"), assume=Profile(msg["profile"]))
+        else:
+            plan = ctrl.profile_plan(area_id, "preview", msg.get("mood"))
+        plans.append({**plan.as_dict(), "room": area_name(hass, area_id) or area_id,
+                      "profile": msg.get("profile") or ("vacant" if plan.vacancy else "occupied")})
     connection.send_result(msg["id"], {"plans": plans, "generated_at": _iso(dt_util.utcnow())})
 
 
@@ -594,11 +626,12 @@ def ws_preview(hass: HomeAssistant, connection: websocket_api.ActiveConnection, 
     vol.Required("target"): vol.All(str, vol.Length(min=1, max=255)),
     vol.Optional("area_id"): vol.Any(str, None),
     vol.Required("setting"): vol.Any(dict, None),
+    vol.Optional("profile", default=Profile.OCCUPIED.value): vol.In([p.value for p in Profile]),
 })
 @websocket_api.require_admin
 @callback
 def ws_profile_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
-    """Save (or with ``setting: null`` remove) one profile entry."""
+    """Save (or with ``setting: null`` remove) one profile entry. Never sends a light command (0.4.0)."""
     if (ctrl := _controller(hass, connection, msg)) is None:
         return
     scope, mood, target, area_id = msg["scope"], msg["mood"].strip(), msg["target"], msg.get("area_id")
@@ -619,13 +652,14 @@ def ws_profile_set(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
     setting = None
     if msg["setting"] is not None:
         setting = ProfileSetting.from_dict(msg["setting"])
-        if errors := validate_setting(setting, mood):
+        if errors := validate_setting(setting, mood, Profile(msg["profile"])):
             connection.send_error(
                 msg["id"], "invalid_profile",
                 "; ".join(ERROR_TEXT.get(e, e) for e in errors.values()),
             )
             return
-    ctrl.store.async_set(set_profile(ctrl.lighting, scope, mood, target, setting, area_id))
+    ctrl.store.async_set(set_profile(ctrl.lighting, scope, mood, target, setting, area_id,
+                                     profile=Profile(msg["profile"])))
     connection.send_result(msg["id"], {"revision": ctrl.store.revision})
 
 
@@ -788,14 +822,11 @@ def ws_room_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
         current = ctrl.lighting.room(area_id).vacancy
         action = VacancyAction(msg.get("vacancy_action", current.action))
         mood = (msg["vacancy_mood"] or "").strip() or None if "vacancy_mood" in msg else current.mood
-        if action == VacancyAction.VACANT_MOOD and not mood:
-            connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT,
-                                  "Choose the mood to apply when the room is vacant")
-            return
         if mood and (ctrl.lighting.is_manual(mood) or mood == ALL_MOODS):
             connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, f"{mood} is not a mood")
             return
-        changes["vacancy"] = RoomVacancy(action, mood)
+        # (0.4.0: Vacant mood applies the room's Vacant profile of the current mood; no mood needs to be chosen.)
+        changes["vacancy"] = replace(current, action=action, mood=mood)
     ctrl.store.async_set(ctrl.with_room(area_id, **changes))
     connection.send_result(msg["id"], {"revision": ctrl.store.revision})
 
@@ -1122,9 +1153,10 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         return
     hass.data[_REGISTERED] = True
     from .preliminary_websocket import PRELIMINARY_HANDLERS
+    from .profile_websocket import PROFILE_HANDLERS
     from .switch_websocket import SWITCH_HANDLERS
 
-    for handler in (*SWITCH_HANDLERS, *PRESENCE_HANDLERS, *PRELIMINARY_HANDLERS):
+    for handler in (*SWITCH_HANDLERS, *PRESENCE_HANDLERS, *PRELIMINARY_HANDLERS, *PROFILE_HANDLERS):
         websocket_api.async_register_command(hass, handler)
     for handler in (
         ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_adaptive_set, ws_room_set,

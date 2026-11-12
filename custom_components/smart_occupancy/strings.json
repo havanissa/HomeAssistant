@@ -277,6 +277,7 @@
       "stuck_too_short": "Must be 0 (off) or at least 60 seconds.",
       "several_colors": "Choose only one of colour temperature, RGB or HS colour.",
       "invalid_hs": "HS colour must be hue 0-360 and saturation 0-100.",
+      "vacant_ambient": "Ambient is an Occupied profile setting; a Vacant profile cannot set it.",
       "invalid_brightness_offset": "Brightness offset must be a whole number from -99 to +99 percentage points",
       "invalid_kelvin_offset": "Colour temperature offset must be a whole number from -5000 to +5000 K",
       "all_moods_action": "An entry for every mood cannot switch lights on or off; set the action per mood",

@@ -75,6 +75,22 @@ precedence). Without confirmation, the lights it switched on, and that nobody
 changed since, are switched off after the preliminary timeout or when the room
 becomes vacant (the vacancy action leaves them to it). The stage is kept in
 the runtime state, so a restart in the middle of it still ends it.
+
+Occupied and Vacant profiles (0.4.0): the mood profiles are the room's
+Occupied profile; a room whose vacancy action is *Vacant mood* also has a
+Vacant profile per mood (``profiles.py``, ``planner.build_vacancy_plan``).
+One decision path per room: while the room is vacant every trigger that
+re-evaluates lighting (a mood change, the room's mood, a daylight change at
+the Vacant profile's threshold) builds one vacancy plan, which keeps the
+ambient lights on the Occupied profile and gives every other light the
+Vacant profile; while it is occupied (or possibly vacant) only the Occupied
+plan runs. The two never control the same light at once, and a queued
+application of the other profile finds the room changed and does nothing.
+Lights go from one profile to the other directly (no off-then-on). Editing
+a profile never sends a command (0.4.0): changes are used at the next
+trigger, or when the user explicitly tests a profile
+(``async_test_profile``), which sends real commands and keeps the tested
+lights as a manual override.
 """
 
 from __future__ import annotations
@@ -129,7 +145,7 @@ from .adaptive import (
     find_source_controllers,
 )
 from .conflicts import AutomationInfo, Conflict, collect_automations, find_conflicts
-from .daylight import GATE_CODES, GATE_NEVER, GATE_NOT_NEEDED, GATE_UNCERTAIN, DaylightGate
+from .daylight import BRIGHT, DARK, GATE_CODES, GATE_NEVER, GATE_NOT_NEEDED, GATE_UNCERTAIN, DaylightGate
 from .daylight_monitor import DaylightMonitor, DaylightStatus
 from .decisions import DecisionLog
 from .engine import RoomResult, SignalStatus
@@ -154,11 +170,12 @@ from .const import (
     UnattributedPolicy,
     UnrepresentableMode,
     VacancyAction,
+    Profile,
 )
 from .const import ALL_MOODS
 from .discovery import area_name
 from .lighting import LightIndex, expand_group, light_capabilities
-from .lighting_config import LightingConfig, LightingStore
+from .lighting_config import LightingConfig, LightingStore, table_get
 from .lighting_decisions import LightingDecisions
 from .models import IntegrationConfig
 from .occupancy import friendly_name
@@ -175,8 +192,8 @@ from .planner import (
 )
 from .preliminary import TRIGGER as PRELIMINARY, ConfirmAction, EffectivePreliminary, effective as prelim_effective
 from .preliminary import evidence as prelim_evidence, preliminary_gate
-from .profiles import resolve
-from .supervision import assert_room_control_permitted, assert_switch_control_permitted
+from .profiles import mood_chain, resolve
+from .supervision import ControlNotPermittedError, assert_room_control_permitted, assert_switch_control_permitted
 from .switch_control import SwitchControl
 from .switch_inputs import SwitchInputs
 from .switches import ButtonEvent, SwitchConfig
@@ -192,6 +209,8 @@ _AUTOMATION_DEBOUNCE_SECONDS = 2.0
 _PAUSED = "__paused__"
 # Triggers that can switch lights on because someone is (or arrived) in the room.
 _ACTIVATION_TRIGGERS = frozenset({"motion", "occupancy_confirmed", "became_dark"})
+# Triggers that re-evaluate a vacant room through its Vacant profile (0.4.0).
+_VACANT_TRIGGERS = frozenset({"mood_change", "room_mood_override"})
 _TRIGGER_WORDS = {"motion": "motion", "occupancy_confirmed": "occupancy confirmed", "became_dark": "it became dark"}
 
 
@@ -857,26 +876,53 @@ class LightingController:
         return out
 
     def resolve(self, mood: str, area_id: str | None, entity_id: str | None, targets,
-                *, levels: tuple[str, ...] = ("global", "room", "light"), config: LightingConfig | None = None):
-        """Resolved setting with the current global adjustment values filled in."""
-        resolved = resolve(config or self.lighting, mood, area_id, entity_id, targets, levels=levels)
+                *, levels: tuple[str, ...] = ("global", "room", "light"), config: LightingConfig | None = None,
+                profile: Profile = Profile.OCCUPIED):
+        """Resolved setting of one profile with the current global adjustment values filled in."""
+        resolved = resolve(config or self.lighting, mood, area_id, entity_id, targets, levels=levels,
+                           profile=profile)
         return apply_global(resolved, self.adaptive.values)
 
+    def has_vacant_profile(self, area_id: str, mood: str | None) -> bool:
+        """Some Vacant profile entry applies to this room in this mood (global, room or single light)."""
+        if not mood:
+            return False
+        lighting = self.lighting
+        room = lighting.room(area_id)
+        tables = [table_get(lighting.global_vacant, m) for m in mood_chain(lighting, mood)]
+        tables += [table_get(room.vacant_overrides, mood), table_get(room.vacant_light_overrides, mood)]
+        return any(any(s.action.value != "inherit" for s in t.values()) for t in tables)
+
+    def vacant_profile_room(self, area_id: str) -> bool:
+        """The room is vacant and its vacancy action applies its Vacant profile: the Vacant profile is in charge."""
+        result = self.coordinator.occupancy.result(area_id)
+        return (result is not None and result.state == OccupancyState.VACANT and result.occupied is False
+                and self.lighting.room(area_id).vacancy.action == VacancyAction.VACANT_MOOD)
+
     def plan(self, area_id: str, trigger: str = "preview", mood: str | None = None,
-             config: LightingConfig | None = None, *, fresh: bool = False) -> Plan:
+             config: LightingConfig | None = None, *, fresh: bool = False, assume: Profile | None = None) -> Plan:
         """Plan for a room, including each light's next gradual update. Never sends anything.
 
         ``fresh`` re-evaluates daylight now (used right before executing); otherwise the
-        latest daylight evaluation is used.
+        latest daylight evaluation is used. ``assume`` (preview, 0.4.0): the plan of that
+        profile as if the room were occupied (confirmed) or vacant now.
         """
-        plan, _ = self._plan(area_id, trigger, mood, config, fresh=fresh)
+        if assume == Profile.VACANT:
+            return self.vacancy_plan(area_id, trigger, mood=mood, assume=True, fresh=fresh)
+        plan, _ = self._plan(area_id, trigger, mood, config, fresh=fresh, assume=assume)
         return plan
+
+    def profile_plan(self, area_id: str, trigger: str = "preview", mood: str | None = None) -> Plan:
+        """What lighting does now: the Vacant profile's plan while it is in charge, else the Occupied one."""
+        if self.vacant_profile_room(area_id):
+            return self.vacancy_plan(area_id, trigger, mood=mood, ambient=True)
+        return self.plan(area_id, trigger, mood)
 
     def daylight_gate(self, area_id: str, *, fresh: bool = False) -> DaylightGate:
         return self.daylight.gate(area_id) if fresh else self.daylight.status(area_id).gate
 
     def _plan(self, area_id: str, trigger: str, mood: str | None = None,
-              config: LightingConfig | None = None, *, fresh: bool = False,
+              config: LightingConfig | None = None, *, fresh: bool = False, assume: Profile | None = None,
               ) -> tuple[Plan, dict[str, tuple[Target, AdaptiveDecision]]]:
         lighting = config or self.lighting
         status = self.mood_status()
@@ -886,20 +932,24 @@ class LightingController:
         note = status.detail if status.manual or not mood else None
         targets = self._targets(area_id)
         rt = self.runtime.get(area_id) or RoomRuntime()
-        owned = set(rt.preliminary_owned)
+        owned = set(rt.preliminary_owned) if assume is None else set()
+        state = result.state.value if result else None
+        occupied = result.occupied if result else None
+        if assume == Profile.OCCUPIED:
+            state, occupied = OccupancyState.CONFIRMED_OCCUPANCY.value, True
         plan = build_plan(
             area_id=area_id,
             mood=mood,
             targets=targets,
             resolve_fn=lambda t: self.resolve(mood or "", area_id, t.entity_id, t.targets, config=lighting),
-            occupancy_state=result.state.value if result else None,
-            occupied=result.occupied if result else None,
+            occupancy_state=state,
+            occupied=occupied,
             trigger=trigger,
             control_enabled=self.room_active(area_id),
             note=note,
             manual_mode=status.manual,
             gate=self.daylight_gate(area_id, fresh=fresh),
-            await_confirmation=self.preliminary_settings(area_id, lighting).active,
+            await_confirmation=self.preliminary_settings(area_id, lighting).active and assume is None,
             preliminary=owned,
         )
         now = time.monotonic()
@@ -958,6 +1008,11 @@ class LightingController:
             trigger = next((t for t in ("room_mood_override", "mood_change", "activated", "occupancy_confirmed",
                                         "motion", "became_dark", "profile_change", "reconnected")
                             if t in triggers), sorted(triggers)[0])
+            if self.vacant_profile_room(area_id) and trigger != "activated":
+                # The Vacant profile is in charge (0.4.0): one plan for every light of the vacant room.
+                if trigger in _VACANT_TRIGGERS:
+                    self._create_task(self.async_vacate(area_id, trigger, only=only, ambient=True))
+                continue  # (a light that comes back is handled by the deferred vacancy action)
             self._create_task(self.async_apply(area_id, trigger, only=only))
 
     def _create_task(self, coro) -> None:
@@ -1085,34 +1140,59 @@ class LightingController:
             return
         self._create_task(self.async_vacate(area_id, trigger, only=only, cleared=cleared, skip=skip))
 
-    def vacancy_plan(self, area_id: str, trigger: str = "vacant") -> Plan:
-        """What the room's vacancy action does now. Never sends anything."""
+    def vacancy_plan(self, area_id: str, trigger: str = "vacant", *, mood: str | None = None,
+                     ambient: bool = False, assume: bool = False, fresh: bool = False,
+                     targets: list[Target] | None = None, gate: DaylightGate | None | bool = True,
+                     manual: bool | None = None) -> Plan:
+        """What the room's vacancy action does now. Never sends anything.
+
+        ``ambient``: the room stays vacant and is re-evaluated (mood or daylight changed): its ambient lights
+        get the Occupied plan's items, so one plan covers every light. ``assume`` (preview, test): the Vacant
+        profile as if the room were vacant now, whatever its vacancy action. ``gate=None``: no daylight rules.
+        """
         status = self.mood_status()
-        mood, _ = self.room_mood(area_id, status)
-        vacancy = self.lighting.room(area_id).vacancy
+        if mood is None:
+            mood, _ = self.room_mood(area_id, status)
+        lighting = self.lighting
+        vacancy = lighting.room(area_id).vacancy
         result = self.coordinator.occupancy.result(area_id)
+        action = VacancyAction.VACANT_MOOD if assume else vacancy.action
+        if gate is True:
+            gate = self.daylight.vacant_gate(area_id, fresh=fresh) if action == VacancyAction.VACANT_MOOD else None
+        items = None
+        if ambient and mood:
+            occupied_plan, _ = self._plan(area_id, trigger, mood)
+            items = {i.entity_id: i for i in occupied_plan.items if i.persistent}
+        state = OccupancyState.VACANT.value if assume else result.state.value if result else None
+        occupied = False if assume else result.occupied if result else None
         return build_vacancy_plan(
             area_id=area_id,
-            action=vacancy.action,
+            action=action,
             mood=mood,
             vacant_mood=vacancy.mood,
-            targets=self._targets(area_id),
+            targets=targets if targets is not None else self._targets(area_id),
             resolve_current=lambda t: self.resolve(mood or "", area_id, t.entity_id, t.targets),
             resolve_vacant=lambda t: self.resolve(vacancy.mood or "", area_id, t.entity_id, t.targets),
-            occupancy_state=result.state.value if result else None,
-            occupied=result.occupied if result else None,
+            resolve_profile=lambda t: self.resolve(mood or "", area_id, t.entity_id, t.targets,
+                                                   profile=Profile.VACANT),
+            others=lighting.vacant_others(area_id),
+            gate=gate or None,
+            ambient=items,
+            occupancy_state=state,
+            occupied=occupied,
             trigger=trigger,
             control_enabled=self.room_active(area_id),
             note=status.detail if status.manual or not mood else None,
-            manual_mode=status.manual,
+            manual_mode=status.manual if manual is None else manual,
         )
 
     async def async_vacate(self, area_id: str, trigger: str = "vacant", *, only: set[str] | None = None,
-                           cleared: int = 0, skip: set[str] | None = None) -> Plan | None:
+                           cleared: int = 0, skip: set[str] | None = None, ambient: bool = False) -> Plan | None:
         """Run the room's vacancy action (Automatic) or record what it would do (Observing, Manual).
 
         ``skip``: preliminary lights of a possible occupancy stage that ended with the vacancy (that stage
-        removes them, so no light gets two commands).
+        removes them, so no light gets two commands). ``ambient``: re-evaluation of a vacant room (0.4.0;
+        mood or daylight changed): its ambient lights follow the Occupied profile in the same plan.
         """
         if self._stopped:
             return None
@@ -1121,7 +1201,9 @@ class LightingController:
             result = self.coordinator.occupancy.result(area_id)
             if self._stopped or result is None or result.state != OccupancyState.VACANT or result.occupied is not False:
                 return None  # occupancy returned before this ran: there is nothing to vacate
-            plan = self.vacancy_plan(area_id, trigger)
+            if ambient and self._manual:
+                return None  # Manual started while this was queued: not replayed
+            plan = self.vacancy_plan(area_id, trigger, ambient=ambient, fresh=True)
             rt = self.runtime_for(area_id)
             relevant = [i for i in plan.items if (only is None or i.entity_id in only)
                         and not (skip and i.entity_id in skip)]
@@ -1150,7 +1232,10 @@ class LightingController:
                                             cleared=cleared)
             if decision is not None:
                 rt.last_vacancy = {"at": decision.at, "action": plan.vacancy, "result": decision.status,
-                                   "text": decision.explanation}
+                                   "text": decision.explanation, "trigger": trigger}
+            if ok:
+                rt.last_applied_mood = plan.current_mood
+                rt.last_applied_at = _iso(dt_util.utcnow())
             log = _LOGGER.warning if errors else _LOGGER.info if executing else _LOGGER.debug
             log("lighting_vacancy area=%s action=%s trigger=%s changed=%d failed=%d deferred=%d", area_id,
                 plan.vacancy, trigger, len(ok or []), len(errors), len(rt.vacancy_deferred))
@@ -1207,6 +1292,21 @@ class LightingController:
             self._preliminary_trigger(area_id)
             return
         self._visit_trigger(area_id, "became_dark")
+
+    @callback
+    def async_daylight_vacant(self, area_id: str, old: Any, status: DaylightStatus) -> None:
+        """The Vacant profile's daylight decision changed (0.4.0): a vacant room is evaluated again."""
+        if not self._running or self._stopped or not self.vacant_profile_room(area_id):
+            return
+        new = status.vacant_committed
+        # Whether the Vacant profile may switch lights on now decides the wording; the plan does the rest.
+        trigger = "became_dark" if status.vacant_gate.blocks() is None else "became_bright"
+        _LOGGER.debug("lighting_vacant_daylight area=%s old=%s new=%s trigger=%s", area_id, old, new, trigger)
+        if self.room_active(area_id) and not self._manual:
+            self._create_task(self.async_vacate(area_id, trigger, ambient=True))
+        elif not self._manual:
+            self._observe(area_id, trigger)
+            self._notify()
 
     def _record_activation(self, area_id: str, trigger: str, plan: Plan, switched_on: list[PlanItem] | None) -> None:
         """Why occupancy did (or did not) switch lights on. ``switched_on`` is None when nothing was executed."""
@@ -1300,6 +1400,10 @@ class LightingController:
     @callback
     def _observe(self, area_id: str, trigger: str) -> None:
         """Evaluate a trigger in an Observing room and log what would happen. Never sends anything."""
+        if self.vacant_profile_room(area_id) and trigger in _VACANT_TRIGGERS | {"became_dark", "became_bright"}:
+            plan = self.vacancy_plan(area_id, trigger, ambient=True)
+            self.explain.vacancy(area_id, trigger, plan, plan.items)
+            return
         plan = self.plan(area_id, trigger)
         self.explain.plan(area_id, trigger, plan, plan.items)
 
@@ -2215,24 +2319,9 @@ class LightingController:
                     continue
                 if o.mood_override != n.mood_override:
                     self._schedule_apply(area_id, "room_mood_override")
-                    continue
-                changed = self._changed_targets(area_id, old, new)
-                if changed:
-                    self._schedule_apply(area_id, "profile_change", changed)
+                # 0.4.0: editing a profile never sends a command. The change is used at the next trigger (mood,
+                # occupancy, daylight), or when the user explicitly tests the profile.
         self._notify()
-
-    def _changed_targets(self, area_id: str, old: LightingConfig, new: LightingConfig) -> set[str]:
-        """Lights whose resolved setting in the room's current mood changed."""
-        mood, _ = self.room_mood(area_id)
-        if not mood:
-            return set()
-        out: set[str] = set()
-        for entity_id in self.managed_room(area_id).controlled:
-            targets = self.index.profile_targets(entity_id)
-            if resolve(old, mood, area_id, entity_id, targets).as_dict() != \
-                    resolve(new, mood, area_id, entity_id, targets).as_dict():
-                out.add(entity_id)
-        return out
 
     # -------------------------------------------------------- diagnostics
     def room_diagnostics(self, area_id: str) -> dict[str, Any]:
@@ -2326,6 +2415,12 @@ class LightingController:
                 **room_lighting.vacancy.as_dict(),
                 "last": rt.last_vacancy,
                 "deferred": sorted(rt.vacancy_deferred),
+                # Vacant profile (0.4.0): the effective settings, whether it is in charge now, its daylight decision.
+                "effective_others": self.lighting.vacant_others(area_id).value,
+                "effective_on_below": self.lighting.vacant_on_below(area_id),
+                "vacant_profile_in_charge": self.vacant_profile_room(area_id),
+                "vacant_profile_entries": self.has_vacant_profile(area_id, mood),
+                "daylight_gate": self.daylight.vacant_gate(area_id).as_dict(),
             },
             "preliminary": {
                 **self.preliminary_settings(area_id).as_dict(),
@@ -2449,6 +2544,14 @@ class LightingController:
         Observing mode nor paused by Manual mood: it is a person's request.
         """
         assert_switch_control_permitted(self.switch_active(area_id, switch_id), area_id, switch_id)
+        return await self._send_for_person(area_id, service, data_by_entity, context)
+
+    async def _send_for_person(self, area_id: str, service: str, data_by_entity: dict[str, dict[str, Any]],
+                               context: Context) -> dict[str, str]:
+        """Send a person's explicit light command (wall switch, profile test). Returns {entity: error}.
+
+        The caller registers the manual override itself; the lights' own reports of it are not new overrides.
+        """
         if self._stopped:
             return {e: "stopped" for e in data_by_entity}
         batches: dict[str, list[str]] = {}
@@ -2470,9 +2573,69 @@ class LightingController:
                 errors.update({e: "no response within timeout" for e in entity_ids})
             except (HomeAssistantError, ValueError) as err:
                 errors.update({e: str(err) or type(err).__name__ for e in entity_ids})
-            _LOGGER.debug("switch_light_command area=%s service=light.%s entities=%s data=%s", area_id, service,
+            _LOGGER.debug("person_light_command area=%s service=light.%s entities=%s data=%s", area_id, service,
                           entity_ids, payload)
         return errors
+
+    # ------------------------------------------------------- profile test (0.4.0)
+    def test_plan(self, area_id: str, profile: Profile, mood: str) -> Plan:
+        """What testing a profile sends: every light it sets, whatever the occupancy, daylight, Manual mood,
+        manual overrides or automation conflicts (the user asked for it). Never sends anything itself."""
+        targets = [replace(t, override=None, conflicts=(), last_command=None) for t in self._targets(area_id)]
+        if profile == Profile.VACANT:
+            return self.vacancy_plan(area_id, "profile_test", mood=mood, assume=True, targets=targets, gate=None,
+                                     manual=False)
+        return build_plan(
+            area_id=area_id, mood=mood, targets=targets,
+            resolve_fn=lambda t: self.resolve(mood, area_id, t.entity_id, t.targets),
+            occupancy_state=OccupancyState.CONFIRMED_OCCUPANCY.value, occupied=True, trigger="profile_test",
+            control_enabled=True, manual_mode=False, gate=None,
+        )
+
+    async def async_test_profile(self, area_id: str, profile: Profile, mood: str, user_id: str | None,
+                                 ) -> dict[str, Any]:
+        """Apply a profile now because the user explicitly asked for it (Test). Sends real light commands.
+
+        Works in Observing and in Automatic rooms, and in Manual mood (a person's request, like an Active wall
+        switch). The lights it changes get a manual override, so automatic lighting does not undo the test
+        until the override ends (or is cleared).
+        """
+        if area_id not in self.config.enabled_rooms:
+            raise ControlNotPermittedError(f"Room {area_id} is not enabled")
+        lock = self._locks.setdefault(area_id, asyncio.Lock())
+        async with lock:
+            plan = self.test_plan(area_id, profile, mood)
+            changes = plan.changes
+            context = Context(user_id=user_id)
+            self._switch_commands[context.id] = time.monotonic()
+            by_service: dict[str, dict[str, dict[str, Any]]] = {}
+            for item in changes:
+                by_service.setdefault(item.service or "", {})[item.entity_id] = item.data
+            errors: dict[str, str] = {}
+            for service, data in by_service.items():
+                errors |= await self._send_for_person(area_id, service, data, context)
+            ok = [i for i in changes if i.entity_id not in errors]
+            minutes = self.lighting.override_minutes(area_id)
+            rt = self.runtime_for(area_id)
+            now_dt = dt_util.utcnow()
+            for item in ok:
+                rt.last_commands.pop(item.entity_id, None)
+                rt.adaptive_sent.pop(item.entity_id, None)
+                rt.overrides[item.entity_id] = {
+                    "entity_id": item.entity_id, "source": "profile_test", "since": _iso(now_dt),
+                    "until": _iso(now_dt + timedelta(minutes=minutes)) if minutes else None,
+                    "user_id": user_id, "state": "off" if item.service == "turn_off" else "on",
+                    "profile": profile.value, "mood": mood,
+                }
+            _LOGGER.info("lighting_profile_test area=%s profile=%s mood=%s sent=%d failed=%d", area_id,
+                         profile.value, mood, len(ok), len(errors))
+            decision = self.explain.profile_test(area_id, profile, mood, plan, ok, errors, minutes)
+            if ok:
+                self._schedule_override_expiry()
+            self._mark_dirty()
+            self._notify()
+            return {"plan": plan.as_dict(), "sent": [i.entity_id for i in ok], "errors": errors,
+                    "override_minutes": minutes, "decision": decision.as_dict() if decision else None}
 
     @callback
     def register_switch_override(self, area_id: str, entities: list[str], state: str, *, switch: SwitchConfig,

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.util import dt as dt_util
 
-from .const import DECISION_VERIFY_SECONDS, AutoOn, SensorKind, VacancyAction
+from .const import DECISION_VERIFY_SECONDS, AutoOn, SensorKind, VacancyAction, VacantOthers
 from .daylight import BRIGHT, DARK, GATE_CODES, GATE_NOT_NEEDED, GATE_UNCERTAIN
 from .decisions import (
     BLOCKED,
@@ -58,6 +58,7 @@ TRIGGER_WORDS = {
     "override_expired": "manual override ended",
     "possible_occupancy": "possible occupancy", "preliminary_end": "possible occupancy not confirmed",
     "retry": "retry of a preliminary light switch-off", "manual_ended": "Manual mood ended",
+    "became_bright": "daylight is enough", "profile_test": "profile test",
 }
 VACANCY_WORDS = {"turn_off": "Turn off", "vacant_mood": "Vacant mood", "leave": "Leave unchanged"}
 _SOURCE_WORDS = {
@@ -434,6 +435,42 @@ class LightingDecisions:
             key=("override", *sorted(targets), source, state, switch or ""), same_seconds=OVERRIDE_SAME_SECONDS,
         )
 
+    # ------------------------------------------------------------ profile test (0.4.0)
+    def profile_test(self, area_id: str, profile: Any, mood: str, plan: Plan, ok: list[PlanItem],
+                     errors: dict[str, str], minutes: int | None) -> Decision:
+        """The user tested a profile: real commands, sent as a person's change."""
+        word = "Vacant" if getattr(profile, "value", profile) == "vacant" else "Occupied"
+        changes = plan.changes
+        failed = [i for i in changes if i.entity_id in errors]
+        names = lambda items: _names([i.name or i.entity_id for i in items])  # noqa: E731
+        label = f"{word} profile, {mood}"
+        if not changes:
+            text = f"{word} profile ({mood}) tested: the lights already match it; nothing was sent."
+            status = NO_CHANGE
+        else:
+            text = (f"{word} profile ({mood}) tested from the dashboard: {self._result_phrase(ok, label)}."
+                    if ok else f"{word} profile ({mood}) tested from the dashboard: nothing could be sent.")
+            if failed:
+                text += " Failed: " + "; ".join(f"{i.name or i.entity_id}: {errors[i.entity_id]}" for i in failed) + "."
+            if ok:
+                text += (f" A test is a person's change: automatic lighting leaves "
+                         f"{'it' if len(ok) == 1 else 'these lights'} as set {minutes_text(minutes)}.")
+            status = PARTIAL if failed and ok else FAILED if failed else DISPATCHED
+        details = {"trigger": TRIGGER_WORDS["profile_test"], "profile": word, "mood": mood,
+                   "service": [f"light.{i.service} {i.name or i.entity_id} {i.data}" for i in changes],
+                   "targets": [f"{i.name or i.entity_id}: {i.decision} — {i.reason}" for i in plan.items
+                               if i.decision != SKIPPED], "override_minutes": minutes}
+        checks: list[Check] | None = None
+        if status == DISPATCHED:
+            checks = []
+            for i in ok:
+                checks.extend(light_checks(i.service or "", {i.entity_id: i.data}))
+        return self.log.record(
+            area_id, module=MODULE_LIGHTING, trigger="profile_test", kind="profile_test",
+            action=f"Test {word.lower()} profile {mood}", explanation=text, mode=self.mode(area_id), status=status,
+            target=names(ok) if ok else None, details=details, checks=checks, verify_after=self._verify_delay(ok),
+        )
+
     # --------------------------------------------------------------- vacancy (0.3.8)
     def _vacancy_phrase(self, area_id: str, names: list[str], *, observing: bool) -> str | None:
         """What the vacancy action will do to the lit lights: "Spots will be switched off"."""
@@ -441,9 +478,19 @@ class LightingDecisions:
         will = "would" if observing else "will"
         if vac.action == VacancyAction.TURN_OFF:
             return f"{_names(names)} {will} be switched off"
-        if vac.action == VacancyAction.VACANT_MOOD and vac.mood:
-            return f"the vacant mood {vac.mood} {will} be applied to {_names(names)}"
+        if vac.action == VacancyAction.VACANT_MOOD:
+            return f"{self._vacant_name(area_id)} {will} be applied to {_names(names)}"
         return None
+
+    def _vacant_name(self, area_id: str, mood: str | None = None) -> str:
+        """"the Vacant profile (Kvøld)", or "the vacant mood Nátt" for a room that keeps the 0.3.8 behaviour."""
+        ctrl = self.ctrl
+        mood = mood or ctrl.room_mood(area_id)[0]
+        vac = ctrl.lighting.room(area_id).vacancy
+        own = ctrl.has_vacant_profile(area_id, mood) if mood else False
+        if ctrl.lighting.vacant_others(area_id) == VacantOthers.MOOD and vac.mood and not own:
+            return f"the vacant mood {vac.mood}"
+        return f"the Vacant profile ({mood})" if mood else "the Vacant profile"
 
     def vacancy_wait(self, area_id: str, result: RoomResult, lit: list[str]) -> Decision | None:
         """The room has no presence any more: its vacancy timeout started (only logged when lights are on)."""
@@ -498,21 +545,39 @@ class LightingDecisions:
             on = [i for i in relevant if i.current.get("state") == "on" and i.reason_code == "vacancy_leave"]
             if not on and not cleared:
                 return None
-        elif not lit and not blocked and not cleared and not ambient:
-            return None  # nothing was on: nothing to decide or explain
+        elif not lit and not blocked and not changes and not cleared and not ambient:
+            return None  # nothing was on and nothing is switched on: nothing to decide or explain
         if trigger == "vacant":
             why = _cap((result.reason if result else "Vacant").rstrip("."))
         elif trigger == "override_expired":
             why = "The manual override ended while the room is vacant"
         elif trigger == "reconnected":
             why = "A light that was unavailable when the room became vacant is available again"
+        elif trigger == "mood_change":
+            why = f"Mood changed to {plan.current_mood} while the room is vacant" if plan.current_mood \
+                else "The mood changed while the room is vacant"
+        elif trigger == "room_mood_override":
+            why = f"Room mood set to {plan.current_mood} while the room is vacant"
+        elif trigger == "became_dark":
+            why = "It became dark while the room is vacant"
+        elif trigger == "became_bright":
+            why = "Daylight is enough while the room is vacant"
         else:
             why = f"Room vacant ({TRIGGER_WORDS.get(trigger, trigger)})"
         mode = MODE_OBSERVING if not plan.control_enabled else MODE_PAUSED if plan.manual_mode else MODE_AUTOMATIC
         details.update({"trigger": TRIGGER_WORDS.get(trigger, trigger), "vacancy_action": VACANCY_WORDS[action_value],
                         "mood": plan.current_mood})
+        vacant_name = self._vacant_name(area_id, plan.current_mood)
+        label = None if action_value == VacancyAction.TURN_OFF.value else (
+            vacant_name.removeprefix("the ") if action_value == VacancyAction.VACANT_MOOD.value else plan.mood)
         if action_value == VacancyAction.VACANT_MOOD.value:
-            details["vacant_mood"] = vac.mood
+            details["vacant_profile"] = _cap(vacant_name)
+            if ctrl.lighting.vacant_others(area_id) == VacantOthers.MOOD:
+                details["vacant_mood"] = vac.mood
+            daylight, daylight_details = self._daylight(area_id, plan)
+            if daylight:
+                details.update(daylight_details)
+                details["daylight_text"] = daylight
         details["targets"] = [f"{i.name or i.entity_id}: {i.decision} — {i.reason}" for i in relevant
                               if i.decision != SKIPPED or i.reason_code == "ambient"]
         overrides = [i for i in held if i.override]
@@ -527,7 +592,7 @@ class LightingDecisions:
             tail += f" {_plural(cleared, 'manual override')} ended with the vacancy."
             details["overrides_cleared"] = cleared
         action = {VacancyAction.TURN_OFF.value: "Lights off",
-                  VacancyAction.VACANT_MOOD.value: f"Apply vacant mood {vac.mood or ''}".strip(),
+                  VacancyAction.VACANT_MOOD.value: f"Apply {vacant_name.removeprefix('the ')}",
                   VacancyAction.LEAVE.value: "Leave lights unchanged"}[action_value]
         checks: list[Check] | None = None
         target = names(changes) if changes else None
@@ -553,7 +618,7 @@ class LightingDecisions:
             sent = list(ok)
             failed = [i for i in changes if i.entity_id in errors]
             stopped = [i for i in changes if paused and i.entity_id in paused]
-            text = f"{why}: {self._result_phrase(sent, plan.mood if action_value != 'turn_off' else None)}."
+            text = f"{why}: {self._result_phrase(sent, label)}."
             if failed:
                 text += " Failed: " + "; ".join(f"{i.name or i.entity_id}: {errors[i.entity_id]}" for i in failed) + "."
             if stopped:
@@ -576,12 +641,17 @@ class LightingDecisions:
                     checks.extend(light_checks(i.service or "", {i.entity_id: i.data}))
         elif changes and not plan.control_enabled:
             status = OBSERVED
-            text = (f"{why}: would {self._result_phrase(changes, plan.mood if action_value != 'turn_off' else None, would=True)}."
+            text = (f"{why}: would {self._result_phrase(changes, label, would=True)}."
                     " Observing: nothing was sent.")
             if held or offline:
                 text += f" Also: {'; '.join(self._blocked_reasons(held + offline))}."
             text += tail
             details["service"] = [f"light.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
+        elif held and all(i.reason_code in GATE_CODES for i in held):
+            status = NO_CHANGE
+            text = f"{why}: {names(held)} stay{'s' if len(held) == 1 else ''} off — " \
+                   f"{_plain(held[0].reason.split(' (')[0]).lower().removeprefix('not switched on: ')}.{tail}"
+            target = names(held)
         elif held:
             status = BLOCKED
             text = f"{why}: not changed — {'; '.join(self._blocked_reasons(held + offline))}.{tail}"
@@ -596,7 +666,7 @@ class LightingDecisions:
             if action_value == VacancyAction.TURN_OFF.value:
                 text = f"{why}: the lights are already off.{tail}"
             else:
-                text = f"{why}: the lights already match the vacant mood {vac.mood}.{tail}"
+                text = f"{why}: the lights already match {vacant_name}.{tail}"
         codes = sorted({i.reason_code for i in blocked})
         return self.log.record(
             area_id, module=MODULE_LIGHTING, trigger=trigger, kind="vacancy", action=action, explanation=text,

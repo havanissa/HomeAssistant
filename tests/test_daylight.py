@@ -350,8 +350,9 @@ def test_store_migration_keeps_activated_rooms_on_confirmed_occupancy() -> None:
     assert config.room("observe").daylight.on_first_motion is True
     assert config.room("done").daylight.on_first_motion is True
     assert config.room("active").daylight.auto_on == AutoOn.DARK
-    # Later minors only add keys (1.5, 0.3.9: possible occupancy lighting, disabled).
-    assert migrate_store(1, 2, {"rooms": {}}) == {"rooms": {}, "preliminary": PreliminaryDefaults().as_dict()}
+    # Later minors only add keys (1.5, 0.3.9: possible occupancy lighting, disabled; 1.6, 0.4.0: vacant profiles).
+    assert migrate_store(1, 2, {"rooms": {}}) == {"rooms": {}, "preliminary": PreliminaryDefaults().as_dict(),
+                                                  "global_vacant": {}, "vacant": {"others": "off", "on_below": None}}
     with pytest.raises(NotImplementedError):
         migrate_store(2, 1, {})
 

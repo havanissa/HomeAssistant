@@ -516,7 +516,7 @@ async def test_stage_survives_a_restart(hass: HomeAssistant, lit: Lit, freezer, 
     ctrl = entry.runtime_data.lighting
     room = ctrl.lighting.room(lit.area).preliminary
     assert room.enabled is True and room.targets[0] == PreliminaryTarget(lit.lamp, 10, 2200, 0.5)
-    assert hass_storage["smart_occupancy.lighting"]["minor_version"] == 5
+    assert hass_storage["smart_occupancy.lighting"]["minor_version"] == 6
     assert ctrl.runtime[lit.area].preliminary["owned"] == {lit.lamp: LAMP_10}
     await advance(hass, freezer, 30)
     assert calls_for(lights, lit.lamp)[-1] == ("turn_off", {"transition": 0.5})
