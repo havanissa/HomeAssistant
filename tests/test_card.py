@@ -85,7 +85,13 @@ def test_lighting_cards_never_control_lights() -> None:
         "presence/sensor", "presence/timing",
         # 0.3.9 Possible occupancy (settings only)
         "preliminary/set",
+        # 0.4.0 Occupied and Vacant profiles: settings, copy, reset, and the explicit, confirmed Test (the integration
+        # sends those commands; the card still never calls a service)
+        "vacant/set", "profile/copy", "profile/reset", "profile/test",
     }, commands
+    assert source.count(f"type: `${{WS}}/profile/test`") == 1 and "confirm: true" in source
+    test = source.split("_testProfile(profile, mood) {", 1)[1].split("\n  }\n", 1)[0]
+    assert "if (!confirm(" in test and "sends real commands" in test  # never without asking
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
@@ -126,8 +132,9 @@ def test_room_card_layout() -> None:
         assert text in switches, text
     assert "callService" not in switches and "dl-" not in switches
     # The tab bar, the conflicts "Review" link (0.3.4), the Last decision's "Log" link (0.3.7), and (0.3.9) the
-    # Settings submenu (Back and its sections) and the Overview's "Switch settings" link.
-    assert source.count('data-action="tab"') == 6
+    # Settings submenu (Back and its sections) and the Overview's "Switch settings" link; (0.4.0) the Vacant profile's
+    # "vacancy settings" link in the Overrides tab.
+    assert source.count('data-action="tab"') == 7
 
 
 def test_operating_modes_on_the_main_screens() -> None:

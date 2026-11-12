@@ -13,6 +13,12 @@ Wall switch actions are a person's explicit request and have their own,
 independent gate (``assert_switch_control_permitted``): a switch set to
 **Active** executes its button actions also while the room's automatic
 lighting is Observing. A switch in **Observing** never sends anything.
+
+A profile **Test** (0.4.0) is also a person's explicit request: an admin
+asks for it in the room card and confirms it, and only then the integration
+sends that profile to the room's lights (an enabled room, in Observing too).
+It is never triggered automatically, and the tested lights become a manual
+override, so automatic lighting does not act on them afterwards.
 """
 
 from __future__ import annotations

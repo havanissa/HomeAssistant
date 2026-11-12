@@ -28,7 +28,7 @@ from .const import (
 from .discovery import area_name
 from .models import IntegrationConfig
 from .lighting_config import parent_cycle
-from .const import ALL_MOODS, MANUAL_PAUSED_TEXT, AdjustMode
+from .const import ALL_MOODS, MANUAL_PAUSED_TEXT, AdjustMode, Profile
 from .models import LightCategory
 from .occupancy import (
     AVAILABLE,
@@ -483,9 +483,11 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
     # Moods and inheritance ------------------------------------------------
     reported_main: set[str] = set()
     uses_global: set[str] = set()
-    for scope, area_id, mood_name, target, setting in iter_profile_entries(lighting_cfg):
-        where = f"{scope} profile '{mood_name}' / {target}"
-        subject = f"{scope}:{area_id or ''}:{mood_name}:{target}"
+    entries = [(prof, *e) for prof in Profile for e in iter_profile_entries(lighting_cfg, prof)]
+    for prof, scope, area_id, mood_name, target, setting in entries:
+        vacant = prof == Profile.VACANT
+        where = f"{scope} {'Vacant ' if vacant else ''}profile '{mood_name}' / {target}"
+        subject = f"{'vacant:' if vacant else ''}{scope}:{area_id or ''}:{mood_name}:{target}"
         ctx = room_ctx(area_id)
 
         def profile(code: str, severity: Severity, title: str, text: str, suffix: str = "", *,
@@ -547,7 +549,7 @@ def validate_lighting(hass: HomeAssistant, config: IntegrationConfig, controller
             uses_global.add("brightness")
         if setting.color_temp_mode in following:
             uses_global.add("color_temp")
-        for field_name, error in validate_setting(setting, mood_name).items():
+        for field_name, error in validate_setting(setting, mood_name, prof).items():
             profile("profile_invalid", Severity.ERROR, "Invalid profile value",
                     f"{field_name} is invalid ({error}).", suffix=f":{field_name}")
 

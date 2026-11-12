@@ -17,13 +17,21 @@ room's stability period. When it becomes dark while the room is occupied, the
 lighting controller is told (``LightingController.async_daylight_dark``);
 nothing else here can cause a light command.
 
+Vacant profile (0.4.0): a room can give its Vacant profile its own darkness
+threshold. Then a second decision is kept at that threshold, with the same
+hysteresis (the room's ratio between its off and on thresholds) and the same
+stability period; without one it is the room's decision. Every change of the
+committed vacant decision is reported (``async_daylight_vacant``), so a
+vacant room can switch decorative lights on when it becomes dark and off
+again when daylight is enough.
+
 Trusted samples and calibration ratios are kept in the lighting state store
 (``.storage/smart_occupancy.lighting_state``), so a restart does not lose them.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 import logging
 from typing import TYPE_CHECKING, Any
@@ -105,11 +113,24 @@ class DaylightStatus:
     evaluated_at: datetime
     changing_since: datetime | None = None
     errors: list[str] = field(default_factory=list)
+    # The Vacant profile's own threshold (0.4.0); None: the room's decision is used.
+    vacant_on_below: int | None = None
+    vacant_off_above: int | None = None
+    vacant_decision: Darkness | None = None
+    vacant_committed: Darkness | None = None
 
     @property
     def gate(self) -> DaylightGate:
         return DaylightGate(self.config.auto_on, self.decision, self.config.uncertain, self.estimate.text,
                             self.config.on_below)
+
+    @property
+    def vacant_gate(self) -> DaylightGate:
+        """The daylight decision for the Vacant profile: at its own threshold, if it has one."""
+        if self.vacant_on_below is None or self.vacant_decision is None:
+            return self.gate
+        return DaylightGate(self.config.auto_on, self.vacant_decision, self.config.uncertain, self.estimate.text,
+                            self.vacant_on_below)
 
     @property
     def reason(self) -> str:
@@ -178,6 +199,10 @@ class DaylightStatus:
                        else round(self.learned_factor, 4), "samples": self.calibration_samples},
             "evaluated_at": _iso(self.evaluated_at),
             "gate": self.gate.as_dict(),
+            "vacant": {"on_below": self.vacant_on_below, "off_above": self.vacant_off_above,
+                       "decision": self.vacant_decision.value if self.vacant_decision else None,
+                       "committed": self.vacant_committed.value if self.vacant_committed else None,
+                       "gate": self.vacant_gate.as_dict()},
         }
 
 
@@ -194,6 +219,15 @@ class _Room:
     saved_at: datetime | None = None  # sample time of the last trusted sample that asked for a save
     timer: CALLBACK_TYPE | None = None
     timer_at: datetime | None = None
+    # The Vacant profile's decision at its own threshold (0.4.0): the threshold it was made for, and its tracker.
+    vacant_on_below: int | None = None
+    vacant: DarknessTracker = field(default_factory=DarknessTracker)
+
+
+def vacant_thresholds(cfg: RoomDaylight, on_below: int) -> RoomDaylight:
+    """The room's daylight settings at the Vacant profile's threshold, with the room's hysteresis ratio."""
+    ratio = cfg.off_above / cfg.on_below if cfg.on_below else 2.0
+    return replace(cfg, on_below=on_below, off_above=max(on_below + 1, round(on_below * ratio)))
 
 
 class DaylightMonitor:
@@ -480,6 +514,19 @@ class DaylightMonitor:
             trusted = room.trusted[sample.entity_id]
         instant = classify(result.estimate, cfg, room.tracker.committed)
         old = room.tracker.update(instant, now, cfg.stable_seconds)
+        # The Vacant profile's decision (0.4.0): at its own threshold, or the room's own decision.
+        v_on = self.ctrl.lighting.vacant_on_below(area_id)
+        if v_on is not None and v_on == cfg.on_below:
+            v_on = None
+        if v_on != room.vacant_on_below:
+            room.vacant_on_below, room.vacant = v_on, DarknessTracker()
+        vcfg = vacant_thresholds(cfg, v_on) if v_on is not None else None
+        if vcfg is not None:
+            v_instant = classify(result.estimate, vcfg, room.vacant.committed)
+            v_old = room.vacant.update(v_instant, now, cfg.stable_seconds)
+            v_committed = room.vacant.committed
+        else:
+            v_instant, v_old, v_committed = instant, old, room.tracker.committed
         errors = [f"{r.name or r.entity_id}: {r.detail}" for r in readings if r.status != OK]
         if outdoor.status not in (OK, "not_configured"):
             errors.append(f"Outdoor: {outdoor.detail}")
@@ -489,6 +536,8 @@ class DaylightMonitor:
             lights=lights, outdoor=outdoor, sun=sun, trusted=trusted, learned_factor=room.calibration.factor,
             calibration_samples=len(room.calibration.ratios), evaluated_at=now,
             changing_since=room.tracker.candidate_since, errors=errors,
+            vacant_on_below=v_on, vacant_off_above=vcfg.off_above if vcfg else None,
+            vacant_decision=v_instant, vacant_committed=v_committed,
         )
         room.status = status
         if old is not None:
@@ -497,6 +546,10 @@ class DaylightMonitor:
             if room.tracker.committed == DARK and cfg.auto_on == AutoOn.DARK and (
                     old == BRIGHT or (old == UNCERTAIN and cfg.uncertain == UncertainPolicy.STAY_OFF)):
                 self.ctrl.async_daylight_dark(area_id, status)
+        if v_old is not None and v_committed is not None:
+            _LOGGER.debug("daylight_vacant_decision area=%s old=%s new=%s on_below=%s", area_id, v_old,
+                          v_committed, v_on if v_on is not None else cfg.on_below)
+            self.ctrl.async_daylight_vacant(area_id, v_old, status)
         self._schedule_deadline(area_id, room, status, now)
         usable = frozenset(r.entity_id for r in readings if r.usable)
         if usable != room.usable:
@@ -513,6 +566,8 @@ class DaylightMonitor:
         cfg = status.config
         candidates: list[datetime] = []
         if (due := room.tracker.due(cfg.stable_seconds)) is not None:
+            candidates.append(due)
+        if room.vacant_on_below is not None and (due := room.vacant.due(cfg.stable_seconds)) is not None:
             candidates.append(due)
         if status.contamination.until is not None:
             candidates.append(status.contamination.until)
@@ -553,13 +608,20 @@ class DaylightMonitor:
     def status(self, area_id: str) -> DaylightStatus:
         """The latest evaluation (evaluated now if there is none)."""
         room = self.rooms.get(area_id)
-        if room is None or room.status is None or room.status.config != self.room_config(area_id):
+        cfg = self.room_config(area_id)
+        v_on = self.ctrl.lighting.vacant_on_below(area_id)
+        if room is None or room.status is None or room.status.config != cfg \
+                or room.status.vacant_on_below != (None if v_on == cfg.on_below else v_on):
             return self.evaluate(area_id, notify=False)
         return room.status
 
     def gate(self, area_id: str) -> DaylightGate:
         """Fresh decision for switching on now (uses the latest evidence, no waiting)."""
         return self.evaluate(area_id, notify=True).gate
+
+    def vacant_gate(self, area_id: str, *, fresh: bool = False) -> DaylightGate:
+        """The Vacant profile's daylight decision (its own threshold, if it has one)."""
+        return (self.evaluate(area_id, notify=True) if fresh else self.status(area_id)).vacant_gate
 
     def diagnostics(self) -> dict[str, Any]:
         return {

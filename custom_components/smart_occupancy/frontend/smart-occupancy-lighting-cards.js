@@ -65,13 +65,25 @@
  * that start it, its timeout and light level), each value shown as a room
  * override or the global default.
  *
+ * 0.4.0: Occupied and Vacant profiles. The room card's Overrides tab and the
+ * Smart Lighting card edit either profile (Occupied | Vacant): per mood, per
+ * light type and single light, On / Off / Leave unchanged, brightness, colour,
+ * transition and whether an off light may be switched on in daylight. Every
+ * value shows where it comes from (global, room, light; mood or every mood).
+ * Copy (mood to mood, Occupied to Vacant), Reset, Preview (as if occupied or
+ * vacant) and Test are next to the editor. Test is the only button that
+ * changes lights; it asks first and the integration sends the commands.
+ * Editing never changes a light. Settings → Automatic → "When the room becomes
+ * vacant" has the Vacant profile's settings (lights it does not set, its own
+ * light level) as room values or global defaults.
+ *
  * The cards are editors only: the integration owns the configuration
- * (websocket API, admin-only writes). The cards never call a light service and
- * a preview never changes a light. They refetch only when the integration
+ * (websocket API, admin-only writes). The cards never call a light service
+ * (a profile test asks the integration to) and a preview never changes a light. They refetch only when the integration
  * reports a change.
  */
 
-const VERSION = "0.3.13";
+const VERSION = "0.4.0";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -445,6 +457,7 @@ class SoLightingBase extends HTMLElement {
     if (own.brightness_pct != null && !own.brightness_mode) eff.brightness_mode = "fixed";
     if (own.color_temp_kelvin != null && !own.color_temp_mode) eff.color_temp_mode = "fixed";
     const every = ctx.mood === ALL;
+    const vacant = ctx.profile === "vacant";
     const glob = (this._model && this._model.adaptive) || {};
     const gv = glob.values || {};
     const ro = !this._canEdit ? "disabled" : "";
@@ -540,18 +553,26 @@ class SoLightingBase extends HTMLElement {
       if (caps.known && caps.brightness === false && !caps.color_temp && !caps.color) {
         html += `<div class="hint">These lights can only be switched on and off.</div>`;
       }
+      // Daylight condition (0.4.0): may an off light be switched on while daylight is enough?
+      const dl = own.daylight || null;
+      const dlInh = inh.daylight || "dark";
+      const dlSeg = (v, label) => `<button class="seg ${dl === v ? "on" : ""}" aria-pressed="${dl === v}" data-ed="${k}" data-daylight="${v || ""}" ${ro}>${esc(label)}</button>`;
+      html += `<div class="frow"><label>Switch on ${dl ? "" : (inh.sources || {}).daylight ? from("daylight") : ""}</label><div class="fval"><div class="segs small" role="group" aria-label="When this may be switched on">
+          ${room || (inh.sources || {}).daylight ? dlSeg(null, `${room ? "Follow" : "Inherit"} (${dlInh === "always" ? "also in daylight" : "only when dark"})`) : ""}
+          ${dlSeg("dark", "Only when dark")}${dlSeg("always", "Also in daylight")}</div>
+        <span class="sub">${(dl || dlInh) === "always" ? "An exception: switched on even when daylight is enough." : `Uses the room's light level${vacant ? " for the Vacant profile" : ""}.`}</span></div></div>`;
     }
     // Advanced: transition, ambient, inheritance details, per-field reset.
     const adv = this._ui.editorAdv;
     html += `<details class="eadv" ${adv ? "open" : ""}><summary data-action="toggle-editor-adv">Advanced</summary>
       ${every ? "" : `<div class="frow"><label>Transition</label><div class="fval"><input type="number" class="num" min="0" max="300" step="0.5"
         value="${esc(own.transition ?? "")}" placeholder="${esc(inh.transition ?? "–")}" data-ed="${k}" data-field="transition" ${ro}> s</div></div>
-      <div class="frow"><label>Ambient</label><div class="fval"><select data-ed="${k}" data-field="persistent" ${ro}>
+      ${vacant ? "" : `<div class="frow"><label>Ambient</label><div class="fval"><select data-ed="${k}" data-field="persistent" ${ro}>
         <option value="inherit" ${own.persistent == null ? "selected" : ""}>Inherit (${inh.persistent ? "yes" : "no"})</option>
         <option value="yes" ${own.persistent === true ? "selected" : ""}>Yes: follow the mood even when the room is empty</option>
-        <option value="no" ${own.persistent === false ? "selected" : ""}>No: only while occupied</option></select></div></div>`}
+        <option value="no" ${own.persistent === false ? "selected" : ""}>No: only while occupied</option></select></div></div>`}`}
       <div class="sub">Reset a value to inherit it again.</div>
-      <div class="kvlist">${["action", "brightness_mode", "brightness_pct", "brightness_offset", "color_temp_mode", "color_temp_kelvin", "color_temp_offset", "rgb_color", "hs_color", "effect", "transition", "persistent"]
+      <div class="kvlist">${["action", "brightness_mode", "brightness_pct", "brightness_offset", "color_temp_mode", "color_temp_kelvin", "color_temp_offset", "rgb_color", "hs_color", "effect", "transition", "persistent", "daylight"]
         .filter((f) => own[f] != null || inh[f] != null).map((f) => `<div><span>${esc(f)}</span>
           <b>${esc(JSON.stringify(own[f] ?? inh[f]))}</b> <span class="sub">${own[f] != null ? "set here" : `inherited · ${esc(sourceText((inh.sources || {})[f], ctx.mood))}`}</span>
           ${own[f] != null && f !== "action" && !ro ? `<button class="link" data-ed="${k}" data-clear="${f}">reset</button>` : ""}</div>`).join("")}</div>
@@ -569,12 +590,13 @@ class SoLightingBase extends HTMLElement {
     const own = { ...(ctx.own || { action: "inherit" }) };
     change(own, ctx);
     if (own.action === "off") ["brightness_pct", "color_temp_kelvin", "rgb_color", "hs_color", "effect", "brightness_mode",
-      "brightness_offset", "color_temp_mode", "color_temp_offset"].forEach((f) => delete own[f]);
+      "brightness_offset", "color_temp_mode", "color_temp_offset", "daylight"].forEach((f) => delete own[f]);
     Object.keys(own).forEach((f) => (own[f] === undefined || own[f] === "") && delete own[f]);
     if (!own.action) own.action = "inherit";
     ctx.own = own;
     const empty = Object.keys(own).length === 1 && own.action === "inherit";
-    const msg = { type: `${WS}/profile/set`, scope: ctx.scope, mood: ctx.mood, target: ctx.target, setting: empty ? null : own };
+    const msg = { type: `${WS}/profile/set`, scope: ctx.scope, mood: ctx.mood, target: ctx.target, setting: empty ? null : own,
+      profile: ctx.profile || "occupied" };
     if (ctx.area_id) msg.area_id = ctx.area_id;
     this._saveTimers = this._saveTimers || {};
     clearTimeout(this._saveTimers[key]);
@@ -628,9 +650,13 @@ class SoLightingBase extends HTMLElement {
   _onClick(ev) {
     const dbl = ev.target.closest("[data-dbl]");
     if (dbl) { if (dbl.getAttribute("aria-disabled") !== "true") this._tap(dbl); return; }
-    const el = ev.target.closest("[data-action],[data-set-action],[data-kelvin],[data-rgb],[data-clear],[data-bmode],[data-kmode]");
+    const el = ev.target.closest("[data-action],[data-set-action],[data-kelvin],[data-rgb],[data-clear],[data-bmode],[data-kmode],[data-daylight]");
     if (!el || el.disabled) return;
     const key = el.dataset.ed;
+    if (key && el.dataset.daylight !== undefined) {
+      this._editorUpdate(key, (o) => { if (el.dataset.daylight) o.daylight = el.dataset.daylight; else delete o.daylight; });
+      return;
+    }
     if (key && el.dataset.bmode) {
       const m = el.dataset.bmode;
       this._editorUpdate(key, (o, ctx) => {
@@ -675,7 +701,8 @@ class SoLightingBase extends HTMLElement {
     const a = el.dataset.action;
     if (a === "reset") {
       const ctx = this._editorCtx[el.dataset.key];
-      const msg = { type: `${WS}/profile/set`, scope: ctx.scope, mood: ctx.mood, target: ctx.target, setting: null };
+      const msg = { type: `${WS}/profile/set`, scope: ctx.scope, mood: ctx.mood, target: ctx.target, setting: null,
+        profile: ctx.profile || "occupied" };
       if (ctx.area_id) msg.area_id = ctx.area_id;
       ctx.own = null;
       this._save(el.dataset.key, msg, "Removed");
@@ -723,7 +750,7 @@ class SoLightingBase extends HTMLElement {
           <span class="pill ${tone}">${esc(word)}</span>
           ${detailed || i.decision === "blocked" ? `<div class="why">${esc(i.reason)}</div>` : ""}${auHtml}</div>`;
       }).join("");
-      return `<div class="plan"><div class="plan-head"><b>${esc(p.room)}</b><span class="sub">${esc(p.manual_mode ? "Manual" : p.mood || "no mood")} ·
+      return `<div class="plan"><div class="plan-head"><b>${esc(p.room)}</b><span class="sub">${p.profile === "vacant" ? "Vacant profile · " : ""}${esc(p.manual_mode ? "Manual" : p.mood || "no mood")} ·
         ${c.change || 0} change · ${c.unchanged || 0} already right · ${c.blocked || 0} blocked${p.control_enabled ? "" : " · Observe: nothing is sent"}</span></div>
         ${p.note ? `<div class="note">${esc(p.note)}</div>` : ""}
         ${p.daylight && !p.manual_mode ? `<div class="sub">Daylight: <b>${esc(DL_WORDS[p.daylight.decision] || p.daylight.decision)}</b> · ${esc(p.daylight.text)}${p.daylight.policy !== "dark" ? ` · switch-on ${p.daylight.policy === "never" ? "off" : "regardless of daylight"}` : ""}</div>` : ""}
@@ -773,7 +800,26 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
 
   setConfig(config) { this._config = { ...(config || {}) }; this._render(); }
 
-  _request() { return { type: `${WS}/editor`, mood: this._mood || null }; }
+  _request() { return { type: `${WS}/editor`, mood: this._mood || null, profile: this._ui.profile || "occupied" }; }
+
+  // Occupied | Vacant (0.4.0): which global profile the light types below belong to, and the Vacant defaults.
+  _profileBarHtml() {
+    const m = this._model;
+    const profile = m.profile || "occupied";
+    const ro = !this._canEdit ? "disabled" : "";
+    const seg = (v, label, icon) => `<button class="seg ${profile === v ? "on" : ""}" aria-pressed="${profile === v}" data-action="profile" data-value="${v}"><ha-icon icon="${icon}"></ha-icon>${label}</button>`;
+    let html = `<div class="frow"><label>Profile</label><div class="fval"><div class="segs small mode" role="group" aria-label="Which lighting profile to edit">
+      ${seg("occupied", "Occupied", "mdi:account")}${seg("vacant", "Vacant", "mdi:account-off-outline")}</div></div></div>`;
+    if (profile !== "vacant") return html;
+    const d = m.vacant_defaults || { others: "off", on_below: null };
+    const oseg = (v, label) => `<button class="seg ${d.others === v ? "on" : ""}" aria-pressed="${d.others === v}" data-action="vac-g-others" data-value="${v}" ${ro}>${label}</button>`;
+    return `${html}<div class="sub">Vacant: what each light type does in an empty room, per mood (rooms whose vacancy action is the Vacant profile).
+        Rooms can override it in their Overrides tab.</div>
+      <div class="frow"><label>Lights it does not set</label><div class="fval"><div class="segs small" role="group" aria-label="Default for lights the Vacant profile does not set">
+        ${oseg("off", "Turn off")}${oseg("leave", "Leave unchanged")}</div><span class="pill muted">Global default</span>${this._statusHtml("vacg-others")}</div></div>
+      <div class="frow"><label for="so-vacg-lux">Light level</label><div class="fval">on below <input id="so-vacg-lux" type="number" class="num" min="0" max="2000" step="1"
+        value="${esc(d.on_below ?? "")}" placeholder="normal" title="Empty: each room's normal threshold" data-control="vac-g-lux" ${ro}> lx<span class="pill muted">Global default</span>${this._statusHtml("vacg-lux")}</div></div>`;
+  }
 
   // Compact "Global light adjustment" section: sources, live values, status.
   _globalHtml() {
@@ -843,7 +889,7 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
     let body = `<div class="header"><ha-icon icon="mdi:palette-outline"></ha-icon><div class="titles">
         <div class="title">${esc(this._config.title || "Smart Lighting")}</div>
         <div class="sub">Now: <b>${esc(status.manual_mode ? "Manual" : status.mood || "no mood")}</b>${status.source && !["main", "manual"].includes(status.source) ? ` · ${esc(status.detail)}` : ""}</div></div></div>
-      <div class="pad">${manualBanner(m)}${this._globalHtml()}<div class="chips" role="tablist">${m.moods.filter((x) => x.in_main || x.has_profile || ui.allMoods || x.name === mood)
+      <div class="pad">${manualBanner(m)}${this._globalHtml()}${this._profileBarHtml()}<div class="chips" role="tablist">${m.moods.filter((x) => x.in_main || x.has_profile || ui.allMoods || x.name === mood)
         .map((x) => `<button class="chip ${x.name === mood ? "on" : ""}" role="tab" data-action="mood" data-mood="${esc(x.name)}">${esc(x.name)}${x.name === status.mood ? " •" : ""}</button>`).join("")}
         <button class="chip ${mood === ALL ? "on" : ""}" role="tab" data-action="mood" data-mood="${ALL}" title="Settings for every mood, e.g. follow the global brightness">Every mood</button>
         ${m.moods.some((x) => !x.in_main && !x.has_profile && x.name !== mood) ? `<button class="link" data-action="all-moods">${ui.allMoods ? "fewer" : "more…"}</button>` : ""}</div>`;
@@ -854,11 +900,13 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
     if (ui.edit && ui.edit.scope === "global") {
       const t = m.types.find((x) => x.target === ui.edit.target) || this._fakeType(ui.edit.target);
       const base = m.categories.find((c) => c.key === t.key);
-      const key = `global|${mood}|${t.target}`;
+      const profile = m.profile || "occupied";
+      const key = `${profile}|global|${mood}|${t.target}`;
       const rgbCount = base && base.kind !== "rgb" ? base.rgb_lights : 0;
       this._editorCtx[key] = {
-        scope: "global", mood, target: t.target, own: t.own, inherited: t.inherited, effective: t.effective,
-        caps: t.variant || t.rgb ? { ...t.caps, color: true } : t.caps, title: `${moodLabel(mood)} · ${t.name}`,
+        scope: "global", mood, target: t.target, own: t.own, inherited: t.inherited, effective: t.effective, profile,
+        caps: t.variant || t.rgb ? { ...t.caps, color: true } : t.caps,
+        title: `${profile === "vacant" ? "Vacant · " : ""}${moodLabel(mood)} · ${t.name}`,
         lightsText: `${t.lights.length} light${t.lights.length === 1 ? "" : "s"}${t.lights.length ? `: ${t.lights.slice(0, 4).map((l) => l.name || l.entity_id).join(", ")}${t.lights.length > 4 ? " …" : ""}` : ""}`,
         rgbToggle: rgbCount,
       };
@@ -872,7 +920,7 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
         ${dot(t.effective)}<span class="tname">${esc(t.name)}<span class="sub"> · ${t.lights.length} light${t.lights.length === 1 ? "" : "s"}</span></span>
         <span class="tval ${mood === ALL || (t.effective?.action && !["inherit", "ignore"].includes(t.effective.action)) ? "" : "muted"}">${esc(mood === ALL ? modesSummary(t.effective) : summary(t.effective))}${!t.configured && t.effective?.action && t.effective.action !== "ignore" ? ` <span class="from">${esc(sourceText(t.effective.sources?.action, mood))}</span>` : ""}</span>
         <ha-icon icon="mdi:chevron-right"></ha-icon></button>`).join("") || (unset.length ? "" : `<div class="note">No light types yet. Add one under Advanced → Light types.</div>`)}</div>
-      ${unset.length ? `<div class="unset"><span class="sub">${types.length ? "Not set" : `Nothing set for ${esc(mood)} yet`} — tap to set:</span>
+      ${unset.length ? `<div class="unset"><span class="sub">${types.length ? "Not set" : `Nothing set for ${esc(mood)} yet`}${m.profile === "vacant" ? ` (${(m.vacant_defaults?.others || "off") === "leave" ? "left as they are" : "switched off"} unless a room sets them)` : ""} — tap to set:</span>
         ${unset.map((t) => `<button class="chip small" data-action="edit" data-target="${esc(t.target)}">${esc(t.name)}</button>`).join("")}</div>` : ""}
       ${hidden ? `<button class="link" data-action="unused">${ui.showUnused ? "Hide unused light types" : `Show ${hidden} unused light type${hidden === 1 ? "" : "s"}`}</button>` : ""}
       ${(m.label_suggestions || []).length && this._canEdit ? `<div class="note">${m.label_suggestions.map((s) => `Label <b>${esc(s.name)}</b> found:
@@ -880,8 +928,8 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
       <div class="actions">${mood === ALL ? "" : `<button class="btn" data-action="preview">${ui.preview ? "Hide preview" : "Preview"}</button>`}
         <button class="btn ghost" data-action="advanced">${ui.advanced ? "Hide advanced" : "Advanced"}</button></div>`;
     if (ui.preview && mood !== ALL) {
-      body += `<div class="section"><div class="stitle">Preview · ${esc(mood)}</div>
-        <div class="sub">What each room would do in this mood. A preview never changes a light.</div>
+      body += `<div class="section"><div class="stitle">Preview · ${m.profile === "vacant" ? "Vacant · " : ""}${esc(mood)}</div>
+        <div class="sub">What each room would do in this mood${m.profile === "vacant" ? " if it were vacant" : ""}. A preview never changes a light.</div>
         ${ui.previewData?.error ? `<div class="bad">${esc(ui.previewData.error)}</div>` : this._previewHtml(ui.previewData?.plans, ui.previewDetail)}</div>`;
     }
     if (ui.advanced) body += this._advancedHtml(mood, info);
@@ -945,6 +993,10 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
   _onAction(a, el) {
     const ui = this._ui;
     if (a === "mood") { this._mood = el.dataset.mood; ui.edit = null; ui.previewData = null; this._fetch(); if (ui.preview) this._loadPreview(); }
+    else if (a === "profile") {
+      if ((ui.profile || "occupied") === el.dataset.value) return;
+      ui.profile = el.dataset.value; ui.edit = null; ui.previewData = null; this._fetch(); if (ui.preview) this._loadPreview();
+    } else if (a === "vac-g-others") this._save("vacg-others", { type: `${WS}/vacant/set`, others: el.dataset.value }, "Global default");
     else if (a === "all-moods") { ui.allMoods = !ui.allMoods; this._render(); }
     else if (a === "edit") { ui.edit = { scope: "global", target: el.dataset.target }; this._render(); }
     else if (a === "unused") { ui.showUnused = !ui.showUnused; this._render(); }
@@ -968,7 +1020,8 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
 
   _loadPreview() {
     this._ui.previewData = null;
-    this._ws({ type: `${WS}/preview`, mood: this._mood }).then((r) => { this._ui.previewData = r; this._render(); })
+    this._ws({ type: `${WS}/preview`, mood: this._mood, profile: this._ui.profile === "vacant" ? "vacant" : null })
+      .then((r) => { this._ui.previewData = r; this._render(); })
       .catch((err) => { this._ui.previewData = { error: err?.message || String(err) }; this._render(); });
   }
 
@@ -977,6 +1030,7 @@ class SmartOccupancyMoodEditorCard extends SoLightingBase {
     const mood = this._mood;
     const cat = (key) => this._model.categories.find((x) => x.key === key);
     if (c === "parent") this._save("parent", { type: `${WS}/mood/set`, mood, parent: el.value || null });
+    else if (c === "vac-g-lux") this._save("vacg-lux", { type: `${WS}/vacant/set`, on_below: el.value === "" ? null : Number(el.value) }, "Global default");
     else if (c === "fallback") this._save("fallback", { type: `${WS}/settings/set`, fallback_mood: el.value || null });
     else if (c === "handling") {
       if (el.value === "use_mood") { this._model.moods.find((x) => x.name === mood).handling = { mode: "use_mood" }; this._render(); return; }
@@ -1023,7 +1077,10 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     this._render();
   }
 
-  _request() { return { type: `${WS}/editor`, area_id: this._config.area, mood: this._mood || null }; }
+  // The Overrides tab edits the Occupied or the Vacant profile (0.4.0); every other tab shows the Occupied one.
+  _profile() { return (this._ui.tab === "overrides" && this._ui.profile === "vacant") ? "vacant" : "occupied"; }
+
+  _request() { return { type: `${WS}/editor`, area_id: this._config.area, mood: this._mood || null, profile: this._profile() }; }
 
   _liveEntities() {
     const r = this._model?.room;
@@ -1099,7 +1156,9 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const ui = this._ui;
     if (key === "settings") key = ui.settingsTab || "automatic";  // the last settings section
     if (isSetting(key)) ui.settingsTab = key;
+    const before = this._profile();
     ui.tab = key; ui.edit = null; ui.swEdit = null; ui.swAdd = false;
+    if (this._profile() !== before) this._fetch();  // the Vacant profile is only shown in Overrides
     if (key === "preview") ui.previewData = null;
     if (key === "advanced") ui.review = null;
     if (key === "presence") this._scheduleFetch();  // fresh sensor states
@@ -1431,32 +1490,62 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
 
   _vacancyWord(r) {
     const v = r.vacancy || {};
-    if (v.action === "vacant_mood") return v.mood ? `Vacant mood ${v.mood}` : "Vacant mood (not chosen)";
+    if (v.action === "vacant_mood") {
+      const others = r.vacant?.effective?.others;
+      return others === "mood" && v.mood ? `Vacant profile (other lights like ${v.mood})` : "Vacant profile";
+    }
     return v.action === "leave" ? "Leave lights unchanged" : "Turn lights off";
   }
 
-  // "When the room becomes vacant" (0.3.8): the room's vacancy action, from the integration.
+  // "When the room becomes vacant" (0.3.8; Vacant profile 0.4.0): the room's vacancy action, from the integration.
   _vacancyHtml(r) {
     const v = r.vacancy || { action: "turn_off" };
+    const vp = r.vacant;
     const ro = !this._canEdit;
     const off = ro || this._status.vacancy?.busy;
-    const picking = this._ui.vacPick && v.action !== "vacant_mood";
-    const shown = picking ? "vacant_mood" : v.action;
+    const shown = v.action;
     const t = (r.presence?.timing || []).find((x) => x.key === "inactivity_timeout");
-    const moods = (this._model.moods || []).filter((m) => m.in_main || m.has_profile || m.name === v.mood);
-    const seg = ([a, label, icon]) => `<button class="seg ${shown === a ? "on" : ""}" aria-pressed="${shown === a}" data-action="vac-action" data-value="${a}" ${off ? "disabled" : ""}><ha-icon icon="${icon}"></ha-icon>${label}</button>`;
+    const seg = ([a, label, icon]) => `<button class="seg ${shown === a ? "on" : ""}" aria-pressed="${shown === a}" data-action="vac-action" data-value="${a}" ${off ? "disabled" : ""}><ha-icon icon="${icon}"></ha-icon>${label === "Vacant mood" ? "Vacant profile" : label}</button>`;
     const explain = {
       turn_off: "Lights that are on are switched off when the vacancy timeout ends. Ambient lights keep following the mood.",
-      vacant_mood: "The chosen mood's light settings are applied to lights that are on (On, Off or Leave unchanged per light type); no light is switched on in the empty room.",
+      vacant_mood: `The room's Vacant profile of the current mood${vp?.mood ? ` (now ${vp.mood})` : ""} is applied when the vacancy timeout ends, and again when the mood or the daylight changes while the room stays empty. Lights go straight to their vacant setting. Ambient lights keep following the mood.`,
       leave: "Lights are left as they are when the room becomes vacant.",
     }[shown];
     const timeout = t ? ` Vacancy timeout ${fmtSecs(t.value)} (${t.overridden ? "this room" : "global default"}) · Presence tab.` : "";
+    let profile = "";
+    if (shown === "vacant_mood" && vp) {
+      const pill = (k) => `<span class="pill ${vp.sources[k] === "room" ? "info" : "muted"}">${vp.sources[k] === "room" ? "Room override" : "Global default"}</span>`;
+      const inherit = (k, text) => (!ro && vp.sources[k] === "room" ? `<button class="link" data-action="vac-inherit" data-key="${k}">Use global default (${esc(text)})</button>` : "");
+      const others = vp.effective.others;
+      const legacy = others === "mood" || this._ui.vacMoodPick;
+      const oseg = (val, label) => `<button class="seg ${others === val && !this._ui.vacMoodPick ? "on" : ""}" aria-pressed="${others === val}" data-action="vac-others" data-value="${val}" ${ro ? "disabled" : ""}>${label}</button>`;
+      const moods = (this._model.moods || []).filter((m) => m.in_main || m.has_profile || m.name === v.mood);
+      const gate = vp.daylight || {};
+      const lux = vp.effective.on_below;
+      profile = `<div class="frow"><label>Vacant profile</label><div class="fval"><button class="link" data-action="vac-edit">Edit the Vacant profile${vp.mood ? ` (${esc(vp.mood)})` : ""}</button>
+          ${vp.mood && !vp.has_entries_now ? `<span class="sub">nothing is set for ${esc(vp.mood)} yet</span>` : ""}</div></div>
+        <div class="frow"><label>Lights it does not set</label><div class="fval"><div class="segs small" role="group" aria-label="Lights the Vacant profile does not set">
+          ${oseg("off", "Turn off")}${oseg("leave", "Leave unchanged")}${legacy ? oseg("mood", "Like a mood") : ""}</div> ${pill("others")}
+          ${inherit("others", (vp.others_words || {})[vp.global.others] || vp.global.others)}${this._statusHtml("vac-others")}</div></div>
+        ${legacy ? `<div class="frow"><label for="so-vac-mood">Like mood</label><div class="fval"><select id="so-vac-mood" data-control="vac-mood" ${ro ? "disabled" : ""}>
+            ${!v.mood ? `<option value="" selected>Choose a mood…</option>` : ""}${moods.map((m) => `<option value="${esc(m.name)}" ${m.name === v.mood ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select>
+            <span class="sub">as in 0.3.8: those lights get this mood's normal settings while they are on; none is switched on</span></div></div>` : ""}
+        <div class="frow"><label for="so-vac-lux">Light level</label><div class="fval">on below <input id="so-vac-lux" type="number" class="num" min="${vp.limits.lux[0]}" max="${vp.limits.lux[1]}" step="1"
+            value="${esc(v.on_below ?? "")}" placeholder="${esc(lux ?? vp.normal_on_below)}" data-control="vac-lux" ${ro ? "disabled" : ""}> lx
+            ${pill("on_below")} ${inherit("on_below", vp.global.on_below == null ? "same as normal" : `${vp.global.on_below} lx`)}${this._statusHtml("vac-lux")}</div></div>
+        <div class="sub">${lux == null ? `Same as the room (${esc(vp.normal_on_below)} lx).` : `Its own threshold; back above ${esc(gate.off_above)} lx counts as daylight (hysteresis).`}
+          A light set to "Only when dark" is switched on below it and off again in daylight while the room is empty. Daylight now: <b>${esc(DL_WORDS[gate.decision] || gate.decision || "—")}</b>${gate.text ? ` · ${esc(gate.text)}` : ""}.</div>
+        <details class="dladv" ${this._ui.vacGlobal ? "open" : ""}><summary data-action="toggle-vac-global">Global defaults (all rooms)</summary>
+          <div class="global"><div class="sub"><b>Global setting</b> — every room that does not set a value follows it. The global Vacant profile of each light type is in the Smart Lighting card (Vacant).</div>
+            <div class="frow"><label>Lights it does not set</label><div class="fval"><div class="segs small" role="group" aria-label="Global default for lights the Vacant profile does not set">
+              ${["off", "leave"].map((x) => `<button class="seg ${vp.global.others === x ? "on" : ""}" aria-pressed="${vp.global.others === x}" data-action="vac-g-others" data-value="${x}" ${ro ? "disabled" : ""}>${x === "off" ? "Turn off" : "Leave unchanged"}</button>`).join("")}</div>${this._statusHtml("vacg-others")}</div></div>
+            <div class="frow"><label for="so-vacg-lux">Light level</label><div class="fval">on below <input id="so-vacg-lux" type="number" class="num" min="${vp.limits.lux[0]}" max="${vp.limits.lux[1]}" step="1"
+              value="${esc(vp.global.on_below ?? "")}" placeholder="normal" title="Empty: the room's normal threshold" data-control="vac-g-lux" ${ro ? "disabled" : ""}> lx${this._statusHtml("vacg-lux")}</div></div>
+          </div></details>`;
+    }
     return `<div class="section vac"><div class="stitle">When the room becomes vacant</div>
       <div class="modebar"><div class="segs small mode" role="group" aria-label="When the room becomes vacant">${VACANCY.map(seg).join("")}</div>${this._statusHtml("vacancy")}</div>
-      ${shown === "vacant_mood" ? `<div class="frow"><label for="so-vac-mood">Vacant mood</label><div class="fval"><select id="so-vac-mood" data-control="vac-mood" ${ro ? "disabled" : ""}>
-        ${!v.mood || picking ? `<option value="" ${v.mood && !picking ? "" : "selected"}>Choose a mood…</option>` : ""}
-        ${moods.map((m) => `<option value="${esc(m.name)}" ${m.name === v.mood && !picking ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select></div></div>` : ""}
-      <div class="sub">${esc(explain + timeout)}</div>
+      <div class="sub">${esc(explain + timeout)}</div>${profile}
       ${v.last ? `<div class="sub">Last vacancy: ${esc(v.last.text)} · ${fmtTime(v.last.at)}</div>` : ""}</div>`;
   }
 
@@ -1464,11 +1553,13 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const r = this._model?.room;
     if (!r) return;
     const v = r.vacancy || {};
-    if (action === "vacant_mood" && !v.mood) { this._ui.vacPick = true; this._render(); return; }  // choose the mood first
-    this._ui.vacPick = false;
     if (action === v.action) { this._render(); return; }
     this._save("vacancy", { type: `${WS}/room/set`, area_id: this._config.area, vacancy_action: action },
-      { turn_off: "Turns lights off when vacant", vacant_mood: "Applies the vacant mood", leave: "Leaves lights unchanged" }[action]);
+      { turn_off: "Turns lights off when vacant", vacant_mood: "Applies the Vacant profile", leave: "Leaves lights unchanged" }[action]);
+  }
+
+  _saveVacant(key, changes, ok = "Saved", global = false) {
+    return this._save(key, { type: `${WS}/vacant/set`, ...(global ? {} : { area_id: this._config.area }), ...changes }, ok);
   }
 
   // Presence tab (0.3.8): the room's occupancy inputs with their live states, and its presence settings.
@@ -1700,6 +1791,19 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const ro = !this._canEdit;
     const s = r.settings;
     const ui = this._ui;
+    const profile = r.profile || "occupied";
+    const vacant = profile === "vacant";
+    const word = vacant ? "Vacant" : "Occupied";
+    const pseg = (v, label, icon) => `<button class="seg ${profile === v ? "on" : ""}" aria-pressed="${profile === v}" data-action="ov-profile" data-value="${v}"><ha-icon icon="${icon}"></ha-icon>${label}</button>`;
+    const vp = r.vacant || {};
+    const othersWord = (vp.others_words || {})[vp.effective?.others] || "Turn off";
+    const profileBar = `<div class="frow"><label>Profile</label><div class="fval"><div class="segs small mode" role="group" aria-label="Which lighting profile to edit">
+        ${pseg("occupied", "Occupied", "mdi:account")}${pseg("vacant", "Vacant", "mdi:account-off-outline")}</div>${this._statusHtml("ov-profile")}</div></div>
+      ${vacant ? `<div class="sub">What the lights do while ${esc(r.name)} is empty, per mood. Lights it does not set: <b>${esc(othersWord)}</b>
+          · <button class="link" data-action="tab" data-tab="automatic">vacancy settings</button></div>
+        ${vp.used === false ? `<div class="note warn">When ${esc(r.name)} becomes vacant it is set to <b>${esc((VACANCY.find(([a]) => a === vp.action) || [])[1] || vp.action)}</b>, so this profile is not used.
+          ${ro ? "" : `<button class="link" data-action="vac-action" data-value="vacant_mood">Use the Vacant profile</button>`}${this._statusHtml("vacancy")}</div>` : ""}`
+        : `<div class="sub">What the lights do while ${esc(r.name)} is occupied, per mood.</div>`}`;
     const roomMood = `<div class="frow"><label>Room mood</label><div class="fval"><select data-control="room-mood" ${ro ? "disabled" : ""}>
         <option value="">Follow global (now ${esc(r.diagnostics.global_mood || "none")})</option>
         ${m.moods.map((x) => `<option ${x.name === s.mood_override ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>${this._statusHtml("room-mood")}</div></div>
@@ -1724,7 +1828,9 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         }
       }
       if (ctx) {
-        const key = `${ctx.scope}|${mood}|${ctx.target}`;
+        ctx.profile = profile;
+        if (vacant) ctx.title = `Vacant · ${ctx.title}`;
+        const key = `${profile}|${ctx.scope}|${mood}|${ctx.target}`;
         this._editorCtx[key] = ctx;
         return roomMood + this._editorHtml(key, ctx);
       }
@@ -1732,32 +1838,89 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const types = r.types.filter((t) => t.lights.length || t.configured);
     const lightOverrides = r.lights.filter((l) => l.own);
     const choices = r.lights.filter((l) => !l.missing && !l.excluded && !l.covered_by && !l.own);
-    return `${roomMood}
+    // Vacant: a light the profile does not set follows the room's rule for those lights (off, unchanged, like a mood).
+    const unsetWord = { off: "Not set: switched off", leave: "Not set: left as it is",
+      mood: `Not set: like ${r.vacancy?.mood || "a mood"}` }[vp.effective?.others] || "Not set";
+    const show = (eff) => (mood === ALL ? modesSummary(eff) : vacant && isUnset(eff) ? unsetWord : summary(eff));
+    return `${roomMood}${profileBar}
       ${mood === ALL ? `<div class="sub">Every mood: whether these lights follow the global brightness and temperature, unless a mood sets its own value.</div>` : ""}
       <div class="stitle">Light types in ${esc(r.name)}</div>
       <div class="rows">${types.map((t) => `<button class="trow" data-action="edit-room" data-target="${esc(t.target)}">${dot(t.effective)}
         <span class="tname">${esc(t.name)}<span class="sub"> · ${t.lights.length}</span></span>
-        <span class="tval">${t.configured ? `<span class="pill info">overridden</span> ` : `<span class="from">default</span> `}${esc(mood === ALL ? modesSummary(t.effective) : summary(t.effective))}</span>
+        <span class="tval">${t.configured ? `<span class="pill info">overridden</span> ` : `<span class="from">default</span> `}${esc(show(t.effective))}</span>
         <ha-icon icon="mdi:chevron-right"></ha-icon></button>`).join("") || `<div class="muted">No light types in this room.</div>`}</div>
       <div class="stitle">Single lights</div>
       <div class="rows">${lightOverrides.map((l) => `<button class="trow" data-action="edit-light" data-target="${esc(l.entity_id)}">${dot(l.effective)}
-        <span class="tname">${esc(l.name || l.entity_id)}</span><span class="tval">${esc(mood === ALL ? modesSummary(l.effective) : summary(l.effective))}</span><ha-icon icon="mdi:chevron-right"></ha-icon></button>`).join("")}</div>
+        <span class="tname">${esc(l.name || l.entity_id)}</span><span class="tval">${esc(show(l.effective))}</span><ha-icon icon="mdi:chevron-right"></ha-icon></button>`).join("")}</div>
       ${ro || !choices.length ? "" : `<div class="fval"><select data-control="pick-light"><option value="">Override a single light…</option>
-        ${choices.map((l) => `<option value="${esc(l.entity_id)}">${esc(l.name || l.entity_id)}</option>`).join("")}</select></div>`}`;
+        ${choices.map((l) => `<option value="${esc(l.entity_id)}">${esc(l.name || l.entity_id)}</option>`).join("")}</select></div>`}
+      ${mood === ALL ? "" : this._profileToolsHtml(r, profile, mood)}`;
+  }
+
+  // Copy, reset, preview and test one profile of one mood (0.4.0). Only Test changes lights, and it asks first.
+  _profileToolsHtml(r, profile, mood) {
+    const ro = !this._canEdit;
+    const ui = this._ui;
+    const word = profile === "vacant" ? "Vacant" : "Occupied";
+    const moods = (this._model.moods || []).filter((x) => x.in_main || x.has_profile);
+    const sources = [];
+    for (const p of ["occupied", "vacant"]) {
+      for (const x of moods) if (!(p === profile && x.name === mood)) sources.push([`${p}|${x.name}`, `${p === "vacant" ? "Vacant" : "Occupied"} · ${x.name}`]);
+    }
+    const sel = ui.copyFrom && sources.some(([v]) => v === ui.copyFrom) ? ui.copyFrom : (profile === "vacant" ? `occupied|${mood}` : "");
+    const minutes = r.settings.manual_override_minutes ?? this._model.settings?.manual_override_minutes;
+    const t = ui.testResult;
+    return `<details class="dladv" ${ui.pfTools ? "open" : ""}><summary data-action="toggle-pf-tools">Copy, reset, preview and test</summary><div class="section">
+      ${ro ? "" : `<div class="frow"><label for="so-pf-copy">Copy from</label><div class="fval"><select id="so-pf-copy" data-control="pf-copy-from">
+          <option value="">Choose…</option>${sources.map(([v, l]) => `<option value="${esc(v)}" ${v === sel ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          <button class="btn small" data-action="pf-copy" ${sel ? "" : "disabled"}>Copy into ${word} · ${esc(mood)}</button>${this._statusHtml("pf-copy")}</div></div>
+        <div class="sub">Replaces this room's ${word} settings for ${esc(mood)} with what the source gives each light type now: a starting point to adjust.</div>
+        <div class="frow"><label>Reset</label><div class="fval"><button class="btn small ghost" data-action="pf-reset">Use the inherited settings</button>
+          <span class="sub">removes this room's ${word} settings for ${esc(mood)}</span>${this._statusHtml("pf-reset")}</div></div>`}
+      <div class="frow"><label>Preview</label><div class="fval"><button class="btn small ghost" data-action="pf-preview">Preview ${word} · ${esc(mood)}</button>
+        <span class="sub">never changes a light</span></div></div>
+      ${ro ? "" : `<div class="frow"><label>Test</label><div class="fval"><button class="btn small warnbtn" data-action="pf-test"><ha-icon icon="mdi:alert-outline"></ha-icon>Test on the lights…</button>${this._statusHtml("pf-test")}</div></div>
+        <div class="sub">Sends real commands to the lights of ${esc(r.name)} now, whatever the occupancy and daylight. The lights it changes are then a manual change${minutes ? ` for ${minutes} min` : ""}, so automatic lighting leaves them alone.</div>`}
+      ${t ? `<div class="note ${t.errors ? "warn" : "ok"}" role="status">${esc(t.text || `${t.sent} light(s) set`)}
+        ${t.sent && !ro ? `<button class="link" data-action="pf-resume">Resume automatic lighting for these lights</button>` : ""}${this._statusHtml("pf-resume")}</div>` : ""}
+    </div></details>`;
+  }
+
+  _testProfile(profile, mood) {
+    const r = this._model.room;
+    const word = profile === "vacant" ? "Vacant" : "Occupied";
+    const minutes = r.settings.manual_override_minutes ?? this._model.settings?.manual_override_minutes;
+    if (!confirm(`Test the ${word} profile (${mood}) in ${r.name}?\n\nThis sends real commands to the lights now, whatever the occupancy and daylight.`
+      + ` The lights it changes are then a manual change${minutes ? ` for ${minutes} min` : ""}: automatic lighting leaves them alone until then.`)) return;
+    this._status["pf-test"] = { busy: true };
+    this._requestRender();
+    this._ws({ type: `${WS}/profile/test`, area_id: this._config.area, profile, mood, confirm: true })
+      .then((res) => {
+        this._ui.testResult = { profile, mood, sent: res.sent.length, entities: res.sent, errors: Object.keys(res.errors || {}).length,
+          text: res.decision?.explanation };
+        this._status["pf-test"] = { ok: `${res.sent.length} light${res.sent.length === 1 ? "" : "s"} set` };
+      })
+      .catch((err) => { this._status["pf-test"] = { error: err?.message || String(err) }; })
+      .finally(() => { this._scheduleFetch(); this._requestRender(); });
   }
 
   _preview(r) {
     const m = this._model;
     const mood = this._ui.previewMood || this._mood || m.selected_mood;
+    const prof = this._ui.previewProfile || "";
     if (!this._ui.previewData && !this._ui.previewLoading) this._loadPreview(mood);
-    return `<div class="fval"><select data-control="preview-mood">${m.moods.map((x) => `<option ${x.name === mood ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
+    const opt = (v, l) => `<option value="${v}" ${prof === v ? "selected" : ""}>${l}</option>`;
+    return `<div class="fval"><select data-control="preview-mood" aria-label="Mood">${m.moods.map((x) => `<option ${x.name === mood ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
+      <select data-control="preview-profile" aria-label="Profile">${opt("", "What happens now")}${opt("occupied", "Occupied profile (as if occupied)")}${opt("vacant", "Vacant profile (as if vacant)")}</select>
       <span class="sub">A preview never changes a light.</span></div>
+      ${prof && this._canEdit ? `<div class="fval"><button class="btn small warnbtn" data-action="pf-test-preview"><ha-icon icon="mdi:alert-outline"></ha-icon>Test on the lights…</button>
+        <span class="sub">sends real commands</span>${this._statusHtml("pf-test")}</div>` : ""}
       ${this._ui.previewData?.error ? `<div class="bad">${esc(this._ui.previewData.error)}</div>` : this._previewHtml(this._ui.previewData?.plans, this._ui.previewDetail)}`;
   }
 
   _loadPreview(mood) {
     this._ui.previewLoading = true;
-    this._ws({ type: `${WS}/preview`, area_id: this._config.area, mood: mood || null })
+    this._ws({ type: `${WS}/preview`, area_id: this._config.area, mood: mood || null, profile: this._ui.previewProfile || null })
       .then((res) => { this._ui.previewData = res; })
       .catch((err) => { this._ui.previewData = { error: err?.message || String(err) }; })
       .finally(() => { this._ui.previewLoading = false; this._requestRender(); });
@@ -2157,6 +2320,49 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     if (a.startsWith("sw-")) { this._onSwitchAction(a, el); return; }
     if (a === "tab") this._openTab(el.dataset.tab);
     else if (a === "vac-action") this._setVacancy(el.dataset.value);
+    else if (a === "ov-profile") {
+      if ((ui.profile || "occupied") === el.dataset.value) return;
+      ui.profile = el.dataset.value; ui.edit = null; ui.testResult = null; ui.copyFrom = null;
+      this._fetch();
+    } else if (a === "vac-edit") { ui.profile = "vacant"; this._openTab("overrides"); }
+    else if (a === "vac-others") {
+      const val = el.dataset.value;
+      if (val === "mood" && !this._model.room.vacancy?.mood) { ui.vacMoodPick = true; this._render(); return; }
+      ui.vacMoodPick = false;
+      this._saveVacant("vac-others", { others: val }, { off: "Turns them off", leave: "Leaves them", mood: "Like the mood" }[val]);
+    } else if (a === "vac-inherit") this._saveVacant(`vac-${el.dataset.key === "on_below" ? "lux" : "others"}`, { [el.dataset.key]: null }, "Uses the global default");
+    else if (a === "vac-g-others") this._saveVacant("vacg-others", { others: el.dataset.value }, "Global default", true);
+    else if (a === "toggle-vac-global") { ui.vacGlobal = !el.parentElement.open; }
+    else if (a === "toggle-pf-tools") { ui.pfTools = !el.parentElement.open; }
+    else if (a === "pf-copy" || a === "pf-reset") {
+      const r = this._model.room;
+      const profile = r.profile || "occupied";
+      const mood = this._mood || this._model.selected_mood;
+      const word = profile === "vacant" ? "Vacant" : "Occupied";
+      if (a === "pf-reset") {
+        if (!confirm(`Remove ${r.name}'s ${word} settings for ${mood}? Its lights then follow the global ${word} profile for ${mood}.`)) return;
+        this._save("pf-reset", { type: `${WS}/profile/reset`, area_id: area, profile, mood }, "Reset");
+        return;
+      }
+      const from = ui.copyFrom || (profile === "vacant" ? `occupied|${mood}` : "");
+      if (!from) return;
+      const [fp, fm] = from.split("|");
+      if (!confirm(`Replace ${r.name}'s ${word} settings for ${mood} with a copy of ${fp === "vacant" ? "Vacant" : "Occupied"} · ${fm}?`)) return;
+      this._save("pf-copy", { type: `${WS}/profile/copy`, area_id: area, from_profile: fp, from_mood: fm, to_profile: profile, to_mood: mood }, "Copied");
+    } else if (a === "pf-preview") {
+      ui.previewProfile = this._model.room.profile || "occupied";
+      ui.previewMood = this._mood || this._model.selected_mood;
+      this._openTab("preview");
+    } else if (a === "pf-test") this._testProfile(this._model.room.profile || "occupied", this._mood || this._model.selected_mood);
+    else if (a === "pf-test-preview") this._testProfile(ui.previewProfile, ui.previewMood || this._mood || this._model.selected_mood);
+    else if (a === "pf-resume") {
+      const ents = ui.testResult?.entities || [];
+      this._status["pf-resume"] = { busy: true };
+      Promise.all(ents.map((e) => this._ws({ type: `${WS}/override/clear`, area_id: area, entity_id: e })))
+        .then(() => { ui.testResult = null; this._status["pf-test"] = { ok: "Automatic lighting resumes at the next trigger" }; delete this._status["pf-resume"]; })
+        .catch((err) => { this._status["pf-resume"] = { error: err?.message || String(err) }; })
+        .finally(() => { this._scheduleFetch(); this._requestRender(); });
+    }
     else if (a === "pre-inherit") this._savePrelim(el.dataset.key === "enabled" ? "pre" : `pre-${el.dataset.key}`, { [el.dataset.key]: null }, "Uses the global default");
     else if (a === "pre-remove") this._savePrelim("pre", { targets: this._prelimTargets().filter((t) => t.entity_id !== el.dataset.entity) }, "Removed");
     else if (a === "pre-confirm") {
@@ -2212,6 +2418,10 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     else if (c === "room-mood") this._save("room-mood", { type: `${WS}/room/set`, area_id: area, mood_override: el.value || null });
     else if (c === "pick-light" && el.value) { this._ui.edit = { scope: "light", target: el.value }; this._render(); }
     else if (c === "preview-mood") { this._ui.previewMood = el.value; this._loadPreview(el.value); }
+    else if (c === "preview-profile") { this._ui.previewProfile = el.value || null; this._loadPreview(this._ui.previewMood || this._mood); }
+    else if (c === "pf-copy-from") { this._ui.copyFrom = el.value || null; this._render(); }
+    else if (c === "vac-lux") this._saveVacant("vac-lux", { on_below: el.value === "" ? null : Number(el.value) }, el.value === "" ? "Uses the global default" : "Room override");
+    else if (c === "vac-g-lux") this._saveVacant("vacg-lux", { on_below: el.value === "" ? null : Number(el.value) }, "Global default", true)
     else if (c === "detailed") { this._ui.detailed = el.checked; this._render(); }
     else if (c === "managed") {
       const set = new Set(s.excluded || []);
@@ -2240,8 +2450,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       if (el.value === "" && el.dataset.key !== "on_below") return;
       this._save(`preg-${el.dataset.key}`, { type: `${WS}/preliminary/set`, [el.dataset.key]: el.value === "" ? null : Number(el.value) }, "Global default");
     } else if (c === "vac-mood" && el.value) {
-      this._ui.vacPick = false;
-      this._save("vacancy", { type: `${WS}/room/set`, area_id: area, vacancy_action: "vacant_mood", vacancy_mood: el.value }, `Vacant mood: ${el.value}`);
+      this._ui.vacMoodPick = false;
+      this._saveVacant("vac-others", { mood: el.value, others: "mood" }, `Like ${el.value}`);
     } else if (c === "pr-enabled") {
       this._save(`pr-${el.dataset.entity}`, { type: `${WS}/presence/sensor`, area_id: area, entity_id: el.dataset.entity, enabled: el.checked },
         el.checked ? "Used" : "Not used here");
@@ -2359,6 +2569,9 @@ const STYLE = `<style>
   .btn { padding: 6px 16px; border-radius: 18px; border: 1px solid var(--primary-color); background: var(--primary-color); color: var(--text-primary-color, #fff); }
   .btn.ghost { background: transparent; color: var(--primary-color); }
   .btn.small { padding: 3px 12px; font-size: 0.9em; }
+  .btn.warnbtn { background: transparent; color: var(--warning-color, #ff9800); border-color: var(--warning-color, #ff9800); }
+  .btn[disabled] { opacity: 0.5; cursor: default; }
+  .btn ha-icon { --mdc-icon-size: 16px; margin-right: 4px; vertical-align: -3px; }
   .btn.primary { font-weight: 500; }
   .link { border: none; background: none; color: var(--primary-color); padding: 0 4px; text-decoration: underline; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; }

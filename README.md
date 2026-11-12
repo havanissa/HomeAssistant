@@ -8,15 +8,19 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **0.3.9** adds **possible occupancy lighting**: a dim, temporary light at the first sign of someone (for example PIR motion) while occupancy is being confirmed, handed over to the normal lighting or switched off on confirmation, and removed again if occupancy is not confirmed (see [Possible occupancy](#possible-occupancy-039)). The room card's configuration sections moved into a **Settings** submenu (gear icon); the Overview keeps the Observing / Automatic control and every wall switch's Observing / Active control.
 
+**0.4.0** adds **Occupied and Vacant lighting profiles**. The mood profiles you already have are the room's *Occupied* profile. Each room (and the global defaults) can also have a *Vacant* profile per mood: what each light type or single light does while the room is empty, for example the LEGO cabinet at 20 % and the floor lamps off in *Kvøld*. It re-applies when the mood or the daylight changes while the room stays empty, and goes straight from one profile to the other without switching everything off first. Editing a profile no longer changes any light: changes are used at the next trigger, or when you explicitly **Test** a profile (see [Occupied and Vacant profiles](#occupied-and-vacant-profiles-040)).
+
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
 - changes the mood selectors or any other helper (they are only *read*), except when you press a wall switch button that you assigned to *Select mood (all rooms)*: that selects the option on your Manual Mood selector. Main Mood is never written
 - takes over a wall switch, changes Zigbee bindings, or publishes MQTT messages
 - controls lights in a room that was not explicitly activated
-- switches lights off because a room became vacant, unless the room is in **Automatic** and its vacancy behaviour is *Turn off* or a *Vacant mood* (0.3.8); ambient lights are never switched off by vacancy
+- switches lights off because a room became vacant, unless the room is in **Automatic** and its vacancy behaviour is *Turn off* or the *Vacant profile* (0.3.8, 0.4.0); ambient lights are never switched off by vacancy
+- switches a light on in an empty room, unless the room is in **Automatic**, its vacancy behaviour is the *Vacant profile*, and that profile switches the light on in the current mood (only when it is dark, unless you made that light an exception) (0.4.0)
+- changes a light because you edited a profile; only an explicit, confirmed **Test** sends commands (0.4.0)
 - switches a light on for *possible* occupancy, unless the room is in **Automatic** and that light was chosen as its preliminary light (0.3.9); it switches off only a preliminary light it switched on itself and nobody changed since
-- switches lights off, or changes their brightness or colour, because of daylight or a lux reading
+- switches lights off, or changes their brightness or colour, because of daylight or a lux reading, except a light that a room's Vacant profile wants *only when dark*: in an empty room it is switched off again when daylight is enough (0.4.0)
 - switches a light on because the global brightness or colour temperature changed
 - sends any automatic lighting command while Main Mood is **Manual**
 - calculates its own adaptive lighting: it only reads the values your existing system publishes
@@ -171,10 +175,11 @@ One shared executor for every mood. In an activated room it applies the room's e
 - the effective mood changes (Main Mood, or the room mood)
 - occupancy is **newly confirmed** (a new visit; Phase 0.2 engine, no second occupancy engine)
 - the room is activated
-- a profile entry changes; only the lights whose resolved setting changed get a command
 - a light that was offline during an application comes back
 
-When the room **becomes vacant**, its vacancy action runs once (see [Vacancy](#vacancy-038)).
+Editing a profile sends nothing (0.4.0): the change is used at the next of these triggers, or when you **Test** the profile.
+
+When the room **becomes vacant**, its vacancy action runs once (see [Vacancy](#vacancy-038)). With the *Vacant profile* it runs again whenever the mood or the daylight changes while the room stays empty.
 
 It sends nothing when:
 - the light already is in the requested state, or the same command was sent and nobody changed the light since
@@ -276,7 +281,7 @@ The log is kept in the integration's existing state file (`.storage/smart_occupa
 | Choice | What happens when the room becomes vacant |
 |---|---|
 | **Turn off** (default) | Lights that are on are switched off. |
-| **Vacant mood** | The chosen mood's light settings are applied to the lights that are on: per light type On (with its brightness and colour), Off, or left unchanged. Nothing is switched on in the empty room. Use a mood such as *Nátt* with dim lamps and the spots off. |
+| **Vacant profile** (0.4.0; *Vacant mood* before) | The room's [Vacant profile](#occupied-and-vacant-profiles-040) of the current mood is applied: per light type or light On (brightness, colour, transition), Off, or left unchanged. Lights it does not set are switched off or left unchanged. It runs again when the mood or the daylight changes while the room stays empty. |
 | **Leave unchanged** | Nothing is changed. The log says so: *Lights left unchanged: room vacancy behavior is configured to Leave Unchanged.* |
 
 - **When.** The action runs when the occupancy engine confirms vacancy, after the room's **vacancy timeout** (see [Presence tab](#presence-tab-038)). There is no extra timer. Presence that returns during the timeout cancels it: nothing is switched off, so nothing has to be switched on again. The log shows *Vacancy timeout started* and then *Vacancy cancelled* or *Vacancy timeout expired*.
@@ -284,6 +289,29 @@ The log is kept in the integration's existing state file (`.storage/smart_occupa
 - **Manual overrides.** An override made while the room was occupied ends with the vacancy (as before), so that light is switched off too. An override made after the room went quiet (someone changed a light in the empty room, e.g. from the app) is respected until it expires. If the room is still vacant then, the vacancy action runs for that light.
 - **Unavailable lights** are reported (*Partly failed*, *Failed*) and handled when they come back, if the room is still vacant.
 - Switching a vacant room to Automatic switches nothing off. The action runs when a room *becomes* vacant.
+
+### Occupied and Vacant profiles (0.4.0)
+
+The mood profiles of earlier releases are the **Occupied** profile. The **Vacant** profile is what a room's lights do while it is empty and its vacancy behaviour is *Vacant profile*. Both are edited the same way, per mood, in the **Overrides** tab of the room card and in the **Smart Lighting** card (global defaults): pick **Occupied** or **Vacant** above the light types.
+
+Example, Stova · Vacant · Kvøld:
+
+| Light | Action | Brightness | Temperature |
+|---|---|---|---|
+| Floor lamps | Off | — | — |
+| LEGO cabinet | On | 20 % | 2200 K |
+| Dining lights | Off (not set: *Lights it does not set* = Turn off) | — | — |
+
+- **Per light.** Each light type or single light is *On* (brightness, colour temperature, RGB colour or effect where the light supports it, transition), *Off*, *Leave unchanged*, or not set. Only the capabilities the lights have are offered. Groups work as everywhere else. A light can still be removed from automatic lighting entirely in the Lights tab.
+- **Lights it does not set** follow the room's setting under *Settings → Automatic → When the room becomes vacant*: **Turn off** (default) or **Leave unchanged**, as a room value or the global default. A room that used the 0.3.8 *Vacant mood* keeps exactly its old behaviour after the upgrade: the lights it does not set get that mood's normal settings while they are on (*Like a mood*). Set them in the Vacant profile, or choose *Turn off* or *Leave unchanged*, to change that.
+- **Inheritance.** Light (mood, then *every mood*) → room (mood, then *every mood*) → global (the mood, its parent and fallback moods, then *every mood*). Each value shows where it comes from: *overridden* for a room value, *from global Kvøld* for an inherited one. *Use the inherited settings* removes a room's values for one mood. A Vacant value never comes from the Occupied profile. *Ambient* belongs to the Occupied profile: an ambient light keeps following the Occupied profile in an empty room, so the two profiles never control the same light.
+- **Daylight.** By default a profile switches an off light on only when the room needs light, by the room's daylight rules (sensor, outdoor light, sun, fallback when a reading is unknown, unavailable or stale). Per light type or light, **Switch on: Also in daylight** makes an exception, for example a window lamp. The Vacant profile can have its own **light level** (room value or global default; empty: the room's). It keeps the room's hysteresis (back above twice the level, by default, counts as daylight) and stability period, so it does not flicker around the threshold. While the room is empty a light the Vacant profile wants *only when dark* is switched on when it becomes dark and off again when daylight is enough. In an occupied room nothing is switched off because of daylight.
+- **Mood changes.** When Main Mood (or the room mood) changes, an empty room gets the new mood's Vacant profile right away, without waiting for a sensor event. Identical commands are not sent again.
+- **Transitions.** Occupied → vacant (after the vacancy timeout) and vacant → occupied (on confirmed occupancy) set every light directly to its new setting. A light that is on in both is adjusted, never switched off and on again. A queued change of the other profile finds the room changed and does nothing.
+- **Manual changes** are respected as everywhere: a light a person changed in the empty room is left alone until the override ends.
+- **Copy, reset, preview and test** (under the light types): *Copy from* copies another mood or the other profile into the one you are editing (for example *Occupied · Kvøld* into *Vacant · Kvøld* as a starting point). It copies what the source gives each light type of this room now, global and room values together, plus single-light values. *Use the inherited settings* removes the room's values. *Preview* shows the plan as if the room were occupied or vacant and never changes a light. **Test on the lights…** asks first, then sends the profile to the room's lights now, whatever the occupancy and daylight, also in Observing and in Manual mood. The tested lights are then a manual change (for the room's manual-override time), so automatic lighting leaves them alone. *Resume automatic lighting for these lights* ends that. The Preview tab has the same profile choice and Test button.
+- **Log.** *Apply Vacant profile (Kvøld)* entries say what was switched on, off or adjusted and why: room vacant, mood changed while the room is vacant, it became dark, daylight is enough. *Test vacant profile Kvøld* records a test. The diagnostics show the effective Vacant settings, whether the Vacant profile is in charge now, and its daylight decision (`lighting.rooms.<room>.vacancy`).
+- **Existing automations** that also control a room's lights are never disabled or changed. They are reported as conflicts (Advanced → activation review), and those lights are left alone until you acknowledge them.
 
 ### Possible occupancy (0.3.9)
 

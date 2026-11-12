@@ -7,8 +7,8 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.3.5"
-VERSION: Final = "0.3.13"
+PHASE: Final = "0.4.0"
+VERSION: Final = "0.4.0"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -225,7 +225,8 @@ LIGHTING_STORE_VERSION: Final = 1
 # Minor 3 (0.3.5): wall switches and remotes (every room starts with none; legacy entities kept).
 # Minor 4 (0.3.8): what automatic lighting does when a room becomes vacant (rooms without a setting: Turn off).
 # Minor 5 (0.3.9): possible occupancy lighting (disabled; no room has a preliminary light).
-LIGHTING_STORE_MINOR_VERSION: Final = 5
+# Minor 6 (0.4.0): occupied and vacant lighting profiles (vacant tables empty; a 0.3.8 vacant mood is kept).
+LIGHTING_STORE_MINOR_VERSION: Final = 6
 LIGHTING_STORE_KEY: Final = "smart_occupancy.lighting"
 LIGHTING_SAVE_DELAY_SECONDS: Final = 1
 # Runtime state of mood lighting (manual overrides, last applied profile).
@@ -287,11 +288,36 @@ class VacancyAction(StrEnum):
     """What automatic lighting does when a room becomes vacant (0.3.8)."""
 
     TURN_OFF = "turn_off"        # switch the room's lights off (ambient lights keep following the mood)
-    VACANT_MOOD = "vacant_mood"  # apply a chosen mood's profile to the lights that are on
+    VACANT_MOOD = "vacant_mood"  # apply the room's Vacant profile of the current mood (0.4.0)
     LEAVE = "leave"              # leave every light as it is
 
 
 DEFAULT_VACANCY_ACTION: Final = VacancyAction.TURN_OFF
+
+
+class Profile(StrEnum):
+    """Which lighting profile a table, an entry or a plan belongs to (0.4.0)."""
+
+    OCCUPIED = "occupied"        # the mood profiles of every release before 0.4.0
+    VACANT = "vacant"            # applied while the room is vacant (vacancy action "Vacant mood")
+
+
+class VacantOthers(StrEnum):
+    """Vacant mood: what happens to a light that the Vacant profile does not set (0.4.0)."""
+
+    OFF = "off"                  # switched off (default)
+    LEAVE = "leave"              # left as it is
+    MOOD = "mood"                # 0.3.8 behaviour: a chosen mood's normal settings, lights that are on only
+
+
+DEFAULT_VACANT_OTHERS: Final = VacantOthers.OFF
+
+
+class DaylightCondition(StrEnum):
+    """Whether a profile entry may switch an off light on in daylight (0.4.0)."""
+
+    DARK = "dark"                # only when the room needs artificial light (the room's daylight rules)
+    ALWAYS = "always"            # regardless of daylight (an explicit exception)
 
 
 class LightingMode(StrEnum):

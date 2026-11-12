@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0 — Occupied and Vacant lighting profiles
+
+### Added
+
+- **Vacant profile** per room and mood, next to the existing mood profiles (now called the **Occupied** profile). It is edited like them: per light type and single light, On (brightness, colour temperature, RGB, effect, transition), Off, Leave unchanged or not set, with the same inheritance: light → room → global, each with the mood, its parent and fallback moods, and *every mood*. Global Vacant defaults are in the Smart Lighting card; rooms override them in the Overrides tab. Choose **Occupied | Vacant** above the light types.
+- **Vacancy behaviour *Vacant profile*** (was *Vacant mood*): when the room becomes vacant, its Vacant profile of the current mood is applied. Unlike the 0.3.8 vacant mood it can switch decorative lights **on** in the empty room. Lights it does not set are switched off (default) or left unchanged (room value or global default). Turn off and Leave unchanged never use a Vacant profile.
+- **Mood changes in an empty room** apply the new mood's Vacant profile at once, without a sensor event. Ambient lights keep following the Occupied profile in the same plan, so the two profiles never control the same light.
+- **Daylight condition per light type or light**: *Only when dark* (default) or *Also in daylight* (an explicit exception, for example a window lamp), in both profiles. The Vacant profile can have its **own light level** (room value or global default) with the room's hysteresis and stability period. In an empty room a light it wants only in the dark is switched on when it becomes dark and off again when daylight is enough.
+- **Copy, reset, preview and test** per profile and mood: copy a mood or the other profile (for example Occupied into Vacant as a starting point); reset a room's values to the inherited ones; preview a profile as if the room were occupied or vacant; and **Test on the lights…**, which asks first, sends the profile to the lights now, and keeps the tested lights as a manual change (*Resume automatic lighting for these lights* ends it).
+- Decision log entries *Apply Vacant profile (…)* and *Test … profile …*; diagnostics `vacancy.effective_others`, `effective_on_below`, `vacant_profile_in_charge`, `daylight_gate`.
+- Websocket commands `vacant/set`, `profile/copy`, `profile/reset`, `profile/test`; `profile` on `editor`, `profile/set` and `preview`.
+
+### Changed
+
+- **Editing a profile no longer changes any light.** Before 0.4.0 a changed profile entry was applied at once to the lights it affected. Now it is used at the next trigger (mood change, confirmed occupancy, darkness, vacancy), or when you Test the profile.
+- *Vacant mood* no longer needs a mood chosen.
+
+### Upgrade
+
+- Lighting store 1.5 → 1.6. Every Vacant table starts empty. A room that used the 0.3.8 *Vacant mood* keeps exactly its behaviour (*Lights it does not set: Like a mood*): the lights the Vacant profile does not set get that mood's normal settings while they are on, and none is switched on. Nothing else changes: Turn off and Leave unchanged rooms are not affected, and no room gets a new light command from the upgrade. A 0.3.13 install reads a 1.6 store and ignores the new keys.
+- Restart Home Assistant after updating; reload the browser for the cards.
+
+### Not included
+
+- **Scenes as profile targets.** A scene sets lights itself. As a target it would compete with the per-light settings of the same profile, and there is no reliable way to tell whether it is already applied (to avoid repeating it). Lights and light groups are supported; a scene can still be assigned to a wall switch button.
+
 ## 0.3.13 — Turn off on confirmation waits until the normal lighting is really on
 
 ### Changed

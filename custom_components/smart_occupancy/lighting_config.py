@@ -32,13 +32,21 @@ Persisted shape (store version 1)::
           "dismissed": [problem subjects],
           "daylight": {...},                           # 0.3.3: daylight-aware switch-on (daylight.RoomDaylight)
           "switches": [{...}],                         # 0.3.5: wall switches / remotes (switches.SwitchConfig)
-          "vacancy": {"action": "turn_off", "mood": null},  # 0.3.8: when the room becomes vacant
+          "vacancy": {"action": "turn_off", "mood": null,   # 0.3.8: when the room becomes vacant
+                      "others": null, "on_below": null},     # 0.4.0: Vacant profile settings (null: global)
+          "vacant_overrides": {mood: {category_key: setting}},        # 0.4.0: room Vacant profile
+          "vacant_light_overrides": {mood: {light entity id: setting}},  # 0.4.0
           "preliminary": {"enabled": null, "timeout": null, "on_below": null,   # 0.3.9: possible occupancy
                           "signals": null, "targets": [{...}]}}},          #   lighting (preliminary.RoomPreliminary)
       "daylight": {"outdoor_entity": null, ...},     # 0.3.3: global daylight settings (daylight.DaylightConfig)
       "switch_settings": {"mqtt_base_topic": "zigbee2mqtt"},  # 0.3.5 (switches.SwitchSettings)
-      "preliminary": {"enabled": false, "timeout": 30, ...}   # 0.3.9: global defaults (preliminary.PreliminaryDefaults)
+      "preliminary": {"enabled": false, "timeout": 30, ...},  # 0.3.9: global defaults (preliminary.PreliminaryDefaults)
+      "global_vacant": {mood: {category_key: setting}},       # 0.4.0: global Vacant profile
+      "vacant": {"others": "off", "on_below": null}           # 0.4.0: global Vacant profile defaults
     }
+
+The tables without "vacant" in their name are the **Occupied** profile (every
+release before 0.4.0 had only that one).
 
 Profile tables may contain the pseudo mood ``"*"`` (every mood, 0.3.2).
 
@@ -76,6 +84,16 @@ light. A room changes nothing until it is enabled *and* has a preliminary
 light, so no room gets extra lighting from the migration, and later changes
 of the global defaults never overwrite a room's own values. A 0.3.8 install
 reads a 1.5 store as is and ignores the new keys.
+
+Store 1.6 (0.4.0) adds the Vacant profile: ``global_vacant`` and the global
+``vacant`` defaults, and per room ``vacant_overrides``,
+``vacant_light_overrides`` and the vacancy keys ``others`` and ``on_below``.
+Every vacant table starts empty. A room that used the 0.3.8 "vacant mood"
+(action ``vacant_mood`` with a mood) gets ``others: "mood"``: every light
+keeps getting that mood's normal settings while it is on, exactly as before,
+until the user gives it a Vacant setting. Every other room keeps its action;
+Turn off and Leave unchanged never use a Vacant profile. A 0.3.13 install
+reads a 1.6 store as is and ignores the new keys.
 """
 
 from __future__ import annotations
@@ -104,10 +122,15 @@ from .const import (
     MANUAL_OVERRIDE_MAX_MINUTES,
     TRANSITION_MAX,
     DEFAULT_VACANCY_ACTION,
+    DEFAULT_VACANT_OTHERS,
+    LUX_MAX_THRESHOLD,
+    LUX_MIN,
+    Profile,
     SourceScale,
     UnattributedPolicy,
     UnrepresentableMode,
     VacancyAction,
+    VacantOthers,
 )
 from .const import LIGHTING_STORE_MINOR_VERSION
 from .daylight import DaylightConfig, RoomDaylight
@@ -254,17 +277,52 @@ class UnrepresentableHandling:
         return {"mode": self.mode.value, "mood": self.mood}
 
 
+def _lux(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(min(max(float(value), LUX_MIN), LUX_MAX_THRESHOLD))
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class VacantDefaults:
+    """Global defaults of the Vacant profile (0.4.0); a room that does not set a value follows them."""
+
+    others: VacantOthers = DEFAULT_VACANT_OTHERS
+    # None: the room's normal darkness threshold (and its hysteresis).
+    on_below: int | None = None
+
+    @classmethod
+    def from_dict(cls, data: Any) -> VacantDefaults:
+        data = data if isinstance(data, dict) else {}
+        others = _enum_or(VacantOthers, data.get("others"), DEFAULT_VACANT_OTHERS)
+        # "Like a mood" needs a mood, which is chosen per room.
+        return cls(others=DEFAULT_VACANT_OTHERS if others == VacantOthers.MOOD else others,
+                   on_below=_lux(data.get("on_below")))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"others": self.others.value, "on_below": self.on_below}
+
+
 @dataclass(frozen=True, slots=True)
 class RoomVacancy:
-    """What automatic lighting does when the room becomes vacant (0.3.8).
+    """What automatic lighting does when the room becomes vacant (0.3.8, Vacant profile 0.4.0).
 
-    ``mood`` is the mood whose profile is applied for ``vacant_mood`` (the
-    existing profile system: light types, room and light overrides). It is
-    kept when another action is chosen, so switching back restores it.
+    ``vacant_mood`` applies the room's Vacant profile of the current mood.
+    ``others`` says what happens to a light that the Vacant profile does not
+    set (``None``: the global default); ``mood`` is the mood used by
+    ``others == "mood"`` (the 0.3.8 behaviour: that mood's normal settings,
+    for lights that are on). ``mood`` is kept when another choice is made, so
+    switching back restores it. ``on_below``: the Vacant profile's own
+    darkness threshold (``None``: the global default, else the room's).
     """
 
     action: VacancyAction = DEFAULT_VACANCY_ACTION
     mood: str | None = None
+    others: VacantOthers | None = None
+    on_below: int | None = None
 
     @classmethod
     def from_dict(cls, data: Any) -> RoomVacancy:
@@ -273,10 +331,13 @@ class RoomVacancy:
         return cls(
             action=_enum_or(VacancyAction, data.get("action"), DEFAULT_VACANCY_ACTION),
             mood=(mood.strip() or None) if isinstance(mood, str) else None,
+            others=_enum_or(VacantOthers, data.get("others"), None),
+            on_below=_lux(data.get("on_below")),
         )
 
     def as_dict(self) -> dict[str, Any]:
-        return {"action": self.action.value, "mood": self.mood}
+        return {"action": self.action.value, "mood": self.mood,
+                "others": self.others.value if self.others else None, "on_below": self.on_below}
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +371,15 @@ class RoomLighting:
     vacancy: RoomVacancy = field(default_factory=RoomVacancy)
     # Possible occupancy lighting (0.3.9).
     preliminary: RoomPreliminary = field(default_factory=RoomPreliminary)
+    # The room's Vacant profile (0.4.0): light types and single lights, per mood.
+    vacant_overrides: ProfileTable = field(default_factory=dict)
+    vacant_light_overrides: ProfileTable = field(default_factory=dict)
+
+    def type_table(self, profile: Profile = Profile.OCCUPIED) -> ProfileTable:
+        return self.vacant_overrides if profile == Profile.VACANT else self.mood_overrides
+
+    def light_table(self, profile: Profile = Profile.OCCUPIED) -> ProfileTable:
+        return self.vacant_light_overrides if profile == Profile.VACANT else self.light_overrides
 
     def switch(self, switch_id: str) -> SwitchConfig | None:
         return next((s for s in self.switches if s.id == switch_id), None)
@@ -343,6 +413,8 @@ class RoomLighting:
             switches=switches_from(data.get("switches")),
             vacancy=RoomVacancy.from_dict(data.get("vacancy")),
             preliminary=RoomPreliminary.from_dict(data.get("preliminary")),
+            vacant_overrides=_table_from(data.get("vacant_overrides")),
+            vacant_light_overrides=_table_from(data.get("vacant_light_overrides")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -363,6 +435,8 @@ class RoomLighting:
             "switches": [s.as_dict() for s in self.switches],
             "vacancy": self.vacancy.as_dict(),
             "preliminary": self.preliminary.as_dict(),
+            "vacant_overrides": _table_as_dict(self.vacant_overrides),
+            "vacant_light_overrides": _table_as_dict(self.vacant_light_overrides),
         }
 
 
@@ -385,6 +459,23 @@ class LightingConfig:
     switch_settings: SwitchSettings = field(default_factory=SwitchSettings)
     # Possible occupancy lighting: global defaults (0.3.9).
     preliminary: PreliminaryDefaults = field(default_factory=PreliminaryDefaults)
+    # The global Vacant profile and its defaults (0.4.0).
+    global_vacant: ProfileTable = field(default_factory=dict)
+    vacant: VacantDefaults = field(default_factory=VacantDefaults)
+
+    def global_table(self, profile: Profile = Profile.OCCUPIED) -> ProfileTable:
+        return self.global_vacant if profile == Profile.VACANT else self.global_profiles
+
+    def vacant_others(self, area_id: str) -> VacantOthers:
+        """What the Vacant profile does with a light it does not set, in one room."""
+        room = self.room(area_id).vacancy
+        others = room.others or self.vacant.others
+        return VacantOthers.OFF if others == VacantOthers.MOOD and not room.mood else others
+
+    def vacant_on_below(self, area_id: str) -> int | None:
+        """The Vacant profile's darkness threshold in one room; None: the room's normal one."""
+        room = self.room(area_id).vacancy
+        return room.on_below if room.on_below is not None else self.vacant.on_below
 
     @classmethod
     def from_dict(cls, data: Any) -> LightingConfig:
@@ -408,6 +499,8 @@ class LightingConfig:
             daylight=DaylightConfig.from_dict(data.get("daylight")),
             switch_settings=SwitchSettings.from_dict(data.get("switch_settings")),
             preliminary=PreliminaryDefaults.from_dict(data.get("preliminary")),
+            global_vacant=_table_from(data.get("global_vacant")),
+            vacant=VacantDefaults.from_dict(data.get("vacant")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -425,6 +518,8 @@ class LightingConfig:
             "daylight": self.daylight.as_dict(),
             "switch_settings": self.switch_settings.as_dict(),
             "preliminary": self.preliminary.as_dict(),
+            "global_vacant": _table_as_dict(self.global_vacant),
+            "vacant": self.vacant.as_dict(),
         }
 
     def room(self, area_id: str) -> RoomLighting:
@@ -478,8 +573,9 @@ def set_profile(
     target: str,
     setting: ProfileSetting | None,
     area_id: str | None = None,
+    profile: Profile = Profile.OCCUPIED,
 ) -> LightingConfig:
-    """Store (or with ``None`` remove) one profile entry."""
+    """Store (or with ``None`` remove) one profile entry of the Occupied or the Vacant profile."""
 
     def update(table: ProfileTable) -> ProfileTable:
         out = {m: dict(t) for m, t in table.items()}
@@ -492,16 +588,52 @@ def set_profile(
             targets[target] = setting
         return {m: t for m, t in out.items() if t}
 
+    vacant = profile == Profile.VACANT
     if scope == "global":
-        return replace(config, global_profiles=update(config.global_profiles))
+        key = "global_vacant" if vacant else "global_profiles"
+        return replace(config, **{key: update(config.global_table(profile))})
     if not area_id:
         raise ValueError("area_id is required for room and light entries")
     room = config.room(area_id)
     if scope == "room":
-        return config.with_room(area_id, replace(room, mood_overrides=update(room.mood_overrides)))
+        key = "vacant_overrides" if vacant else "mood_overrides"
+        return config.with_room(area_id, replace(room, **{key: update(room.type_table(profile))}))
     if scope == "light":
-        return config.with_room(area_id, replace(room, light_overrides=update(room.light_overrides)))
+        key = "vacant_light_overrides" if vacant else "light_overrides"
+        return config.with_room(area_id, replace(room, **{key: update(room.light_table(profile))}))
     raise ValueError(f"unknown scope {scope}")
+
+
+def replace_mood_entries(
+    config: LightingConfig,
+    mood: str,
+    profile: Profile,
+    *,
+    area_id: str | None = None,
+    types: dict[str, ProfileSetting] | None = None,
+    lights: dict[str, ProfileSetting] | None = None,
+) -> LightingConfig:
+    """Replace every entry of one mood in one profile (copy, reset): the room's, or the global ones.
+
+    ``None`` (or empty) removes them, so the mood inherits again.
+    """
+
+    def put(table: ProfileTable, entries: dict[str, ProfileSetting] | None) -> ProfileTable:
+        out = {m: dict(t) for m, t in table.items() if _norm(m) != _norm(mood)}
+        kept = {t: s for t, s in (entries or {}).items() if not s.is_empty}
+        if kept:
+            key = next((m for m in table if _norm(m) == _norm(mood)), mood)
+            out[key] = kept
+        return out
+
+    vacant = profile == Profile.VACANT
+    if area_id is None:
+        key = "global_vacant" if vacant else "global_profiles"
+        return replace(config, **{key: put(config.global_table(profile), types)})
+    room = config.room(area_id)
+    changes = {("vacant_overrides" if vacant else "mood_overrides"): put(room.type_table(profile), types),
+               ("vacant_light_overrides" if vacant else "light_overrides"): put(room.light_table(profile), lights)}
+    return config.with_room(area_id, replace(room, **changes))
 
 
 def parent_cycle(config: LightingConfig, mood: str, parent: str | None) -> list[str] | None:
@@ -529,7 +661,9 @@ def without_categories(config: LightingConfig, keys: set[str]) -> LightingConfig
     return replace(
         config,
         global_profiles=strip(config.global_profiles),
-        rooms={a: replace(r, mood_overrides=strip(r.mood_overrides)) for a, r in config.rooms.items()},
+        global_vacant=strip(config.global_vacant),
+        rooms={a: replace(r, mood_overrides=strip(r.mood_overrides), vacant_overrides=strip(r.vacant_overrides))
+               for a, r in config.rooms.items()},
     )
 
 
@@ -598,6 +732,7 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
             excluded=sub_ids(room.excluded),
             manual_switches=sub_ids(room.manual_switches),
             light_overrides=sub_table(room.light_overrides),
+            vacant_light_overrides=sub_table(room.vacant_light_overrides),
             daylight=sub_daylight(room.daylight),
             switches=tuple(sub_switch(s) for s in room.switches),
         )
@@ -656,6 +791,25 @@ def migrate_store(old_major: int, old_minor: int, data: dict[str, Any]) -> dict[
             room = dict(room) if isinstance(room, dict) else {}
             if not isinstance(room.get("preliminary"), dict):
                 room["preliminary"] = RoomPreliminary().as_dict()
+            rooms[area_id] = room
+        data["rooms"] = rooms
+    if old_minor < 6:
+        # Occupied and Vacant profiles (0.4.0): every vacant table starts empty. A room that used the 0.3.8 vacant
+        # mood keeps exactly its behaviour: lights without a Vacant setting get that mood's settings while on.
+        data.setdefault("global_vacant", {})
+        if not isinstance(data.get("vacant"), dict):
+            data["vacant"] = VacantDefaults().as_dict()
+        rooms = {}
+        for area_id, room in (data.get("rooms") or {}).items():
+            room = dict(room) if isinstance(room, dict) else {}
+            vacancy = dict(room["vacancy"]) if isinstance(room.get("vacancy"), dict) else {}
+            if "others" not in vacancy:
+                legacy = vacancy.get("action") == VacancyAction.VACANT_MOOD.value and vacancy.get("mood")
+                vacancy["others"] = VacantOthers.MOOD.value if legacy else None
+            vacancy.setdefault("on_below", None)
+            room["vacancy"] = vacancy
+            room.setdefault("vacant_overrides", {})
+            room.setdefault("vacant_light_overrides", {})
             rooms[area_id] = room
         data["rooms"] = rooms
     return data

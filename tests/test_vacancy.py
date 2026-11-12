@@ -13,7 +13,7 @@ from typing import Any
 from homeassistant.core import Context, HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 
-from custom_components.smart_occupancy.const import VacancyAction
+from custom_components.smart_occupancy.const import VacancyAction, VacantOthers
 from custom_components.smart_occupancy.daylight import RoomDaylight
 from custom_components.smart_occupancy.lighting_config import RoomVacancy, migrate_store
 from custom_components.smart_occupancy.models import ProfileSetting
@@ -127,8 +127,10 @@ async def test_return_before_the_timeout_cancels(hass: HomeAssistant, lit: Lit, 
 
 # --------------------------------------------------------------- Vacant mood
 async def test_vacant_mood_applies_a_profile_to_lights_that_are_on(hass: HomeAssistant, lit: Lit, freezer) -> None:
-    """Nátt: downlights off, lamps 10 % 2200 K, LED strips not set (left as they are); nothing switched on."""
-    _entry, ctrl, seen = await ready(hass, lit, freezer, vacancy=RoomVacancy(VacancyAction.VACANT_MOOD, "Nátt"))
+    """The 0.3.8 vacant mood, kept by rooms that used it (others: like a mood). Nátt: downlights off, lamps
+    10 % 2200 K, LED strips not set (left as they are); nothing switched on."""
+    _entry, ctrl, seen = await ready(hass, lit, freezer,
+                                     vacancy=RoomVacancy(VacancyAction.VACANT_MOOD, "Nátt", VacantOthers.MOOD))
     hass.states.async_set(lit.desk, "off", hass.states.get(lit.desk).attributes, context=Context(user_id="person"))
     await advance(hass, freezer, 2)
     seen.clear()
@@ -299,8 +301,8 @@ async def test_lights_already_off_are_not_logged_again(hass: HomeAssistant, lit:
 def test_store_migration_gives_turn_off_and_keeps_existing_values() -> None:
     data = {"rooms": {"a": {"control_enabled": True}, "b": {"vacancy": {"action": "leave", "mood": None}}}}
     out = migrate_store(1, 3, data)
-    assert out["rooms"]["a"]["vacancy"] == {"action": "turn_off", "mood": None}
-    assert out["rooms"]["b"]["vacancy"] == {"action": "leave", "mood": None}
+    assert out["rooms"]["a"]["vacancy"] == {"action": "turn_off", "mood": None, "others": None, "on_below": None}
+    assert out["rooms"]["b"]["vacancy"] == {"action": "leave", "mood": None, "others": None, "on_below": None}
     assert out["rooms"]["a"]["control_enabled"] is True  # everything else is kept
     # A 1.3 store loads with the new default; unknown values fall back to it too.
     assert RoomVacancy.from_dict({"action": "bogus"}).action == VacancyAction.TURN_OFF
@@ -323,8 +325,9 @@ async def test_vacancy_setting_over_the_websocket(hass: HomeAssistant, lit: Lit,
     ctrl = ctrl_of(entry)
     ws = WS(await hass_ws_client(hass))
     room_set = "smart_occupancy/lighting/room/set"
-    reply = await ws(type=room_set, area_id=lit.area, vacancy_action="vacant_mood")
-    assert reply["error"]["message"] == "Choose the mood to apply when the room is vacant"
+    # 0.4.0: Vacant mood applies the room's Vacant profile of the current mood; no mood has to be chosen.
+    assert (await ws(type=room_set, area_id=lit.area, vacancy_action="vacant_mood"))["success"]
+    assert ctrl.lighting.room(lit.area).vacancy == RoomVacancy(VacancyAction.VACANT_MOOD)
     reply = await ws(type=room_set, area_id=lit.area, vacancy_action="vacant_mood", vacancy_mood="Manual")
     assert not reply["success"]
     assert (await ws(type=room_set, area_id=lit.area, vacancy_action="vacant_mood", vacancy_mood="Nátt"))["success"]

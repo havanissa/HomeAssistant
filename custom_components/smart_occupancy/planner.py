@@ -31,9 +31,19 @@ Vacancy plans (0.3.8, ``build_vacancy_plan``) decide what happens to the
 room's lights when it has become vacant, by the room's vacancy action:
 
 * ``turn_off``: lights that are on are switched off;
-* ``vacant_mood``: the chosen mood's profile is applied to the lights that
-  are on (On with its brightness and colour, Off, or left unchanged); it
-  never switches an off light on in an empty room;
+* ``vacant_mood`` (0.4.0): the room's **Vacant profile** of the current mood
+  is applied: each light it sets is switched on (brightness, colour,
+  transition), switched off, or left unchanged. A light it does not set is
+  switched off or left unchanged (the room's or global "others" setting), or,
+  for a room that used the 0.3.8 vacant mood, gets that mood's normal
+  settings while it is on (it is never switched on, as in 0.3.8). The
+  Vacant profile switches an off light on only when its daylight decision
+  says the room needs light (its own threshold, if one is set), unless the
+  entry's daylight condition is ``always``; in daylight a light it wants
+  only in the dark is switched off (nobody is in the room). The same plan
+  runs again when the mood or the daylight decision changes while the room
+  stays vacant, so it never fights itself: it is the only plan for the
+  room's (non-ambient) lights while the room is vacant;
 * ``leave``: nothing is planned.
 
 Ambient (persistent) settings of the room's current mood are never touched
@@ -60,8 +70,9 @@ from .const import (
     LightAction,
     OccupancyState,
     VacancyAction,
+    VacantOthers,
 )
-from .daylight import DaylightGate
+from .daylight import GATE_NEVER, GATE_NOT_NEEDED, GATE_UNCERTAIN, DaylightGate
 from .lighting import Capabilities
 from .preliminary import TRIGGER as PRELIMINARY_TRIGGER, EffectivePreliminary, describe_setting
 from .profiles import ResolvedSetting
@@ -464,7 +475,8 @@ def build_plan(
                      f"Occupancy is only possible: switched on when it is confirmed ({summary})")
                 continue
             off = t.state != "on" or t.entity_id in preliminary
-            if gate_block and service == "turn_on" and off:
+            if gate_block and service == "turn_on" and off and not (
+                    resolved.in_daylight and gate_block[0] in (GATE_NOT_NEEDED, GATE_UNCERTAIN)):
                 set_(BLOCKED, gate_block[0], gate_block[1])
                 continue
         if matches(t, service, data):
@@ -490,7 +502,8 @@ def build_plan(
         light = ""
         if gate and gate.policy == AutoOn.DARK and service == "turn_on" \
                 and (t.state != "on" or t.entity_id in preliminary) and not resolved.is_persistent:
-            light = f" Daylight: {gate.decision.value} ({gate.text})."
+            light = f" Daylight: {gate.decision.value} ({gate.text})" + (
+                ", switched on regardless of daylight (this light's exception)" if gate_block else "") + "."
         set_(CHANGE, "change", f"{verb} set {summary} because {why}.{ambient}{light}")
     return Plan(area_id, mood, occupancy_state, occupied, trigger, control_enabled, items, note, manual_mode, gate)
 
@@ -510,21 +523,46 @@ def build_vacancy_plan(
     control_enabled: bool,
     note: str | None = None,
     manual_mode: bool = False,
+    others: VacantOthers = VacantOthers.MOOD,
+    resolve_profile=None,
+    gate: DaylightGate | None = None,
+    ambient: Mapping[str, PlanItem] | None = None,
 ) -> Plan:
     """What the room's vacancy action does to each target (see the module docstring). Never sends anything.
 
     ``mood`` is the room's current mood (its ambient lights are kept);
-    ``resolve_current(target)`` / ``resolve_vacant(target)`` resolve the
-    current and the vacant mood for a target.
+    ``resolve_current(target)`` resolves it. Vacant mood (0.4.0):
+    ``resolve_profile(target)`` resolves the room's Vacant profile of ``mood``;
+    a light it does not set follows ``others`` (Off, Leave unchanged, or the
+    0.3.8 behaviour: ``resolve_vacant(target)``, the normal settings of
+    ``vacant_mood``, for lights that are on only). ``gate`` is the Vacant
+    profile's daylight decision. ``ambient``: the Occupied plan's items of
+    the ambient lights, used for them instead of skipping them (a mood
+    change while the room is vacant: one plan for every light).
     """
     items: list[PlanItem] = []
-    plan_mood = vacant_mood if action == VacancyAction.VACANT_MOOD else mood
+    profile = action == VacancyAction.VACANT_MOOD
+    gate_block = gate.blocks() if gate else None
     for t in targets:
         current = resolve_current(t) if mood else ResolvedSetting()
-        resolved = resolve_vacant(t) if action == VacancyAction.VACANT_MOOD and vacant_mood else ResolvedSetting()
+        if current.is_persistent and ambient is not None and t.entity_id in ambient:
+            items.append(ambient[t.entity_id])  # an ambient light keeps following the Occupied profile
+            continue
+        source = "turn_off" if action == VacancyAction.TURN_OFF else None
+        resolved = ResolvedSetting()
+        if profile and mood:
+            resolved = resolve_profile(t) if resolve_profile else ResolvedSetting()
+            if "action" in resolved.sources:
+                source = "profile"
+            elif others == VacantOthers.OFF:
+                source, resolved = "others_off", ResolvedSetting(action=LightAction.OFF)
+            elif others == VacantOthers.MOOD and vacant_mood:
+                source, resolved = "legacy", resolve_vacant(t)
+            else:
+                source = "others_leave"
         if action == VacancyAction.TURN_OFF:
             service, data, requested, unsupported = "turn_off", {}, {"state": "off"}, []
-        elif action == VacancyAction.VACANT_MOOD and vacant_mood:
+        elif profile and mood and source != "others_leave":
             service, data, requested, unsupported = build_command(resolved, t.capabilities)
         else:
             service, data, requested, unsupported = None, {}, {}, []
@@ -540,6 +578,7 @@ def build_vacancy_plan(
         def set_(decision: str, code: str, reason: str, item: PlanItem = item) -> None:
             item.decision, item.reason_code, item.reason = decision, code, reason
 
+        where = f"the Vacant profile ({mood})"
         if t.excluded:
             set_(SKIPPED, "excluded", f"Excluded from automatic management ({t.excluded})")
             continue
@@ -557,9 +596,6 @@ def build_vacancy_plan(
             # Without a mood it is unknown which lights are ambient, so nothing is switched off.
             set_(BLOCKED, "no_mood", "No effective mood, so ambient lights cannot be told apart; nothing is changed")
             continue
-        if action == VacancyAction.VACANT_MOOD and not vacant_mood:
-            set_(BLOCKED, "no_vacant_mood", "No vacant mood is chosen for this room; nothing is changed")
-            continue
         if current.is_persistent:
             set_(SKIPPED, "ambient", f"Ambient in {mood}: follows the mood whether or not the room is occupied")
             continue
@@ -567,20 +603,40 @@ def build_vacancy_plan(
             set_(BLOCKED, "offline", f"Light is {t.state or 'missing'}; it could not be changed")
             continue
         if service is None:
-            set_(UNCHANGED, "vacant_ignore", f"Left as it is: the vacant mood {vacant_mood} does not set it")
+            if source == "others_leave":
+                set_(UNCHANGED, "vacant_unset", f"Left as it is: {where} does not set it")
+            elif source == "legacy":
+                set_(UNCHANGED, "vacant_ignore", f"Left as it is: the vacant mood {vacant_mood} does not set it")
+            else:
+                set_(UNCHANGED, "vacant_ignore", f"Left as it is: {where} says Leave unchanged")
             continue
+        daylight = None
+        if service == "turn_on" and t.state != "on":
+            if source == "legacy":
+                set_(UNCHANGED, "stays_off", f"Stays off: the vacant mood {vacant_mood} does not switch lights on "
+                     "in an empty room")
+                continue
+            if gate_block and not (resolved.in_daylight and gate_block[0] in (GATE_NOT_NEEDED, GATE_UNCERTAIN)):
+                set_(UNCHANGED if gate_block[0] == GATE_NEVER else BLOCKED, gate_block[0],
+                     f"{gate_block[1]} ({where})")
+                continue
+            if gate and gate.policy == AutoOn.DARK:
+                daylight = f" Daylight: {gate.decision.value} ({gate.text})" + (
+                    ", switched on regardless of daylight" if resolved.in_daylight and gate_block else "") + "."
+        elif service == "turn_on" and source == "profile" and gate_block and gate_block[0] != GATE_NEVER \
+                and not resolved.in_daylight:
+            # A light that is only wanted in the dark: in daylight the empty room does not need it.
+            service, data, requested = "turn_off", {}, {"state": "off"}
+            item.service, item.data, item.requested = service, data, requested
+            daylight = f" Daylight is enough ({gate.text if gate else ''}; on below {gate.on_below if gate else ''} lx)."
         if service == "turn_off" and t.state == "off":
             set_(UNCHANGED, "already", "Already off")
             continue
-        if service == "turn_on" and t.state != "on":
-            set_(UNCHANGED, "stays_off", f"Stays off: the vacant mood {vacant_mood} does not switch lights on "
-                 "in an empty room")
-            continue
         if t.override:
             until = t.override.get("until")
-            source = t.override.get("source", "manual")
+            source_word = t.override.get("source", "manual")
             set_(BLOCKED, "manual_override",
-                 f"Manual change ({source}) is respected" + (f" until {until}" if until else ""))
+                 f"Manual change ({source_word}) is respected" + (f" until {until}" if until else ""))
             continue
         if t.conflicts:
             names = ", ".join(c.get("name") or c["automation"] for c in t.conflicts)
@@ -588,16 +644,26 @@ def build_vacancy_plan(
                  f"Also controlled by enabled automation(s) {names}; acknowledge or resolve the conflict first")
             continue
         if service == "turn_on" and matches(t, service, data):
-            set_(UNCHANGED, "already", f"Already in the vacant mood {vacant_mood}")
+            set_(UNCHANGED, "already", f"Already as {where if source == 'profile' else f'the vacant mood {vacant_mood}'}"
+                 " sets it")
+            continue
+        if service == "turn_on" and t.last_command == (service, data) and t.state == "on":
+            set_(UNCHANGED, "already_sent", "The same command was already sent and the light was not changed since")
             continue
         verb = "Will" if control_enabled else "Would"
         if service == "turn_off":
-            why = "the room is vacant" if action == VacancyAction.TURN_OFF else f"the vacant mood {vacant_mood} sets Off"
-            set_(CHANGE, "change", f"{verb} switch off because {why}.")
-        else:
+            why = {"turn_off": "the room is vacant", "others_off": f"{where} does not set it (others: Off)",
+                   "legacy": f"the vacant mood {vacant_mood} sets Off"}.get(source or "", f"{where} sets Off")
+            if daylight:
+                why = f"{where} wants it only in the dark"
+            set_(CHANGE, "change", f"{verb} switch off because {why}.{daylight or ''}")
+        elif source == "legacy":
             set_(CHANGE, "change", f"{verb} set {describe(resolved, vacant_mood)} (vacant mood {vacant_mood}).")
+        else:
+            set_(CHANGE, "change", f"{verb} set {describe(resolved, mood)} ({where}).{daylight or ''}")
+    plan_mood = mood if profile and others != VacantOthers.MOOD else vacant_mood if profile else mood
     return Plan(area_id, plan_mood, occupancy_state, occupied, trigger, control_enabled, items, note, manual_mode,
-                None, action.value, mood)
+                gate if profile else None, action.value, mood)
 
 
 # ------------------------------------------------------- possible occupancy (0.3.9)
