@@ -13,9 +13,10 @@ button, press type, time, reference). The raw action is the key of a learned
 button and of its mapping; nothing about a device's buttons is assumed: they
 are discovered from the device or learned by pressing them.
 
-A switch starts in **Listen only**: its presses are recognised as manual
-intervention, nothing is sent. **Smart Occupancy control** executes the
-button mappings and is an explicit activation per switch.
+A switch starts in **Observing** (stored as ``listen``): its presses are
+registered as manual intervention and logged, nothing is executed. **Active**
+(stored as ``control``) executes the button mappings and is an explicit
+activation per switch, independent of the room's automatic lighting mode.
 
 This module has no Home Assistant runtime dependencies (models, parsing,
 validation and deduplication only), so it is fully unit testable.
@@ -578,8 +579,8 @@ IGNORED_WORDS = {
     "debounced": "repeated within the debounce time",
     "learning": "captured by Learn buttons (no command)",
     "not_mapped": "this button has no assigned action",
-    "listen_only": "Listen only: Smart Occupancy sends no command",
-    "observe": "the room is in Observe: no command is sent",
+    "listen_only": "Observing: registered, no action is executed",
+    "switched_to_observe": "the switch was set to Observing before the press ran: not executed",
     "busy": "too many presses queued; this one was dropped",
-    "disabled": "the room is not enabled",
+    "disabled": "blocked: the room is not enabled in Smart Occupancy",
 }

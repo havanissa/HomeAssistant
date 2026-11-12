@@ -204,12 +204,12 @@ Not set — tap to set: [Task lighting]
 
 **Smart Room Lighting** (`custom:smart-occupancy-room-lighting-card`, pick the room in the visual editor). Six tabs (**Overview · Lights · Automatic · Overrides · Preview · Advanced**), the only navigation; only **Overview** is open by default:
 
-- **Overview**: mood (follows global or room mood), mode (Observe/Active), occupancy and lighting health, managed lights, last applied, the daylight decision in one line, then one line per issue: a group question with its three buttons, "2 lighting conflicts · Review", short health lines. No settings forms.
+- **Overview**: mood (follows global or room mood), automatic lighting mode (Observing / Automatic / Paused / Blocked), occupancy and lighting health, managed lights, last applied, the daylight decision in one line, then one line per issue: a group question with its three buttons, "2 lighting conflicts · Review", short health lines. No settings forms.
 - **Lights**: one line per light type ("Spottar · 6 lights · follows global · Off"); tap to see its lights, or tick *Show every light*. *Managed* toggles exclusion.
-- **Automatic**: automatic switch-on when occupied and dark (see [Daylight](#daylight-aware-automatic-lighting-phase-033)), with the details collapsed under *Advanced daylight settings*.
+- **Automatic**: the room's **operating mode** first (see [Operating modes](#operating-modes-036)), then automatic switch-on when occupied and dark (see [Daylight](#daylight-aware-automatic-lighting-phase-033)), with the details collapsed under *Advanced daylight settings*.
 - **Overrides**: room mood; per type *follows global* or *overridden* (tap to override, the same editor with *Follow global*); single-light overrides.
 - **Preview**: what this room would do in a mood.
-- **Advanced**: activation (Observe/Active), automations that also control the lights (allow both or leave them alone), group decisions, manual overrides, wall-switch entities, discovery, last decision and the full diagnostics.
+- **Advanced**: activation with the full review (Observing / Automatic), automations that also control the lights (allow both or leave them alone), group decisions, manual overrides, wall-switch entities, discovery, last decision and the full diagnostics.
 
 **Room Status** (`custom:smart-occupancy-room-card`): occupancy state, evidence quality, active sensors, three health chips (Occupancy / Lighting / Configuration), one short line per warning (*Details* for the full explanations), and the existing-helper comparison in one line.
 
@@ -229,6 +229,23 @@ area: kamar_nordur
 - **Theme and layout.** Light and dark themes, phone to wide dashboards.
 - **Permissions.** Only administrators can change settings.
 
+### Operating modes (0.3.6)
+
+Both modes are shown and changed on the main screens, without opening a configuration page. The status always shows what the integration really does, and every change is saved by the integration (it survives reloads and restarts, and other open dashboards update).
+
+| Where | Modes | Change it |
+|---|---|---|
+| **Automatic → Automatic lighting** (room) | **Observing**: monitors events and calculates decisions, controls no light · **Automatic**: applies moods and switches on as configured. Also shown: *Automatic · paused* (Main Mood is `Manual`) and *Automatic · blocked* (every managed light is held by an unacknowledged automation, or no light is managed), with the reason. | **double-click the status** (tooltip: *Double-click to switch between Observing and Automatic.*), or the **Observing / Automatic** selector |
+| **Switches → each switch card** | **Observing**: presses are registered and logged, nothing is executed · **Active**: the assigned button actions are executed | **double-click the status**, or the **Observing / Active** selector |
+
+A single click on a status never changes anything. Double-tap works the same on phones; keyboard users use the selector buttons. Only administrators can change modes.
+
+**The two modes are independent.** A switch set to **Active** executes its actions also while the room's automatic lighting is **Observing** (and while Main Mood is `Manual`). A switch in Observing never sends anything. The one thing that blocks an Active switch is a room that is not enabled in the integration's options: its card then shows **Active · blocked** with that reason, never plain *Active*. A switch card also warns when presses cannot arrive (no input) or no button has an action yet.
+
+Setting a switch to Active is refused while Zigbee2MQTT reports a direct binding to lights, and asks you to acknowledge enabled automations that also react to the switch (right on the card), so a press is never executed twice. Changing the mode never changes the switch's buttons or actions.
+
+Each press ends with one outcome, shown on the card (*Result*) and in *Advanced switch settings → Recent presses*: **Observed** (Observing), **Not assigned** (the button has no action), **Blocked** (Active, but the room is not enabled, too many presses queued, or the switch was set to Observing before the press ran), **Executed** or **Failed** (with Home Assistant's error, or *No light to control (2 lights offline)*). Executed, failed and blocked presses are logged at info level (`switch_press … outcome=…`); observed ones only at debug level.
+
 ### Activation (pilot: Kamar Norður)
 
 1. Open the Smart Room Lighting card for Kamar Norður → **Advanced**. The review shows:
@@ -243,9 +260,9 @@ area: kamar_nordur
    - tick it (*acknowledged*: both may control the light).
 
    **Lights affected by an enabled, unacknowledged automation are left alone** while mood lighting is active.
-3. **Enable mood lighting in Kamar Norður → Confirm** (in the same tab). Only administrators can do this. The current mood is applied if the room is occupied.
+3. **Switch Kamar Norður to Automatic → Confirm** (in the same tab), or use the mode selector in **Automatic → Automatic lighting** (see [Operating modes](#operating-modes-036)). Only administrators can do this. The current mood is applied if the room is occupied.
 
-**Return to Observe** stops control immediately, and lights are left as they are. Other rooms stay in Observe until you activate them the same way. Existing automations are never disabled or modified.
+**Return to Observing** stops control immediately, and lights are left as they are. Other rooms stay in Observe until you activate them the same way. Existing automations are never disabled or modified.
 
 ### Manual overrides
 
@@ -257,7 +274,7 @@ A light changed by a person is respected for a while (default 60 min; per room o
 | From an automation triggered by a configured **wall-switch entity**, or within 3 s after it changed | **manual** |
 | From another automation or script | not manual (recorded as an external change) |
 | Our own command, including MQTT devices reporting back | ours |
-| A press of an assigned wall switch (0.3.5), or a light change within 3 s after it | **manual** (also for directly bound switches in Listen only) |
+| A press of an assigned wall switch (0.3.5), or a light change within 3 s after it | **manual** (also for directly bound switches in Observing) |
 | No context at all (e.g. a directly bound Zigbee switch) | **not** manual by default; configurable |
 
 Opening a dashboard never applies anything.
@@ -387,7 +404,7 @@ When **Main Mood** is `Manual`, all automatic lighting is paused. `Manual` is an
 - The cards show **Manual control — automatic lighting paused**. Active rooms report `paused`, and the Room Status card shows *Paused (Manual)*.
 - `Manual` needs no lighting profile, and it is not listed as a mood.
 
-**Wall switches keep working in Manual** (0.3.5): a switch in Smart Occupancy control still executes its button actions; see [Wall switches while Main Mood is Manual](#wall-switches-while-main-mood-is-manual).
+**Wall switches keep working in Manual** (0.3.5): an Active switch still executes its button actions; see [Wall switches while Main Mood is Manual](#wall-switches-while-main-mood-is-manual).
 
 Manual takes precedence over every mood, room mood, profile and global adjustment setting. When Main Mood changes to anything else, automatic lighting resumes only in explicitly activated rooms, with the newly selected mood and the current sensor and global values.
 
@@ -415,7 +432,7 @@ One source per switch is authoritative: *Automatic* prefers raw MQTT, then devic
 
 1. Open **Smart Room Lighting** for the room (`area: kamar_sudur`) → **Switches** → **Add a switch or remote**.
 2. Pick **avb_ksu** (Schneider Electric · Wiser wireless switch · Zigbee2MQTT · 10 button actions known) → **Assign to Kamar Suður**.
-3. The switch starts in **Listen only** with the buttons the device declares. Recognisable buttons get a suggested action (ON → *Turn lights on*, OFF → *Turn lights off*, *brightness move up/down* → *Start dimming up/down*, *brightness stop* → *Stop dimming*); every other button stays unassigned.
+3. The switch starts in **Observing** with the buttons the device declares. Recognisable buttons get a suggested action (ON → *Turn lights on*, OFF → *Turn lights off*, *brightness move up/down* → *Start dimming up/down*, *brightness stop* → *Stop dimming*); every other button stays unassigned.
 
 A device that cannot be discovered can be added under *Add a switch → Advanced* with its exact MQTT topic (no `+` or `#`) or its event entity.
 
@@ -426,7 +443,7 @@ A device that cannot be discovered can be added under *Add a switch → Advanced
 3. The card shows the detected action (*Detected: ON right `on_right`*). Learned buttons are saved at once and survive restarts.
 4. Assign its action in the button table; repeat for the other buttons; click **Done** (learning also ends after 60 s).
 
-While learning, nothing is executed (no light is switched, even in Smart Occupancy control) and every available input path listens. Retained MQTT messages, battery and link-quality updates, malformed messages, restored or stale event-entity states and triggers replayed right after attaching are not learned. Single, double, hold and release presses are learned exactly as the device names them; no press type is synthesised.
+While learning, nothing is executed (no light is switched, even when the switch is Active) and every available input path listens. Retained MQTT messages, battery and link-quality updates, malformed messages, restored or stale event-entity states and triggers replayed right after attaching are not learned. Single, double, hold and release presses are learned exactly as the device names them; no press type is synthesised.
 
 ### Assign actions
 
@@ -442,25 +459,27 @@ Light actions control **Room lights** (every managed light of the room, through 
 
 Only these fixed actions are available. Every entity is validated (scene, script, WLED preset, light), and no template, shell command or arbitrary service call can be configured.
 
-### Listen only and Smart Occupancy control
+### Observing and Active (switch modes)
 
-| | Listen only (default) | Smart Occupancy control |
+Earlier versions called these *Listen only* and *Smart Occupancy control*; the stored values (`listen`, `control`) are unchanged.
+
+| | Observing (default) | Active |
 |---|---|---|
 | Light commands | **never** | the assigned actions |
 | Presses count as manual changes | yes: light changes in the room in the next 3 s are a person's | yes, and the lights it switches get a manual override directly |
 | Suitable for | switches bound directly to lights (Zigbee binding) or handled by your own automations | switches that only Smart Occupancy acts on |
-| Activation | — | explicit (*Activate Smart Occupancy control* → *Confirm*) |
+| Activation | — | explicit: the selector or a double-click on the switch's status (see [Operating modes](#operating-modes-036)) |
 
 Smart Occupancy never takes over a switch by itself, never removes or changes Zigbee bindings and never disables automations. Before activating control:
 
-- **Direct Zigbee binding**: Zigbee2MQTT reports a binding of the switch to lights or a group (`genOnOff`, `genLevelCtrl`, …; the normal binding to the coordinator is ignored). Control is **refused** while it exists, so a press is never executed twice. Keep the switch in Listen only, or remove the binding in Zigbee2MQTT (*Devices → avb_ksu → Bind*) and activate control.
+- **Direct Zigbee binding**: Zigbee2MQTT reports a binding of the switch to lights or a group (`genOnOff`, `genLevelCtrl`, …; the normal binding to the coordinator is ignored). Control is **refused** while it exists, so a press is never executed twice. Keep the switch Observing, or remove the binding in Zigbee2MQTT (*Devices → avb_ksu → Bind*) and set it to Active.
 - **Competing automations**: automations whose triggers use the switch (its device triggers, its event entity or its MQTT topic) are listed. Disable or change them first, or tick them to acknowledge that both may act.
 
-Commands are sent only in rooms where mood lighting is enabled: in an **Observe** room, presses are recognised and shown, but nothing is sent.
+An Active switch works whatever the room's automatic lighting mode is (0.3.6; in 0.3.5 a room in Observe silently suppressed every switch action).
 
 ### Manual overrides
 
-A press of a switch in Smart Occupancy control is a person's explicit request and wins over automatic lighting:
+A press of an Active switch is a person's explicit request and wins over automatic lighting:
 
 1. the press is recorded (*Last button: OFF right*),
 2. the mapped command is sent (to the managed group, not to each bulb),
@@ -473,7 +492,7 @@ Hold-to-dim and brightness steps keep their brightness as an override until its 
 
 ### Wall switches while Main Mood is Manual
 
-**Manual pauses automatic lighting, never your wall switches.** While Main Mood is `Manual`, Smart Occupancy sends no automatic command, but a switch in Smart Occupancy control still executes its actions (there is no mood then, so *Turn lights on* uses the lights' own last values), and its overrides are recorded so that your choice is still respected when Manual ends.
+**Manual pauses automatic lighting, never your wall switches.** While Main Mood is `Manual`, Smart Occupancy sends no automatic command, but an Active switch still executes its actions (there is no mood then, so *Turn lights on* uses the lights' own last values), and its overrides are recorded so that your choice is still respected when Manual ends.
 
 ### Moods from a switch
 
@@ -875,6 +894,8 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 
 ## Upgrading
 
+**From 0.3.5.** Nothing to do, and no mode is changed by the upgrade: rooms that were Observing stay Observing, switches keep their mode, buttons and actions. There is no store migration. What changes in behaviour: a switch that was already in *Smart Occupancy control* (now *Active*) in a room whose mood lighting was not enabled now **executes its actions** (before, they were silently suppressed). Set it to Observing if you do not want that.
+
 **From 0.3.4.** Nothing to do, and nothing is applied by the upgrade:
 - The lighting store is migrated from 1.2 to 1.3: every room gets an empty list of switches. Rooms, moods, profiles, manual overrides, daylight settings, light groups, activation and the global adjustment are kept unchanged.
 - The **wall switch entities** of earlier versions (*Advanced → Wall switch entities*) are kept and keep working as listen-only sources; none is converted into a command source.
@@ -908,7 +929,7 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 ## Known limitations (Phase 0.3.5)
 
 - **Not tested with a physical Wiser switch.** The wall switch support was tested with the automated suite on Home Assistant 2026.10.4 and 2026.11.1, with the real MQTT integration, a mocked broker and simulated Zigbee2MQTT messages, device triggers and event entities. Not hardware verified; not deployed to the production Home Assistant.
-- **Zigbee bindings are known only from Zigbee2MQTT's device list.** Bindings made another way (Touchlink, a different coordinator) are invisible: if lights react to a switch by themselves, keep it in Listen only.
+- **Zigbee bindings are known only from Zigbee2MQTT's device list.** Bindings made another way (Touchlink, a different coordinator) are invisible: if lights react to a switch by themselves, keep it Observing.
 - **Competing automations are found by their triggers** (device triggers, event entity, the MQTT topic). Node-RED, AppDaemon and templated triggers are invisible.
 - **Device triggers appear after first use** in Zigbee2MQTT; raw MQTT does not need them.
 - **Hold-to-dim is a sequence of brightness steps**, not a native Zigbee *move/stop*: dimming continues until the next interval after STOP at most, plus the Zigbee and MQTT latency.

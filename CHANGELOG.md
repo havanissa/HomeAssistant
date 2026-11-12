@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.6 — Operating modes on the main screens; wall switch actions no longer suppressed by Observe
+
+### Fixed
+
+- **Active wall switches did nothing in rooms whose mood lighting was not enabled.** In 0.3.5 every switch action had two gates: the switch's own mode (*Smart Occupancy control*) **and** the room's mood-lighting activation, which starts in Observe and could only be changed under *Advanced*. Presses were received and logged ("the room is in Observe: no command is sent"), but nothing was executed, while the switch card still showed *Smart Occupancy control* as if it worked. Switch actions are now gated by the switch's own mode only (`assert_switch_control_permitted`), checked again when a queued press runs; the room's automatic lighting mode no longer blocks them. Automatic lighting in an Observing room still sends nothing.
+
+### Added
+
+- **Automatic → Automatic lighting** shows the room's operating mode first: **Observing** / **Automatic** (also *Automatic · paused* by Manual mood and *Automatic · blocked*, with the reason). Double-click the status to switch between Observing and Automatic (tooltip), or use the **Observing / Automatic** selector. It uses the existing `room/activate` / `room/deactivate` commands, so the change is the real, persisted backend state; the full review stays under *Advanced*.
+- **Switches → every switch card** shows its mode with the same controls (**Observing** / **Active**): double-click the status or use the selector, without opening *Configure*. Enabled automations that also react to the switch are acknowledged right on the card; a directly bound switch cannot be set to Active. Mappings and buttons are never changed by a mode change.
+- The switch model has `operating` (`mode`, effective `state`: observing / active / blocked / attention, `blocked_by`, `text`): a switch is never shown as plainly *Active* while its actions are suppressed (room not enabled) or cannot arrive (no input).
+- **Press outcomes**: `observed`, `not_mapped`, `blocked`, `succeeded`, `failed` in the switch status (`last_outcome`, persisted over restarts) and in each history entry; shown as *Observed / Not assigned / Blocked / Executed / Failed* on the card and in *Recent presses*. Dispatches are logged at debug level, executed / failed / blocked presses at info, observed presses at debug only (no new log noise, no Recorder events).
+
+### Changed
+
+- Wording: *Listen only* → **Observing**, *Smart Occupancy control* → **Active** (switches); *Observe / Active* → **Observing / Automatic** (room). Stored values (`listen` / `control`, `control_enabled`) are unchanged: no migration, no mode is changed by the upgrade.
+- `LightingController.async_switch_lights` takes the `switch_id` and checks that switch (`switch_active`), not the room's activation.
+
 ## 0.3.5 — Native wall switches, remotes and Zigbee2MQTT button control
 
 Wall switches and remotes become part of Smart Occupancy: assign a switch to a room, learn its buttons, give each button an action, and every press counts as a manual change that automatic lighting respects. The upgrade sends no command and keeps every setting; every new switch starts in **Listen only**. Tested with simulated Zigbee2MQTT messages, device triggers and event entities through Home Assistant's MQTT integration; **not tested with physical Wiser hardware**.

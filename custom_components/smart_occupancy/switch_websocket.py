@@ -5,11 +5,11 @@ Reading the switch model is part of ``smart_occupancy/lighting/editor``
 anything is saved. No command sends a light command or publishes MQTT:
 
 * ``switch/candidates`` - devices that look like switches or remotes;
-* ``switch/add`` / ``switch/remove`` - assign or remove a switch (Listen only);
+* ``switch/add`` / ``switch/remove`` - assign or remove a switch (starts Observing);
 * ``switch/set`` - name, input source, MQTT topic (Advanced), dimming, debounce,
   activity evidence, manual override time;
 * ``switch/mapping`` - assign (or clear) one button's action, or forget a button;
-* ``switch/mode`` - Listen only / Smart Occupancy control (explicit confirmation;
+* ``switch/mode`` - Observing (``listen``) / Active (``control``; explicit confirmation;
   refused while the switch is directly bound to lights, or while an enabled
   automation that reacts to it is not acknowledged);
 * ``switch/learn`` - start or cancel learning mode;
@@ -161,15 +161,12 @@ def switch_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, sw
     if bindings:
         warnings.append({"code": "binding", "text": (
             f"Directly bound in Zigbee2MQTT ({', '.join(b['cluster'] + ' → ' + b['target'] for b in bindings)}): the "
-            "switch controls those lights itself. Keep it in Listen only, or remove the binding in Zigbee2MQTT first.")})
+            "switch controls those lights itself. Keep it Observing, or remove the binding in Zigbee2MQTT first.")})
     for a in open_competing:
         warnings.append({"code": "competing_automation", "text": (
             f"Automation “{a['name'] or a['entity_id']}” also reacts to this switch ({a['via']}"
             + (f": {', '.join(a['buttons'])}" if a["buttons"] else "") + "). Disable it or change it before "
-            "activating Smart Occupancy control, or acknowledge that both may act.")})
-    if switch.controls and not ctrl.room_active(area_id):
-        warnings.append({"code": "observe", "text": "The room is in Observe: button presses are recognised, but no "
-                                                    "command is sent until mood lighting is enabled for the room."})
+            "setting the switch to Active, or acknowledge that both may act.")})
     if status.problem:
         warnings.append({"code": "input", "text": status.problem})
     if not device.get("exists") and switch.device_id:
@@ -190,10 +187,39 @@ def switch_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, sw
         "bindings": bindings,
         "competing": competing,
         "warnings": warnings,
+        "operating": operating_state(ctrl, area_id, switch, status, buttons),
         "can_control": not bindings,
         "learning": session.as_dict() if session else None,
         "dimming_now": ctrl.switch_control.dimming(area_id, switch.id),
     }
+
+
+def operating_state(ctrl: LightingController, area_id: str, switch: SwitchConfig, status: SwitchStatus,
+                    buttons: list[dict[str, Any]]) -> dict[str, Any]:
+    """What the switch really does with a press now: never "active" while its actions are suppressed.
+
+    ``mode`` is the chosen mode (observe / active); ``state`` is the effective
+    one: observing, active, blocked (Active, but every action is suppressed)
+    or attention (Active, but presses cannot arrive or nothing is assigned).
+    The room's automatic lighting mode never blocks a switch (0.3.6).
+    """
+    if not switch.controls:
+        return {"mode": "observe", "state": "observing", "blocked_by": None,
+                "text": "Observing: presses are registered and logged; no action is executed."}
+    if area_id not in ctrl.config.enabled_rooms:
+        return {"mode": "active", "state": "blocked", "blocked_by": "room_disabled",
+                "text": "Blocked: the room is not enabled in Smart Occupancy (integration options), so no "
+                        "action is executed."}
+    if status.problem:
+        return {"mode": "active", "state": "attention", "blocked_by": "input",
+                "text": f"Active, but presses are not received: {status.problem}"}
+    if not any(b["mapping"] and b["mapping"]["action"] != ButtonAction.NONE.value for b in buttons):
+        return {"mode": "active", "state": "attention", "blocked_by": None,
+                "text": "Active, but no button has an action assigned yet (Configure)."}
+    room_auto = ctrl.room_active(area_id)
+    return {"mode": "active", "state": "active", "blocked_by": None,
+            "text": "Active: assigned button actions are executed"
+                    + ("." if room_auto else " (independent of automatic lighting, which is Observing).")}
 
 
 def _wled_presets(hass: HomeAssistant) -> list[dict[str, Any]]:
@@ -280,7 +306,7 @@ def _already_assigned(ctrl: LightingController, device_id: str | None, ieee: str
 @websocket_api.require_admin
 @websocket_api.async_response
 async def ws_add(hass: HomeAssistant, connection, msg) -> None:
-    """Assign a switch to a room (Listen only). Its declared buttons are added; nothing is controlled."""
+    """Assign a switch to a room (Observing). Its declared buttons are added; nothing is controlled."""
     if (ctrl := _ctrl(hass, connection, msg)) is None or not _room(ctrl, connection, msg):
         return
     area_id = msg["area_id"]
@@ -510,7 +536,7 @@ def ws_mapping(hass: HomeAssistant, connection, msg) -> None:
 @websocket_api.require_admin
 @callback
 def ws_mode(hass: HomeAssistant, connection, msg) -> None:
-    """Listen only, or (explicitly confirmed) Smart Occupancy control."""
+    """Observing (listen), or (explicitly confirmed) Active (control). The room's lighting mode is not involved."""
     if (ctrl := _ctrl(hass, connection, msg)) is None or (switch := _switch(ctrl, connection, msg)) is None:
         return
     if msg["mode"] == SwitchMode.LISTEN:
@@ -518,7 +544,7 @@ def ws_mode(hass: HomeAssistant, connection, msg) -> None:
         connection.send_result(msg["id"], {"revision": ctrl.store.revision})
         return
     if msg.get("confirm") is not True:
-        connection.send_error(msg["id"], "confirmation_required", "Confirm to let Smart Occupancy control this switch")
+        connection.send_error(msg["id"], "confirmation_required", "Confirm to set this switch to Active")
         return
     inputs = ctrl.switch_inputs
     z2m = inputs.bridge_devices.get(switch.ieee) if switch.ieee else None
@@ -526,7 +552,7 @@ def ws_mode(hass: HomeAssistant, connection, msg) -> None:
         connection.send_error(msg["id"], "binding", (
             "This switch is directly bound to lights in Zigbee2MQTT ("
             + ", ".join(f"{b['cluster']} → {b['target']}" for b in bindings)
-            + "). Both would switch the lights. Remove the binding in Zigbee2MQTT first, or keep Listen only."))
+            + "). Both would switch the lights. Remove the binding in Zigbee2MQTT first, or keep it Observing."))
         return
     acknowledged = tuple(dict.fromkeys([*switch.acknowledged, *msg["acknowledge"]]))
     open_competing = [a for a in _competing(hass, ctrl, switch) if a["enabled"] and a["entity_id"] not in acknowledged]

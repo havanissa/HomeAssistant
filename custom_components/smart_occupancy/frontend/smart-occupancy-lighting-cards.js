@@ -29,13 +29,20 @@
  * "Advanced switch settings". Switch commands are executed by the
  * integration, never by the card.
  *
+ * 0.3.6: operating modes are on the main screens. The Automatic tab's
+ * "Automatic lighting" box shows the room's real mode (Observing / Automatic,
+ * also Paused by Manual mood or Blocked) with a double-click toggle on the
+ * status and a single-click selector; every switch card in the Switches tab
+ * has the same for Observing / Active. A switch set to Active works whatever
+ * the room's automatic lighting mode is.
+ *
  * The cards are editors only: the integration owns the configuration
  * (websocket API, admin-only writes). The cards never call a light service and
  * a preview never changes a light. They refetch only when the integration
  * reports a change.
  */
 
-const VERSION = "0.3.5";
+const VERSION = "0.3.6";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -163,6 +170,15 @@ const sourceText = (src, mood) => {
   }
   return src.level === "room" ? "room" : "this light";
 };
+
+// What happened to the last press of a switch (0.3.6 diagnostics).
+const OUTCOMES = {
+  observed: ["Observed", "muted"], not_mapped: ["Not assigned", "muted"], blocked: ["Blocked", "warn"],
+  succeeded: ["Executed", "ok"], failed: ["Failed", "bad"],
+};
+const outcomeOf = (st) => st.last_outcome || (st.last_result_ok === true ? "succeeded" : st.last_result_ok === false ? "failed" : null);
+const outcomePill = (st) => { const o = OUTCOMES[outcomeOf(st)]; return o ? `<span class="pill ${o[1]}">${o[0]}</span>` : ""; };
+const outcomeTone = (st) => ({ failed: "bad", blocked: "warn" }[outcomeOf(st)] || "");
 
 const OCC = {
   vacant: "Vacant", possible_occupancy: "Possible occupancy", confirmed_occupancy: "Confirmed occupancy",
@@ -294,7 +310,7 @@ class SoLightingBase extends HTMLElement {
     if (!s) return "";
     if (s.busy) return `<span class="status muted">Saving…</span>`;
     if (s.error) return `<span class="status bad" role="alert">${esc(s.error)}</span>`;
-    return `<span class="status ok">✓ ${esc(s.ok)}</span>`;
+    return `<span class="status ok" role="status">✓ ${esc(s.ok)}</span>`;
   }
 
   get _canEdit() { return !!this._model?.can_edit; }
@@ -492,6 +508,8 @@ class SoLightingBase extends HTMLElement {
   }
 
   _onClick(ev) {
+    const dbl = ev.target.closest("[data-dbl]");
+    if (dbl) { if (dbl.getAttribute("aria-disabled") !== "true") this._tap(dbl); return; }
     const el = ev.target.closest("[data-action],[data-set-action],[data-kelvin],[data-rgb],[data-clear],[data-bmode],[data-kmode]");
     if (!el || el.disabled) return;
     const key = el.dataset.ed;
@@ -548,6 +566,16 @@ class SoLightingBase extends HTMLElement {
     if (a === "toggle-editor-adv") { this._ui.editorAdv = !el.parentElement.open; return; }
     if (a === "close-editor") { this._ui.edit = null; this._render(); return; }
     this._onAction?.(a, el);
+  }
+
+  // Double-click (or double-tap) on a status, detected from two clicks on the same status: a re-render
+  // between the clicks (live state) does not lose it, and a single click never changes anything.
+  _tap(el) {
+    const key = `${el.dataset.dbl}|${el.dataset.switch || ""}`;
+    const now = Date.now();
+    const last = this._lastTap;
+    if (last && last.key === key && now - last.at < 500) { this._lastTap = null; this._onDouble?.(el.dataset.dbl, el); }
+    else this._lastTap = { key, at: now };
   }
 
   _switchRgb(key, on) {
@@ -886,6 +914,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     if (!r) return `<div class="pad bad">Room ${esc(this._config.area)} not found.</div>`;
     const d = r.diagnostics;
     const active = d.control_mode === "active";
+    const st = this._roomModeState(r);
     const tab = this._ui.tab || "overview";
     const tabs = [["overview", "Overview"], ["lights", "Lights"], ["automatic", "Automatic"], ["switches", "Switches"],
       ["overrides", "Overrides"], ["preview", "Preview"], ["advanced", "Advanced"]];
@@ -895,7 +924,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     return `<div class="header"><ha-icon icon="${active ? "mdi:lightbulb-auto" : "mdi:lightbulb-outline"}" class="${active ? "lit" : ""}"></ha-icon>
         <div class="titles"><div class="title">${esc(this._config.title || r.name)}</div>
         <div class="sub">${esc(OCC[r.occupancy.state] || "Occupancy unknown")}</div></div>
-        <span class="badge ${active ? "ok" : ["blocked", "paused"].includes(d.control_mode) ? "warn" : ""}">${active ? "Active" : d.control_mode === "blocked" ? "Blocked" : d.control_mode === "paused" ? "Paused" : "Observe"}</span></div>
+        <span class="badge ${st.tone === "muted" ? "" : st.tone}" title="Automatic lighting: ${esc(st.word)}">${esc(st.short)}</span></div>
       <div class="tabs" role="tablist">${tabs.map(([k, l]) => `<button role="tab" class="tab ${k === tab ? "on" : ""}" data-action="tab" data-tab="${k}">${l}</button>`).join("")}</div>
       <div class="pad">${manualBanner(this._model)}${content}</div>`;
   }
@@ -955,7 +984,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const issues = this._issues(r);
     return `<div class="kvs">
         <div><span>Mood</span><b>${d.follows_global ? `follows global ${esc(d.room_mood || "—")}` : `room mood ${esc(d.room_mood)}`}</b></div>
-        <div><span>Mode</span><b>${d.control_mode === "active" ? "Active" : d.control_mode === "blocked" ? "Blocked" : "Observe"}</b></div>
+        <div><span>Automatic lighting</span><b>${esc(this._roomModeState(r).word)}</b></div>
         <div><span>Occupancy</span><b>${hv(h.occupancy)}</b></div>
         <div><span>Lighting</span><b>${hv(h.lighting, nConf ? ` <span class="sub">(${nConf} conflict${nConf === 1 ? "" : "s"})</span>` : "")}</b></div>
         <div><span>Managed lights</span><b>${d.managed_lights}</b></div>
@@ -981,7 +1010,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
 
   // Automatic tab: the simple settings and the decision now; the details are collapsed below.
   _automatic(r) {
-    if (!r.daylight) return `<div class="muted">Daylight information is not available for this room.</div>`;
+    if (!r.daylight) return `<div class="section auto">${this._lightingModeHtml(r)}
+      <div class="muted">Daylight information is not available for this room.</div></div>`;
     const open = this._ui.dlAdv;
     return `${this._autoHtml(r)}
       <details class="dladv" ${open ? "open" : ""}><summary data-action="toggle-dl-adv">Advanced daylight settings</summary>
@@ -1003,7 +1033,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const opt = (x) => `<option value="${esc(x.entity_id)}" ${x.entity_id === preferred ? "selected" : ""}>${esc(x.name)}${x.value != null ? ` · ${esc(x.value)} lx` : ""}${x.in_room ? "" : x.area ? ` (${esc(x.area)})` : ""}</option>`;
     const sensorRow = c.sensors[0] ? st.sensors?.[0] : null;
     const act = dl.activation;
-    return `<div class="section auto"><div class="stitle">Automatic lighting</div>
+    return `<div class="section auto">${this._lightingModeHtml(r)}
       <label class="switch"><input type="checkbox" data-control="dl-auto" ${c.auto_on === "dark" ? "checked" : ""} ${ro}> Turn on when occupied and dark</label>
       ${c.auto_on === "always" ? `<div class="sub">Now: turns on when occupied, regardless of daylight (Advanced).</div>` : c.auto_on === "never" ? `<div class="sub">Occupancy does not switch lights on. Lights that are on still follow the mood.</div>` : ""}
       <div class="frow"><label>Indoor light sensor</label><div class="fval"><select data-control="dl-sensor" ${ro}>
@@ -1023,6 +1053,59 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       <div class="sub">${esc(st.natural_light)}${st.estimated ? " (an estimate, not a measured value)" : ""}</div>
       ${st.contaminated && st.contamination ? `<div class="sub">Indoor readings are not used as daylight now · ${esc(st.contamination)}</div>` : ""}
       ${act ? `<div class="sub">Last decision: <b>${esc(act.text.split(" · ")[0])}</b> · ${fmtTime(act.at)}</div>` : ""}</div>`;
+  }
+
+  // The room's automatic lighting mode as the integration reports it (never a UI-only state).
+  _roomModeState(r) {
+    const d = r.diagnostics;
+    if (!r.settings.control_enabled) return { key: "observe", word: "Observing", short: "Observing", tone: "muted", icon: "mdi:eye-outline" };
+    if (d.control_mode === "paused") return { key: "paused", word: "Automatic · paused", short: "Paused", tone: "warn", icon: "mdi:pause-circle-outline" };
+    if (d.control_mode === "blocked") return { key: "blocked", word: "Automatic · blocked", short: "Blocked", tone: "warn", icon: "mdi:alert-circle-outline" };
+    return { key: "active", word: "Automatic", short: "Automatic", tone: "ok", icon: "mdi:lightbulb-auto" };
+  }
+
+  // Operating mode: the status (double-click toggles Observing ⇄ Automatic) and a single-click selector.
+  _lightingModeHtml(r) {
+    const d = r.diagnostics;
+    const on = !!r.settings.control_enabled;
+    const st = this._roomModeState(r);
+    const ro = !this._canEdit;
+    const off = ro || this._status["room-mode"]?.busy;
+    const tip = ro ? "Only an administrator can change the mode." : "Double-click to switch between Observing and Automatic.";
+    const n = d.managed_lights || 0;
+    const lights = `${n} light${n === 1 ? "" : "s"}`;
+    const nConf = (d.blocking_automations || []).length;
+    const explain = {
+      observe: `Monitors events and calculates decisions; no light is controlled.${n ? ` Automatic controls ${lights} and applies the current mood at once.` : ""}`,
+      active: `Controls ${lights}: follows the mood and switches on as set below.`,
+      paused: d.control_mode_reason,
+      blocked: d.control_mode_reason,
+    }[st.key];
+    const conf = nConf ? ` ${nConf} automation${nConf === 1 ? " also controls" : "s also control"} some of these lights: those are left alone (Advanced).` : "";
+    const seg = (mode, label, icon, current) => `<button class="seg ${current ? "on" : ""}" aria-pressed="${current}" data-action="room-mode" data-mode="${mode}" ${off ? "disabled" : ""}><ha-icon icon="${icon}"></ha-icon>${label}</button>`;
+    return `<div class="modehead"><div class="stitle">Automatic lighting</div>
+        <button class="mode-chip ${st.tone}" data-dbl="room-mode" title="${esc(tip)}" aria-label="Automatic lighting: ${esc(st.word)}. ${esc(tip)}" aria-disabled="${!!off}">
+          <ha-icon icon="${st.icon}"></ha-icon><span>${esc(st.word)}</span></button></div>
+      <div class="modebar"><div class="segs small mode" role="group" aria-label="Automatic lighting mode">${seg("observe", "Observing", "mdi:eye-outline", !on)}${seg("automatic", "Automatic", "mdi:lightbulb-auto", on)}</div>
+        ${this._statusHtml("room-mode")}</div>
+      <div class="sub ${st.tone === "warn" ? "warn" : ""}">${esc(explain + conf)} Wall switches set to Active work in both modes.</div>`;
+  }
+
+  _setRoomMode(mode) {
+    const r = this._model?.room;
+    if (!r || (mode === "automatic") === !!r.settings.control_enabled) return;
+    const area = this._config.area;
+    const msg = mode === "automatic" ? { type: `${WS}/room/activate`, area_id: area, confirm: true } : { type: `${WS}/room/deactivate`, area_id: area };
+    this._save("room-mode", msg, mode === "automatic" ? "Automatic: lighting is controlled" : "Observing: nothing is controlled")
+      .then(() => { this._ui.review = null; });
+  }
+
+  _onDouble(kind, el) {
+    if (kind === "room-mode") this._setRoomMode(this._model?.room?.settings?.control_enabled ? "observe" : "automatic");
+    else if (kind === "sw-mode") {
+      const x = this._swItem(el.dataset.switch);
+      if (x) this._setSwitchMode(x.id, x.mode === "control" ? "listen" : "control");
+    }
   }
 
   // Advanced → Daylight: priority, freshness, calibration, hysteresis, outdoor light.
@@ -1224,7 +1307,52 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       ${(sw.legacy_entities || []).length ? `<div class="sub">Also listening (wall switch entities, Advanced): ${esc(sw.legacy_entities.join(", "))}</div>` : ""}`;
   }
 
-  _swModeWord(x) { return x.mode === "control" ? "Smart Occupancy control" : "Listen only"; }
+  _swModeWord(x) { return x.mode === "control" ? (x.operating?.state === "blocked" ? "Active · blocked" : "Active") : "Observing"; }
+
+  // Operating mode of one switch: the effective state (double-click toggles Observing ⇄ Active) and a selector.
+  _swModeHtml(x, head) {
+    const op = x.operating || {};
+    const on = x.mode === "control";
+    const ro = !this._canEdit;
+    const key = `sw-mode-${x.id}`;
+    const off = ro || this._status[key]?.busy;
+    const tone = { observing: "muted", active: "ok", blocked: "warn", attention: "warn" }[op.state] || (on ? "ok" : "muted");
+    const icon = op.state === "blocked" ? "mdi:cancel" : op.state === "attention" ? "mdi:alert-circle-outline" : on ? "mdi:gesture-tap-button" : "mdi:eye-outline";
+    const tip = ro ? "Only an administrator can change the mode." : "Double-click to switch between Observing and Active.";
+    const word = this._swModeWord(x);
+    const at = `data-switch="${esc(x.id)}" ${off ? "disabled" : ""}`;
+    const seg = (mode, label, icn, current) => `<button class="seg ${current ? "on" : ""}" aria-pressed="${current}" data-action="sw-mode-set" data-mode="${mode}" ${at}><ha-icon icon="${icn}"></ha-icon>${label}</button>`;
+    const ui = this._ui;
+    const open = (x.competing || []).filter((a) => a.enabled && !(x.acknowledged || []).includes(a.entity_id));
+    const confirmHtml = ui.swConfirm === x.id && !on ? `<div class="global"><b>Set ${esc(x.name)} to Active?</b>
+        <div class="sub">These automations also react to this switch, so a press could be executed twice. Tick the ones that may keep acting too, or disable them first.</div>
+        ${open.map((a) => `<label class="auto warn"><input type="checkbox" data-control="sw-ack" data-automation="${esc(a.entity_id)}" ${(ui.swAck || []).includes(a.entity_id) ? "checked" : ""}>
+          <div><b>${esc(a.name || a.entity_id)}</b> <span class="sub">${esc(a.via)}${a.buttons.length ? `: ${esc(a.buttons.join(", "))}` : ""}</span></div></label>`).join("")}
+        <div><button class="btn primary small" data-action="sw-mode-confirm" data-switch="${esc(x.id)}">Set to Active</button> <button class="link" data-action="sw-mode-cancel">Cancel</button></div></div>` : "";
+    return `<div class="modehead">${head}
+        <button class="mode-chip ${tone}" data-dbl="sw-mode" data-switch="${esc(x.id)}" title="${esc(tip)}" aria-label="${esc(x.name)}: ${esc(word)}. ${esc(tip)}" aria-disabled="${!!off}">
+          <ha-icon icon="${icon}"></ha-icon><span>${esc(word)}</span></button></div>
+      <div class="modebar"><div class="segs small mode" role="group" aria-label="Operating mode of ${esc(x.name)}">${seg("listen", "Observing", "mdi:eye-outline", !on)}${seg("control", "Active", "mdi:gesture-tap-button", on)}</div>
+        ${this._statusHtml(key)}</div>
+      ${op.text ? `<div class="sub ${tone === "warn" ? "warn" : ""}">${esc(op.text)}</div>` : ""}${confirmHtml}`;
+  }
+
+  _setSwitchMode(id, mode) {
+    const x = this._swItem(id);
+    if (!x || x.mode === mode) return;
+    const ui = this._ui;
+    const key = `sw-mode-${id}`;
+    const msg = { type: `${WS}/switch/mode`, area_id: this._config.area, switch_id: id, mode };
+    if (mode === "listen") { ui.swConfirm = null; this._save(key, msg, "Observing"); return; }
+    if (!x.can_control) {
+      this._status[key] = { error: "Bound directly to lights in Zigbee2MQTT: remove the binding first, or keep it Observing." };
+      this._requestRender();
+      return;
+    }
+    const open = (x.competing || []).filter((a) => a.enabled && !(x.acknowledged || []).includes(a.entity_id));
+    if (open.length) { ui.swConfirm = id; ui.swAck = []; this._render(); return; }
+    this._save(key, { ...msg, confirm: true, acknowledge: [] }, "Active: actions are executed");
+  }
 
   _switchCard(r, sw, x) {
     const ro = !this._canEdit;
@@ -1235,12 +1363,12 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const what = [x.manufacturer, x.model].filter(Boolean).join(" ") || x.description || "";
     const avail = st.availability === "offline" || st.availability === "unavailable" ? ` · <span class="warn">${esc(st.availability)}</span>` : st.availability === "online" ? " · online" : "";
     const controls = new Set((x.buttons_list || []).filter((b) => b.mapping && b.mapping.action !== "none").map((b) => (b.mapping.target === "room" ? "Room lights" : this._name(r, b.mapping.target))));
-    return `<div class="section swc"><div><b>${esc(x.name)}</b> <span class="pill ${x.mode === "control" ? "ok" : "muted"}">${esc(this._swModeWord(x))}</span>
-        ${what ? `<div class="sub">${esc(what)}</div>` : ""}</div>
+    return `<div class="section swc">
+      ${this._swModeHtml(x, `<div class="lmain"><b>${esc(x.name)}</b>${what ? `<div class="sub">${esc(what)}</div>` : ""}</div>`)}
       <div class="kvs">
+        <div><span>Last event</span><b>${ev ? `${esc(ev.label)} · ${fmtTime(ev.at)}` : "—"}</b></div>
+        ${st.last_result ? `<div><span>Result</span><b>${outcomePill(st)} <span class="${outcomeTone(st)}">${esc(st.last_result)}</span></b></div>` : ""}
         <div><span>Connection</span><b>${esc(x.connection)}${avail}</b></div>
-        <div><span>Last button</span><b>${ev ? `${esc(ev.label)} · ${fmtTime(ev.at)}` : "—"}</b></div>
-        ${st.last_result ? `<div><span>Result</span><b class="${st.last_result_ok === false ? "warn" : ""}">${esc(st.last_result)}</b></div>` : ""}
         <div><span>Controls</span><b>${controls.size ? esc([...controls].join(", ")) : "nothing assigned"}</b></div>
         <div><span>Buttons configured</span><b>${mapped} of ${(x.buttons_list || []).length}</b></div>
         ${st.override ? `<div><span>Manual override</span><b>Active</b></div>` : ""}
@@ -1272,7 +1400,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
           · ${d.actions.length} button action${d.actions.length === 1 ? "" : "s"} known${d.available === false ? " · unavailable" : ""}${d.bindings ? ` · ${d.bindings} direct binding${d.bindings === 1 ? "" : "s"}` : ""}</span>
           ${d.assigned_room ? `<span class="sub"> · assigned${d.assigned_room === r.area_id ? " here" : ""}</span>` : `<button class="link" data-action="sw-add" data-device="${esc(d.device_id || "")}" data-ieee="${esc(d.ieee || "")}">Assign to ${esc(r.name)}</button>`}</div>`).join("")
         || `<div class="muted">No switch or remote found${c.mqtt_configured ? (c.bridge_seen_at ? "" : " yet (reading Zigbee2MQTT…)") : " (MQTT is not set up)"}.</div>`;
-    return `<div class="global"><div class="stitle">Add a switch</div><div class="sub">It starts in Listen only: Smart Occupancy recognises its presses as manual changes and sends nothing until you activate control.</div>
+    return `<div class="global"><div class="stitle">Add a switch</div><div class="sub">It starts Observing: Smart Occupancy registers its presses as manual changes and executes nothing until you set it to Active.</div>
       ${list}
       <details class="dladv" ${ui.swAddAdv ? "open" : ""}><summary data-action="sw-add-adv">Advanced: add by MQTT topic or event entity</summary>
         <div class="frow"><label>MQTT topic</label><div class="fval"><input type="text" placeholder="${esc((c?.base_topic || sw.settings?.mqtt_base_topic || "zigbee2mqtt") + "/avb_ksu")}" data-control="sw-new-topic"></div></div>
@@ -1295,24 +1423,14 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const ui = this._ui;
     const buttons = x.buttons_list || [];
     const rows = buttons.map((b) => this._mappingRow(r, sw, x, b)).join("");
-    const open = (x.competing || []).filter((a) => a.enabled && !(x.acknowledged || []).includes(a.entity_id));
-    const mode = x.mode === "control"
-      ? `<div class="note ok">Smart Occupancy control since ${fmtTime(x.activated_at)}: the assigned actions are executed and count as manual changes.</div>
-         ${ro ? "" : `<div><button class="btn ghost small" data-action="sw-mode-listen" data-switch="${esc(x.id)}">Return to Listen only</button></div>`}`
-      : `<div class="note">Listen only: presses are recognised as manual changes (e.g. a switch bound directly to its lights); nothing is sent.</div>
-         ${ro ? "" : !x.can_control ? `<div class="sub warn">Smart Occupancy control is not possible while the switch is bound directly to lights.</div>`
-           : ui.swConfirm === x.id ? `<div class="global"><b>Activate Smart Occupancy control?</b>
-               <div class="sub">Make sure nothing else also acts on this switch (direct Zigbee binding, automations), or a press may be executed twice.</div>
-               ${open.map((a) => `<label class="auto warn"><input type="checkbox" data-control="sw-ack" data-automation="${esc(a.entity_id)}" ${(ui.swAck || []).includes(a.entity_id) ? "checked" : ""}>
-                 <div><b>${esc(a.name || a.entity_id)}</b> <span class="sub">${esc(a.via)}${a.buttons.length ? `: ${esc(a.buttons.join(", "))}` : ""}</span>
-                 <div class="sub">Tick if both may act (otherwise disable or change the automation first).</div></div></label>`).join("")}
-               <div><button class="btn primary small" data-action="sw-mode-confirm" data-switch="${esc(x.id)}">Confirm: activate</button> <button class="link" data-action="sw-mode-cancel">Cancel</button></div></div>`
-           : `<div><button class="btn primary small" data-action="sw-mode-ask" data-switch="${esc(x.id)}">Activate Smart Occupancy control</button></div>`}`;
+    const mode = `${this._swModeHtml(x, `<div class="stitle">Operating mode</div>`)}
+      ${x.mode === "control" && x.activated_at ? `<div class="sub">Active since ${fmtTime(x.activated_at)}; executed actions count as manual changes.</div>` : ""}
+      ${x.mode !== "control" && !x.can_control ? `<div class="sub warn">Active is not possible while the switch is bound directly to lights.</div>` : ""}`;
     return `<div><button class="link" data-action="sw-back">← All switches</button></div>
       <div class="frow"><label>Name</label><div class="fval"><input type="text" value="${esc(x.name)}" data-control="sw-name" data-switch="${esc(x.id)}" ${dis}>${this._statusHtml(`sw-${x.id}`)}</div></div>
       <div class="sub">${esc([x.manufacturer, x.model, x.description].filter(Boolean).join(" · "))}${x.connection ? ` · ${esc(x.connection)}` : ""}</div>
       ${(x.warnings || []).map((w) => `<div class="note warn">${esc(w.text)}</div>`).join("")}
-      <div class="stitle">Mode</div>${mode}
+      ${mode}
       <div class="stitle">Buttons</div>
       ${x.learning ? this._learningHtml(x) : ro ? "" : `<div><button class="btn small ghost" data-action="sw-learn" data-switch="${esc(x.id)}">Learn buttons</button> <span class="sub">press each button once; unassigned buttons do nothing</span></div>`}
       <div class="rows">${rows || `<div class="muted">No buttons known yet. Use Learn buttons and press each button.</div>`}</div>
@@ -1378,7 +1496,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const dm = x.dimming || {};
     const num = (key, v, min, max, unit, step = 1) => `<input type="number" class="num" min="${min}" max="${max}" step="${step}" value="${esc(v ?? "")}" data-control="sw-dim" data-key="${key}" ${at}> ${unit}`;
     const sources = [["auto", "Automatic (best available)"], ["zigbee2mqtt", "Zigbee2MQTT (raw MQTT)"], ["device_trigger", "MQTT device triggers"], ["event_entity", "Event entity"]];
-    const hist = (st.history || []).slice().reverse().map((h) => `<div class="li"><span class="sub">${fmtTime(h.at)} · ${esc(h.source || "")}</span> <b>${esc(h.label)}</b> <span class="sub">${esc(h.result)}</span></div>`).join("");
+    const hist = (st.history || []).slice().reverse().map((h) => `<div class="li"><span class="sub">${fmtTime(h.at)} · ${esc(h.source || "")}</span> <b>${esc(h.label)}</b> ${outcomePill({ last_outcome: h.outcome, last_result_ok: h.ok })} <span class="sub">${esc(h.result)}</span></div>`).join("");
     return `<div class="frow"><label>Input source</label><div class="fval"><select data-control="sw-source" ${at}>${sources.map(([v, l]) => `<option value="${v}" ${x.source === v ? "selected" : ""}>${l}</option>`).join("")}</select>
         <span class="sub">listening now: ${esc((st.sources || []).join(", ") || "nothing")}</span></div></div>
       <div class="frow"><label>MQTT topic</label><div class="fval"><input type="text" value="${esc(x.topic || "")}" placeholder="${esc(x.topic_now || `${sw.settings?.mqtt_base_topic || "zigbee2mqtt"}/…`)}" data-control="sw-topic" ${at}><span class="sub">empty: derived from the Zigbee2MQTT name (follows renames)</span></div></div>
@@ -1450,14 +1568,14 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       if (el.dataset.device) msg.device_id = el.dataset.device;
       if (el.dataset.ieee) msg.ieee = el.dataset.ieee;
       ui.swAdd = false;
-      this._save("sw", msg, "Switch assigned (Listen only)");
+      this._save("sw", msg, "Switch assigned (Observing)");
     } else if (a === "sw-add-manual") {
       const topic = this.shadowRoot.querySelector('[data-control="sw-new-topic"]')?.value.trim();
       const event = this.shadowRoot.querySelector('[data-control="sw-new-event"]')?.value.trim();
       const msg = { type: `${WS}/switch/add`, area_id: area };
       if (topic) msg.topic = topic;
       if (event) msg.event_entity = event;
-      this._save("sw", msg, "Switch assigned (Listen only)").then(() => { if (!this._status.sw?.error) { ui.swAdd = false; this._requestRender(); } });
+      this._save("sw", msg, "Switch assigned (Observing)").then(() => { if (!this._status.sw?.error) { ui.swAdd = false; this._requestRender(); } });
     } else if (a === "sw-configure") { ui.swEdit = id; ui.swConfirm = null; this._render(); }
     else if (a === "sw-back") { ui.swEdit = null; this._render(); }
     else if (a === "sw-learn") this._save(`sw-${id}`, { type: `${WS}/switch/learn`, area_id: area, switch_id: id, action: "start", seconds: 60 }, "Listening…");
@@ -1468,12 +1586,11 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         if (ui.swEdit === id) ui.swEdit = null;
         this._save("sw", { type: `${WS}/switch/remove`, area_id: area, switch_id: id }, "Removed");
       }
-    } else if (a === "sw-mode-listen") this._save(`sw-${id}`, { type: `${WS}/switch/mode`, area_id: area, switch_id: id, mode: "listen" }, "Listen only");
-    else if (a === "sw-mode-ask") { ui.swConfirm = id; ui.swAck = []; this._render(); }
+    } else if (a === "sw-mode-set") this._setSwitchMode(id, el.dataset.mode);
     else if (a === "sw-mode-cancel") { ui.swConfirm = null; this._render(); }
     else if (a === "sw-mode-confirm") {
       ui.swConfirm = null;
-      this._save(`sw-${id}`, { type: `${WS}/switch/mode`, area_id: area, switch_id: id, mode: "control", confirm: true, acknowledge: ui.swAck || [] }, "Smart Occupancy control active");
+      this._save(`sw-mode-${id}`, { type: `${WS}/switch/mode`, area_id: area, switch_id: id, mode: "control", confirm: true, acknowledge: ui.swAck || [] }, "Active: actions are executed");
     } else if (a === "sw-forget") this._save(`map-${id}-${el.dataset.raw}`, { type: `${WS}/switch/mapping`, area_id: area, switch_id: id, raw: el.dataset.raw, forget: true }, "Forgotten");
     else if (a === "sw-add-declared") this._save(`sw-${id}`, { type: `${WS}/switch/mapping`, area_id: area, switch_id: id, raw: el.dataset.raw, add: true }, "Added");
     else return false;
@@ -1516,11 +1633,11 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const autos = review?.automations || [];
     const groups = r.group_issues || [];
     return `<div class="stitle">Control</div>
-      ${active ? `<div class="note ok">Mood lighting is active since ${fmtTime(s.activated_at)}. Existing automations are not changed.</div>
-          ${ro ? "" : `<div><button class="btn ghost" data-action="deactivate">Return to Observe</button></div>`}`
-        : `<div class="note">Observe: nothing is controlled in this room. Review below, then enable.</div>
-          ${ro || !review ? "" : this._ui.confirm ? `<div><button class="btn primary" data-action="activate">Confirm: enable mood lighting</button> <button class="link" data-action="cancel">Cancel</button></div>`
-            : `<div><button class="btn primary" data-action="ask-activate">Enable mood lighting in ${esc(r.name)}</button></div>`}`}
+      ${active ? `<div class="note ok">Automatic since ${fmtTime(s.activated_at)}. Existing automations are not changed.</div>
+          ${ro ? "" : `<div><button class="btn ghost" data-action="deactivate">Return to Observing</button></div>`}`
+        : `<div class="note">Observing: nothing is controlled in this room. Review below, then switch to Automatic (also in the Automatic tab).</div>
+          ${ro || !review ? "" : this._ui.confirm ? `<div><button class="btn primary" data-action="activate">Confirm: switch to Automatic</button> <button class="link" data-action="cancel">Cancel</button></div>`
+            : `<div><button class="btn primary" data-action="ask-activate">Switch ${esc(r.name)} to Automatic</button></div>`}`}
       ${this._statusHtml("activation")}
       ${review ? `<div class="sub">Will control ${review.managed.length} light${review.managed.length === 1 ? "" : "s"}: ${esc(review.managed.map((l) => l.name || l.entity_id).join(", "))}${review.excluded.length ? ` · ${review.excluded.length} not managed` : ""}</div>` : ""}
       <div class="stitle">Automations that also control these lights</div>
@@ -1563,13 +1680,14 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     else if (a === "edit-light") { ui.edit = { scope: "light", target: el.dataset.target }; this._render(); }
     else if (a === "preview-detail") { ui.previewDetail = !ui.previewDetail; this._render(); }
     else if (a === "group") this._save("group", { type: `${WS}/room/group_choice`, area_id: area, group: el.dataset.group, choice: el.dataset.choice }, "Done");
+    else if (a === "room-mode") this._setRoomMode(el.dataset.mode);
     else if (a === "ask-activate") { ui.confirm = true; this._render(); }
     else if (a === "cancel") { ui.confirm = false; this._render(); }
     else if (a === "activate") {
       ui.confirm = false;
       const ack = (ui.review?.automations || []).filter((x) => x.acknowledged).map((x) => x.automation);
-      this._save("activation", { type: `${WS}/room/activate`, area_id: area, confirm: true, acknowledge: ack }, "Mood lighting enabled").then(() => this._loadReview());
-    } else if (a === "deactivate") this._save("activation", { type: `${WS}/room/deactivate`, area_id: area }, "Back in Observe").then(() => this._loadReview());
+      this._save("activation", { type: `${WS}/room/activate`, area_id: area, confirm: true, acknowledge: ack }, "Automatic").then(() => this._loadReview());
+    } else if (a === "deactivate") this._save("activation", { type: `${WS}/room/deactivate`, area_id: area }, "Observing").then(() => this._loadReview());
     else if (a === "clear-override") this._save("activation", { type: `${WS}/override/clear`, area_id: area, entity_id: el.dataset.entity }, "Cleared");
     else if (a === "toggle-dl-adv") { ui.dlAdv = !el.parentElement.open; }
     else if (a === "dl-outdoor-edit") { ui.outdoorEdit = !ui.outdoorEdit; this._render(); }
@@ -1736,7 +1854,7 @@ const STYLE = `<style>
   .note.bad { border-left: 4px solid var(--error-color, #db4437); color: var(--primary-text-color); }
   .kvs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; }
   .kvs > div { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--divider-color); padding: 4px 0; min-width: 0; }
-  .kvs span:first-child { color: var(--secondary-text-color); }
+  .kvs > div > span:first-child { color: var(--secondary-text-color); }
   .kvs b { font-weight: 500; text-align: right; overflow-wrap: anywhere; }
   .issues { display: grid; gap: 6px; }
   .issue { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--divider-color); font-size: 0.92em; }
@@ -1811,6 +1929,20 @@ const STYLE = `<style>
   .segs.small .seg { padding: 4px 10px; font-size: 0.9em; }
   .adl { margin-top: 2px; }
   .chip.small { padding: 2px 10px; font-size: 0.88em; }
+  .pill.bad { color: var(--error-color, #db4437); }
+  .modehead { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+  .modehead .stitle { margin-top: 0; }
+  .modebar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .mode-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; border-radius: 18px; border: 1px solid currentColor;
+    background: none; font-weight: 500; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+  .mode-chip ha-icon { --mdc-icon-size: 18px; }
+  .mode-chip.ok { color: var(--success-color, #43a047); }
+  .mode-chip.warn { color: var(--warning-color, #ff9800); }
+  .mode-chip.muted { color: var(--secondary-text-color); }
+  .mode-chip[aria-disabled="true"] { cursor: default; opacity: 0.8; }
+  .segs.mode .seg { display: inline-flex; align-items: center; gap: 4px; touch-action: manipulation; }
+  .segs.mode ha-icon { --mdc-icon-size: 16px; }
+  .seg:focus-visible, .mode-chip:focus-visible, .btn:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
   @container (max-width: 480px) {
     .tab { padding: 8px 9px; }
     .kvs { grid-template-columns: 1fr; }

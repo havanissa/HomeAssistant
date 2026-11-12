@@ -43,11 +43,13 @@ evaluated again. Nothing is switched off because of daylight.
 
 Wall switches (0.3.5): configured switches and remotes deliver button events
 (``switch_inputs.py``). Every press marks the next light changes in the room
-as a person's (manual override). Switches in Smart Occupancy control execute
-their button mappings (``switch_control.py``) through
-``async_switch_lights``: the room must be activated (Observe never sends),
-Manual mood does not pause them (a person's explicit request), and the lights
-they switch get a manual override, so automatic lighting does not undo it.
+as a person's (manual override). Switches set to Active execute their button
+mappings (``switch_control.py``) through ``async_switch_lights``. That is
+gated by the switch's own mode only (0.3.6): the room's automatic lighting
+mode (Observing / Automatic) does not block a deliberately activated switch,
+Manual mood does not pause it (a person's explicit request), and the lights it
+switches get a manual override, so automatic lighting does not undo it. A
+switch in Observing never sends anything.
 """
 
 from __future__ import annotations
@@ -129,7 +131,7 @@ from .models import IntegrationConfig
 from .occupancy import friendly_name
 from .planner import BLOCKED, CHANGE, Plan, PlanItem, Target, build_plan
 from .profiles import resolve
-from .supervision import assert_room_control_permitted
+from .supervision import assert_room_control_permitted, assert_switch_control_permitted
 from .switch_control import SwitchControl
 from .switch_inputs import SwitchInputs
 from .switches import ButtonEvent, SwitchConfig
@@ -357,6 +359,13 @@ class LightingController:
     def room_active(self, area_id: str) -> bool:
         """Lighting control permitted: the room is enabled and was explicitly activated."""
         return area_id in self.config.enabled_rooms and self.lighting.room(area_id).control_enabled
+
+    def switch_active(self, area_id: str, switch_id: str) -> bool:
+        """Switch actions permitted: the room is enabled and the switch is set to Active (now, not when queued)."""
+        if area_id not in self.config.enabled_rooms:
+            return False
+        switch = self.lighting.room(area_id).switch(switch_id)
+        return switch is not None and switch.controls
 
     @property
     def manual_mode(self) -> bool:
@@ -1559,13 +1568,14 @@ class LightingController:
         return context
 
     async def async_switch_lights(self, area_id: str, service: str, data_by_entity: dict[str, dict[str, Any]],
-                                  context: Context) -> dict[str, str]:
+                                  context: Context, *, switch_id: str) -> dict[str, str]:
         """Send a light command for a wall switch press. Returns {entity: error}.
 
-        Only in activated rooms (Observe never sends). Unlike automatic
-        lighting it is not paused by Manual mood: it is a person's request.
+        Only for a switch set to Active (a switch in Observing never sends).
+        Unlike automatic lighting it is neither blocked by the room's
+        Observing mode nor paused by Manual mood: it is a person's request.
         """
-        assert_room_control_permitted(self.room_active(area_id), area_id)
+        assert_switch_control_permitted(self.switch_active(area_id, switch_id), area_id, switch_id)
         if self._stopped:
             return {e: "stopped" for e in data_by_entity}
         batches: dict[str, list[str]] = {}
