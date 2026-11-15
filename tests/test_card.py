@@ -88,6 +88,9 @@ def test_lighting_cards_never_control_lights() -> None:
         # 0.4.0 Occupied and Vacant profiles: settings, copy, reset, and the explicit, confirmed Test (the integration
         # sends those commands; the card still never calls a service)
         "vacant/set", "profile/copy", "profile/reset", "profile/test",
+        # 0.6.0 zones, shared spaces, relay outputs and Room Supervisor settings, and the supervisor's view of a room
+        # (its "Check now" runs the same reconciliation as the periodic check; the card never calls a service)
+        "zone/set", "zone/remove", "space/set", "space/remove", "relay/set", "supervisor/set", "supervisor/room",
     }, commands
     assert source.count(f"type: `${{WS}}/profile/test`") == 1 and "confirm: true" in source
     test = source.split("_testProfile(profile, mood) {", 1)[1].split("\n  }\n", 1)[0]
@@ -134,7 +137,8 @@ def test_room_card_layout() -> None:
     # The tab bar, the conflicts "Review" link (0.3.4), the Last decision's "Log" link (0.3.7), and (0.3.9) the
     # Settings submenu (Back and its sections) and the Overview's "Switch settings" link; (0.4.0) the Vacant profile's
     # "vacancy settings" link in the Overrides tab.
-    assert source.count('data-action="tab"') == 7
+    # (0.6.0: the Overview's Room Supervisor details link to its settings in Settings → Advanced.)
+    assert source.count('data-action="tab"') == 8
 
 
 def test_operating_modes_on_the_main_screens() -> None:

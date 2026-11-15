@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.0 — Multi-zone lighting and the Room Supervisor (Phase 4.5)
+
+### Added
+
+- **Zones** per room (Settings → Presence → Zones): a subset of the room's sensors, *occupied at the first detection* or *when confirmed*, timing overrides (hold after the last detection, exit confirmation, confirmation window, dropout grace), a fail-safe for unavailable sensors (*keep last state* / *vacant* / *occupied while the room is*), *keeps the room occupied*, lights with On (brightness, colour temperature, transition) / Off / Unchanged, priority, manual-change policy, daylight rule (room / always / own light level) and what happens when the zone ends. Each zone runs the existing occupancy engine; zone transitions are kept in a bounded history (diagnostics) for later learning.
+- **One lighting rule engine** (`arbitration.py`): every plan (Occupied, Vacant / vacancy, possible occupancy, gradual updates) gets one winning rule per light — protection, high-priority zones, manual overrides, zones, Occupied profile, possible occupancy, Vacant profile — before anything is sent. Plan items, previews, the decision log and the Supervisor name the rule and what it took precedence over.
+- **Shared spaces** (open-plan rooms): optional shared mood, shared lights never switched off by one room while another member room is occupied and commanded by one room at a time, and optional joint vacancy.
+- **Relay lighting outputs**: switches explicitly ticked in Settings → Advanced are lights of the room (on/off only, `switch.turn_on` / `switch.turn_off`, never light attributes); they take part in profiles, possible occupancy, vacancy, zones, manual overrides, wall switches and the Supervisor; automations calling `switch.*` on them are detected as conflicts.
+- **Room Supervisor** (`supervisor.py`): compares desired and actual states with tolerances and verification delays; Observing (default) / Automatic / Off per room or globally; bounded corrections with growing delays and a per-device hourly limit; never corrects a manual change; reports (and optionally corrects once) changes by other automations, then *Conflict suspected*; *Device failure* after the last correction, verified again when the device comes back online; verifies the removal of preliminary and zone lights. Statuses Healthy, Observing, Waiting for verification, Mismatch detected, Correcting, Degraded sensor availability, Device failure, Conflict suspected.
+- **Room card**: Overview → Room Supervisor (status, active zones, discrepancies, last check, health; per light: winning rule, expected, actual, last command, verification, correction, error; supervisor log; *Check now*); Settings → Presence → Zones and Shared space; Settings → Advanced → Relay lighting outputs and Room Supervisor settings.
+- Decision log: zone activated / ended (with the lights' new rule), vacancy waiting for the shared space (room log); mismatch, correction, verified, device failure, conflict, manual change respected, sensor availability, room healthy again (supervisor log `<area>#supervisor`).
+- Websocket commands `zone/set`, `zone/remove`, `relay/set`, `space/set`, `space/remove`, `supervisor/set`, `supervisor/room`; diagnostics `zones`, `supervisor`, `relays`, `shared_space`; occupancy diagnostics `zone_holds`.
+- Lighting store 1.7 (`zones`, `relays`, `supervisor` per room; global `supervisor`, `shared_spaces`).
+
+### Changed
+
+- Commands to a target are sent with the service of its domain (`light.*` or `switch.*`).
+- A light a zone switched on counts as off for the daylight rules after the zone ends, so it is not left on in daylight.
+- The room mood-lighting sensor shows a compact zone / supervisor summary (unrecorded attributes).
+
+### Not changed
+
+- Rooms without zones, relays or a shared space: occupancy, mood lighting, possible occupancy, Vacant profiles, manual overrides, wall switches and the decision log behave as in 0.5.0. Forecasts stay observation only and never activate a zone.
+
+### Not included
+
+- Predictive heating (Phase 5).
+
 ## 0.5.0 — Occupancy forecast (Phase 4, observation only)
 
 ### Added

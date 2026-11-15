@@ -7,8 +7,8 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.5.0"
-VERSION: Final = "0.5.0"
+PHASE: Final = "0.6.0"
+VERSION: Final = "0.6.0"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -226,7 +226,9 @@ LIGHTING_STORE_VERSION: Final = 1
 # Minor 4 (0.3.8): what automatic lighting does when a room becomes vacant (rooms without a setting: Turn off).
 # Minor 5 (0.3.9): possible occupancy lighting (disabled; no room has a preliminary light).
 # Minor 6 (0.4.0): occupied and vacant lighting profiles (vacant tables empty; a 0.3.8 vacant mood is kept).
-LIGHTING_STORE_MINOR_VERSION: Final = 6
+# Minor 7 (0.6.0): zones, relay lighting outputs, shared spaces and the Room Supervisor (none configured;
+# the supervisor starts Observing, so no room behaves differently).
+LIGHTING_STORE_MINOR_VERSION: Final = 7
 LIGHTING_STORE_KEY: Final = "smart_occupancy.lighting"
 LIGHTING_SAVE_DELAY_SECONDS: Final = 1
 # Runtime state of mood lighting (manual overrides, last applied profile).
@@ -527,3 +529,23 @@ FORECAST_TICK_MINUTES: Final = 5
 # Learning starts this long after Home Assistant has started (the Recorder is busy while starting).
 FORECAST_START_DELAY_SECONDS: Final = 90
 SIGNAL_FORECAST_UPDATED: Final = f"{DOMAIN}_forecast_updated"
+
+# Multi-zone lighting and the Room Supervisor (0.6.0, Phase 4.5) ---------------
+# Zones are optional and configured per room; a room without zones behaves exactly as before.
+ZONE_PRIORITY_DEFAULT: Final = 50
+ZONE_PRIORITY_MAX: Final = 100
+ZONE_TIMING_KEYS: Final = ("correlation_window", "exit_confirmation", "inactivity_timeout", "dropout_grace")
+# Bounded history of zone transitions per room (zone-aware data interface for later learning; observation only).
+ZONE_HISTORY_SIZE: Final = 50
+# Room Supervisor: global defaults, (default, min, max).
+SUPERVISOR_LIMITS: Final[dict[str, tuple[float, float, float]]] = {
+    "verify_delay": (4, 2, 30),             # s after a command before its result is checked
+    "reconcile_interval": (30, 10, 600),    # s between full reconciliations of a room
+    "health_interval": (60, 30, 900),       # s between sensor / device health evaluations
+    "diagnostics_interval": (300, 60, 3600),  # s between extended diagnostics (metrics only)
+    "max_retries": (3, 0, 10),              # corrective commands per mismatch episode
+    "retry_delay": (5, 1, 300),             # s before the first retry; doubled after each attempt
+    "max_per_hour": (6, 1, 60),             # corrective commands per device per hour (loop protection)
+    "brightness_tolerance": (5, 1, 20),     # percentage points that are not a mismatch
+    "kelvin_tolerance": (150, 20, 1000),    # K that are not a mismatch
+}

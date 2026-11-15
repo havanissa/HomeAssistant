@@ -516,6 +516,8 @@ class RoomMoodLightingSensor(RoomOccupancyEntity, SensorEntity):
         "last_trigger", "last_result", "last_reason", "last_counts", "last_errors", "last_decision_at",
         "integration", "manual_mode", "global_adjustment", "last_adaptive_at", "last_adaptive", "adaptive_conflicts",
         "auto_on", "vacancy",
+        # 0.6.0: a compact summary only (the details are in the room card and the diagnostics).
+        "active_zones", "supervisor", "supervisor_discrepancies", "relays", "shared_space", "space_deferred",
     })
 
     async def async_added_to_hass(self) -> None:
@@ -523,7 +525,14 @@ class RoomMoodLightingSensor(RoomOccupancyEntity, SensorEntity):
         self.async_on_remove(async_dispatcher_connect(self.hass, SIGNAL_LIGHTING_UPDATED, self._write_if_changed))
 
     def _diagnostics(self) -> dict[str, Any]:
-        return self.coordinator.lighting.room_diagnostics(self._area_id)
+        diag = self.coordinator.lighting.room_diagnostics(self._area_id)
+        # Zones and the Room Supervisor (0.6.0): their status only; check times and logs are not entity state.
+        zones = diag.pop("zones", None) or {}
+        supervisor = diag.pop("supervisor", None) or {}
+        diag["active_zones"] = sorted(z["name"] for z in zones.get("status", []) if z.get("active"))
+        diag["supervisor"] = supervisor.get("status")
+        diag["supervisor_discrepancies"] = supervisor.get("discrepancies")
+        return diag
 
     @property
     def available(self) -> bool:

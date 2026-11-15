@@ -175,6 +175,18 @@ class OccupancyManager:
             if self._running:
                 self._evaluate(area_id, now)
 
+    @callback
+    def async_set_holds(self, area_id: str, names: frozenset[str]) -> None:
+        """Occupied zones that keep a room occupied (0.6.0). A change is evaluated at once."""
+        engine = self.engines.get(area_id)
+        if engine is None:
+            return
+        now = dt_util.utcnow()
+        if engine.set_hold(names, now):
+            _LOGGER.debug("occupancy_zone_hold area=%s zones=%s", area_id, ",".join(sorted(names)))
+            if self._running:
+                self._evaluate(area_id, now)
+
     def same_signals(self, config: IntegrationConfig) -> bool:
         """The rooms and assigned signals of ``config`` are the ones this manager runs."""
         if set(config.enabled_rooms) != set(self.engines):
@@ -333,6 +345,7 @@ class OccupancyManager:
             out[area_id] = {
                 "timing": engine.timing.as_dict(),
                 "preliminary_signals": sorted(engine.preliminary),
+                "zone_holds": sorted(engine.external_hold),
                 "adjacent_rooms": list(engine.adjacent),
                 "state": result.state.value if result else None,
                 "occupied": result.occupied if result else None,

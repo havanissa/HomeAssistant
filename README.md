@@ -12,6 +12,8 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **0.5.0 (Phase 4)** adds an **occupancy forecast**: learned from your Recorder history, per room, 5–60 minutes ahead, with confidence, explanations, movement between rooms and measured accuracy, in **observation mode only**: no forecast ever controls anything (see [Occupancy forecast](#occupancy-forecast-phase-4-050)).
 
+**0.6.0 (Phase 4.5)** adds **multi-zone lighting and the Room Supervisor**: optional zones inside a room (a sink and a shower, each with its own sensors and lights, the shower taking precedence), one rule engine that gives every light exactly one winning rule, shared open-plan spaces (Køkur / Stova), switches explicitly designated as relay-controlled lights, and a Room Supervisor that compares what each light should do with what Home Assistant reports and, only when you allow it, corrects devices that did not follow a command (see [Multi-zone lighting and the Room Supervisor](#multi-zone-lighting-and-the-room-supervisor-phase-45-060)).
+
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
@@ -28,6 +30,9 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - calculates its own adaptive lighting: it only reads the values your existing system publishes
 - polls, uses the internet, or writes to the Recorder database directly (0.5.0 reads the Recorder's history, read only)
 - controls a light, heating or any other device because of an occupancy forecast, or changes an occupancy state because of one (0.5.0: forecasts are observation only)
+- treats a `switch.*` entity as a light unless you ticked it as a relay lighting output of a room (0.6.0)
+- sends a corrective command unless the room's Room Supervisor is set to **Automatic** (default: Observing) and the room is in Automatic; it never corrects a person's change and corrects another automation's change at most once, only if you allow it (0.6.0)
+- activates a zone from a forecast: zones follow sensor states only (0.6.0)
 
 ## Requirements
 
@@ -780,6 +785,116 @@ With that:
 
 The existing lighting automation and helper are not touched. Compare them with `sensor.smart_occupancy_kamar_nordur_helper_comparison`.
 
+## Multi-zone lighting and the Room Supervisor (Phase 4.5, 0.6.0)
+
+Optional and per room. A room without zones, relay outputs or a shared space behaves exactly as in 0.5.0, and the Room Supervisor starts in **Observing**: it reports, it never sends a command until you set it to Automatic.
+
+### Audit (before implementation)
+
+What existed and was extended (nothing was duplicated):
+
+| Part | Before | 0.6.0 |
+|---|---|---|
+| Occupancy engine (`engine.py`, `occupancy_manager.py`) | one engine per room | unchanged rules; each **zone** runs the same engine over its subset of the room's signals (`zone_runtime.py`); an occupied zone can **hold** its room occupied (`RoomEngine.set_hold`) |
+| Lighting controller (`controller.py`) | Occupied plan, vacancy plan, preliminary plan, gradual updates, wall switches | every plan passes **one arbitration step** (`arbitration.py`) before it is executed or shown; zone changes are applied by `async_zones`; commands go to `light.*` or `switch.*` by domain |
+| Planner (`planner.py`) | per-light decisions | each item names its winning **rule**; lights a zone switched on count as off for the daylight rules once the zone ends |
+| Profiles (`profiles.py`), Vacant profile, possible occupancy | — | unchanged; they are rules 5–7 of the arbitration |
+| Light index (`lighting.py`) | `light.*` only | also indexes the switches you designated as relay outputs (labels, categories) |
+| "Supervision" (`supervision.py`) | permission gates only (Observe / Automatic / Active switch) | unchanged; the new **Room Supervisor** (`supervisor.py`) uses those gates and the controller's own plan |
+| Decision log (`decisions.py`, `lighting_decisions.py`) | per room and per switch | zone decisions in the room log; supervisor decisions in their own log per room (`<area>#supervisor`) |
+| Room relationships | adjacent rooms (Phase 0.2), room connections (Phase 4) | adjacent rooms are suggested when you create a **shared space** |
+| Lighting store | 1.6 | 1.7: `zones`, `relays`, `supervisor` per room; global `supervisor`, `shared_spaces` |
+
+### Zones
+
+Settings → **Presence** → **Zones**. A zone is a logical part of a room (sink, shower, kitchen island); Home Assistant's areas are not changed. For each zone:
+
+- **Presence sensors**: some of the room's own sensors (kind, role and "inverted" come from the room; a sensor you switched off in the Presence tab is off in its zones too).
+- **Occupied**: at the *first detection* (one PIR movement) or *when presence is confirmed*.
+- **Timing** (blank = the room's value): confirmation window, *hold after the last detection* (the zone stays occupied that long after its sensors went quiet, so a brief interruption never dims the shower), exit confirmation, dropout grace.
+- **If its sensors are unavailable**: *keep its last state* (default), *treat as vacant*, or *occupied while the room is occupied*. Unavailable is never simply taken as vacant, and an unavailable zone never holds the room occupied.
+- **Keeps the room occupied**: while the zone is occupied the room is not declared vacant (the room's quiet period starts when the zone ends). A zone becoming vacant never makes the room vacant; the room is still decided by its own sensors.
+- **Lights**: any light or relay output the room controls, with **On** (brightness, colour temperature, transition, only what the light supports), **Off**, or **Unchanged** (the zone claims the light and keeps it as it is; lower rules do not change it).
+- **Priority** (1–100, higher wins between zones), **Manual changes** (*respected*, or *zone wins over earlier ones*), **Switch on in daylight** (*only when the room needs light*, *always*, or *below its own light level*), **When the zone ends** (*room rules take over*: a light the zone switched on that no remaining rule sets is switched off; or *lights stay as they are*).
+
+Zones are active from sensor states only. A zone is never active while its room is vacant, and a forecast or *predicted* occupancy never activates one.
+
+**WC Neðra example.** *Sink*: sink PIR, priority 40, downlights 30 %, mirror light on. *Shower*: shower radar, priority 80, hold 3 min, downlights 100 %, *Switch on in daylight: always*, optionally *zone wins over earlier ones*. Someone at the sink: downlights 30 %, mirror on. Steps into the shower: downlights 100 % (the shower wins; the mirror stays on, the sink still claims it). A mood change meanwhile changes nothing the shower controls. Leaves the shower but stays at the sink: after the hold, downlights back to 30 %. Leaves the room: the room's vacancy action.
+
+### The lighting rule engine (one winning rule per light)
+
+For every light the rule engine decides before anything is sent, in this order:
+
+1. **Protection**: Manual mood (everything paused), an unavailable device, an excluded light, a member controlled through its group, an unacknowledged automation conflict.
+2. **Zones set to *zone wins over earlier ones***: they win over a manual override made *before* the zone became active. A change a person makes while the zone is active is respected.
+3. **Manual overrides**.
+4. **Zones** (higher priority first, then the order in the list).
+5. **Occupied profile** (the room's mood).
+6. **Possible occupancy** (preliminary lights that no zone claims).
+7. **Vacant profile** / vacancy action.
+
+Each light gets at most one command, only when it is not already in the requested state; the decision log and the Supervisor show the winning rule and what it took precedence over ("Downlights set to 100 %, overriding Sink zone"). A zone can only target lights the room controls; a member of a managed group is controlled through the group, so a group and its members never get contradictory commands.
+
+### Shared (open-plan) spaces
+
+Settings → Presence → **Shared space**: group rooms such as Køkur and Stova. Each room keeps its own occupancy, zones, lights and daylight rules. The space adds:
+
+- a **shared mood** (optional; rooms without their own room mood use it),
+- **shared lights**: a light managed by two member rooms is never switched off by one room while the other is occupied, and is commanded by one room at a time (the first occupied room in the space's list),
+- **When a room is vacant**: *it runs its own vacancy action* (default) or *it waits until the whole space is vacant*.
+
+### Relay-controlled lights
+
+Settings → **Advanced** → **Relay lighting outputs**: tick the `switch.*` entities that switch a light. Only those are lights; no switch is ever treated as a light automatically, and wall switches, buttons and switch inputs stay what they are. A relay output takes part in everything a light does (Occupied and Vacant profiles per single light or by its labels, possible occupancy, vacancy, zones, manual overrides, the Supervisor), with on/off only: it is switched with `switch.turn_on` / `switch.turn_off`, never with light attributes, and the editors show only on/off for it. Automations that call `switch.*` on it are found as conflicts.
+
+### Room Supervisor
+
+Settings → Advanced → **Room Supervisor**: *Observing* (default), *Automatic* or *Off*, per room or as the global default; the Overview shows its status.
+
+It compares the **desired state** (what the winning rule requests) with the **actual state** (what Home Assistant reports; the physical output may differ), for the attributes the device supports, with tolerances (brightness ±5 %, colour temperature ±150 K by default) and after a verification delay plus the command's transition. It never applies new lighting itself, so it changes no room's behaviour; it checks what Smart Occupancy commanded:
+
+- a command that was accepted but not reported, or that failed, while the rule still wants it: **mismatch**; in Automatic it is **corrected** (at most 3 times per mismatch: the first once the verification delay has passed, then after 5 and 10 s, each delay doubling; at most 6 times per device per hour; never while a command or transition is pending or a lighting change is queued);
+- the removal of a preliminary light, or of a light a zone switched on, is verified the same way;
+- a **manual change** is never corrected;
+- a change by **an automation or another integration** is reported (*Changed elsewhere*); with *Changes by automations: correct once* it is corrected once, and if it is changed again the supervisor reports **Conflict suspected** and stops;
+- after the last allowed correction: **Device failure** (suspected: Home Assistant still reports the old state), left alone until the device changes, the rule changes, or the device comes back online.
+
+**Timing**: command verification a few seconds after each command; a reconciliation of each room every 30 s; sensor and device health every 60 s; extended metrics every 5 min. One timer for all rooms; reconciliation only reads states (no periodic service call), and cards are refreshed only when something changed.
+
+**Statuses**: Healthy · Observing · Waiting for verification · Mismatch detected · Correcting · Degraded sensor availability · Device failure · Conflict suspected · Not checked yet · Supervisor off. *Healthy* only when occupancy is known, every sensor and device is available and nothing differs.
+
+**Overview → Room Supervisor**: status, mode, active zones, discrepancies, last successful check, sensor and device health, and on demand each light's winning rule, expected and actual state, last command, verification, correction and error, plus the supervisor log.
+
+### Decision log examples
+
+- *Shower zone activated. light.wc_downlights set to 100 %, overriding Sink zone.* (room log)
+- *Shower zone ended. light.wc_downlights set to 30 %, …* (room log)
+- *WC Neðra: light.wc_downlights expected 100 %, actual 30 % (Shower zone). Correction requested.* (supervisor log)
+- *WC Neðra: light.wc_downlights: expected 100 %, actual 30 %. Corrective light.turn_on issued (attempt 1 of 3).*
+- *WC Neðra: light.wc_downlights verified at 100 %.* · *Room Supervisor: every device reports its requested state again. Supervisor healthy.*
+- *Stova: switch.stova_relay: expected off, actual on. Corrective switch.turn_off issued (attempt 1 of 3).*
+- *Room vacant, but Stova in the shared space Køkur/Stova is still occupied: this room's lights stay as they are until the whole space is vacant.*
+
+Routine successful checks are counted (Overview metrics, diagnostics), not logged.
+
+### Migrating a room from Home Assistant automations
+
+Smart Occupancy never disables or changes your automations. Room by room:
+
+1. **Read the existing automations** of the room (Settings → Automations): their triggers (sensors), conditions (lux, mood, time) and light actions. Settings → Advanced in the room card lists the automations that also control its lights.
+2. **Recreate the behaviour as zones**: one zone per sensor area, with the same lights and levels; the shower's 100 % as a higher-priority zone; lux conditions as *Switch on in daylight*.
+3. **Compare in Observing**: leave the room's automatic lighting Observing. Each zone change is logged as *would* ("would be set to 100 %"), next to what your automation actually does. Settings → Presence → Zones → *Which rule controls each light now* shows the winning rule per light.
+4. **Resolve the overlap**: when the zone rules match, disable the old automation yourself, or acknowledge it as a co-controller (Advanced) if both should run.
+5. **Switch the room to Automatic**, then optionally the Supervisor to Automatic.
+
+### Live-testing checklist
+
+**WC Neðra**: (1) at the sink: downlights at the sink level, mirror on; (2) in the shower: downlights 100 %; (3) both: the shower wins (log: "overriding Sink zone"); (4) a short radar dropout in the shower does not dim; (5) leave the shower, stay at the sink: back to the sink level after the hold; (6) leave the room: the vacancy action; (7) unplug the shower radar: the fail-safe you chose (Presence → Zones shows "Sensor unavailable").
+
+**Køkur / Stova**: (1) activity in the kitchen lights the kitchen only; (2) in the living room only the living room; (3) both occupied: each keeps its own levels, a shared light gets one command; (4) leave the kitchen: its own lights follow its vacancy action, a shared light stays on while Stova is occupied; (5) with *wait until the whole space is vacant*: the kitchen keeps its lights until Stova is vacant too.
+
+**Relay output**: (1) tick the switch in Advanced → Relay lighting outputs; (2) give it a zone or a per-light profile entry: it is switched with `switch.turn_on/turn_off` only; (3) the Overview's supervisor table shows its expected and actual on/off; (4) with the Supervisor in Automatic, block the relay (or unplug it while on): the supervisor corrects at most 3 times, then reports *Device failure*; plug it back: verified again; (5) switch it by hand: *Manual change*, never corrected.
+
 ## Occupancy forecast (Phase 4, 0.5.0)
 
 The integration learns, from your Recorder history, when each room is usually used and how people move between rooms, and forecasts each room's occupancy 5, 15, 30 and 60 minutes ahead.
@@ -1127,6 +1242,8 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 
 ## Upgrading
 
+**From 0.5.0.** Nothing to configure, and nothing changes in any room. The lighting store is migrated from 1.6 to 1.7: every room gets no zone, no relay output and no supervisor override; there is no shared space; the global Room Supervisor mode is **Observing** (it compares and reports, and never sends a command). The supervisor's own log appears under Overview → Room Supervisor. The room mood-lighting sensor gets a few unrecorded attributes (`active_zones`, `supervisor`, `supervisor_discrepancies`, `relays`, `shared_space`). 0.5.0 can be reinstalled; it ignores the new keys.
+
 **From 0.4.0.** Nothing to configure, and nothing changes in occupancy or lighting. New entities appear (forecast, predicted occupancy and forecast confidence per room; predicted next room and forecast learning). About 90 seconds after Home Assistant has started, the forecast reads the Recorder's history (once per available day), then refreshes hourly; until then the forecast entities show `learning`. Two new store files: `smart_occupancy.forecast_settings` and `smart_occupancy.forecast_days`. To switch forecasts off: Settings → Presence → Occupancy forecast → Forecast settings → Global defaults → *Learn and forecast occupancy*. 0.4.0 can be reinstalled; it ignores the new files (remove the new entities by hand if you go back).
 
 **From 0.3.7.** Nothing to configure. What changes:
@@ -1167,6 +1284,16 @@ Observe rooms are asserted never to call a light service. Any test that logs an 
 **From 0.1.x.** Configuration version 1.1 is migrated to 1.2 on the first start, keeping everything you configured; then the 0.2 step above applies.
 
 ## Known limitations (Phase 0.3.5)
+
+### From 0.6.0 (zones, relays, shared spaces, Room Supervisor)
+
+- **Not verified on the production Home Assistant** (the HA connection was unavailable while this was built): WC Neðra, Køkur / Stova and relay outputs were tested with simulated sensors, Zigbee-like lights (own-context reports, failures, ignored commands, late reports) and a simulated relay. The cards were rendered in a headless browser with a mocked Home Assistant at desktop and phone widths, not in the real frontend.
+- **Your existing WC Neðra / Køkur automations were not inspected** (same reason). Use the migration procedure above; no automation is changed or disabled by Smart Occupancy.
+- **A change in the same direction within 20 s of a Smart Occupancy command** (for example an automation switching on a light Smart Occupancy has just switched on, at another level) cannot be told apart from the device's own late report. It is then treated as the device's report: the supervisor may correct it, within its retry limits.
+- **Home Assistant's state is not the physical output**: a relay that reports *on* but whose lamp is broken looks healthy; *Device failure* means Home Assistant kept reporting the old state.
+- **Supervisor history is in memory**: retry counters, verification times and metrics start over after a restart (its log is kept). Zone states, zone ownership and the shared-space vacancy wait are kept across restarts.
+- **Zones use the room's sensors**: a sensor must be assigned to the room (Configure → Rooms) before a zone can use it, and its kind and role are the room's.
+- **Shared lights in a shared space** follow the first occupied room in the space's list; there is no per-light choice of the owning room yet.
 
 ### From 0.5.0 (occupancy forecast)
 

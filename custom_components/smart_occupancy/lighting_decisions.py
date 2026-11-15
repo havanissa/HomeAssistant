@@ -59,6 +59,7 @@ TRIGGER_WORDS = {
     "possible_occupancy": "possible occupancy", "preliminary_end": "possible occupancy not confirmed",
     "retry": "retry of a preliminary light switch-off", "manual_ended": "Manual mood ended",
     "became_bright": "daylight is enough", "profile_test": "profile test",
+    "zone": "zone occupancy changed", "space_vacant": "shared space vacant", "supervisor": "Room Supervisor",
 }
 VACANCY_WORDS = {"turn_off": "Turn off", "vacant_mood": "Vacant mood", "leave": "Leave unchanged"}
 _SOURCE_WORDS = {
@@ -302,7 +303,7 @@ class LightingDecisions:
                 text += f" {_plural(len(stopped))} not sent: Manual mood started."
             text += tail
             status = PARTIAL if failed and sent else FAILED if failed or not sent else DISPATCHED
-            details["service"] = [f"light.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
+            details["service"] = [f"{i.entity_id.split('.', 1)[0]}.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
             details["result"] = (f"{len(sent)} sent and accepted" + (f", {len(failed)} failed" if failed else "")
                                  + (f", {len(stopped)} not sent" if stopped else ""))
             if failed:
@@ -317,7 +318,7 @@ class LightingDecisions:
             status = OBSERVED
             text = f"{why}{light_clause}: would {self._result_phrase(changes, mood, would=True)}. " \
                    "Observing: nothing was sent." + tail
-            details["service"] = [f"light.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
+            details["service"] = [f"{i.entity_id.split('.', 1)[0]}.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
         elif activation and gated and not turning_on:
             code = gated[0].reason_code
             status = NO_CHANGE if code == GATE_NOT_NEEDED else BLOCKED
@@ -457,7 +458,7 @@ class LightingDecisions:
                          f"{'it' if len(ok) == 1 else 'these lights'} as set {minutes_text(minutes)}.")
             status = PARTIAL if failed and ok else FAILED if failed else DISPATCHED
         details = {"trigger": TRIGGER_WORDS["profile_test"], "profile": word, "mood": mood,
-                   "service": [f"light.{i.service} {i.name or i.entity_id} {i.data}" for i in changes],
+                   "service": [f"{i.entity_id.split('.', 1)[0]}.{i.service} {i.name or i.entity_id} {i.data}" for i in changes],
                    "targets": [f"{i.name or i.entity_id}: {i.decision} — {i.reason}" for i in plan.items
                                if i.decision != SKIPPED], "override_minutes": minutes}
         checks: list[Check] | None = None
@@ -629,7 +630,7 @@ class LightingDecisions:
                 text += f" Not changed: {'; '.join(self._blocked_reasons(held))}."
             text += tail
             status = PARTIAL if (failed or offline) and sent else FAILED if failed or not sent else DISPATCHED
-            details["service"] = [f"light.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
+            details["service"] = [f"{i.entity_id.split('.', 1)[0]}.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
             details["result"] = (f"{len(sent)} sent and accepted" + (f", {len(failed)} failed" if failed else "")
                                  + (f", {len(offline)} unavailable" if offline else ""))
             if failed or offline:
@@ -646,7 +647,7 @@ class LightingDecisions:
             if held or offline:
                 text += f" Also: {'; '.join(self._blocked_reasons(held + offline))}."
             text += tail
-            details["service"] = [f"light.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
+            details["service"] = [f"{i.entity_id.split('.', 1)[0]}.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
         elif held and all(i.reason_code in GATE_CODES for i in held):
             status = NO_CHANGE
             text = f"{why}: {names(held)} stay{'s' if len(held) == 1 else ''} off — " \
@@ -753,7 +754,7 @@ class LightingDecisions:
             if ok:
                 text += after
             status = PARTIAL if failed and ok else FAILED if failed or not ok else DISPATCHED
-            details["service"] = [f"light.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
+            details["service"] = [f"{i.entity_id.split('.', 1)[0]}.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
             details["result"] = f"{len(ok)} sent and accepted" + (f", {len(failed)} failed" if failed else "")
             if failed:
                 details["errors"] = {i.entity_id: errors[i.entity_id] for i in failed}
@@ -764,7 +765,7 @@ class LightingDecisions:
         elif changes and not plan.control_enabled:
             status = OBSERVED
             text = f"{why}{light_clause}: would switch on {lights(changes)} as a preliminary light. Observing: nothing was sent."
-            details["service"] = [f"light.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
+            details["service"] = [f"{i.entity_id.split('.', 1)[0]}.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
         elif gated:
             code = gated[0].reason_code
             status = NO_CHANGE if code == GATE_NOT_NEEDED else BLOCKED
@@ -981,3 +982,89 @@ class LightingDecisions:
                         "no light is controlled.",
             mode=MODE_OBSERVING, status=NOTED, details={"trigger": TRIGGER_WORDS["deactivated"]}, key=("mode",),
         )
+
+    # ------------------------------------------------------------------ zones (0.6.0)
+    def zones(self, area_id: str, trigger: str, plan: Plan, changed: set[str], items: list[PlanItem], *,
+              ok: list[PlanItem] | None, errors: dict[str, str], removed: list[str],
+              observing: bool) -> Decision | None:
+        """A zone became occupied or vacant: what its lights did (the winning rule of each one)."""
+        ctrl = self.ctrl
+        room = ctrl.lighting.room(area_id)
+        names = {z.id: z.name for z in room.zones}
+        now_active = {z.zone.id for z in ctrl.zones.active(area_id)}
+        started = sorted(names.get(z, z) for z in changed if z in now_active)
+        ended = sorted(names.get(z, z) for z in changed if z not in now_active)
+        heads = [f"{n} zone activated" for n in started] + [f"{n} zone ended" for n in ended]
+        head = " · ".join(heads) or "Zone lighting re-evaluated"
+        would = observing or ok is None
+        parts: list[str] = []
+        sent = {i.entity_id for i in ok or []}
+        for item in items:
+            name = item.name or item.entity_id
+            rule = item.rule or {}
+            superseded = rule.get("superseded") or []
+            over = f", overriding {_names(superseded)}" if superseded else ""
+            if item.decision == CHANGE and (would or item.entity_id in sent):
+                what = "switched off" if item.service == "turn_off" else (
+                    f"set to {item.data['brightness_pct']} %" if "brightness_pct" in item.data else "switched on")
+                if would:
+                    what = "would be " + what
+                by = f" ({rule.get('name')})" if rule.get("kind") != "zone" else ""
+                parts.append(f"{name} {what}{by}{over}")
+            elif item.decision == CHANGE and item.entity_id in errors:
+                parts.append(f"{name}: failed ({errors[item.entity_id]})")
+            elif item.entity_id not in removed and item.reason:
+                parts.append(f"{name}: {item.reason[0].lower()}{item.reason[1:]}")
+        for entity_id in removed:
+            parts.append(f"{_name(ctrl.hass, entity_id)} {'would be ' if would else ''}switched off "
+                         "(no remaining rule keeps it on)")
+        text = f"{head}. {'; '.join(p.rstrip('.') for p in parts)}." if parts else f"{head}: no light changes."
+        if not plan.control_enabled:
+            text += " Observing: nothing was sent."
+        elif plan.manual_mode:
+            text += " Main Mood is Manual: nothing was sent."
+        if plan.manual_mode:
+            status = BLOCKED
+        elif would:
+            status = OBSERVED if (any(i.decision == CHANGE for i in items) or removed) else NO_CHANGE
+        elif errors and not sent:
+            status = FAILED
+        elif errors:
+            status = PARTIAL
+        elif sent or removed:
+            status = DISPATCHED
+        else:
+            status = NO_CHANGE
+        checks: list[Check] = []
+        for item in ok or []:
+            checks.extend(light_checks(item.service or "", {item.entity_id: item.data}))
+        if not would:
+            checks.extend(light_checks("turn_off", {e: {} for e in removed}))
+        if status == DISPATCHED and not checks:
+            status = EXECUTED
+        details = {"trigger": TRIGGER_WORDS.get(trigger, trigger),
+                   "zones": {**{n: "active" for n in started}, **{n: "vacant" for n in ended}},
+                   "targets": [f"{i.name or i.entity_id}: {(i.rule or {}).get('name')} — {i.decision}: {i.reason}"
+                               for i in items]}
+        return self.log.record(
+            area_id, module=MODULE_LIGHTING, trigger=trigger, kind="zone", action=heads[0] if heads else head,
+            explanation=text, mode=MODE_OBSERVING if not plan.control_enabled else self.mode(area_id),
+            status=status, target=_names([i.name or i.entity_id for i in items]) or None, details=details,
+            key=("zone", head, status), checks=checks or None, verify_after=self._verify_delay(ok or []),
+        )
+
+    def space_wait(self, area_id: str, waits: list[str]) -> Decision:
+        """A room of a shared space that vacates together became vacant while another member room is occupied."""
+        from .discovery import area_name
+
+        ctrl = self.ctrl
+        space = ctrl.lighting.space_of(area_id)
+        others = _names([area_name(ctrl.hass, r) or r for r in waits])
+        return self.log.record(
+            area_id, module=MODULE_LIGHTING, trigger="vacant", kind="vacancy", action="Vacancy waits",
+            explanation=(f"Room vacant, but {others} in the shared space {space.name if space else ''} is still "
+                         "occupied: this room's lights stay as they are until the whole space is vacant."),
+            mode=self.mode(area_id), status=NOTED, details={"trigger": TRIGGER_WORDS["vacant"], "occupied": waits},
+            key=("space_wait", *waits),
+        )
+

@@ -69,6 +69,7 @@ from .daylight import DaylightConfig, RoomDaylight, parse_lux, round_lux
 from .discovery import area_name
 from .health import room_health
 from .lighting import light_capabilities
+from .targets import capabilities as target_capabilities, is_relay
 from .lighting_config import (
     AdaptiveConfig,
     UnrepresentableHandling,
@@ -420,6 +421,12 @@ def _group_issues(ctrl: LightingController, area_id: str) -> list[dict[str, Any]
     return out
 
 
+def _zones_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> dict[str, Any]:
+    from .zone_websocket import zones_model
+
+    return zones_model(hass, ctrl, area_id)
+
+
 def _preliminary_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> dict[str, Any]:
     from .preliminary_websocket import preliminary_model
 
@@ -474,7 +481,8 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
             "labels": [cat_names[k] for k in index.categories_of.get(entity_id, []) if k in cat_names],
             "rgb": index.rgb_eligible(entity_id),
             "state": state.state if state else None,
-            "capabilities": light_capabilities(hass, entity_id).as_dict(),
+            "capabilities": target_capabilities(hass, entity_id).as_dict(),
+            "type": "relay" if is_relay(entity_id) else "light",
             "is_group": entity_id in managed.members or entity_id in managed.opaque_groups,
             "members": sorted(managed.members.get(entity_id, ())),
             "opaque_group": entity_id in managed.opaque_groups,
@@ -528,6 +536,9 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
         "preliminary": _preliminary_model(hass, ctrl, area_id) if area_id in ctrl.config.enabled_rooms else None,
         # Occupancy forecast (0.5.0, observation only): the room's current forecast (details: forecast/room).
         "forecast": ctrl.coordinator.forecast.summary(area_id) if area_id in ctrl.config.enabled_rooms else None,
+        # Zones, relay outputs, shared space (0.6.0) and the Room Supervisor's summary (details: supervisor/room).
+        "zones": _zones_model(hass, ctrl, area_id) if area_id in ctrl.config.enabled_rooms else None,
+        "supervisor": ctrl.supervisor.model(area_id) if area_id in ctrl.config.enabled_rooms else None,
         "occupancy": {
             "state": result.state.value if result else None,
             "occupied": result.occupied if result else None,
@@ -1158,8 +1169,10 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     from .preliminary_websocket import PRELIMINARY_HANDLERS
     from .profile_websocket import PROFILE_HANDLERS
     from .switch_websocket import SWITCH_HANDLERS
+    from .zone_websocket import ZONE_HANDLERS
 
-    for handler in (*SWITCH_HANDLERS, *PRESENCE_HANDLERS, *PRELIMINARY_HANDLERS, *PROFILE_HANDLERS, *FORECAST_HANDLERS):
+    for handler in (*SWITCH_HANDLERS, *PRESENCE_HANDLERS, *PRELIMINARY_HANDLERS, *PROFILE_HANDLERS, *FORECAST_HANDLERS,
+                    *ZONE_HANDLERS):
         websocket_api.async_register_command(hass, handler)
     for handler in (
         ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_adaptive_set, ws_room_set,

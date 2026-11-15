@@ -157,6 +157,8 @@ class PlanItem:
     conflicts: tuple[dict[str, Any], ...] = ()
     # The next gradual (global adjustment) update of this light, set by the controller.
     adaptive_update: dict[str, Any] | None = None
+    # The rule that decides this light (0.6.0, arbitration.py): {"kind", "name", ...}.
+    rule: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -179,6 +181,7 @@ class PlanItem:
             "conflicts": [dict(c) for c in self.conflicts],
             "adaptive": self.resolved.adaptive,
             "adaptive_update": self.adaptive_update,
+            "rule": self.rule,
         }
 
 
@@ -393,8 +396,12 @@ def build_plan(
     gate: DaylightGate | None = None,
     await_confirmation: bool = False,
     preliminary: frozenset[str] | set[str] = frozenset(),
+    assume_off: frozenset[str] | set[str] = frozenset(),
 ) -> Plan:
     """Build the plan for one room. ``resolve_fn(target) -> ResolvedSetting``.
+
+    ``assume_off`` (0.6.0): lights a zone switched on; for the daylight rules
+    they count as off (a zone that ends does not leave them on in daylight).
 
     Possible occupancy lighting (0.3.9): ``await_confirmation`` (the room has
     active preliminary lighting) keeps off lights off while occupancy is only
@@ -474,7 +481,7 @@ def build_plan(
                 set_(BLOCKED, "awaiting_confirmation",
                      f"Occupancy is only possible: switched on when it is confirmed ({summary})")
                 continue
-            off = t.state != "on" or t.entity_id in preliminary
+            off = t.state != "on" or t.entity_id in preliminary or t.entity_id in assume_off
             if gate_block and service == "turn_on" and off and not (
                     resolved.in_daylight and gate_block[0] in (GATE_NOT_NEEDED, GATE_UNCERTAIN)):
                 set_(BLOCKED, gate_block[0], gate_block[1])
@@ -501,7 +508,8 @@ def build_plan(
         ambient = " Ambient: applied regardless of occupancy." if resolved.is_persistent and not occupied else ""
         light = ""
         if gate and gate.policy == AutoOn.DARK and service == "turn_on" \
-                and (t.state != "on" or t.entity_id in preliminary) and not resolved.is_persistent:
+                and (t.state != "on" or t.entity_id in preliminary or t.entity_id in assume_off) \
+                and not resolved.is_persistent:
             light = f" Daylight: {gate.decision.value} ({gate.text})" + (
                 ", switched on regardless of daylight (this light's exception)" if gate_block else "") + "."
         set_(CHANGE, "change", f"{verb} set {summary} because {why}.{ambient}{light}")

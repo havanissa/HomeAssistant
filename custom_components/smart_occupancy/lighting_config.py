@@ -37,12 +37,17 @@ Persisted shape (store version 1)::
           "vacant_overrides": {mood: {category_key: setting}},        # 0.4.0: room Vacant profile
           "vacant_light_overrides": {mood: {light entity id: setting}},  # 0.4.0
           "preliminary": {"enabled": null, "timeout": null, "on_below": null,   # 0.3.9: possible occupancy
-                          "signals": null, "targets": [{...}]}}},          #   lighting (preliminary.RoomPreliminary)
+                          "signals": null, "targets": [{...}]},            #   lighting (preliminary.RoomPreliminary)
+          "zones": [{...}],                            # 0.6.0: logical zones (zones.ZoneConfig)
+          "relays": [switch entity ids],               # 0.6.0: switches designated as lighting outputs
+          "supervisor": {...}}},                       # 0.6.0: Room Supervisor overrides (null: global)
       "daylight": {"outdoor_entity": null, ...},     # 0.3.3: global daylight settings (daylight.DaylightConfig)
       "switch_settings": {"mqtt_base_topic": "zigbee2mqtt"},  # 0.3.5 (switches.SwitchSettings)
       "preliminary": {"enabled": false, "timeout": 30, ...},  # 0.3.9: global defaults (preliminary.PreliminaryDefaults)
       "global_vacant": {mood: {category_key: setting}},       # 0.4.0: global Vacant profile
-      "vacant": {"others": "off", "on_below": null}           # 0.4.0: global Vacant profile defaults
+      "vacant": {"others": "off", "on_below": null},          # 0.4.0: global Vacant profile defaults
+      "supervisor": {"mode": "observing", ...},              # 0.6.0: Room Supervisor defaults
+      "shared_spaces": [{...}]                               # 0.6.0: open-plan spaces (zones.SharedSpace)
     }
 
 The tables without "vacant" in their name are the **Occupied** profile (every
@@ -94,6 +99,13 @@ keeps getting that mood's normal settings while it is on, exactly as before,
 until the user gives it a Vacant setting. Every other room keeps its action;
 Turn off and Leave unchanged never use a Vacant profile. A 0.3.13 install
 reads a 1.6 store as is and ignores the new keys.
+
+Store 1.7 (0.6.0) adds zones, relay lighting outputs and the Room Supervisor
+per room, and the global Supervisor defaults and shared spaces. Every room
+gets no zone, no relay and no supervisor override; the global Supervisor mode
+is Observing (it never sends a command), and there is no shared space, so no
+room behaves differently after the migration. A 0.5.0 install reads a 1.7
+store as is and ignores the new keys.
 """
 
 from __future__ import annotations
@@ -137,6 +149,7 @@ from .daylight import DaylightConfig, RoomDaylight
 from .models import IntegrationConfig, ProfileSetting, ProfileTable, _enum_or
 from .preliminary import PreliminaryDefaults, RoomPreliminary
 from .switches import ROOM_TARGET, SwitchConfig, SwitchSettings, switches_from
+from .zones import GLOBAL_SUPERVISOR, SharedSpace, SupervisorSettings, ZoneConfig, spaces_from, zones_from
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -374,6 +387,13 @@ class RoomLighting:
     # The room's Vacant profile (0.4.0): light types and single lights, per mood.
     vacant_overrides: ProfileTable = field(default_factory=dict)
     vacant_light_overrides: ProfileTable = field(default_factory=dict)
+    # Multi-zone lighting (0.6.0): logical zones, relay lighting outputs, Room Supervisor overrides.
+    zones: tuple[ZoneConfig, ...] = ()
+    relays: tuple[str, ...] = ()
+    supervisor: SupervisorSettings = field(default_factory=SupervisorSettings)
+
+    def zone(self, zone_id: str) -> ZoneConfig | None:
+        return next((z for z in self.zones if z.id == zone_id), None)
 
     def type_table(self, profile: Profile = Profile.OCCUPIED) -> ProfileTable:
         return self.vacant_overrides if profile == Profile.VACANT else self.mood_overrides
@@ -415,6 +435,9 @@ class RoomLighting:
             preliminary=RoomPreliminary.from_dict(data.get("preliminary")),
             vacant_overrides=_table_from(data.get("vacant_overrides")),
             vacant_light_overrides=_table_from(data.get("vacant_light_overrides")),
+            zones=zones_from(data.get("zones")),
+            relays=tuple(e for e in _ids(data.get("relays")) if e.startswith("switch.")),
+            supervisor=SupervisorSettings.from_dict(data.get("supervisor")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -437,6 +460,9 @@ class RoomLighting:
             "preliminary": self.preliminary.as_dict(),
             "vacant_overrides": _table_as_dict(self.vacant_overrides),
             "vacant_light_overrides": _table_as_dict(self.vacant_light_overrides),
+            "zones": [z.as_dict() for z in self.zones],
+            "relays": list(self.relays),
+            "supervisor": self.supervisor.as_dict(),
         }
 
 
@@ -462,6 +488,17 @@ class LightingConfig:
     # The global Vacant profile and its defaults (0.4.0).
     global_vacant: ProfileTable = field(default_factory=dict)
     vacant: VacantDefaults = field(default_factory=VacantDefaults)
+    # Room Supervisor defaults and shared (open-plan) spaces (0.6.0).
+    supervisor: SupervisorSettings = GLOBAL_SUPERVISOR
+    shared_spaces: tuple[SharedSpace, ...] = ()
+
+    def supervisor_for(self, area_id: str) -> SupervisorSettings:
+        """The Room Supervisor settings of one room: the global defaults with its own values applied."""
+        return self.supervisor.merged(self.room(area_id).supervisor)
+
+    def space_of(self, area_id: str) -> SharedSpace | None:
+        """The shared space a room belongs to (the first one that lists it)."""
+        return next((s for s in self.shared_spaces if area_id in s.rooms and len(s.rooms) > 1), None)
 
     def global_table(self, profile: Profile = Profile.OCCUPIED) -> ProfileTable:
         return self.global_vacant if profile == Profile.VACANT else self.global_profiles
@@ -501,6 +538,8 @@ class LightingConfig:
             preliminary=PreliminaryDefaults.from_dict(data.get("preliminary")),
             global_vacant=_table_from(data.get("global_vacant")),
             vacant=VacantDefaults.from_dict(data.get("vacant")),
+            supervisor=GLOBAL_SUPERVISOR.merged(SupervisorSettings.from_dict(data.get("supervisor"))),
+            shared_spaces=spaces_from(data.get("shared_spaces")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -520,6 +559,8 @@ class LightingConfig:
             "preliminary": self.preliminary.as_dict(),
             "global_vacant": _table_as_dict(self.global_vacant),
             "vacant": self.vacant.as_dict(),
+            "supervisor": self.supervisor.as_dict(),
+            "shared_spaces": [s.as_dict() for s in self.shared_spaces],
         }
 
     def room(self, area_id: str) -> RoomLighting:
@@ -724,9 +765,19 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
         signals = sub_ids(prelim.signals) if prelim.signals is not None else None
         return replace(prelim, targets=targets, signals=signals)
 
+    def sub_zone(zone: ZoneConfig) -> ZoneConfig:
+        nonlocal changed
+        targets = zone.targets
+        if any(t.entity_id == old for t in targets):
+            changed = True
+            targets = tuple(replace(t, entity_id=new) if t.entity_id == old else t for t in targets)
+        return replace(zone, sensors=sub_ids(zone.sensors), targets=targets)
+
     rooms = {
         area_id: replace(
             room,
+            zones=tuple(sub_zone(z) for z in room.zones),
+            relays=sub_ids(room.relays),
             preliminary=sub_preliminary(room.preliminary),
             acknowledged=sub_ids(room.acknowledged),
             excluded=sub_ids(room.excluded),
@@ -810,6 +861,20 @@ def migrate_store(old_major: int, old_minor: int, data: dict[str, Any]) -> dict[
             room["vacancy"] = vacancy
             room.setdefault("vacant_overrides", {})
             room.setdefault("vacant_light_overrides", {})
+            rooms[area_id] = room
+        data["rooms"] = rooms
+    if old_minor < 7:
+        # Zones, relays, shared spaces and the Room Supervisor (0.6.0): none configured, the supervisor Observing.
+        if not isinstance(data.get("supervisor"), dict):
+            data["supervisor"] = GLOBAL_SUPERVISOR.as_dict()
+        data.setdefault("shared_spaces", [])
+        rooms = {}
+        for area_id, room in (data.get("rooms") or {}).items():
+            room = dict(room) if isinstance(room, dict) else {}
+            room.setdefault("zones", [])
+            room.setdefault("relays", [])
+            if not isinstance(room.get("supervisor"), dict):
+                room["supervisor"] = SupervisorSettings().as_dict()
             rooms[area_id] = room
         data["rooms"] = rooms
     return data
