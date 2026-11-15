@@ -123,7 +123,14 @@ def test_curtains_card_never_moves_a_cover_itself() -> None:
     assert commands == {
         "subscribe", "model", "preview", "apply", "window/create", "window/update", "window/remove", "preset/save",
         "preset/duplicate", "preset/delete", "preset/select", "manual/clear", "settings", "rescan", "calibration/reset",
+        # 0.6.2: the Automatic review and its confirmed enable, Resume, rule settings, allowing an automation
+        "auto/preview", "auto/enable", "resume", "auto/settings", "automation/allow",
     }, commands
+    assert source.count("type: `${WS}/auto/enable`") == 1
+    enable = source.split("async _enableConfirmed() {", 1)[1].split("\n  }\n", 1)[0]
+    assert "confirm: true" in enable and "if (!e || !e.review" in enable
+    assert source.count("this._enableConfirmed()") == 1 and 'case "enable-confirm": this._enableConfirmed()' in source
+    assert "r.blockers.length || e.sending ? \"disabled\"" in source  # refused while something must be resolved
     assert source.count("type: `${WS}/apply`") == 1
     apply = source.split("async _applyConfirmed() {", 1)[1].split("\n  }\n", 1)[0]
     assert "confirm: true" in apply and "expected: c.plan.positions" in apply and "if (!c || !c.plan" in apply
@@ -131,7 +138,7 @@ def test_curtains_card_never_moves_a_cover_itself() -> None:
     assert source.count('data-action="apply-confirm"') == 1
     assert 'case "apply": this._openPlan(el.dataset.window, el.dataset.preset, "confirm")' in source
     assert "mood" not in source.lower().replace("moods are never used", "")
-    for tab in ("General", "Covers", "Presets", "Automation", "Sun protection", "Diagnostics"):
+    for tab in ("General", "Covers", "Presets", "Automatic", "Sun protection", "Diagnostics"):
         assert f'"{tab}"' in source
     assert "@container (max-width: 480px)" in source  # usable on phones
 

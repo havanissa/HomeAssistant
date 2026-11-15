@@ -17,9 +17,10 @@ are observation only: no forecast ever controls a light, heating or any other
 device, and none changes an occupancy state.
 
 Curtains (0.6.1) are managed per window (``curtains/``): covers, presets,
-orientation and future rules. A cover moves only when an administrator applies
-a preset and confirms it; nothing moves automatically, at start-up or on a
-configuration change, and no lighting mood is read for curtain decisions.
+orientation and rules. A cover moves when an administrator applies a preset and
+confirms it, or (0.6.2) when its window was explicitly switched to Automatic;
+Observing and Off windows never move on their own, nothing is sent at start-up
+or replayed after a restart, and no lighting mood is read for curtain decisions.
 """
 
 from __future__ import annotations

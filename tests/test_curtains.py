@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from aiohttp.client_exceptions import WSMessageTypeError
 import pytest
 
 from homeassistant.core import Context, HomeAssistant, ServiceCall, callback
@@ -153,19 +154,20 @@ class Api:
     async def __call__(self, command: str, **data: Any) -> dict[str, Any]:
         self.n += 1
         payload = {"id": self.n, "type": f"smart_occupancy/curtains/{command}", **data}
-        try:
-            if self.client.closed:
-                raise ConnectionResetError
-            await self.client.send_json(payload)
-        except ConnectionResetError:
-            if self.connect is None:
-                raise
-            self.client = await self.connect()
-            await self.client.send_json(payload)
-        while True:
-            msg = await self.client.receive_json()
-            if msg.get("id") == self.n and msg.get("type") == "result":
-                return msg
+        for attempt in (1, 2):
+            try:
+                if self.client.closed:
+                    raise ConnectionResetError
+                await self.client.send_json(payload)
+                while True:
+                    msg = await self.client.receive_json()
+                    if msg.get("id") == self.n and msg.get("type") == "result":
+                        return msg
+            except (ConnectionResetError, WSMessageTypeError):
+                if self.connect is None or attempt == 2:
+                    raise
+                self.client = await self.connect()
+        raise AssertionError("unreachable")
 
     async def ok(self, command: str, **data: Any) -> Any:
         res = await self(command, **data)
@@ -296,7 +298,7 @@ async def test_multi_cover_defaults_and_preset_library(hass, pilot, house, cover
         ("Full blackout", 100, 0)]
     assert w["conditions"] == {
         "morning": "p_half_shade", "day": "p_open", "sun": "p_full_shade", "evening_privacy": "p_evening_privacy",
-        "night": "p_blackout", "sleep": "p_blackout", "manual_override": None}
+        "night": "p_blackout", "sleep": "p_blackout", "lamp": "p_half_shade", "manual_override": None}
 
     # A new custom preset with two independent positions, one cover left unchanged in another.
     tv = (await api.ok("preset/save", window_id=wid, name="TV", positions={sheer: 20, blackout: 70}))["preset_id"]
@@ -450,24 +452,31 @@ async def test_apply_needs_admin_confirmation_and_the_confirmed_targets(hass, pi
     assert covers.services() == [("set_cover_position", STOVA_BLACKOUT, 100)]
 
 
-async def test_automatic_mode_and_origin_are_refused(hass, pilot, house, covers, hass_ws_client, hass_storage) -> None:
-    assert AUTOMATIC_CURTAIN_CONTROL is False
-    with pytest.raises(ControlNotPermittedError):
-        assert_curtain_command_permitted(CurtainOrigin.AUTOMATIC, confirmed=True, window_mode="automatic",
-                                         window_id="w")
-    with pytest.raises(ControlNotPermittedError):
-        assert_curtain_command_permitted(CurtainOrigin.AUTOMATIC, confirmed=True, window_mode="observing",
-                                         window_id="w")
+async def test_curtain_gate_by_origin_and_mode(hass, pilot, house, covers, hass_ws_client, hass_storage) -> None:
+    """0.6.2: automatic commands only for windows in Automatic; Automatic only through its confirmed enable."""
+    assert AUTOMATIC_CURTAIN_CONTROL is True
+    for mode in ("observing", "off"):
+        with pytest.raises(ControlNotPermittedError):
+            assert_curtain_command_permitted(CurtainOrigin.AUTOMATIC, confirmed=True, window_mode=mode, window_id="w")
+    assert_curtain_command_permitted(CurtainOrigin.AUTOMATIC, confirmed=False, window_mode="automatic",
+                                     window_id="w")
     assert_curtain_command_permitted(CurtainOrigin.MANUAL_CONFIRMED, confirmed=True, window_mode="observing",
                                      window_id="w")
+    with pytest.raises(ControlNotPermittedError):
+        assert_curtain_command_permitted(CurtainOrigin.MANUAL_CONFIRMED, confirmed=False, window_mode="automatic",
+                                         window_id="w")
     _e, mgr, api = await start(hass, pilot, hass_ws_client)
     wid = await make_stova(api, house)
-    assert (await api.error("window/update", window_id=wid, mode="automatic"))["code"] == "mode_not_available"
+    # Automatic is never set by a plain update (nor at creation): it has its own confirmed action.
+    assert (await api.error("window/update", window_id=wid, mode="automatic"))["code"] == "confirm_required"
+    assert (await api.error("window/create", name="X", mode="automatic"))["code"] == "confirm_required"
     with pytest.raises(ControlNotPermittedError):
-        await mgr.async_apply(wid, "p_open", origin=CurtainOrigin.AUTOMATIC, confirmed=True, expected=None)
-    # A stored "automatic" (e.g. written by a later version) loads as Observing.
+        mgr.begin(mgr.config.windows[wid], mgr.config.windows[wid].preset("p_open"), CurtainOrigin.AUTOMATIC)
+    # A stored "automatic" (enabled earlier) loads as Automatic; an unknown mode as Observing.
     stored = mgr.config.as_dict()
     stored["windows"][0]["mode"] = "automatic"
+    assert CurtainConfig.from_dict(stored).windows[wid].mode == "automatic"
+    stored["windows"][0]["mode"] = "turbo"
     assert CurtainConfig.from_dict(stored).windows[wid].mode == "observing"
     assert covers.calls == []
 

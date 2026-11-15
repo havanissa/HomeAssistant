@@ -43,9 +43,30 @@ class CoverAutomation:
     refs: CoverRefs
 
 
+_SCRIPT_SERVICES = frozenset({"script.turn_on", "script.turn_off", "script.toggle", "script.reload"})
+
+
 def _refs(script: Any) -> CoverRefs:
     base = _script_refs(script)
     return CoverRefs(set(base.entities), set(base.devices), set(base.areas), set(base.labels))
+
+
+def called_scripts(config: Any) -> set[str]:
+    """Scripts run by calling them as an action (``action: script.close_all``), which Home Assistant does not
+    list among the referenced entities (0.6.2)."""
+    found: set[str] = set()
+    stack = [config]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key in ("action", "service"):
+                value = item.get(key)
+                if isinstance(value, str) and value.startswith("script.") and value not in _SCRIPT_SERVICES:
+                    found.add(value)
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return found
 
 
 def _expand(hass: HomeAssistant, refs: CoverRefs, depth: int, seen: set[str]) -> None:
@@ -68,6 +89,7 @@ def _expand(hass: HomeAssistant, refs: CoverRefs, depth: int, seen: set[str]) ->
             if script is None:
                 continue
             sub = _refs(script)
+            sub.entities |= called_scripts(getattr(entity, "raw_config", None))
             sub.controls = _calls_light_service(getattr(entity, "raw_config", None), _COVER_PREFIXES, "cover")
             _expand(hass, sub, depth + 1, seen)
             if sub.controls:
@@ -91,6 +113,7 @@ def collect(hass: HomeAssistant) -> list[CoverAutomation]:
         raw = getattr(entity, "raw_config", None) or {}
         actions = raw.get("actions", raw.get("action")) if isinstance(raw, dict) else None
         refs.controls = _calls_light_service(actions, _COVER_PREFIXES, "cover")
+        refs.entities |= called_scripts(actions)
         _expand(hass, refs, 0, set())
         if refs.controls:
             out.append(CoverAutomation(entity.entity_id, friendly_name(hass, entity.entity_id),

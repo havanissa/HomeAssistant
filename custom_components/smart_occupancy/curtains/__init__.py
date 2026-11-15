@@ -18,8 +18,16 @@ What this build does:
   integration then sends the cover commands, verifies the reported positions
   and records the result per cover.
 
-What it never does: move a cover automatically (Automatic mode is reserved
-for a later phase and refused by the safety gate), move anything at discovery,
-installation, migration or restart, read or write a lighting mood, or change,
-disable or delete an existing automation.
+Automatic (0.6.2, the user's Phase 4.6.1): a window an administrator
+explicitly switched to Automatic decides on its own which preset applies
+(``logic.py``: Sleep, Night, Evening privacy, Waiting for daylight, Sun
+protection, Window lamp, Morning, Day, manual holds) and sends it through the
+same executor after the safety limits of ``auto.py``. Settings are resolved
+window → room → all windows (``rules.py``).
+
+What it never does: move a cover of an Observing or Off window on its own,
+open a window without measured daylight (or the explicitly allowed sun
+fallback), open a sleep-protected window during sleep, undo a manual move,
+replay an interrupted movement after a restart, read or write a lighting mood,
+or change, disable or delete an existing automation.
 """

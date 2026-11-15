@@ -14,7 +14,9 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **0.6.0 (Phase 4.5)** adds **multi-zone lighting and the Room Supervisor**: optional zones inside a room (a sink and a shower, each with its own sensors and lights, the shower taking precedence), one rule engine that gives every light exactly one winning rule, shared open-plan spaces (Køkur / Stova), switches explicitly designated as relay-controlled lights, and a Room Supervisor that compares what each light should do with what Home Assistant reports and, only when you allow it, corrects devices that did not follow a command (see [Multi-zone lighting and the Room Supervisor](#multi-zone-lighting-and-the-room-supervisor-phase-45-060)).
 
-**0.6.1 (Phase 4.6.0)** adds a **window and curtain manager**: windows per room with one or more cover layers (blackout, semitransparent / sheer, shade, custom), a direction, an editable preset library per window, and **explicitly confirmed manual preset control** with per-cover verification. Nothing moves automatically yet (see [Curtains](#curtains-phase-460-061)).
+**0.6.1 (Phase 4.6.0)** adds a **window and curtain manager**: windows per room with one or more cover layers (blackout, semitransparent / sheer, shade, custom), a direction, an editable preset library per window, and **explicitly confirmed manual preset control** with per-cover verification (see [Curtains](#curtains-phase-460-061)).
+
+**0.6.2 (Phase 4.6.1)** adds **autonomous curtain control per window**. A window you switch to **Automatic** (after reviewing its intended preset, safety conditions and conflicts) decides on its own between Sleep, Night, Evening privacy, Waiting for daylight, Sun protection, Window lamp, Morning and Day, and moves all its covers together without asking again. Measured outdoor light, not the clock, opens a window; sleep keeps sleep-protected rooms closed; manual moves are kept; every decision is explained. Every other window stays in Observing until you switch it (see [Automatic curtains](#automatic-curtains-phase-461-062)).
 
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
@@ -35,7 +37,10 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - treats a `switch.*` entity as a light unless you ticked it as a relay lighting output of a room (0.6.0)
 - sends a corrective command unless the room's Room Supervisor is set to **Automatic** (default: Observing) and the room is in Automatic; it never corrects a person's change and corrects another automation's change at most once, only if you allow it (0.6.0)
 - activates a zone from a forecast: zones follow sensor states only (0.6.0)
-- moves a cover unless an administrator applied a preset in the Curtains card and confirmed the listed targets; never automatically, never at start-up, discovery or a configuration change, and never because of a lighting mood (0.6.1)
+- moves a cover unless an administrator applied a preset in the Curtains card and confirmed the listed targets (0.6.1), or the window was explicitly switched to **Automatic** (0.6.2); never in Observing or Off, never during the first two minutes after a start, never at discovery or a configuration change of an Observing window, never replays an interrupted movement, and never because of a lighting mood
+- opens a curtain in an Automatic window while sleep is on in a sleep-protected room, or without measured daylight (unless you explicitly allow the sun fallback for a window without a light sensor); a clock time can only delay an opening (0.6.2)
+- undoes a manual cover move: it is kept until its release policy ends it or you press **Resume** (0.6.2)
+- changes, disables or deletes a competing curtain automation: it is listed, and Automatic is refused for its covers until you disable it or explicitly allow it (0.6.2)
 
 ## Requirements
 
@@ -900,7 +905,7 @@ Smart Occupancy never disables or changes your automations. Room by room:
 
 ## Curtains (Phase 4.6.0, 0.6.1)
 
-A window manager with adjustable presets and reliable, explicitly initiated manual control. It is the foundation for the automatic curtain rules of the next phase; **in this version nothing moves on its own**.
+A window manager with adjustable presets, explicitly initiated manual control (0.6.1) and, per window, autonomous control (0.6.2, see [Automatic curtains](#automatic-curtains-phase-461-062)). Every window starts in **Observing**: it decides and explains, but nothing moves on its own.
 
 ### Add the card
 
@@ -913,8 +918,8 @@ A window manager with adjustable presets and reliable, explicitly initiated manu
 - **One cover belongs to one window.** A cover (or a cover group containing it, or a member of a group) already used by another window cannot be added.
 - Windows, layers and presets have stable ids. Renaming a window, preset or cover entity keeps every preset and future rule pointing at the right thing.
 - **Direction**: N, NE, E, SE, S, SW, W, NW, or an exact angle (0 = north, 90 = east, 180 = south).
-- **Mode**: *Off* (presets cannot be applied), *Observing* (default; nothing moves on its own, a person may still apply a preset) or *Automatic* (shown, not selectable: a later phase).
-- **Privacy**, **Sleep protection** and **Sun protection** are switched on and off per window. They are stored for the next phase and do not move anything now.
+- **Mode**: *Off* (not evaluated; presets cannot be applied), *Observing* (default; decides and explains, nothing moves on its own, a person may still apply a preset) or *Automatic* (moves on its own; switched on per window with its own review and confirmation).
+- **Sleep mode**, **Evening privacy** and **Sun protection** are switched on and off per window (Automatic tab).
 
 ### Presets
 
@@ -941,26 +946,102 @@ An operation interrupted by a restart is shown as *Interrupted* and is **not** r
 
 ### Manual changes
 
-A position change Smart Occupancy did not command (the NSPanel, a device button, another automation, a person in Home Assistant) is shown as the window's **manual change**, with the time and whether a person in Home Assistant made it. Reconnects and restarts are not counted. Nothing acts on it in this version; applying a preset clears it.
-
-### Automation (prepared, not running)
-
-Per window, choose which preset each future condition will use: Morning, Normal daytime, Direct sunlight, Evening privacy, Night, Sleep and Manual override (default: leave as it is). Defaults follow the starting presets (e.g. Morning → Half shade, Day → Fully open, Sun → Full shade, Night → Full blackout). Deleting a preset sets the conditions that used it to *Not set*. **No condition is evaluated or executed in this version**, and lighting moods are never read for curtains.
+A position change Smart Occupancy did not command (the NSPanel, a device button, another automation, a person in Home Assistant) is shown as the window's **manual change**, with the time and whether a person in Home Assistant made it. Reconnects and restarts are not counted. Our own commands are recognised while the covers are busy in an operation and for 90 s after it (late Zigbee2MQTT reports), and after a restart for the rest of an interrupted movement. In Observing and Automatic a manual change becomes a **manual hold** (see below).
 
 ### Sun protection
 
 - The window's direction, the current sun azimuth and elevation (`sun.sun`, or two sensors chosen under the card's ⚙ settings) and **Potentially exposed to direct sunshine** when the sun is above the window's minimum elevation (default 3°), within ± the exposure width (default 70°) of its direction, and not behind an **obstruction**.
 - **Obstructions** model blocked sun, such as an east-facing window behind a hill: between two directions, the sun must be higher than a given elevation to reach the window.
 - `sensor.sun_angle` (0° = the sun faces the south-facing windows) is shown as the house's calibrated reference. Its sign and formula are **not assumed**: the integration compares it with the standard azimuth over the day and reports the relation (for example *sun_angle ≈ azimuth − 113°*, and the azimuth at which it reads 0°) only once readings over at least 30° of sun movement fit within 2°. Until then it is *not validated*. It is never used to move a cover.
-- Exposure is geometry only (no clouds or brightness) and never moves a cover in this version.
+- Exposure is geometry only (no clouds or brightness). It never proves sunshine on its own: Automatic sun protection also needs measured strong light (see below).
 
 ### Diagnostics
 
-Per window: actual versus desired (selected preset) position per cover, state and supported features, the recognised preset, the manual change, the last command with each cover's service, reported position and result, earlier commands, and **other automations that may move these covers**. An automation is listed when its actions call a cover service (`cover.*`, `homeassistant.turn_*`, a scene or a script) on the cover, its group, device, area or label, directly or through a scene or script. Enabled ones are warnings on the window card. They are only listed, never changed, disabled or deleted. Templated targets cannot be detected. Home Assistant's integration diagnostics include a `curtains` section.
+Per window: actual versus desired (the automatic preset, or the selected preset) position per cover, state and supported features, the recognised preset, the manual change, the last command with each cover's service, reported position and result, earlier commands, and **other automations that may move these covers**. An automation is listed when its actions call a cover service (`cover.*`, `homeassistant.turn_*`, a scene or a script) on the cover, its group, device, area or label, directly or through a scene or script. Enabled ones are warnings on the window card. They are only listed, never changed, disabled or deleted. Templated targets cannot be detected. Home Assistant's integration diagnostics include a `curtains` section.
 
 ### Safe alongside the legacy curtain system
 
-The legacy automations (`auto_gardinur`, `cover_*_sudur`, `inngongd_nspanel` …) keep working as before; this version only reads their configuration to report them. `gardinur_state`, `input_boolean.sol` and the mood helpers are not read or written.
+The legacy automations (`auto_gardinur`, `cover_*_sudur`, `inngongd_nspanel` …) keep working as before; the integration only reads their configuration to report them. `gardinur_state`, `input_boolean.sol` and the mood helpers are not read or written. A window cannot be switched to Automatic while an enabled automation may also move its covers (directly, through a group, device, area, label, scene, or a script, also a script called as an action); disable that automation yourself, or mark it in Diagnostics as *does not compete*. If such an automation is enabled later, the Automatic window stops sending and says why.
+
+## Automatic curtains (Phase 4.6.1, 0.6.2)
+
+### Enabling one window
+
+1. Configure the window: its covers and presets, which preset each condition uses (Automatic tab), and the outdoor light sensor (Automatic tab → Daylight, usually for **All windows**).
+2. General → Mode → **Automatic…** shows what would happen now: the condition, its preset, which covers move, anything that **must be resolved first** (an enabled competing automation, a missing cover, contradictory settings) and what is **good to know** (no light sensor, an unavailable sleep source, conditions without a preset, an active manual hold), plus the order of precedence.
+3. **Enable Automatic**. From then on the window moves on its own, without confirmations. Other windows are not touched. Switch back to Observing or Off at any time.
+
+### Conditions
+
+Each window chooses one condition at a time and applies that condition's preset to **all its covers together** (one command per cover, sheer and blackout in one operation). Positions come only from the window's presets; nothing is hard-coded.
+
+| Condition | When |
+| --- | --- |
+| **Sleep** | Sleep mode is on for the window and its sleep source (default `input_boolean.sleep`, or any input boolean / binary sensor) is on |
+| **Night** | Inside the household night: before a workday 22:30–06:30, before a free day 23:30–08:00 (free days: Sat, Sun; all editable) |
+| **Evening privacy** | Privacy is on and it is dark in the evening: outdoor light at or below 50 lx for 10 minutes, or the sun below −4° (works without a light sensor) |
+| **Waiting for daylight** | Nothing above, but no evidence allows opening: daylight not confirmed, the light sensor stale or unavailable, or the sleep source unavailable. **The covers keep their position** |
+| **Sun protection** | Sun protection is on, the sun is in front of the window (direction ± exposure width, above the minimum elevation, not behind an obstruction) **and** outdoor light has been at least 12 000 lx for 10 minutes; released below 8 000 lx for 20 minutes or when the sun leaves the sector (3° margin) |
+| **Morning** | The first time daylight is confirmed before noon (after the night and after sleep): 120 minutes, or until a time of day (10:00 workdays, 11:00 free days) |
+| **Normal daytime** | Daylight: at least 150 lx for 10 minutes and the sun at least −2° |
+
+**Daylight is measured, not assumed.** A clock time only delays an opening (the end of the night); it never opens a window by itself, and never while sleep is on. Missing or stale evidence (no report for 30 minutes) never opens a window. Without a light sensor a window does not open automatically, unless you allow the conservative **sun fallback** (open once the sun is at least 3°). Night and evening closing work without a light sensor. After a restart the light history starts again, so daylight must be stable again before anything opens.
+
+The 11-12 / 11-13 failure (curtains opened at 07:00 at −10.2°, 0 lx, sleep on) is replayed in the tests: Sleep keeps the bedroom closed, the other windows wait for daylight, and the morning starts only once sleep has ended *and* daylight is measured, e.g. *“Waiting for daylight. Sleep mode ended, but outdoor light is 12 lx (daylight needs 150 lx for 10 min). Morning preset not yet applied”*.
+
+**When sleep ends**: start the morning once there is daylight (default), go straight to the current condition, or keep the sleep position until you resume. *Opening after sleep needs daylight* can be switched off for a window.
+
+### Window lamp
+
+Optional per window (Automatic → Window lamp): the lamp, its **Lamp On** preset, a release delay (default 120 s) and the conditions that win over the lamp (default Sleep, Night and Evening privacy; Sun protection can be added). While the lamp is on its preset holds; after it switches off and the delay passes, the window applies its **current** condition, never the position from before the lamp. A condition that wins over the lamp applies its own preset while the lamp stays on.
+
+### Manual changes and Resume
+
+A manual move (or a preset you apply yourself) is kept as a **manual hold**:
+
+- *Until the next automatic phase* (default), e.g. a move during the day is kept until evening privacy, night or sleep;
+- *For a number of minutes* (default 120);
+- *Until the room has been empty* for a number of minutes (from the room's occupancy; a room without occupancy uses the next phase);
+- *Until I resume*.
+
+**Resume automatic curtains** (window card) releases the hold and applies the current condition at once; the next manual move starts a new hold. Holds survive restarts. Sleep, Night or Evening privacy can be set to end a hold, but only when they start *after* the manual move: a move made during sleep is respected.
+
+### Precedence
+
+1. Safety: unavailable or missing covers, a competing automation, a running movement, the movement limits
+2. Manual hold (with the configured exceptions)
+3. Sleep
+4. Night, Evening privacy
+5. Window lamp
+6. Sun protection
+7. Morning, Normal daytime
+8. Waiting for daylight (keeps the position)
+
+Conditions chosen to win over the lamp rank above it, the others below. The window's exact order is shown in the enable review and in Diagnostics.
+
+### Movement safety
+
+- Covers already within the position tolerance (dead band, default 3 points) get no command, and the same targets are never sent twice.
+- A running movement is never contradicted; an unavailable or missing cover blocks the window until it reports again.
+- **Minimum time between moves** (default 10 minutes) for Morning, Day and Sun protection; Sleep, Night, Evening privacy, the lamp, leaving them, Resume and retries are not delayed.
+- **Automatic moves per day** (default 12); then only Sleep and Night still move.
+- A failed or timed-out movement is retried at most twice (after 1 and 5 minutes), then reported and left until the condition changes or you resume.
+- Late device reports are verified as before (default 120 s); a restart never replays an interrupted movement and sends nothing for the first two minutes.
+
+### Settings: all windows, room, window
+
+Every setting (Automatic tab → *Settings for*) can be set for **all windows**, for a **room**, or for **one window**; the first that sets it wins and each field shows where its value comes from. Groups: Sleep mode, Window lamp (per window), Daylight, Night and morning, Strong sunshine, Manual changes, Movement safety. Everything is edited in the card; no YAML.
+
+### What the card shows
+
+Each window shows Off / Observing / Automatic, the current condition and preset, why (the decision sentence), the status (*Moved*, *Would move*, *Already there*, *Prevented* with the reason, *Manual hold*, *Failed*), desired and actual positions of every cover, sleep, lamp, manual hold, outdoor light and sun, **Resume**, and the last movement with its verification. Diagnostics adds the evidence, precedence, moves today, next check and a decision log (40 entries, kept across restarts); Home Assistant's diagnostics include it under `curtains.automatic`.
+
+### Limitations
+
+- One outdoor light sensor per window (set once for all windows); no cloud cover or weather input yet.
+- Heat / thermal optimisation (indoor and outdoor temperature, winter solar gain) is not part of this phase; the solar settings are kept compatible for it.
+- A morning starts only before noon; after a later wake-up the window goes to Normal daytime.
+- A manual move reported within 90 s after an automatic movement of the same window is treated as part of that movement (Zigbee2MQTT reports late); it is then not corrected, but not held either.
 
 ## Occupancy forecast (Phase 4, 0.5.0)
 
