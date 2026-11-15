@@ -103,7 +103,7 @@
  * reports a change.
  */
 
-const VERSION = "0.6.2";
+const VERSION = "0.6.3";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -113,14 +113,58 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 })[c]);
 
-const fmtTime = (iso) => {
+// <time24> (0.6.3) Every clock time is 24-hour HH:mm in Home Assistant's time zone, whatever the browser
+// locale (en-US would otherwise show AM/PM, Danish "14.30"). Stored times stay ISO 8601; this is display only.
+let TIME_ZONE;  // undefined = the browser's own zone (the person chose "local" time in their profile)
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const TIME_PARTS = new Map();
+const setTimeZone = (hass) => {
+  const zone = hass && hass.locale && hass.locale.time_zone === "local" ? undefined : hass && hass.config && hass.config.time_zone;
+  TIME_ZONE = zone || undefined;
+};
+const timeParts = (d) => {
+  const key = TIME_ZONE || "";
+  let f = TIME_PARTS.get(key);
+  if (!f) {
+    const opts = { hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" };
+    try { f = new Intl.DateTimeFormat("en-GB", { ...opts, timeZone: TIME_ZONE }); } catch (_e) { f = new Intl.DateTimeFormat("en-GB", opts); }
+    TIME_PARTS.set(key, f);
+  }
+  const p = {};
+  for (const part of f.formatToParts(d)) p[part.type] = part.value;
+  if (p.hour === "24") p.hour = "00";
+  return p;
+};
+const hhmm = (d) => { const p = timeParts(d); return `${p.hour}:${p.minute}`; };
+const dayKey = (d) => { const p = timeParts(d); return `${p.year}-${p.month}-${p.day}`; };
+// "07:00" today, "14 Nov 23:55" on another day.
+const fmtTime = (iso, now = new Date()) => {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return esc(iso);
-  const sameDay = d.toDateString() === new Date().toDateString();
-  return sameDay ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  if (dayKey(d) === dayKey(now)) return hhmm(d);
+  const p = timeParts(d);
+  return `${Number(p.day)} ${MONTHS[Number(p.month) - 1]} ${p.hour}:${p.minute}`;
 };
+// "2026-11-15 07:00:05" (tooltips).
+const fullTime = (iso) => {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso || "");
+  const p = timeParts(d);
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
+};
+// A time typed by a person: "7:30", "0730", "7.30", "07:30" -> "07:30"; null unless 00:00-23:59.
+const parseHHMM = (text) => {
+  const t = String(text == null ? "" : text).trim().replace(/[.h]/g, ":");
+  let m = /^(\d{1,2}):(\d{2})$/.exec(t) || /^(\d{1,2})(\d{2})$/.exec(t);
+  if (!m && /^\d{1,2}$/.test(t)) m = [t, t, "00"];
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mi = Number(m[2]);
+  if (h > 23 || mi > 59) return null;
+  return `${String(h).padStart(2, "0")}:${String(mi).padStart(2, "0")}`;
+};
+// </time24>
 
 // Named colours for quick, fun profiles (Veistla) and readable summaries.
 const SWATCHES = [
@@ -263,7 +307,6 @@ const decisionPill = (d) => { const [w, tone, icon] = decisionStatus(d); return 
 // The target beside the action, unless the action already names it.
 const targetText = (d) => (d.target && !d.action.includes(d.target) ? ` <span class="sub">${esc(d.target)}</span>` : "");
 const DECISION_MODES = { observing: "Observing", automatic: "Automatic", paused: "Automatic · paused (Manual mood)", active: "Active" };
-const fullTime = (iso) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? String(iso || "") : d.toLocaleString(); };
 const DETAIL_LABELS = [
   ["trigger", "Trigger"], ["trigger_entity", "Triggering entity"], ["trigger_state", "Triggering state"],
   ["switch", "Switch"], ["button", "Button"], ["press", "Press type"], ["input", "Received through"],
@@ -402,7 +445,7 @@ function barChart(values, { label, unit, scale }) {
       : v > 0 ? `<path d="${barPath(x, y(v), bw - 2, y(0) - y(v))}" class="bar"/>` : "";
     return `<g><title>${esc(tip)}</title><rect x="${x - 1}" y="${T}" width="${bw}" height="${H - T - B}" class="hit"/>${mark}</g>`;
   }).join("");
-  const ticks = [0, 6, 12, 18].map((h) => `<text x="${L + h * bw + bw / 2}" y="${H - 4}" text-anchor="middle">${h}:00</text>`).join("");
+  const ticks = [0, 6, 12, 18].map((h) => `<text x="${L + h * bw + bw / 2}" y="${H - 4}" text-anchor="middle">${String(h).padStart(2, "0")}:00</text>`).join("");
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)} by hour">${grid}${bars}${ticks}</svg>`;
 }
 
@@ -443,6 +486,7 @@ class SoLightingBase extends HTMLElement {
   }
 
   set hass(hass) {
+    setTimeZone(hass);
     const first = !this._hass || this._hass.connection !== hass.connection;
     this._hass = hass;
     if (first) {
@@ -3159,7 +3203,7 @@ function lightingSensors(hass) {
 // ------------------------------------------------------ card config editors
 class SoMoodEditorCardEditor extends HTMLElement {
   setConfig(config) { this._config = { ...config }; this._render(); }
-  set hass(hass) { const first = !this._hass; this._hass = hass; if (first) this._render(); }
+  set hass(hass) { setTimeZone(hass); const first = !this._hass; this._hass = hass; if (first) this._render(); }
   _render() {
     if (!this._config) return;
     this.innerHTML = `${EDITOR_STYLE}<div class="so-editor"><label for="so-title">Title (optional)</label>
@@ -3175,7 +3219,7 @@ class SoMoodEditorCardEditor extends HTMLElement {
 
 class SoRoomLightingCardEditor extends HTMLElement {
   setConfig(config) { this._config = { ...config }; this._render(); }
-  set hass(hass) { const first = !this._hass; this._hass = hass; if (first) this._render(); }
+  set hass(hass) { setTimeZone(hass); const first = !this._hass; this._hass = hass; if (first) this._render(); }
   _render() {
     if (!this._hass || !this._config) return;
     const rooms = lightingSensors(this._hass);

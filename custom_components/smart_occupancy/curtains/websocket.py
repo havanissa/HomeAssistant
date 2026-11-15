@@ -1,4 +1,4 @@
-"""Websocket API of the Curtains card (0.6.1, automatic 0.6.2): ``smart_occupancy/curtains/*``.
+"""Websocket API of the Curtains card (0.6.1, automatic 0.6.2, environment 0.6.3): ``smart_occupancy/curtains/*``.
 
 Reads (``model``, ``preview``, ``auto/preview``, ``subscribe``) are open to
 every authenticated user and never move anything. Every write is admin only and
@@ -9,6 +9,13 @@ Automatic after the person reviewed its intended preset, safety conditions and
 conflicts; needs ``confirm: true`` and is refused while a blocker remains).
 ``resume`` releases a manual hold of a window, which an Automatic window
 then follows at once. Automatic cannot be set through ``window/update``.
+
+0.6.3: ``auto/simulate`` (read only) predicts what every affected window would
+decide with changed settings *before* they are saved, so a new automatic
+feature (temperature-aware sun, glare, weather evidence) is never switched on
+blind. The model carries each window's environment (sun angle relative to the
+window, light, temperatures, weather, direct-sun and temperature assessments)
+and a sensor-quality summary of every candidate entity.
 """
 
 from __future__ import annotations
@@ -37,6 +44,7 @@ from .config import (
     COVER_KINDS,
     ELEVATION_LIMITS,
     EXPOSURE_WIDTH_LIMITS,
+    MAX_ELEVATION_LIMITS,
     KIND_WORDS,
     MAX_LAYERS,
     MAX_OBSTRUCTIONS,
@@ -71,6 +79,7 @@ from .discovery import (
     members,
     proposals,
 )
+from .environment import BAND_WORDS, ROLE_WORDS, STATUS_WORDS, discover
 from .executor import OVERALL_WORDS, PLAN_WORDS, RESULT_WORDS, preset_matches, recognise
 from .manager import SIGNAL_CURTAINS_UPDATED, CurtainManager
 from .solar import calibrate, exposure, relation_text
@@ -223,7 +232,7 @@ def build_model(hass: HomeAssistant, mgr: CurtainManager, connection) -> dict[st
         "limits": {"windows": MAX_WINDOWS, "layers": MAX_LAYERS, "presets": MAX_PRESETS,
                    "obstructions": MAX_OBSTRUCTIONS, "tolerance": TOLERANCE_LIMITS,
                    "verify_timeout": VERIFY_TIMEOUT_LIMITS, "exposure_width": EXPOSURE_WIDTH_LIMITS,
-                   "elevation": ELEVATION_LIMITS},
+                   "elevation": ELEVATION_LIMITS, "max_elevation": MAX_ELEVATION_LIMITS},
         "compass": list(COMPASS),
         "kinds": list(COVER_KINDS),
         "modes": list(WINDOW_MODES),
@@ -234,7 +243,33 @@ def build_model(hass: HomeAssistant, mgr: CurtainManager, connection) -> dict[st
                   "rooms": {k: curtain_rules.dump(v) for k, v in config.rooms.items()},
                   "defaults": curtain_rules.dump(curtain_rules.defaults()), "weekdays": list(curtain_rules.WEEKDAYS)},
         "entities": _entity_choices(hass),
+        "environment": environment_summary(hass, mgr),
+        "time_zone": hass.config.time_zone,
     }
+
+
+def environment_summary(hass: HomeAssistant, mgr: CurtainManager) -> dict[str, Any]:
+    """The sensor-quality summary: every candidate per role, its validity now, and which windows use it."""
+    config = mgr.config
+    chosen: dict[str, set[str]] = {r: set() for r in ROLE_WORDS}
+    role_of = {"lux_entity": "outdoor_lux", "indoor_lux_entity": "indoor_lux", "room_temp_entity": "room_temp",
+               "outdoor_temp_entity": "outdoor_temp", "weather_entity": "weather", "cloud_entity": "cloud",
+               "thermostat_entity": "thermostat"}
+    for window in config.windows.values():
+        values, _ = config.rules_for(window)
+        for key, role in role_of.items():
+            if values[key]:
+                chosen[role].add(values[key])
+    global_values, _ = curtain_rules.resolve(config.defaults, None, {})
+    for key, role in role_of.items():
+        if global_values.get(key):
+            chosen[role].add(global_values[key])
+    found = discover(hass, chosen=chosen, values=global_values, elevation=mgr.sun().elevation,
+                     since_of=lambda e: (mgr.auto.value_since.get(e) or (None, None))[1])
+    return {"roles": [{"role": r, "word": ROLE_WORDS[r], "candidates": found[r],
+                       "chosen": sorted(chosen[r])} for r in ROLE_WORDS],
+            "global": {k: global_values[k] for k in role_of}, "status_words": STATUS_WORDS,
+            "band_words": BAND_WORDS}
 
 
 def _entity_choices(hass: HomeAssistant) -> dict[str, list[dict[str, Any]]]:
@@ -247,12 +282,21 @@ def _entity_choices(hass: HomeAssistant) -> dict[str, list[dict[str, Any]]]:
     lux = [item(x) for x in hass.states.async_all("sensor")
            if x.attributes.get("device_class") == "illuminance" or x.attributes.get("unit_of_measurement") == "lx"]
     lights = [item(x) for x in hass.states.async_all("light")]
+    temperature = [item(x) for x in hass.states.async_all(("sensor", "climate", "weather"))
+                   if x.domain != "sensor" or x.attributes.get("device_class") == "temperature"
+                   or x.attributes.get("unit_of_measurement") in ("°C", "°F")]
+    weather = [item(x) for x in hass.states.async_all("weather")]
+    cloud = [item(x) for x in hass.states.async_all("sensor") if x.attributes.get("unit_of_measurement") == "%"
+             and "cloud" in x.entity_id]
+    thermostat = [item(x) for x in hass.states.async_all(("climate", "input_number"))]
 
     def key(d: dict[str, Any]) -> tuple[bool, str]:
         return not d["entity_id"].startswith("input_boolean."), d["name"].casefold()
 
     return {"sleep": sorted(sleep, key=key)[:400], "lux": sorted(lux, key=key)[:200],
-            "light": sorted(lights, key=key)[:400]}
+            "light": sorted(lights, key=key)[:400], "temperature": sorted(temperature, key=key)[:300],
+            "weather": sorted(weather, key=key)[:50], "cloud": sorted(cloud, key=key)[:50],
+            "thermostat": sorted(thermostat, key=key)[:200]}
 
 
 # ------------------------------------------------------------ validation
@@ -323,7 +367,18 @@ def _solar_from(raw: Any, current: SolarSettings) -> SolarSettings:
         if not isinstance(items, list) or len(items) > MAX_OBSTRUCTIONS:
             raise CurtainConfigError("invalid_obstruction", f"At most {MAX_OBSTRUCTIONS} obstructions")
         obstructions = tuple(Obstruction.from_dict(o) for o in items)
-    return SolarSettings(int(width), round(float(elevation), 1), obstructions)
+    top = raw.get("max_elevation", current.max_elevation)
+    if top == "":
+        top = None
+    if top is not None:
+        if isinstance(top, bool) or not isinstance(top, (int, float)) \
+                or not MAX_ELEVATION_LIMITS[0] <= top <= MAX_ELEVATION_LIMITS[1]:
+            raise CurtainConfigError("invalid_max_elevation", "The overhang limit must be "
+                                     f"{MAX_ELEVATION_LIMITS[0]:.0f} to {MAX_ELEVATION_LIMITS[1]:.0f}° (or none)")
+        if top <= elevation:
+            raise CurtainConfigError("invalid_max_elevation", "The overhang limit must be above the minimum elevation")
+        top = round(float(top), 1)
+    return SolarSettings(int(width), round(float(elevation), 1), obstructions, top)
 
 
 def _apply_fields(hass: HomeAssistant, config: CurtainConfig, window: Window, msg: dict[str, Any]) -> Window:
@@ -712,6 +767,23 @@ def enable_review(hass: HomeAssistant, mgr: CurtainManager, window: Window) -> d
         warnings.append(f"No preset for {', '.join(unset)}: the covers are kept as they are then.")
     if window.solar_protection and window.effective_bearing is None:
         warnings.append("Sun protection needs the window's direction.")
+    env = model["environment"]["readings"]
+    lux_reading = env.get("outdoor_lux") or {}
+    if lux_reading.get("status") in ("stuck", "implausible"):
+        warnings.append(f"The outdoor light sensor is not trusted now ({lux_reading.get('detail')}): nothing opens "
+                        "or shades until it reports plausible values.")
+    if values["thermal_enabled"]:
+        room = env.get("room_temp") or {}
+        if room.get("status") != "ok":
+            warnings.append("Temperature-aware sun is on, but the room temperature is not usable "
+                            f"({room.get('detail') or 'not chosen'}): normal sun protection applies.")
+        if not window.solar_protection:
+            warnings.append("Temperature-aware sun only acts on windows with sun protection on.")
+    if values["glare_sensitive"] and not window.solar_protection:
+        warnings.append("Glare protection only acts on windows with sun protection on.")
+    if values["sun_evidence"] == "weather" and not values["lux_entity"]:
+        warnings.append("Without a light sensor a clear sky from the weather may confirm sunshine for sun protection "
+                        "(it never opens a window).")
     if model["hold"]:
         warnings.append("A manual hold is active; it is kept until it ends (or use Resume).")
     preset = window.preset(decision.preset_id) if decision else None
@@ -775,6 +847,75 @@ def ws_resume(hass, mgr, msg, connection):
 @_guard
 def ws_auto_settings(hass, mgr, msg, connection):
     """Set (or, with null, remove) automatic rule settings for every window, one room or one window."""
+    new, affected = _settings_change(hass, mgr, msg)
+    for window in affected or [Window("_", "_")]:
+        values, _ = new.rules_for(window)
+        if problems := curtain_rules.consistency(values):
+            raise CurtainConfigError("inconsistent", problems[0])
+    mgr.async_set(new)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "smart_occupancy/curtains/automation/allow",
+                                  vol.Required("window_id"): str, vol.Required("automation"): str,
+                                  vol.Required("allowed"): bool})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_guard
+def ws_automation_allow(hass, mgr, msg, connection):
+    """Mark a listed automation as reviewed: it may coexist with Automatic for this window (or undo that).
+    The automation itself is never changed, disabled or deleted."""
+    window = _window(mgr, msg["window_id"])
+    automation = msg["automation"]
+    if not automation.startswith("automation."):
+        raise CurtainConfigError("invalid_automation", "Choose an automation")
+    allowed = [a for a in window.allowed_automations if a != automation]
+    if msg["allowed"]:
+        allowed.append(automation)
+    mgr.async_set(mgr.config.with_window(replace(window, allowed_automations=tuple(allowed))))
+    mgr.auto.evaluate(window.window_id, force_notify=True)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "smart_occupancy/curtains/auto/simulate",
+    vol.Required("scope"): vol.In(curtain_rules.ALL_SCOPES),
+    vol.Optional("area_id"): str,
+    vol.Optional("window_id"): str,
+    vol.Required("values"): dict,
+})
+@websocket_api.async_response
+@_guard
+def ws_auto_simulate(hass, mgr, msg, connection):
+    """What every affected window would decide now if these settings were saved. Saves and moves nothing.
+
+    Shown before a new automatic feature is switched on (the card's confirmation)."""
+    new, affected = _settings_change(hass, mgr, msg)
+    out = []
+    for window in affected[:MAX_WINDOWS]:
+        values, _ = new.rules_for(window)
+        current = mgr.auto.rt(window.window_id).decision
+        if window.mode == "off":
+            out.append({"window_id": window.window_id, "name": window.name, "mode": window.mode, "current": None,
+                        "predicted": None, "preset_name": None, "moves": 0, "changes": False})
+            continue
+        predicted = mgr.auto.simulate(window, values)
+        preset = window.preset(predicted.preset_id)
+        items = mgr.preview(window.window_id, preset.preset_id)["items"] if preset else []
+        moves = sum(1 for i in items if i["decision"] == "move") if predicted.condition not in (
+            "manual_override", "waiting") else 0
+        current_preset = window.preset(current.preset_id) if current else None
+        out.append({"window_id": window.window_id, "name": window.name, "mode": window.mode,
+                    "current": current.as_dict() if current else None,
+                    "current_preset_name": current_preset.name if current_preset else None,
+                    "predicted": predicted.as_dict(), "preset_name": preset.name if preset else None,
+                    "items": items, "moves": moves,
+                    "changes": current is None or (current.condition, current.preset_id) != (predicted.condition,
+                                                                                              predicted.preset_id),
+                    "warnings": curtain_rules.consistency(values)})
+    return {"windows": out}
+
+
+def _settings_change(hass: HomeAssistant, mgr: CurtainManager, msg: dict[str, Any]) -> tuple[CurtainConfig, list[Window]]:
+    """The configuration after an ``auto/settings`` change and the windows it affects (not saved)."""
     scope = msg["scope"]
     config = mgr.config
 
@@ -806,36 +947,12 @@ def ws_auto_settings(hass, mgr, msg, connection):
         updated = replace(window, auto=merged(dict(window.auto)))
         new = config.with_window(updated)
         affected = [updated]
-    for window in affected or [Window("_", "_")]:
-        values, _ = new.rules_for(window)
-        if problems := curtain_rules.consistency(values):
-            raise CurtainConfigError("inconsistent", problems[0])
-    mgr.async_set(new)
-
-
-@websocket_api.websocket_command({vol.Required("type"): "smart_occupancy/curtains/automation/allow",
-                                  vol.Required("window_id"): str, vol.Required("automation"): str,
-                                  vol.Required("allowed"): bool})
-@websocket_api.require_admin
-@websocket_api.async_response
-@_guard
-def ws_automation_allow(hass, mgr, msg, connection):
-    """Mark a listed automation as reviewed: it may coexist with Automatic for this window (or undo that).
-    The automation itself is never changed, disabled or deleted."""
-    window = _window(mgr, msg["window_id"])
-    automation = msg["automation"]
-    if not automation.startswith("automation."):
-        raise CurtainConfigError("invalid_automation", "Choose an automation")
-    allowed = [a for a in window.allowed_automations if a != automation]
-    if msg["allowed"]:
-        allowed.append(automation)
-    mgr.async_set(mgr.config.with_window(replace(window, allowed_automations=tuple(allowed))))
-    mgr.auto.evaluate(window.window_id, force_notify=True)
+    return new, affected
 
 
 CURTAIN_HANDLERS = (
     ws_model, ws_subscribe, ws_window_create, ws_window_update, ws_window_remove, ws_preset_save,
     ws_preset_duplicate, ws_preset_delete, ws_preset_select, ws_preview, ws_apply, ws_manual_clear, ws_settings,
     ws_rescan, ws_calibration_reset, ws_auto_preview, ws_auto_enable, ws_resume, ws_auto_settings,
-    ws_automation_allow,
+    ws_automation_allow, ws_auto_simulate,
 )

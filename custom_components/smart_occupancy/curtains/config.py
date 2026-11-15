@@ -1,4 +1,5 @@
-"""Curtain configuration: windows, cover layers, presets and settings (0.6.1, automatic rules 0.6.2).
+"""Curtain configuration: windows, cover layers, presets and settings (0.6.1, automatic rules 0.6.2,
+solar and thermal conditions 0.6.3).
 
 Everything here is plain data with strict validation. Positions are percent
 open (Home Assistant's cover convention: 0 = closed, 100 = fully open). A
@@ -32,13 +33,17 @@ COMPASS: dict[str, float] = {"N": 0.0, "NE": 45.0, "E": 90.0, "SE": 135.0, "S": 
 
 # Automatic conditions -> the preset each one uses (per window). "Manual override" never sends a
 # command (the manual position is kept), and "Waiting for daylight" keeps the current position, so
-# neither of them has a preset of its own.
-CONDITIONS: tuple[str, ...] = ("morning", "day", "sun", "evening_privacy", "night", "sleep", "lamp",
-                               "manual_override")
+# neither of them has a preset of its own. "Glare protection" and "Excess solar heat" (0.6.3) use the
+# Direct sunlight preset until a preset of their own is chosen; "Useful solar heating" keeps the
+# Morning / Normal daytime preset, so it has no mapping either.
+CONDITIONS: tuple[str, ...] = ("morning", "day", "sun", "glare", "heat", "evening_privacy", "night", "sleep",
+                               "lamp", "manual_override")
+SUN_FALLBACK: frozenset[str] = frozenset({"glare", "heat"})   # unset -> the Direct sunlight preset
 CONDITION_WORDS = {
     "morning": "Morning", "day": "Normal daytime", "sun": "Direct sunlight", "evening_privacy": "Evening privacy",
     "night": "Night", "sleep": "Sleep", "lamp": "Window lamp on", "manual_override": "Manual override",
-    "waiting": "Waiting for daylight",
+    "waiting": "Waiting for daylight", "glare": "Glare protection", "heat": "Excess solar heat",
+    "solar_heating": "Useful solar heating",
 }
 
 MAX_WINDOWS = 64
@@ -51,6 +56,7 @@ TOLERANCE_LIMITS = (0, 10)          # percentage points: "at the position" / "al
 VERIFY_TIMEOUT_LIMITS = (20, 600)   # seconds to wait for the reported position
 EXPOSURE_WIDTH_LIMITS = (5, 90)     # ± degrees either side of the window's bearing
 ELEVATION_LIMITS = (-5.0, 60.0)
+MAX_ELEVATION_LIMITS = (5.0, 90.0)  # an overhang / eaves: above this the sun no longer reaches the glass
 
 
 class CurtainConfigError(ValueError):
@@ -204,10 +210,13 @@ class SolarSettings:
     exposure_width: int = 70        # the sun can shine in within ± this many degrees of the bearing
     min_elevation: float = 3.0      # below this the sun is too low to matter
     obstructions: tuple[Obstruction, ...] = ()
+    # 0.6.3: an overhang, balcony or eaves above the window: a higher (summer) sun does not reach the
+    # glass. None = no overhang (the 0.6.2 behaviour).
+    max_elevation: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {"exposure_width": self.exposure_width, "min_elevation": self.min_elevation,
-                "obstructions": [o.as_dict() for o in self.obstructions]}
+                "obstructions": [o.as_dict() for o in self.obstructions], "max_elevation": self.max_elevation}
 
     @classmethod
     def from_dict(cls, data: Any) -> SolarSettings:
@@ -218,10 +227,13 @@ class SolarSettings:
                 obstructions.append(Obstruction.from_dict(item))
             except CurtainConfigError:
                 continue
+        top = data.get("max_elevation")
         return cls(
             exposure_width=int(_number(data.get("exposure_width"), 70, *EXPOSURE_WIDTH_LIMITS)),
             min_elevation=round(_number(data.get("min_elevation"), 3.0, *ELEVATION_LIMITS), 1),
             obstructions=tuple(obstructions[:MAX_OBSTRUCTIONS]),
+            max_elevation=None if top is None or isinstance(top, bool) or not isinstance(top, (int, float))
+            else round(_number(top, 90.0, *MAX_ELEVATION_LIMITS), 1),
         )
 
 
@@ -464,6 +476,8 @@ def default_conditions(presets: tuple[Preset, ...]) -> dict[str, str | None]:
         "night": pick("p_blackout", "p_closed"),
         "sleep": pick("p_blackout", "p_closed"),
         "lamp": pick("p_half_shade", "p_half"),
+        "glare": None,            # 0.6.3: not set = the Direct sunlight preset
+        "heat": None,
         "manual_override": None,  # a manual move is kept as it is
     }
 

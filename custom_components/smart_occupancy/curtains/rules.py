@@ -1,4 +1,5 @@
-"""Settings of the automatic curtain rules (0.6.2, the user's Phase 4.6.1).
+"""Settings of the automatic curtain rules (0.6.2, the user's Phase 4.6.1; environment, solar and
+thermal settings 0.6.3, Phase 4.6.2).
 
 Every setting is one entry in ``RULES``: its type, default, limits, group and
 the scopes it can be set at. A value is resolved **window → room → all
@@ -9,6 +10,15 @@ window lamp) exist only on the window.
 The card renders its settings forms from this table (``schema()``), and the
 websocket validates every change with ``validate()``; nothing is edited as
 YAML.
+
+0.6.3 adds the environment sensors (outdoor / indoor light, room and outdoor
+temperature, weather and cloud cover), how their validity is judged, and the
+optional temperature-aware and glare behaviour. Every new behaviour is **off**
+by default (``thermal_enabled``, ``glare_sensitive``, ``sun_evidence``), so a
+window configured in 0.6.2 decides exactly as before; the only new default that
+is on (``lux_stuck``) can only keep a window where it is.
+
+Times are always 24-hour ``HH:mm`` (00:00-23:59).
 """
 
 from __future__ import annotations
@@ -44,12 +54,18 @@ class Rule:
     choices: tuple[tuple[str, str], ...] = ()
     domains: tuple[str, ...] = ()   # entity: allowed domains
     scopes: tuple[str, ...] = ALL_SCOPES
+    step: float | None = None       # number fields (the card uses 1, or 0.5 for floats, when unset)
+    # 0.6.3: switching this on (or choosing a value other than the default) shows the predicted result
+    # (``auto/simulate``) before it is saved.
+    confirm: bool = False
+    entity_list: str | None = None  # which entity suggestions the card offers
 
     def as_dict(self) -> dict[str, Any]:
         return {"key": self.key, "kind": self.kind, "default": _jsonable(self.default), "group": self.group,
                 "label": self.label, "hint": self.hint, "low": self.low, "high": self.high, "unit": self.unit,
                 "choices": [list(c) for c in self.choices], "domains": list(self.domains),
-                "scopes": list(self.scopes)}
+                "scopes": list(self.scopes), "step": self.step, "confirm": self.confirm,
+                "entity_list": self.entity_list}
 
 
 def _jsonable(value: Any) -> Any:
@@ -64,7 +80,14 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
     ("sun", "Strong sunshine", "Sun protection needs the sun in front of the window and measured strong light."),
     ("manual", "Manual changes", "How long a manual move is kept before automatic control takes over again."),
     ("movement", "Movement safety", "Limits that keep covers from moving too often."),
+    # 0.6.3 (shown in the window's Environment tab)
+    ("environment", "Environment sensors",
+     "Measurements for daylight, sunshine and temperature. Doubtful readings never open a window."),
+    ("thermal", "Temperature and glare",
+     "Optional. Decides whether direct sunshine is welcome warmth, unwanted heat or glare. Never controls heating."),
 )
+ENVIRONMENT_GROUPS = frozenset({"environment", "thermal"})
+TEMPERATURE_DOMAINS = ("sensor", "climate", "weather")
 
 RULES: tuple[Rule, ...] = (
     # ---------------------------------------------------------------- sleep
@@ -86,8 +109,6 @@ RULES: tuple[Rule, ...] = (
          choices=(("sleep", "Sleep"), ("night", "Night"), ("evening_privacy", "Evening privacy"),
                   ("sun", "Sun protection"))),
     # ------------------------------------------------------------- daylight
-    Rule("lux_entity", "entity", None, "daylight", "Outdoor light sensor", "An outdoor illuminance sensor (lx)",
-         domains=("sensor",)),
     Rule("daylight_lux", "int", 150, "daylight", "Daylight from", "Outdoor light for opening", 1, 20000, "lx"),
     Rule("dusk_lux", "int", 50, "daylight", "Dark below", "Outdoor light that counts as dusk", 0, 20000, "lx"),
     Rule("daylight_stable", "int", 10, "daylight", "Stable for", "Before daylight or dusk counts", 0, 120, "min"),
@@ -95,8 +116,6 @@ RULES: tuple[Rule, ...] = (
          -12, 20, "°"),
     Rule("dusk_elevation", "float", -4.0, "daylight", "Dark when the sun is below",
          "Works without a light sensor too", -18, 10, "°"),
-    Rule("lux_stale", "int", 30, "daylight", "Sensor stale after", "No report for this long: no opening", 5, 720,
-         "min"),
     Rule("fallback", "choice", "none", "daylight", "Without a light sensor",
          choices=(("none", "Never open automatically"), ("sun", "Open when the sun is clearly up"))),
     Rule("fallback_elevation", "float", 3.0, "daylight", "Sun clearly up at", "Only used by the fallback", -6, 30,
@@ -119,6 +138,11 @@ RULES: tuple[Rule, ...] = (
     Rule("sun_release_lux", "int", 8000, "sun", "Released below", low=0, high=200000, unit="lx"),
     Rule("sun_stable", "int", 10, "sun", "Strong for", "Before sun protection starts", 0, 120, "min"),
     Rule("sun_release", "int", 20, "sun", "Weaker for", "Before sun protection ends", 0, 240, "min"),
+    Rule("sun_evidence", "choice", "measured", "sun", "Direct sunshine is confirmed by",
+         "A forecast never overrides a working light sensor",
+         choices=(("measured", "Measured outdoor light only"),
+                  ("weather", "Without a light sensor: also a clear sky from the weather entity")), confirm=True),
+    Rule("cloud_max", "int", 30, "sun", "Clear sky up to", "Cloud cover for the weather evidence", 0, 100, "%"),
     # --------------------------------------------------------------- manual
     Rule("manual_policy", "choice", "next_phase", "manual", "Keep a manual move",
          choices=(("next_phase", "Until the next automatic phase"), ("duration", "For a number of minutes"),
@@ -135,6 +159,55 @@ RULES: tuple[Rule, ...] = (
     Rule("max_moves", "int", 12, "movement", "Automatic moves per day",
          "Then only sleep and night still move", 1, 100),
     Rule("max_retries", "int", 2, "movement", "Retries after a failed move", low=0, high=5),
+    # ---------------------------------------------------------- environment (0.6.3)
+    Rule("lux_entity", "entity", None, "environment", "Outdoor light sensor", "An outdoor illuminance sensor (lx)",
+         domains=("sensor",), entity_list="lux"),
+    Rule("lux_stale", "int", 30, "environment", "Light sensor stale after", "No report for this long: no opening",
+         5, 720, "min"),
+    Rule("lux_stuck", "int", 120, "environment", "Light sensor stuck after",
+         "The same reading for this long (not a dark night): not trusted, nothing opens or shades. 0 = never", 0,
+         1440, "min"),
+    Rule("indoor_lux_entity", "entity", None, "environment", "Indoor light sensor",
+         "Optional; lamps make it unreliable for daylight, so it is only used to confirm glare", domains=("sensor",),
+         scopes=(ROOM, WINDOW), entity_list="lux"),
+    Rule("room_temp_entity", "entity", None, "environment", "Room temperature",
+         "A temperature sensor, or a thermostat (its current temperature)", domains=("sensor", "climate"),
+         scopes=(ROOM, WINDOW), entity_list="temperature"),
+    Rule("outdoor_temp_entity", "entity", None, "environment", "Outdoor temperature",
+         "A temperature sensor or the weather entity", domains=TEMPERATURE_DOMAINS, entity_list="temperature"),
+    Rule("weather_entity", "entity", None, "environment", "Weather", "Condition and cloud cover (supplementary)",
+         domains=("weather",), entity_list="weather"),
+    Rule("cloud_entity", "entity", None, "environment", "Cloud cover sensor",
+         "Optional (%); otherwise the weather entity's cloud cover", domains=("sensor",), entity_list="cloud"),
+    Rule("temp_stale", "int", 180, "environment", "Temperature stale after",
+         "No report for this long: temperature is not used", 10, 1440, "min"),
+    # ---------------------------------------------------------- thermal and glare (0.6.3)
+    Rule("thermal_enabled", "bool", False, "thermal", "Temperature-aware sun",
+         "Direct sunshine shades only when the room is warm; a cold room keeps the sun's warmth", confirm=True),
+    Rule("preferred_temp", "float", 21.0, "thermal", "Preferred room temperature", "", 5, 35, "°C", step=0.5),
+    Rule("comfort_band", "float", 1.5, "thermal", "Comfortable within ±", "Around the preferred temperature",
+         0.5, 10, "°C", step=0.5),
+    Rule("max_temp", "float", 25.0, "thermal", "Maximum acceptable", "Above this the Excess solar heat preset applies",
+         10, 40, "°C", step=0.5),
+    Rule("thermostat_entity", "entity", None, "thermal", "Use a thermostat's target",
+         "Optional: its target temperature replaces the preferred temperature (it is never changed)",
+         domains=("climate", "input_number"), scopes=(ROOM, WINDOW), entity_list="thermostat"),
+    Rule("heat_gain", "choice", "welcome", "thermal", "Solar heat gain",
+         choices=(("welcome", "Welcome it when the room is cold"), ("ignore", "Do not keep covers open for warmth"))),
+    Rule("outdoor_heat_temp", "float", 18.0, "thermal", "Warm outside from",
+         "Outdoor temperature at or above this: solar heating is not needed", -20, 40, "°C", step=0.5),
+    Rule("temp_hysteresis", "float", 0.5, "thermal", "Temperature hysteresis", "Before a temperature state ends",
+         0.1, 5, "°C", step=0.1),
+    Rule("temp_stable", "int", 10, "thermal", "Temperature stable for", "Before a new temperature state counts", 0, 120,
+         "min"),
+    Rule("glare_sensitive", "bool", False, "thermal", "Glare-sensitive window",
+         "A screen or a workplace: direct sunshine shades even when its warmth would be welcome", scopes=(WINDOW,),
+         confirm=True),
+    Rule("glare_when", "choice", "always", "thermal", "Glare protection",
+         choices=(("always", "Whenever there is direct sunshine"),
+                  ("occupied", "Only while the room is occupied"))),
+    Rule("glare_indoor_lux", "int", 0, "thermal", "Glare also needs indoor light from",
+         "Uses the indoor light sensor; 0 = not used", 0, 100000, "lx"),
 )
 BY_KEY: dict[str, Rule] = {r.key: r for r in RULES}
 
@@ -244,4 +317,6 @@ def consistency(values: Mapping[str, Any]) -> list[str]:
         problems.append("“Released below” must be lower than “Strong sunshine from”")
     if values["dusk_elevation"] > values["daylight_elevation"]:
         problems.append("The dark elevation must not be above the daylight elevation")
+    if values["max_temp"] <= values["preferred_temp"] + values["comfort_band"]:
+        problems.append("“Maximum acceptable” must be above the comfortable range")
     return problems
