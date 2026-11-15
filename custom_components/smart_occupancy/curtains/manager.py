@@ -1,4 +1,4 @@
-"""Curtain runtime (0.6.1, automatic 0.6.2): configuration store, presets, verification and observation.
+"""Curtain runtime (0.6.1, automatic 0.6.2, environment 0.6.3): store, presets, verification and observation.
 
 Cover commands are sent only by an operation created with ``begin``: for an
 explicit, confirmed manual preset (``async_apply``) or for a window in
@@ -54,7 +54,9 @@ _LOGGER = logging.getLogger(__name__)
 
 STORE_KEY = "smart_occupancy.curtains"
 STORE_VERSION = 1
-STORE_MINOR_VERSION = 2   # 0.6.2: automatic rule settings (defaults, rooms, window auto); older data loads as is
+# 0.6.2: automatic rule settings (defaults, rooms, window auto); 0.6.3: environment / thermal settings, the
+# Glare and Excess heat mappings and the overhang limit. Older data loads as it is (new keys are defaults).
+STORE_MINOR_VERSION = 3
 STATE_STORE_KEY = "smart_occupancy.curtains_state"
 STATE_STORE_VERSION = 1
 SIGNAL_CURTAINS_UPDATED = "smart_occupancy_curtains_updated"
@@ -111,6 +113,7 @@ class CurtainManager:
         self.samples = [(float(a), float(b)) for a, b in state.get("samples") or ()
                         if isinstance(a, (int, float)) and isinstance(b, (int, float))]
         self.auto.restore(state.get("auto"))
+        self.auto.restore_sensors(state.get("sensors"))
         # An operation that was running when Home Assistant stopped is not resumed and never re-sent. Its
         # covers may still be travelling and report the rest of that movement: those reports are ours, not
         # a manual change.
@@ -144,7 +147,8 @@ class CurtainManager:
     def _state_data(self) -> dict[str, Any]:
         self._state_dirty = False
         return {"last": self.last, "history": self.history, "manual": self.manual,
-                "samples": [list(s) for s in self.samples], "auto": self.auto.export()}
+                "samples": [list(s) for s in self.samples], "auto": self.auto.export(),
+                "sensors": self.auto.export_sensors()}
 
     def save_state(self) -> None:
         self._save_state()

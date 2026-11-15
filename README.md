@@ -18,6 +18,8 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **0.6.2 (Phase 4.6.1)** adds **autonomous curtain control per window**. A window you switch to **Automatic** (after reviewing its intended preset, safety conditions and conflicts) decides on its own between Sleep, Night, Evening privacy, Waiting for daylight, Sun protection, Window lamp, Morning and Day, and moves all its covers together without asking again. Measured outdoor light, not the clock, opens a window; sleep keeps sleep-protected rooms closed; manual moves are kept; every decision is explained. Every other window stays in Observing until you switch it (see [Automatic curtains](#automatic-curtains-phase-461-062)).
 
+**0.6.3 (Phase 4.6.2)** adds **solar and thermal curtain control** and **24-hour time everywhere**. Each window judges direct sunshine from the sun's geometry against its own direction (with obstructions and an optional overhang) *and* measured outdoor light; stuck, implausible, stale or missing sensors are recognised and never open or shade a window. Optional, per window: temperature-aware sun (a cold room keeps the sun's warmth, a warm room gets sun protection, a too-warm room a stronger preset), glare-sensitive windows, and weather evidence for windows without a light sensor. Every new behaviour is off until you switch it on, except stuck-sensor detection, which can only keep a window where it is; you see what a new feature would do before it is saved. Every time shown by the cards is 24-hour `HH:mm` in Home Assistant's time zone (see [Solar and thermal curtains](#solar-and-thermal-curtains-phase-462-063)).
+
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
@@ -41,6 +43,9 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - opens a curtain in an Automatic window while sleep is on in a sleep-protected room, or without measured daylight (unless you explicitly allow the sun fallback for a window without a light sensor); a clock time can only delay an opening (0.6.2)
 - undoes a manual cover move: it is kept until its release policy ends it or you press **Resume** (0.6.2)
 - changes, disables or deletes a competing curtain automation: it is listed, and Automatic is refused for its covers until you disable it or explicitly allow it (0.6.2)
+- treats a stuck, implausible, stale or missing light reading as sunshine or daylight, or lets a weather forecast override a working light sensor (0.6.3)
+- lets temperature, glare or solar heating override sleep, night, evening privacy or a manual hold, or controls heating equipment (0.6.3: a thermostat is only read)
+- shows a time in 12-hour notation (0.6.3)
 
 ## Requirements
 
@@ -1038,10 +1043,62 @@ Each window shows Off / Observing / Automatic, the current condition and preset,
 
 ### Limitations
 
-- One outdoor light sensor per window (set once for all windows); no cloud cover or weather input yet.
-- Heat / thermal optimisation (indoor and outdoor temperature, winter solar gain) is not part of this phase; the solar settings are kept compatible for it.
+- One outdoor light sensor per window (set once for all windows, or per room / window). Weather and temperature: see [Solar and thermal curtains](#solar-and-thermal-curtains-phase-462-063) (0.6.3).
 - A morning starts only before noon; after a later wake-up the window goes to Normal daytime.
 - A manual move reported within 90 s after an automatic movement of the same window is treated as part of that movement (Zigbee2MQTT reports late); it is then not corrected, but not held either.
+
+## Solar and thermal curtains (Phase 4.6.2, 0.6.3)
+
+Builds on the automatic windows above; nothing changes for a window until you switch a new option on.
+
+### Direct sunshine: four separate questions
+
+1. **Can the sun reach the glass?** (geometry) The standard solar azimuth and elevation from `sun.sun` against the window's direction: within ± the exposure width, above the minimum elevation (low winter sun), not behind an obstruction (e.g. east windows behind a hill need a higher morning sun) and, new, not above an optional **overhang** limit (eaves or a balcony shade the glass from a high summer sun). The card shows the sun's angle *from the window* and its incidence on the glass.
+2. **How bright is it outside?** (measurement) The outdoor light sensor is the primary evidence.
+3. **Is it direct sunshine?** Only *measured* strong light for its stable period confirms it; geometry alone never does, and a clock never does. Without a light sensor, and only if you choose it, a clear sky from the weather entity may confirm it for sun protection (never for opening). If that weather evidence disappears while the window shades, it keeps its position. A forecast never overrides a working light sensor.
+4. **Glare or heat?** Optional, see below.
+
+`sensor.sun_angle` is the house's compensated angle (0° = the sun faces the south-facing windows); it is **not** an azimuth. Once its calibration is validated, the card also shows each window's angle read through it, as a cross-check; it never drives a decision.
+
+### Measurement validity
+
+Every reading is **Valid**, **Not chosen**, **Not found**, **Unavailable**, **Stale** (no report for too long), **Appears stuck** (the same light value for 2 hours, adjustable, while it should vary; a constant dark reading at night is normal) or **Implausible** (e.g. thousands of lux while the sun is below the horizon, as `sensor.pir_taf_illuminance` read at dawn). Only valid readings count. A stuck or implausible sensor keeps the window where it is, with an explanation such as *“The outdoor illuminance sensor … appears stuck … Sun protection not activated because direct sunshine cannot be confirmed”*; once it reports real values again, daylight and sunshine need their full stable periods again. Stuck detection is the one new default that is on: it can only keep a window where it is.
+
+The **sensor-quality summary** (gear on the overview) lists every candidate found by type and unit — outdoor and indoor light, outdoor and room temperature, weather, cloud cover, thermostats — with its validity now, and offers **Use for all windows**. Nothing is hard-coded; `sensor.pir_tfr_illuminance`, `sensor.min_ljos_terassa_framman` and `weather.forecast_home` are only candidates.
+
+### Temperature-aware sun (optional, per window, room or all windows)
+
+With a room temperature (a sensor or a thermostat's current temperature) the room is **Cold** (below the comfortable range), **Comfortable**, **Warm** (above it) or **Too warm** (above the maximum acceptable). A band changes only after the temperature has been in it for the stable period (10 min) and leaves it only past the hysteresis (0.5 °C). With direct sunshine:
+
+| Room | Decision | Preset |
+| --- | --- | --- |
+| Too warm | Excess solar heat | its own, else Direct sunlight |
+| Warm | Direct sunlight (sun protection) | Direct sunlight |
+| Glare-sensitive window | Glare protection | its own, else Direct sunlight |
+| Cold (warmth welcome, not warm outside) | Useful solar heating | keeps Morning / Normal daytime |
+| Comfortable, or temperature unknown | Direct sunlight | Direct sunlight |
+
+Settings: preferred temperature (or a thermostat's target, which is only read), comfortable ±, maximum acceptable, solar heat gain (welcome / not), “warm outside from” (outdoor temperature at which solar heating is not needed), hysteresis, stable period, glare-sensitive window, glare only while the room is occupied, and an optional indoor-light threshold for glare. The calculations are explained in words; no heat power is estimated.
+
+### Precedence
+
+Safety → manual hold → sleep → night → evening privacy → window lamp → excess solar heat → direct sunlight → glare → useful solar heating → morning → normal daytime → waiting. *Direct sunlight* in “wins over the lamp” also covers glare and excess heat. Nothing thermal ever bypasses sleep, night, privacy or a manual hold. The window's precedence list shows only the rows that are switched on.
+
+### Switching a feature on
+
+Switching on temperature-aware sun, a glare-sensitive window or weather evidence first shows, for every affected window, what it would decide now and how many covers would move (`auto/simulate`); it is saved only when you confirm.
+
+### Testing in Observing
+
+Leave the window in **Observing**, open its **Environment** tab, choose the sensors and check that each says *Valid*. Switch on temperature-aware sun (look at the prediction), then watch the overview's *Direct sun*, *Temperature* and *Glare / heat* rows and the decision log over a sunny day: each entry reads like *“11:35 — Direct sunlight detected (25000 lx). Room temperature 23.8 °C exceeds the configured comfort maximum (22.5 °C)”* with *Would move …*. Nothing moves until you enable Automatic.
+
+### 24-hour time
+
+Every time the cards show — curtains, lighting, presence, forecasts, the Room Supervisor, decision logs, manual-override expiry and the next check — is `HH:mm` (00:00–23:59) in Home Assistant's time zone (or your own, if your profile says so), never AM/PM and independent of the browser language. Time settings are text fields that accept `HH:mm` (also `7:30`, `0730`, `7.30`, stored as `07:30`) and refuse anything else; stored times and their meaning are unchanged. Timestamps stay ISO 8601 with a time zone.
+
+### Storage
+
+Curtain store minor version 3: window `solar.max_elevation`, condition mappings `glare` and `heat`, and the new settings (all defaults when absent). The state store adds `sensors` (when each light sensor's value last changed, so a restart does not hide a stuck sensor) and per window `thermal` and `last_phase`. 0.6.2 data loads unchanged.
 
 ## Occupancy forecast (Phase 4, 0.5.0)
 

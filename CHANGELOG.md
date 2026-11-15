@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.6.3 — Solar and thermal curtain control, 24-hour time (Phase 4.6.2)
+
+### Added
+
+- **Environmental evidence** (`curtains/environment.py`): outdoor / indoor light, room / outdoor temperature (sensor, thermostat or weather; converted to °C), weather condition and cloud cover; each reading judged Valid / Not chosen / Not found / Unavailable / Stale / **Appears stuck** / **Implausible**. Selectable for all windows, a room or a window (`lux_entity`, `indoor_lux_entity`, `room_temp_entity`, `outdoor_temp_entity`, `weather_entity`, `cloud_entity`, `lux_stuck`, `temp_stale`). Discovery with a **sensor-quality summary** and *Use for all windows*.
+- **Direct sunshine** kept apart from geometry and daylight: `direct_sun` assessment (not in front / confirmed / likely / diffuse daylight / cannot be confirmed). Optional weather evidence (`sun_evidence`, `cloud_max`) only for windows without a light sensor, never for opening; if it disappears while shading, the position is kept.
+- **Temperature-aware sun** (`thermal_enabled` and its settings): Cold / Comfortable / Warm / Too warm with hysteresis and a stable period; conditions **Useful solar heating** (keeps the Morning / Normal daytime preset), **Excess solar heat** and **Glare protection** (glare-sensitive windows, optionally only while occupied or above an indoor light level). New condition mappings *Glare protection* and *Excess solar heat* fall back to the Direct sunlight preset. Thermostats are only read.
+- **Overhang** limit per window (`solar.max_elevation`), sun incidence and the window's angle read through the validated `sensor.sun_angle` calibration.
+- `auto/simulate`: the predicted decision and moves of every affected window before a setting is saved; the card uses it before switching on temperature-aware sun, glare or weather evidence.
+- Smart Curtains card: per window the sun angle and elevation, direct sun, outdoor light, temperatures, glare / heat decision, next re-evaluation; new **Environment** tab (measurements with validity, assessments, environment / temperature / glare settings); overhang field; decision log as `HH:mm — explanation`.
+- **24-hour time everywhere**: one shared helper in the curtains and lighting cards formats every time as `HH:mm` in Home Assistant's time zone (`hourCycle: "h23"`, independent of the browser locale; honours a profile set to local time); chart axes `00:00 … 18:00`; time settings are 24-hour text fields (`HH:mm`, 00:00–23:59) instead of native time inputs.
+- Tests: `tests/test_curtains_solar.py` (geometry for south, east, west, obstructed and overhung windows, the compensated sun angle, sensor validity, temperature bands, arbitration against sleep / night / privacy / lamp / manual holds, equality with the frozen 0.6.2 logic over 4000 random situations, DST and midnight schedules, layered presets, passing clouds, stuck sensor, missing sources, discovery, restart, upgrade from a 0.6.2 store) and `tests/test_time24.py` (Node under en-US, en-GB, Faroese and Danish locales, browser in another zone, midnight, 12:00, 23:59, date changes, DST, time-field parsing).
+
+### Changed
+
+- **Stuck light sensors** (same value for 2 h while it should vary) and implausible readings are no longer evidence: the window keeps its position. This is the only new default that is on; it never moves anything.
+- Decision texts: “Direct sunlight detected (… lx)”, “Night protection active until 06:30”, “Lamp override bypassed: …”; a movement is logged as “<reason>. Applying <preset> (<condition>): moving N covers”.
+- Light settings moved from *Daylight* to the new *Environment sensors* group (same keys and values).
+- Curtain store minor version 3; state store adds `sensors`, `thermal`, `last_phase`. 0.6.2 data loads unchanged.
+
+### Not changed
+
+- Occupancy, lighting, zones, the Room Supervisor, switches, forecasts and heating. With the new options at their defaults, every 0.6.2 window decides exactly as before (verified against the frozen 0.6.2 logic).
+
 ## 0.6.2 — Autonomous curtain control (Phase 4.6.1)
 
 ### Added

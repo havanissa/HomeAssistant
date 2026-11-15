@@ -298,7 +298,8 @@ async def test_multi_cover_defaults_and_preset_library(hass, pilot, house, cover
         ("Full blackout", 100, 0)]
     assert w["conditions"] == {
         "morning": "p_half_shade", "day": "p_open", "sun": "p_full_shade", "evening_privacy": "p_evening_privacy",
-        "night": "p_blackout", "sleep": "p_blackout", "lamp": "p_half_shade", "manual_override": None}
+        "night": "p_blackout", "sleep": "p_blackout", "lamp": "p_half_shade", "manual_override": None,
+        "glare": None, "heat": None}   # 0.6.3: not set = the Direct sunlight preset
 
     # A new custom preset with two independent positions, one cover left unchanged in another.
     tv = (await api.ok("preset/save", window_id=wid, name="TV", positions={sheer: 20, blackout: 70}))["preset_id"]
@@ -686,7 +687,8 @@ async def test_restart_persists_everything_and_moves_nothing(hass, pilot, house,
     w = await window(api, wid)
     assert preset(w, "Half shade")["positions"][sheer] == 35 and w["selected_preset"] == "p_half_shade"
     assert w["solar"] == {"exposure_width": 55, "min_elevation": 4.0, "obstructions": [
-        {"from_azimuth": 60.0, "to_azimuth": 120.0, "min_elevation": 12.0}]} and w["solar_protection"]
+        {"from_azimuth": 60.0, "to_azimuth": 120.0, "min_elevation": 12.0}], "max_elevation": None} \
+        and w["solar_protection"]
     assert w["last"]["status"] == "interrupted" and not w["running"]
     assert {i["entity_id"]: i["status"] for i in w["last"]["items"]}[STOVA_SHEER] == "interrupted"
     assert len(covers.calls) == calls  # nothing was resumed or sent again on restart

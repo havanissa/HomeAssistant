@@ -54,6 +54,10 @@ class Run:
         self.hass, self.freezer, self.api, self.mgr, self.covers = hass, freezer, api, mgr, covers
         self.lux_value: Any = None
         self.reporting = True
+        # A real outdoor sensor never reports exactly the same daylight value for hours (0.6.3 treats that
+        # as stuck): daylight readings vary by 1 lx between reports unless a test switches it off.
+        self.jitter = True
+        self._ticks = 0
 
     def lux(self, value: Any) -> None:
         self.lux_value = value
@@ -76,7 +80,13 @@ class Run:
         for _ in range(steps):
             self.freezer.tick(timedelta(seconds=step))
             if self.reporting and self.lux_value is not None:
-                self.lux(self.lux_value)
+                self._ticks += 1
+                value = self.lux_value
+                if self.jitter and isinstance(value, (int, float)) and value >= 100:
+                    value = value + self._ticks % 2
+                self.hass.states.async_set(LUX, str(value), {"unit_of_measurement": "lx",
+                                                             "device_class": "illuminance",
+                                                             "friendly_name": "Terrace light"})
             async_fire_time_changed(self.hass)
             await self.hass.async_block_till_done()
 
@@ -879,7 +889,7 @@ async def test_settings_scopes_through_the_card_api(hass, pilot, house, covers, 
     assert model["rules"]["global"] == {"daylight_lux": 200, "lux_entity": LUX}
     assert model["rules"]["rooms"][house.kamar]["daylight_lux"] == 300
     assert {g[0] for g in model["rules"]["groups"]} == {"sleep", "lamp", "daylight", "schedule", "sun", "manual",
-                                                        "movement"}
+                                                        "movement", "environment", "thermal"}
     await r.api.ok("auto/settings", scope="room", area_id=house.kamar, values={"daylight_lux": None})
     assert r.auto(k)["sources"]["daylight_lux"] == "global"
     err = await r.api.error("auto/settings", scope="global", values={"dusk_lux": 500})

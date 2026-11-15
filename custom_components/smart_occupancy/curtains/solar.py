@@ -1,11 +1,18 @@
-"""Sun position against each window (0.6.1): display and configuration only.
+"""Sun position against each window (0.6.1; overhang, incidence and the sun-angle view 0.6.3).
 
 Exposure uses the **standard** solar azimuth (0 = north, 90 = east) and
 elevation, from ``sun.sun`` or two sensors. A window is *potentially exposed*
 when the sun is above the window's minimum elevation, within ± the exposure
-width of the window's bearing and not behind a configured obstruction (a hill,
-a building). This says nothing about clouds or brightness; it never moves a
-cover in this phase.
+width of the window's bearing, not behind a configured obstruction (a hill,
+a building; e.g. east windows behind a hill need a higher morning sun) and not
+above an optional overhang limit (eaves or a balcony that shade the glass from
+a high summer sun). This is geometry only: it says nothing about clouds or
+brightness, and it is never taken as proof of sunshine (see ``logic.py``).
+
+The *incidence* is the angle between the sun's rays and the window's normal
+(0° = straight onto the glass, 90° = grazing). It is shown to explain how
+directly the sun faces the window; it is not converted into a heat power,
+because that needs glazing and room data Smart Occupancy does not have.
 
 ``sensor.sun_angle`` is the house's compensated angle (0 = the sun faces the
 south-facing windows). Its formula and sign are **not assumed**: the
@@ -83,6 +90,7 @@ EXPOSURE_TEXT = {
     "exposed": "Potentially exposed to direct sunshine",
     "outside_sector": "The sun is not in front of this window",
     "too_low": "The sun is too low for this window",
+    "too_high": "The sun is high enough for the overhang to shade this window",
     "below_horizon": "The sun is below the horizon",
     "obstructed": "The sun is behind an obstruction",
     "no_direction": "Set the window's direction to see its sun exposure",
@@ -90,20 +98,31 @@ EXPOSURE_TEXT = {
 }
 
 
+def incidence(offset: float, elevation: float) -> float:
+    """Angle between the sun's rays and the normal of a vertical window, in degrees (0 = head on)."""
+    cos_i = math.cos(math.radians(elevation)) * math.cos(math.radians(offset))
+    return math.degrees(math.acos(max(-1.0, min(1.0, cos_i))))
+
+
 def exposure(bearing: float | None, sun: SunNow, settings: SolarSettings) -> dict[str, Any]:
     """Whether direct sun can reach a window now (geometry only)."""
-    out: dict[str, Any] = {"status": "unknown", "offset": None}
+    out: dict[str, Any] = {"status": "unknown", "offset": None, "incidence": None, "elevation": None}
     if bearing is None:
         out["status"] = "no_direction"
     elif sun.azimuth is not None and sun.elevation is not None:
         offset = angle_diff(sun.azimuth, bearing)
         out["offset"] = round(offset, 1)
+        out["elevation"] = round(sun.elevation, 1)
+        if abs(offset) < 90 and sun.elevation > 0:
+            out["incidence"] = round(incidence(offset, sun.elevation), 1)
         if sun.elevation <= 0 and sun.elevation < settings.min_elevation:
             out["status"] = "below_horizon"
         elif abs(offset) > settings.exposure_width:
             out["status"] = "outside_sector"
         elif sun.elevation < settings.min_elevation:
             out["status"] = "too_low"
+        elif settings.max_elevation is not None and sun.elevation > settings.max_elevation:
+            out["status"] = "too_high"
         elif any(in_arc(sun.azimuth, o.from_azimuth, o.to_azimuth) and sun.elevation < o.min_elevation
                  for o in settings.obstructions):
             out["status"] = "obstructed"
@@ -112,6 +131,20 @@ def exposure(bearing: float | None, sun: SunNow, settings: SolarSettings) -> dic
     out["exposed"] = out["status"] == "exposed"
     out["text"] = EXPOSURE_TEXT[out["status"]]
     return out
+
+
+def window_angle_from_sun_angle(sun_angle: float | None, cal: dict[str, Any], bearing: float | None) -> float | None:
+    """The sun's angle from a window's facing direction, read through the house's compensated sun angle.
+
+    ``sensor.sun_angle`` is 0° when the sun faces the south-facing reference windows; it is **not** a
+    geographical azimuth. Only once the calibration has validated ``sun_angle = sign * (azimuth - Z)``
+    (Z = the azimuth where it reads 0) can it be turned into a window's own angle:
+    ``azimuth - bearing = sign * sun_angle + Z - bearing``. Without a validated calibration: None.
+    It is shown next to the azimuth-based angle as a cross-check and never replaces it.
+    """
+    if sun_angle is None or bearing is None or cal.get("status") != "validated" or cal.get("zero_azimuth") is None:
+        return None
+    return round(angle_diff(cal["sign"] * sun_angle + cal["zero_azimuth"] - bearing, 0.0), 1)
 
 
 # ------------------------------------------------------------ calibration

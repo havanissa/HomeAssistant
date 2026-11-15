@@ -87,7 +87,7 @@ def test_lighting_cards_never_control_lights() -> None:
     assert "import " not in source.split("*/", 1)[1]
     assert "callService" not in source and "call_service" not in source
     assert "http://" not in source and "https://cdn" not in source
-    commands = set(re.findall(r"type: `\$\{WS\}/([a-z_/]+)`", source))
+    commands = set(re.findall(r"`\$\{WS\}/([a-z_/]+)`", source))
     assert len(commands) >= 10, commands
     assert commands <= {
         "subscribe", "editor", "preview", "profile/set", "mood/set", "settings/set", "room/set", "room/activation",
@@ -119,12 +119,14 @@ def test_curtains_card_never_moves_a_cover_itself() -> None:
     assert "import " not in source.split("*/", 1)[1]
     assert "callService" not in source and "call_service" not in source
     assert "http://" not in source and "https://cdn" not in source
-    commands = set(re.findall(r"type: `\$\{WS\}/([a-z_/]+)`", source))
+    commands = set(re.findall(r"`\$\{WS\}/([a-z_/]+)`", source))
     assert commands == {
         "subscribe", "model", "preview", "apply", "window/create", "window/update", "window/remove", "preset/save",
         "preset/duplicate", "preset/delete", "preset/select", "manual/clear", "settings", "rescan", "calibration/reset",
         # 0.6.2: the Automatic review and its confirmed enable, Resume, rule settings, allowing an automation
         "auto/preview", "auto/enable", "resume", "auto/settings", "automation/allow",
+        # 0.6.3: the predicted result of a settings change, shown before it is saved (read only)
+        "auto/simulate",
     }, commands
     assert source.count("type: `${WS}/auto/enable`") == 1
     enable = source.split("async _enableConfirmed() {", 1)[1].split("\n  }\n", 1)[0]
@@ -138,7 +140,7 @@ def test_curtains_card_never_moves_a_cover_itself() -> None:
     assert source.count('data-action="apply-confirm"') == 1
     assert 'case "apply": this._openPlan(el.dataset.window, el.dataset.preset, "confirm")' in source
     assert "mood" not in source.lower().replace("moods are never used", "")
-    for tab in ("General", "Covers", "Presets", "Automatic", "Sun protection", "Diagnostics"):
+    for tab in ("General", "Covers", "Presets", "Automatic", "Sun protection", "Environment", "Diagnostics"):
         assert f'"{tab}"' in source
     assert "@container (max-width: 480px)" in source  # usable on phones
 

@@ -1,4 +1,6 @@
-"""Automatic curtain decisions (0.6.2, the user's Phase 4.6.1). Pure logic, no Home Assistant calls.
+"""Automatic curtain decisions (0.6.2, the user's Phase 4.6.1; solar and thermal 0.6.3, Phase 4.6.2).
+
+Pure logic, no Home Assistant calls.
 
 ``decide()`` chooses one *condition* for a whole window from evidence and
 returns the preset the window's condition mapping gives it, with a sentence
@@ -14,8 +16,26 @@ that explains why. The base conditions are tried in this order:
    that allows opening (no confirmed daylight, a stale or unavailable sensor, an
    unavailable sleep source). The window keeps its position: **missing evidence
    never opens a window, and a clock time never does either.**
-5. **Sun protection**: the sun is in front of the window (geometry) *and*
-   measured light is strong. Geometry alone is never proof of sunshine.
+5. **Direct sunlight** (only for windows with sun protection on): the sun is
+   in front of the window (geometry) *and* direct sunshine is confirmed —
+   measured strong outdoor light, or (opt-in, only without a light sensor) a
+   clear sky from the weather entity. Geometry alone is never proof of
+   sunshine, a stuck or stale sensor is not either, and a forecast never
+   overrides a working light sensor. With direct sunlight the window chooses,
+   highest first (0.6.3; every step is opt-in except plain sun protection):
+
+   a. **Excess solar heat** — temperature-aware sun on and the room above
+      its maximum acceptable temperature (preset: Excess solar heat, else
+      Direct sunlight);
+   b. **Direct sunlight** (sun protection) — the room is warm (above the
+      comfortable range), or temperature-aware sun is off, or the room
+      temperature is unknown (then it decides exactly as in 0.6.2);
+   c. **Glare protection** — a glare-sensitive window (optionally only while
+      the room is occupied); it wins over useful solar heating;
+   d. **Useful solar heating** — the room is cold, its warmth is welcome and
+      it is not warm outside: the Morning / Normal daytime preset is kept;
+   e. otherwise Direct sunlight.
+
 6. **Morning**, then **Normal daytime**.
 
 Two overlays sit above the base condition:
@@ -25,7 +45,10 @@ Two overlays sit above the base condition:
   chosen in ``manual_bypass`` end a hold that began before they started;
 * the **window lamp** applies its preset while the lamp is on (and for the
   release delay after it switches off), except over the conditions in
-  ``lamp_bypass``.
+  ``lamp_bypass`` (``sun`` there also covers glare and excess heat).
+
+Nothing thermal ever bypasses sleep, night, evening privacy or a manual hold:
+those are decided before the sun is looked at.
 
 Unavailable covers, competing automations, running movements, the minimum
 interval and the daily budget are *safety* limits applied by the runtime
@@ -39,9 +62,11 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from .config import CONDITION_WORDS
+from .config import CONDITION_WORDS, SUN_FALLBACK
 
 PROTECTIVE = ("sleep", "night", "evening_privacy")
+SUN_BASES = frozenset({"sun", "glare", "heat", "solar_heating"})   # the sun is in front and shining
+BAD_LUX = frozenset({"stale", "unavailable", "stuck", "implausible", "missing"})
 PHASE_EXEMPT = frozenset({"waiting"})   # "waiting" is not a phase: it only keeps the position
 DWELL_EXEMPT = frozenset({"sleep", "night", "evening_privacy", "lamp"})
 BUDGET_EXEMPT = frozenset({"sleep", "night"})
@@ -162,8 +187,9 @@ class Evidence:
     lamp: str | None = None           # "on" / "releasing" / "off"; None = no lamp override
     lamp_release_at: datetime | None = None
     lux: float | None = None
-    lux_status: str = "none"          # ok / stale / unavailable / none (no sensor)
+    lux_status: str = "none"          # ok / stale / unavailable / stuck / implausible / missing / none (no sensor)
     lux_entity: str | None = None
+    lux_detail: str = ""
     daylight: bool | None = None      # confirmed daylight (hysteresis); None = not proven
     dusk_measured: bool = False       # measured light below the dusk level for long enough
     elevation: float | None = None
@@ -174,6 +200,16 @@ class Evidence:
     vacant_since: datetime | None = None
     occupancy_known: bool = False
     deadlines: list[datetime] = field(default_factory=list)
+    # 0.6.3: weather (supplementary), temperature and glare
+    weather_sun: bool | None = None   # clear sky for long enough (only used without a light sensor, opt-in)
+    weather_text: str = ""
+    thermal: str | None = None        # cold / comfortable / warm / hot; None = unknown (or off)
+    thermal_text: str = ""
+    outdoor_warm: bool | None = None  # outdoor temperature at or above the "warm outside" level
+    outdoor_text: str = ""
+    glare: bool = False               # a glare-sensitive window whose glare conditions are met
+    glare_text: str = ""
+    in_sun: bool = False              # the window was in a sun condition at the last evaluation
 
 
 @dataclass(slots=True)
@@ -197,13 +233,18 @@ class Decision:
     morning_start: datetime | None = None
     next_check: datetime | None = None
     opening_blocked: str | None = None
+    phase: str | None = None          # what a "next phase" hold compares (Useful solar heating = its day phase)
+    direct_sun: dict[str, Any] = field(default_factory=dict)
+    thermal: dict[str, Any] = field(default_factory=dict)
+    sun_hold: bool = False            # kept in its sun position: the weather evidence was lost
 
     def as_dict(self) -> dict[str, Any]:
         return {"condition": self.condition, "condition_word": CONDITION_WORDS.get(self.condition, self.condition),
                 "base": self.base, "base_word": CONDITION_WORDS.get(self.base, self.base), "preset_id": self.preset_id,
                 "text": self.text, "evidence": self.evidence, "hold_release": self.hold_release,
                 "next_check": self.next_check.isoformat(timespec="seconds") if self.next_check else None,
-                "opening_blocked": self.opening_blocked}
+                "opening_blocked": self.opening_blocked, "phase": self.phase, "direct_sun": self.direct_sun,
+                "thermal": self.thermal}
 
 
 def precedence(values: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -212,15 +253,26 @@ def precedence(values: Mapping[str, Any]) -> list[dict[str, str]]:
     lamp_bypass = set(values["lamp_bypass"])
     rows = [{"key": "safety", "word": "Safety: unavailable covers, competing automations, running movement, "
              "movement limits"}]
-    rest = ["sleep", "night", "evening_privacy", "sun"]
-    above_lamp = [c for c in rest if c in lamp_bypass]
-    below_lamp = [c for c in rest if c not in lamp_bypass]
+    thermal = values["thermal_enabled"]
+    sun_family = (["heat"] if thermal else []) + ["sun"] + (["glare"] if values["glare_sensitive"] else [])
+    words = {**CONDITION_WORDS, "heat": "Excess solar heat (room above its maximum)",
+             "sun": "Direct sunlight (room warm)" if thermal else CONDITION_WORDS["sun"],
+             "solar_heating": "Useful solar heating (cold room: keeps the day preset)"}
+    rest = ["sleep", "night", "evening_privacy", *sun_family]
+
+    def above(c: str) -> bool:
+        return c in lamp_bypass or (c in SUN_FALLBACK and "sun" in lamp_bypass)
+
+    above_lamp = [c for c in rest if above(c)]
+    below_lamp = [c for c in rest if not above(c)]
+    if thermal and values["heat_gain"] == "welcome":
+        below_lamp.append("solar_heating")
     rows.append({"key": "manual_override", "word": "Manual hold" + (
         f" (ended by {', '.join(CONDITION_WORDS[c] for c in PROTECTIVE if c in manual_bypass)} when it starts later)"
         if manual_bypass else "")})
-    rows += [{"key": c, "word": CONDITION_WORDS[c]} for c in above_lamp]
+    rows += [{"key": c, "word": words[c]} for c in above_lamp]
     rows.append({"key": "lamp", "word": CONDITION_WORDS["lamp"]})
-    rows += [{"key": c, "word": CONDITION_WORDS[c]} for c in below_lamp]
+    rows += [{"key": c, "word": words[c]} for c in below_lamp]
     rows += [{"key": "morning", "word": "Morning"}, {"key": "day", "word": "Normal daytime"},
              {"key": "waiting", "word": "Waiting for daylight (keeps the position)"}]
     return rows
@@ -235,12 +287,83 @@ def _lux_text(ev: Evidence) -> str:
         return "no outdoor light sensor"
     if ev.lux_status == "unavailable":
         return f"the outdoor light sensor {ev.lux_entity} is unavailable"
+    if ev.lux_status == "missing":
+        return f"the outdoor light sensor {ev.lux_entity} does not exist"
     if ev.lux_status == "stale":
         return f"the outdoor light sensor {ev.lux_entity} has not reported for too long"
+    if ev.lux_status == "stuck":
+        return f"the outdoor illuminance sensor {ev.lux_entity} appears stuck ({ev.lux_detail})"
+    if ev.lux_status == "implausible":
+        return f"the outdoor illuminance sensor {ev.lux_entity} reads an implausible value ({ev.lux_detail})"
     return f"outdoor light is {ev.lux:.0f} lx"
 
 
-def _hold_release(hold: Mapping[str, Any], base: str, values: Mapping[str, Any], ev: Evidence,
+def direct_sun(flags: Flags, values: Mapping[str, Any], ev: Evidence) -> dict[str, Any]:
+    """Is there direct sunshine on this window? Geometry, measurement and (opt-in) weather, kept apart.
+
+    ``status``: ``not_exposed`` (the sun is not in front), ``confirmed`` (measured strong light),
+    ``likely`` (clear sky from the weather, only without a light sensor and only when allowed),
+    ``not_detected`` (the sun is in front, but the light is ordinary: cloudy daylight) or
+    ``uncertain`` (the sun is in front, but no trustworthy evidence)."""
+    if not ev.exposed:
+        return {"status": "not_exposed", "text": ev.exposure_text or "The sun is not in front of this window"}
+    if ev.lux_status == "ok":
+        if ev.strong is True:
+            return {"status": "confirmed", "text": f"Direct sunlight detected ({ev.lux:.0f} lx)"}
+        return {"status": "not_detected",
+                "text": f"The sun is in front of the window, but outdoor light {ev.lux:.0f} lx is not strong "
+                        f"sunshine (from {values['sun_lux']} lx for {values['sun_stable']} min): diffuse daylight"}
+    if ev.lux_status == "none" and values["sun_evidence"] == "weather":
+        if ev.weather_sun is True:
+            return {"status": "likely", "text": f"Direct sunshine likely: {ev.weather_text} (no light sensor)"}
+        if ev.weather_sun is False:
+            return {"status": "not_detected", "text": f"The sun is in front of the window, but {ev.weather_text}"}
+        return {"status": "uncertain", "text": "The sun is in front of the window; the weather cannot confirm "
+                                               f"sunshine ({ev.weather_text or 'no weather'})"}
+    if ev.lux_status == "none":
+        return {"status": "uncertain", "text": "The sun is in front of the window, but there is no outdoor light "
+                                               "sensor to confirm direct sunshine"}
+    return {"status": "uncertain", "text": f"Direct sunshine cannot be confirmed: {_lux_text(ev)}"}
+
+
+def thermal_view(values: Mapping[str, Any], ev: Evidence) -> dict[str, Any]:
+    if not values["thermal_enabled"]:
+        return {"state": "off", "text": "Temperature-aware sun is off"}
+    if ev.thermal is None:
+        return {"state": "unknown", "text": (ev.thermal_text or "Room temperature unknown")
+                + ": temperature-aware sun is not used, normal sun protection applies"}
+    return {"state": ev.thermal, "text": ev.thermal_text}
+
+
+def _solar(values: Mapping[str, Any], ev: Evidence, direct: dict[str, Any], day_cond: str) -> tuple[str, str]:
+    """The sun condition and its explanation when direct sunshine is on the window."""
+    head = direct["text"]
+    thermal = values["thermal_enabled"] and ev.thermal is not None
+    if thermal and ev.thermal == "hot":
+        return "heat", f"{head}. {ev.thermal_text}"
+    if thermal and ev.thermal == "warm":
+        return "sun", f"{head}. {ev.thermal_text}"
+    welcome = (thermal and ev.thermal == "cold" and values["heat_gain"] == "welcome" and ev.outdoor_warm is not True)
+    if ev.glare:
+        tail = ". Solar heating would be welcome, but glare protection wins" if welcome else ""
+        return "glare", f"{head}. Glare-sensitive window{(': ' + ev.glare_text) if ev.glare_text else ''}{tail}"
+    if welcome:
+        return "solar_heating", (f"{head}. {ev.thermal_text}. Solar heating is beneficial; keeping the "
+                                 f"{CONDITION_WORDS[day_cond]} preset")
+    if thermal:
+        why = ev.thermal_text
+        if ev.thermal == "cold" and ev.outdoor_warm:
+            why += f", but it is warm outside ({ev.outdoor_text[:1].lower()}{ev.outdoor_text[1:]}): solar heating is " \
+                "not needed"
+        elif ev.thermal == "cold":
+            why += " (solar heat gain is not used for warmth)"
+        return "sun", f"{head}. {why}"
+    if values["thermal_enabled"]:
+        return "sun", f"{head}. {thermal_view(values, ev)['text']}"
+    return "sun", head
+
+
+def _hold_release(hold: Mapping[str, Any], base: str, phase: str, values: Mapping[str, Any], ev: Evidence,
                   active_since: Mapping[str, datetime]) -> tuple[str | None, datetime | None]:
     """Why a hold ends now (or None), and when it would end by time."""
     created: datetime = hold["created"]
@@ -252,7 +375,7 @@ def _hold_release(hold: Mapping[str, Any], base: str, values: Mapping[str, Any],
         return ("Sleep started again", None) if base == "sleep" else (None, None)
     policy = hold.get("policy")
     if policy == "next_phase" or (policy == "vacant" and not ev.occupancy_known):
-        if base not in PHASE_EXEMPT and base != hold.get("phase"):
+        if base not in PHASE_EXEMPT and phase != hold.get("phase"):
             return f"the next automatic phase started ({CONDITION_WORDS.get(base, base)})", None
         return None, None
     if policy == "duration":
@@ -287,19 +410,27 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
         notes.append(f"Sun elevation {ev.elevation:.1f}°")
     if flags.solar_protection:
         notes.append(ev.exposure_text)
+        if ev.weather_text:
+            notes.append(f"Weather: {ev.weather_text}")
+        if values["thermal_enabled"]:
+            notes.append(thermal_view(values, ev)["text"])
+            if ev.outdoor_text:
+                notes.append(ev.outdoor_text)
 
     # ---- base condition
     base: str
     text: str
     opening_blocked = None
     morning_start = None
+    day_cond = "day"
+    sun_hold = False
     evening = now.hour >= 12
     dark = ev.dusk_measured or (ev.elevation is not None and ev.elevation <= values["dusk_elevation"])
     sleep_on = flags.sleep_protection and ev.sleep == "on"
     if sleep_on:
         base, text = "sleep", "Sleep mode is on"
     elif night:
-        base, text = "night", f"Night until {_fmt(night_change)}"
+        base, text = "night", f"Night protection active until {_fmt(night_change)}"
     elif flags.privacy and dark and evening:
         base = "evening_privacy"
         text = "Dark outside in the evening" + (f" ({ev.lux:.0f} lx)" if ev.lux_status == "ok" else
@@ -321,7 +452,7 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
             elif ev.lux_status == "ok":
                 opening_blocked = (f"the sun is at {ev.elevation:.1f}°, below {values['daylight_elevation']}°"
                                    if ev.elevation is not None else "the sun position is unavailable")
-            elif ev.lux_status in ("stale", "unavailable"):
+            elif ev.lux_status in BAD_LUX:
                 opening_blocked = _lux_text(ev)
             elif values["fallback"] == "sun":
                 opening_blocked = (f"the sun is at {ev.elevation:.1f}° (the fallback opens from "
@@ -333,8 +464,14 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
             base = "waiting"
             woke = flags.sleep_protection and ev.sleep == "off" and ev.sleep_ended is not None \
                 and ev.sleep_ended.date() == now.date()
-            if evening:
+            sun_note = ("Sun protection not activated because direct sunshine cannot be confirmed. "
+                        if flags.solar_protection and ev.exposed and ev.lux_status in BAD_LUX else "")
+            if ev.lux_status in ("stuck", "implausible") and opening_blocked == _lux_text(ev):
+                text = f"{opening_blocked[0].upper()}{opening_blocked[1:]}. {sun_note}The covers keep their position"
+            elif evening:
                 text = f"No daylight: the covers keep their position ({opening_blocked})"
+                if sun_note:
+                    text += f". {sun_note.strip()}"
             else:
                 lead = f"Sleep mode ended, but {opening_blocked}" if woke else \
                     opening_blocked[0].upper() + opening_blocked[1:]
@@ -357,9 +494,15 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
                 if now < end:
                     in_morning = True
                     deadlines.append(end)
-            if flags.solar_protection and ev.exposed and ev.strong is True:
-                base, text = "sun", "Strong sunshine on this window" + (
-                    f" ({ev.lux:.0f} lx)" if ev.lux is not None else "")
+            day_cond = "morning" if in_morning else "day"
+            sun_now = direct_sun(flags, values, ev) if flags.solar_protection else {}
+            if sun_now.get("status") in ("confirmed", "likely"):
+                base, text = _solar(values, ev, sun_now, day_cond)
+            elif sun_now.get("status") == "uncertain" and ev.in_sun and ev.lux_status == "none":
+                # Shading on weather evidence that is now missing: uncertain evidence never opens.
+                base, sun_hold = "waiting", True
+                opening_blocked = "direct sunshine can no longer be confirmed"
+                text = f"{sun_now['text']}. The covers keep their sun position"
             elif in_morning:
                 base = "morning"
                 text = ("Morning after sleep" if woke_in_dark and not daylight_ok else "Morning: daylight confirmed")
@@ -370,10 +513,15 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
                 text = "Daylight" + (f" ({ev.lux:.0f} lx)" if ev.lux_status == "ok" else
                                      f" (sun at {ev.elevation:.1f}°, fallback)" if ev.elevation is not None else "")
 
+    phase = (day_cond if base == "solar_heating" else base) if base not in PHASE_EXEMPT else base
+    extras = {"phase": phase, "direct_sun": direct_sun(flags, values, ev) if flags.solar_protection else
+              {"status": "off", "text": "Sun protection is off for this window"},
+              "thermal": thermal_view(values, ev), "sun_hold": sun_hold}
+
     # ---- manual hold
     hold_release = None
     if hold is not None:
-        hold_release, hold_until = _hold_release(hold, base, values, ev, active_since)
+        hold_release, hold_until = _hold_release(hold, base, phase, values, ev, active_since)
         if hold_until:
             deadlines.append(hold_until)
         if hold_release is None:
@@ -387,14 +535,14 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
             return Decision("manual_override", base, None,
                             f"Manual override: {src}; kept {how}. Automatic would use "
                             f"{CONDITION_WORDS.get(base, base)}.",
-                            notes, None, morning_start, _next(deadlines, now), opening_blocked)
+                            notes, None, morning_start, _next(deadlines, now), opening_blocked, **extras)
 
     # ---- window lamp
-    condition, preset = base, flags.conditions.get(base) if base != "waiting" else None
+    condition, preset = base, preset_for(flags, base, phase)
     if ev.lamp in ("on", "releasing") and flags.conditions.get("lamp"):
         lamp_name = CONDITION_WORDS.get(base, base)
-        if base in values["lamp_bypass"]:
-            text = f"{text}. The lamp is on, but {lamp_name} is set to win over the lamp"
+        if base in values["lamp_bypass"] or (base in SUN_FALLBACK and "sun" in values["lamp_bypass"]):
+            text = f"{text}. Lamp override bypassed: {lamp_name} is set to win over the lamp"
         else:
             condition, preset = "lamp", flags.conditions.get("lamp")
             text = ("Lamp override active" if ev.lamp == "on" else
@@ -405,9 +553,27 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
             if ev.lamp_release_at:
                 deadlines.append(ev.lamp_release_at)
     if condition != "waiting" and preset is None:
-        text += f". No preset is set for {CONDITION_WORDS.get(condition, condition)}: the covers are kept as they are"
+        what = CONDITION_WORDS.get(condition, condition)
+        if condition in SUN_FALLBACK:
+            what += " (nor for Direct sunlight)"
+        elif condition == "solar_heating":
+            what = CONDITION_WORDS.get(phase, phase)
+        text += f". No preset is set for {what}: the covers are kept as they are"
     return Decision(condition, base, preset, text, notes, hold_release, morning_start, _next(deadlines, now),
-                    opening_blocked)
+                    opening_blocked, **extras)
+
+
+def preset_for(flags: Flags, condition: str, phase: str | None) -> str | None:
+    """The preset a condition uses: its own mapping; glare and excess heat fall back to Direct sunlight;
+    useful solar heating keeps the Morning / Normal daytime preset."""
+    if condition == "waiting":
+        return None
+    if condition == "solar_heating":
+        return flags.conditions.get(phase or "day")
+    preset = flags.conditions.get(condition)
+    if preset is None and condition in SUN_FALLBACK:
+        preset = flags.conditions.get("sun")
+    return preset
 
 
 def _next(deadlines: list[datetime], now: datetime) -> datetime | None:

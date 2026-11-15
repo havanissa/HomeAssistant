@@ -1,5 +1,12 @@
 """Autonomous curtain control (0.6.2, the user's Phase 4.6.1): evidence, holds, safety and execution.
 
+0.6.3 (Phase 4.6.2) adds environmental evidence (``environment.py``): the
+validity of the light sensor (also *stuck* and *implausible* readings), the
+room and outdoor temperature with a hysteresis band, the weather / cloud cover
+(supplementary, and only without a light sensor when allowed), glare, and a
+side-effect-free ``simulate`` that predicts a window's decision under changed
+settings before they are saved.
+
 One ``WindowRuntime`` per window keeps what the decisions need between
 evaluations (light hysteresis, the morning of the day, when protective
 conditions started, the manual hold, what was applied, the daily move count
@@ -39,6 +46,7 @@ Covers that are already at their target get no command (the plan skips them).
 from __future__ import annotations
 
 from collections.abc import Mapping
+import copy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 import logging
@@ -52,12 +60,27 @@ from homeassistant.util import dt as dt_util
 from ..const import OccupancyState
 from ..supervision import CurtainOrigin
 from .config import CONDITION_WORDS, Window
-from .discovery import available
+from .environment import (
+    BAND_WORDS,
+    Reading,
+    band_text,
+    clear_sky,
+    comfort,
+    judge_lux,
+    judge_temperature,
+    judge_weather,
+    lux_value,
+    stuck_deadline,
+    temperature_of,
+    thermostat_target,
+    track_band,
+)
 from .executor import build_plan
 from .logic import (
     BUDGET_EXEMPT,
     DWELL_EXEMPT,
     PROTECTIVE,
+    SUN_BASES,
     Decision,
     Evidence,
     Flags,
@@ -67,7 +90,7 @@ from .logic import (
     precedence,
 )
 from .rules import consistency
-from .solar import exposure
+from .solar import exposure, window_angle_from_sun_angle
 
 if TYPE_CHECKING:
     from .manager import CurtainManager
@@ -81,6 +104,9 @@ SUN_MARGIN = 3.0                 # degrees of geometric hysteresis once sun prot
 LOG_LENGTH = 40
 NOTIFY_SECONDS = 60.0            # unchanged decisions are pushed to the card at most this often
 SUCCESS = frozenset({"succeeded", "nothing_to_do"})
+ENV_KEYS = ("lux_entity", "indoor_lux_entity", "room_temp_entity", "outdoor_temp_entity", "weather_entity",
+            "cloud_entity", "thermostat_entity")
+OCCUPIED = frozenset({OccupancyState.CONFIRMED_OCCUPANCY, OccupancyState.POSSIBLE_VACANCY})
 
 ACTION_WORDS = {
     "moved": "Moved", "would_move": "Would move", "at_target": "Already there", "keep": "Keeping position",
@@ -109,6 +135,10 @@ def _key(preset_id: str, targets: Mapping[str, int | None]) -> list[Any]:
 class WindowRuntime:
     daylight: Hysteresis = field(default_factory=Hysteresis)
     strong: Hysteresis = field(default_factory=Hysteresis)
+    weather: Hysteresis = field(default_factory=Hysteresis)       # clear sky (weather evidence, opt-in)
+    weather_history: History = field(default_factory=History)
+    env: dict[str, Any] = field(default_factory=dict)              # the last readings (for the card)
+    next_eval: datetime | None = None
     fallback: bool | None = None
     in_sun: bool = False
     lamp_on: bool = False
@@ -126,6 +156,8 @@ class WindowRuntime:
     sleep_ended: datetime | None = None
     last_sleep: str | None = None
     last_base: str | None = None
+    last_phase: str | None = None
+    thermal: str | None = None          # the room's temperature band (kept for its hysteresis)
     applied: dict[str, Any] | None = None
     moves: dict[str, Any] = field(default_factory=dict)
     last_move_at: datetime | None = None
@@ -137,7 +169,8 @@ class WindowRuntime:
         hold = dict(self.hold, created=_iso(self.hold["created"])) if self.hold else None
         return {"hold": hold, "active_since": {k: _iso(v) for k, v in self.active_since.items()},
                 "morning_since": _iso(self.morning_since), "sleep_ended": _iso(self.sleep_ended),
-                "last_sleep": self.last_sleep, "last_base": self.last_base, "applied": self.applied,
+                "last_sleep": self.last_sleep, "last_base": self.last_base, "last_phase": self.last_phase,
+                "thermal": self.thermal, "applied": self.applied,
                 "moves": self.moves, "last_move_at": _iso(self.last_move_at),
                 "last_condition": self.last_condition, "status": self.status,
                 "log": self.log}
@@ -155,6 +188,8 @@ class WindowRuntime:
         rt.sleep_ended = _dt(data.get("sleep_ended"))
         rt.last_sleep = data.get("last_sleep") if data.get("last_sleep") in ("on", "off") else None
         rt.last_base = data.get("last_base") if isinstance(data.get("last_base"), str) else None
+        rt.last_phase = data.get("last_phase") if isinstance(data.get("last_phase"), str) else rt.last_base
+        rt.thermal = data.get("thermal") if data.get("thermal") in BAND_WORDS else None
         applied = data.get("applied")
         if isinstance(applied, Mapping):
             rt.applied = dict(applied)
@@ -175,6 +210,9 @@ class AutoCurtains:
         self.occupancy = occupancy
         self.runtimes: dict[str, WindowRuntime] = {}
         self.histories: dict[str, History] = {}
+        self.temp_histories: dict[str, History] = {}   # °C per temperature entity
+        # light sensor -> (value, since when it has had that value); survives restarts (stuck detection)
+        self.value_since: dict[str, tuple[float | None, datetime]] = {}
         self.started_at: datetime | None = None
         self._tracking: CALLBACK_TYPE | None = None
         self._occupancy_unsubs: list[CALLBACK_TYPE] = []
@@ -187,6 +225,16 @@ class AutoCurtains:
 
     def export(self) -> dict[str, Any]:
         return {k: rt.export() for k, rt in self.runtimes.items() if k in self.mgr.config.windows}
+
+    def restore_sensors(self, data: Any) -> None:
+        self.value_since = {}
+        for entity_id, item in (data or {}).items() if isinstance(data, Mapping) else ():
+            if isinstance(item, (list, tuple)) and len(item) == 2 and (since := _dt(item[1])):
+                value = item[0] if isinstance(item[0], (int, float)) and not isinstance(item[0], bool) else None
+                self.value_since[entity_id] = (value, since)
+
+    def export_sensors(self) -> dict[str, Any]:
+        return {k: [v, _iso(since)] for k, (v, since) in self.value_since.items()}
 
     def rt(self, window_id: str) -> WindowRuntime:
         return self.runtimes.setdefault(window_id, WindowRuntime())
@@ -252,6 +300,11 @@ class AutoCurtains:
             if values["lux_entity"]:
                 ids.add(values["lux_entity"])
                 self._history(values["lux_entity"])
+            for key in ENV_KEYS[1:]:
+                if values[key]:
+                    ids.add(values[key])
+            if values["room_temp_entity"]:
+                self._temp_history(values["room_temp_entity"])
             if window.area_id:
                 areas.add(window.area_id)
         if ids:
@@ -274,30 +327,57 @@ class AutoCurtains:
         return history
 
     def _lux_value(self, entity_id: str) -> float | None:
+        return lux_value(self.hass.states.get(entity_id))
+
+    def _temp_value(self, entity_id: str) -> float | None:
+        return temperature_of(self.hass.states.get(entity_id), self.hass.config.units.temperature_unit)[0]
+
+    def _temp_history(self, entity_id: str) -> History:
+        """Room temperature in °C. Starts at the reading's last change: a temperature is slow and usually
+        unchanged for a while, so its stable period does not restart at every reconfiguration."""
+        history = self.temp_histories.get(entity_id)
+        if history is None:
+            history = self.temp_histories[entity_id] = History()
+            state = self.hass.states.get(entity_id)
+            start = min(state.last_changed, dt_util.utcnow()) if state is not None else dt_util.utcnow()
+            history.add(start, self._temp_value(entity_id))
+        return history
+
+    def since_of(self, entity_id: str) -> datetime | None:
+        """Since when a light sensor has reported its current value (for the stuck test)."""
         state = self.hass.states.get(entity_id)
-        if not available(state):
+        if state is None:
             return None
-        try:
-            value = float(state.state)
-        except (TypeError, ValueError):
-            return None
-        return value if value >= 0 else None
+        value = lux_value(state)
+        known = self.value_since.get(entity_id)
+        if known is None or known[0] != value:
+            # A restored record with the same value keeps its (older) start: a restart does not unstick it.
+            self.value_since[entity_id] = (value, min(state.last_changed, dt_util.utcnow()))
+            self.mgr.save_state()
+        return self.value_since[entity_id][1]
 
     @callback
     def _on_input(self, event: Event) -> None:
         entity_id = event.data["entity_id"]
         if entity_id in self.histories:
             self.histories[entity_id].add(dt_util.utcnow(), self._lux_value(entity_id))
+            self.since_of(entity_id)
+        if entity_id in self.temp_histories:
+            self.temp_histories[entity_id].add(dt_util.utcnow(), self._temp_value(entity_id))
         for window in self.mgr.config.windows.values():
             values, _ = self.mgr.config.rules_for(window)
-            if entity_id in (values["sleep_entity"], values["lamp_entity"], values["lux_entity"]):
+            if entity_id in (values["sleep_entity"], values["lamp_entity"], *(values[k] for k in ENV_KEYS)):
                 self.evaluate(window.window_id)
 
     @callback
     def _on_occupancy(self, area_id: str) -> None:
         for window in self.mgr.config.windows.values():
             rt = self.runtimes.get(window.window_id)
-            if window.area_id == area_id and rt and rt.hold and rt.hold.get("policy") == "vacant":
+            if window.area_id != area_id or rt is None:
+                continue
+            values = rt.values or self.mgr.config.rules_for(window)[0]
+            if (rt.hold and rt.hold.get("policy") == "vacant") or (
+                    values.get("glare_sensitive") and values.get("glare_when") == "occupied"):
                 self.evaluate(window.window_id)
 
     @callback
@@ -324,7 +404,7 @@ class AutoCurtains:
         new = rt.hold is None or rt.hold.get("source") != "manual" or rt.hold.get("entity_id") != record.get(
             "entity_id") or rt.hold.get("at") != record.get("at")
         rt.hold = {"source": "manual", "created": dt_util.utcnow(), "policy": values["manual_policy"],
-                   "phase": rt.last_base or (rt.decision.base if rt.decision else None),
+                   "phase": rt.last_phase or (rt.decision.phase if rt.decision else None),
                    "entity_id": record.get("entity_id"), "name": record.get("name"), "at": record.get("at"),
                    "from": record.get("from"), "to": record.get("to"), "by": record.get("source")}
         rt.applied = None  # the covers are no longer where automatic control put them
@@ -342,7 +422,7 @@ class AutoCurtains:
         rt = self.rt(window.window_id)
         values, _ = self.mgr.config.rules_for(window)
         rt.hold = {"source": "preset", "created": dt_util.utcnow(), "policy": values["manual_policy"],
-                   "phase": rt.last_base, "preset_id": preset.preset_id, "name": preset.name}
+                   "phase": rt.last_phase, "preset_id": preset.preset_id, "name": preset.name}
         rt.applied = None
         self._log(window, rt, "hold_started", f"{preset.name} applied by hand: kept "
                   f"{POLICY_WORDS[values['manual_policy']].lower()}")
@@ -390,7 +470,8 @@ class AutoCurtains:
         self.evaluate(window_id, force_notify=True)
 
     # ------------------------------------------------------------ evidence
-    def _evidence(self, window: Window, rt: WindowRuntime, values: Mapping[str, Any], now: datetime) -> Evidence:
+    def _evidence(self, window: Window, rt: WindowRuntime, values: Mapping[str, Any], now: datetime,
+                  dry: bool = False) -> Evidence:
         hass = self.hass
         utc = dt_util.utcnow()
         sun = self.mgr.sun()
@@ -406,8 +487,9 @@ class AutoCurtains:
                     rt.sleep_ended = utc
                     if values["sleep_end"] == "hold" and rt.last_base == "sleep" and window.mode != "off":
                         rt.hold = {"source": "sleep_end", "created": utc, "policy": "until_released", "phase": "sleep"}
-                        self._log(window, rt, "hold_started", "Sleep ended: the sleep position is kept until you "
-                                  "resume")
+                        if not dry:
+                            self._log(window, rt, "hold_started", "Sleep ended: the sleep position is kept until you "
+                                      "resume")
                 rt.last_sleep = ev.sleep
             ev.sleep_ended = dt_util.as_local(rt.sleep_ended) if rt.sleep_ended else None
         # window lamp
@@ -423,22 +505,25 @@ class AutoCurtains:
                     ev.lamp, ev.lamp_release_at = "releasing", dt_util.as_local(release)
                 else:
                     ev.lamp, rt.lamp_off_at = "off", None
-        # outdoor light
+        # outdoor light: missing, unavailable, stale, implausible or stuck readings are never evidence
+        env: dict[str, Any] = {}
         entity = values["lux_entity"]
         if entity:
             ev.lux_entity = entity
             history = self._history(entity)
             state = hass.states.get(entity)
-            value = self._lux_value(entity)
-            reported = getattr(state, "last_reported", None) or (state.last_updated if state else None)
-            stale_for = timedelta(minutes=values["lux_stale"])
-            if value is None:
-                ev.lux_status = "unavailable"
-            elif reported is None or utc - reported > stale_for:
-                ev.lux_status, ev.lux = "stale", value
-            else:
-                ev.lux_status, ev.lux = "ok", value
-                ev.deadlines.append(reported + stale_for)
+            reading = judge_lux(entity, state, now=utc, since=self.since_of(entity), elevation=sun.elevation,
+                                stale_minutes=values["lux_stale"], stuck_minutes=values["lux_stuck"],
+                                dark_lux=values["dusk_lux"])
+            env["outdoor_lux"] = reading
+            ev.lux_status, ev.lux, ev.lux_detail = reading.status, reading.value, reading.detail
+            if reading.status in ("stuck", "implausible") and history.value is not None:
+                # Untrustworthy readings are no evidence: once it reports real values again, daylight and
+                # strong sunshine need their full stable periods again.
+                history.add(utc, None)
+            if reading.ok:
+                ev.deadlines.append(reading.reported + timedelta(minutes=values["lux_stale"]))
+                ev.deadlines.append(stuck_deadline(reading, values["lux_stuck"]))
             if ev.lux_status == "ok":
                 stable = timedelta(minutes=values["daylight_stable"])
                 ev.daylight, deadline = rt.daylight.evaluate(
@@ -463,14 +548,19 @@ class AutoCurtains:
             elif el <= values["dusk_elevation"]:
                 rt.fallback = False
             ev.fallback_daylight = rt.fallback
+            env["outdoor_lux"] = Reading("outdoor_lux", None, unit="lx", detail="No light sensor chosen")
         # sun geometry (with a small hysteresis once the window is shading)
         solar = window.solar
         if rt.in_sun:
             solar = replace(solar, exposure_width=solar.exposure_width + SUN_MARGIN,
-                            min_elevation=solar.min_elevation - 1.0)
+                            min_elevation=solar.min_elevation - 1.0,
+                            max_elevation=None if solar.max_elevation is None else solar.max_elevation + 1.0)
         expo = exposure(window.effective_bearing, sun, solar)
         ev.exposed = expo["exposed"]
         ev.exposure_text = expo["text"]
+        ev.in_sun = rt.in_sun
+        self._environment(window, rt, values, ev, utc, sun, env)
+        rt.env = env
         # occupancy (for the "until the room has been empty" hold)
         if self.occupancy is not None and window.area_id:
             result = self.occupancy.result(window.area_id)
@@ -480,6 +570,103 @@ class AutoCurtains:
                     ev.vacant_since = dt_util.as_local(result.state_since)
         ev.deadlines = [dt_util.as_local(d) for d in ev.deadlines if d is not None]
         return ev
+
+    def _environment(self, window: Window, rt: WindowRuntime, values: Mapping[str, Any], ev: Evidence,
+                     utc: datetime, sun, env: dict[str, Any]) -> None:
+        """Weather, temperatures and glare (0.6.3). Every reading is judged before it is used."""
+        hass = self.hass
+        unit = hass.config.units.temperature_unit
+
+        def state_of(key: str):
+            return hass.states.get(values[key]) if values[key] else None
+
+        # weather and cloud cover: supplementary; evidence for sunshine only without a light sensor (opt-in)
+        weather = judge_weather(values["weather_entity"], state_of("weather_entity"), values["cloud_entity"],
+                                state_of("cloud_entity"), now=utc)
+        env["weather"] = weather
+        if weather.status != "none":
+            ev.weather_text = weather.detail
+        if values["sun_evidence"] == "weather" and ev.lux_status == "none":
+            clear = clear_sky(weather, values["cloud_max"])
+            if clear is None:
+                rt.weather.reset()
+                rt.weather_history = History()
+            else:
+                rt.weather_history.add(utc, 1.0 if clear else 0.0)
+                ev.weather_sun, deadline = rt.weather.evaluate(
+                    rt.weather_history, utc, lambda v: v >= 1, timedelta(minutes=values["sun_stable"]),
+                    lambda v: v < 1, timedelta(minutes=values["sun_release"]))
+                ev.deadlines.append(deadline)
+                if weather.ok:
+                    ev.weather_text = ("clear sky: " if clear else "not clear: ") + weather.detail
+        else:
+            rt.weather.reset()
+        # outdoor temperature
+        outdoor = judge_temperature("outdoor_temp", values["outdoor_temp_entity"], state_of("outdoor_temp_entity"),
+                                    now=utc, hass_unit=unit, stale_minutes=values["temp_stale"])
+        env["outdoor_temp"] = outdoor
+        if outdoor.ok:
+            ev.outdoor_warm = outdoor.value >= values["outdoor_heat_temp"]
+            ev.outdoor_text = f"Outdoor temperature {outdoor.value:.1f} °C"
+        elif outdoor.status != "none":
+            ev.outdoor_text = f"Outdoor temperature unknown ({outdoor.detail})"
+        # room temperature and its band (only used when temperature-aware sun is on)
+        room = judge_temperature("room_temp", values["room_temp_entity"], state_of("room_temp_entity"), now=utc,
+                                 hass_unit=unit, stale_minutes=values["temp_stale"])
+        env["room_temp"] = room
+        target = thermostat_target(state_of("thermostat_entity"), unit) if values["thermostat_entity"] else None
+        c = comfort(values, target, values["thermostat_entity"])
+        env["comfort"] = {"low": round(c.low, 1), "high": round(c.high, 1), "top": round(c.top, 1),
+                          "preferred": round(c.preferred, 1), "source": c.source,
+                          "thermostat": values["thermostat_entity"], "thermostat_target": target}
+        if room.ok:
+            history = self._temp_history(values["room_temp_entity"])
+            band, deadline = track_band(history, utc, rt.thermal, c, timedelta(minutes=values["temp_stable"]))
+            rt.thermal = band
+            ev.deadlines.append(deadline)
+            ev.deadlines.append(room.reported + timedelta(minutes=values["temp_stale"]))
+            if values["thermal_enabled"]:
+                ev.thermal, ev.thermal_text = band, band_text(band, room.value, c)
+            env["band"] = band
+        else:
+            ev.thermal_text = (f"Room temperature unknown ({room.detail})" if room.status != "none"
+                               else "No room temperature chosen")
+            env["band"] = None
+        # glare
+        ev.glare = False
+        if values["glare_sensitive"]:
+            reasons: list[str] = []
+            ok = True
+            if values["glare_when"] == "occupied" and self.occupancy is not None and window.area_id:
+                result = self.occupancy.result(window.area_id)
+                if result is None:
+                    reasons.append("the room has no occupancy, so glare protection applies always")
+                elif result.state in OCCUPIED:
+                    reasons.append("the room is occupied")
+                else:
+                    ok = False
+                    reasons.append("the room is not occupied")
+            indoor = None
+            if values["indoor_lux_entity"]:
+                indoor = judge_lux(values["indoor_lux_entity"], state_of("indoor_lux_entity"), now=utc,
+                                   since=None, elevation=None, stale_minutes=values["lux_stale"], stuck_minutes=0,
+                                   dark_lux=0, role="indoor_lux")
+                env["indoor_lux"] = indoor
+            if values["glare_indoor_lux"]:
+                if indoor is not None and indoor.ok:
+                    if indoor.value < values["glare_indoor_lux"]:
+                        ok = False
+                        reasons.append(f"indoor light {indoor.value:.0f} lx is below {values['glare_indoor_lux']} lx")
+                    else:
+                        reasons.append(f"indoor light {indoor.value:.0f} lx")
+                else:
+                    reasons.append("the indoor light sensor is not usable, so it is not required")
+            ev.glare = ok
+            ev.glare_text = "; ".join(reasons)
+        elif values["indoor_lux_entity"]:
+            env["indoor_lux"] = judge_lux(values["indoor_lux_entity"], state_of("indoor_lux_entity"), now=utc,
+                                          since=None, elevation=None, stale_minutes=values["lux_stale"],
+                                          stuck_minutes=0, dark_lux=0, role="indoor_lux")
 
     # ---------------------------------------------------------- evaluation
     @callback
@@ -517,11 +704,31 @@ class AutoCurtains:
             else:
                 rt.active_since.pop(cond, None)
         rt.last_base = decision.base
-        rt.in_sun = decision.base == "sun"
+        rt.last_phase = decision.phase
+        rt.in_sun = decision.base in SUN_BASES or decision.sun_hold
         rt.decision = decision
         deadline = self._act(window, rt, values, decision, utc, resume, force_notify)
         self._schedule(window_id, rt, min((d for d in (decision.next_check, deadline) if d is not None),
                                           default=None))
+        return decision
+
+    def simulate(self, window: Window, values: Mapping[str, Any]) -> Decision:
+        """What a window would decide now with these settings. Changes nothing: it works on a copy of the
+        window's runtime and never logs, schedules, notifies or sends."""
+        source = self.rt(window.window_id)
+        timer, source.timer = source.timer, None
+        try:
+            rt = copy.deepcopy(source)
+        finally:
+            source.timer = timer
+        now = dt_util.now()
+        ev = self._evidence(window, rt, values, now, dry=True)
+        flags = Flags(window.sleep_protection, window.privacy, window.solar_protection, window.conditions)
+        decision = decide(flags, values, ev, hold=rt.hold, active_since=rt.active_since,
+                          morning_since=rt.morning_since)
+        if decision.hold_release and rt.hold is not None:
+            decision = decide(flags, values, ev, hold=None, active_since=rt.active_since,
+                              morning_since=rt.morning_since)
         return decision
 
     def _schedule(self, window_id: str, rt: WindowRuntime, when: datetime | None) -> None:
@@ -529,9 +736,11 @@ class AutoCurtains:
             rt.timer()
             rt.timer = None
         if not self.running:
+            rt.next_eval = None
             return
         cap = dt_util.utcnow() + timedelta(seconds=RECHECK_SECONDS)
         when = min(when, cap) if when else cap
+        rt.next_eval = dt_util.as_utc(when)
         rt.timer = async_track_point_in_utc_time(
             self.hass, callback(lambda _now: self._timer_fired(window_id)), dt_util.as_utc(when) + timedelta(
                 milliseconds=50))
@@ -638,8 +847,8 @@ class AutoCurtains:
         rt.last_move_at = utc
         rt.last_condition = decision.condition
         rt.skip_limits = False
-        text = (f"{cond} → {name}: moving {len(sends)} cover{'s' if len(sends) != 1 else ''}"
-                + (f" (attempt {attempts + 1})" if attempts else "") + f". {reason}")
+        text = (f"{reason}. Applying {name} ({cond}): moving {len(sends)} cover{'s' if len(sends) != 1 else ''}"
+                + (f" (attempt {attempts + 1})" if attempts else ""))
         self._status(window, rt, "moved", text, preset, True)
         self._log(window, rt, "moved", text, preset)
         self.hass.async_create_task(mgr.async_run(op, sends, context), f"smart_occupancy curtain {op['op_id']}")
@@ -699,6 +908,8 @@ class AutoCurtains:
             lamp_state = state.state if state is not None else "missing"
         lux = values["lux_entity"]
         return {
+            "environment": self._env_model(window, rt, values, decision),
+            "next_evaluation": _iso(dt_util.as_local(rt.next_eval)) if rt.next_eval else None,
             "decision": decision.as_dict() if decision else None,
             "status": rt.status or None,
             "hold": hold,
@@ -724,11 +935,39 @@ class AutoCurtains:
             "warnings": consistency(values),
         }
 
+    def _env_model(self, window: Window, rt: WindowRuntime, values: Mapping[str, Any],
+                   decision: Decision | None) -> dict[str, Any]:
+        """Everything the card shows about the sun and the environment of one window (0.6.3)."""
+        from .solar import calibrate
+
+        sun = self.mgr.sun()
+        bearing = window.effective_bearing
+        expo = exposure(bearing, sun, window.solar)
+        cal = calibrate(self.mgr.samples)
+        readings = {role: r.as_dict() for role, r in rt.env.items() if isinstance(r, Reading)}
+        band = rt.env.get("band")
+        return {
+            "sun": {**sun.as_dict(), "offset": expo["offset"], "incidence": expo["incidence"],
+                    "status": expo["status"], "text": expo["text"], "exposed": expo["exposed"],
+                    "offset_via_sun_angle": window_angle_from_sun_angle(sun.sun_angle, cal, bearing),
+                    "calibration": cal["status"]},
+            "readings": readings,
+            "comfort": rt.env.get("comfort"),
+            "band": band, "band_word": BAND_WORDS.get(band) if band else None,
+            "direct_sun": decision.direct_sun if decision else None,
+            "thermal": decision.thermal if decision else None,
+            "thermal_enabled": values["thermal_enabled"],
+            "glare": {"enabled": bool(values["glare_sensitive"]), "when": values["glare_when"],
+                      "active": bool(decision and decision.condition == "glare")},
+            "sun_evidence": values["sun_evidence"],
+        }
+
     def diagnostics(self) -> dict[str, Any]:
         out = {}
         for window in self.mgr.config.windows.values():
             m = self.model(window)
             out[window.window_id] = {k: m[k] for k in ("decision", "status", "hold", "sleep", "lamp", "light",
-                                                       "morning_since", "applied", "moves_today", "precedence",
-                                                       "values", "sources", "log")}
-        return {"started_at": _iso(self.started_at), "windows": out}
+                                                       "environment", "next_evaluation", "morning_since",
+                                                       "applied", "moves_today", "precedence", "values", "sources",
+                                                       "log")}
+        return {"started_at": _iso(self.started_at), "windows": out, "sensors": self.export_sensors()}
