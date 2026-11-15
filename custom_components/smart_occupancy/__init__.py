@@ -15,6 +15,11 @@ event entities; nothing is ever published.
 Occupancy forecasts (0.5.0) learn from the Recorder's history (read only) and
 are observation only: no forecast ever controls a light, heating or any other
 device, and none changes an occupancy state.
+
+Curtains (0.6.1) are managed per window (``curtains/``): covers, presets,
+orientation and future rules. A cover moves only when an administrator applies
+a preset and confirms it; nothing moves automatically, at start-up or on a
+configuration change, and no lighting mood is read for curtain decisions.
 """
 
 from __future__ import annotations
@@ -67,15 +72,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntr
     await coordinator.lighting.async_load()
     # Occupancy forecast (0.5.0): settings and the learned daily summaries.
     await coordinator.forecast.async_load()
+    # Curtains (0.6.1): windows, presets and the last results. Loading never moves a cover.
+    await coordinator.curtains.async_load()
     await coordinator.async_config_entry_first_refresh()
     coordinator.async_start()
     coordinator.occupancy.async_start()
     coordinator.lighting.async_start()
     coordinator.forecast.async_start()
+    coordinator.curtains.async_start()
     entry.async_on_unload(coordinator.async_stop)
     entry.async_on_unload(coordinator.occupancy.async_stop)
     entry.async_on_unload(coordinator.lighting.async_stop)
     entry.async_on_unload(coordinator.forecast.async_stop)
+    entry.async_on_unload(coordinator.curtains.async_stop)
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     entry.async_on_unload(
@@ -96,6 +105,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
         await entry.runtime_data.occupancy.async_flush()
         await entry.runtime_data.lighting.async_flush()
         await entry.runtime_data.forecast.async_flush()
+        await entry.runtime_data.curtains.async_flush()
     return unloaded
 
 
@@ -103,6 +113,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
     """Delete this integration's own stored data when it is removed."""
     from homeassistant.helpers.storage import Store
 
+    from .curtains.manager import CurtainManager
     from .const import (
         FORECAST_DAYS_STORE_KEY,
         FORECAST_DAYS_STORE_VERSION,
@@ -121,6 +132,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
     await Store(hass, 1, LIGHTING_STATE_STORE_KEY).async_remove()
     await Store(hass, FORECAST_SETTINGS_STORE_VERSION, FORECAST_SETTINGS_STORE_KEY).async_remove()
     await Store(hass, FORECAST_DAYS_STORE_VERSION, FORECAST_DAYS_STORE_KEY).async_remove()
+    await CurtainManager(hass).async_remove()
     _LOGGER.debug("removed_storage keys=%s,%s", LIGHTING_STORE_KEY, LIGHTING_STATE_STORE_KEY)
 
 
@@ -180,6 +192,7 @@ def _rename_listener(hass: HomeAssistant, entry: SmartOccupancyConfigEntry):
         if data["action"] != "update" or "old_entity_id" not in data:
             return
         old, new = data["old_entity_id"], data["entity_id"]
+        entry.runtime_data.curtains.rename_entity(old, new)
         store = entry.runtime_data.lighting.store
         if (lighting := rename_entity(store.config, old, new)) is not None:
             _LOGGER.info("entity_renamed old=%s new=%s (lighting configuration updated)", old, new)

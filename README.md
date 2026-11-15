@@ -14,6 +14,8 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **0.6.0 (Phase 4.5)** adds **multi-zone lighting and the Room Supervisor**: optional zones inside a room (a sink and a shower, each with its own sensors and lights, the shower taking precedence), one rule engine that gives every light exactly one winning rule, shared open-plan spaces (Køkur / Stova), switches explicitly designated as relay-controlled lights, and a Room Supervisor that compares what each light should do with what Home Assistant reports and, only when you allow it, corrects devices that did not follow a command (see [Multi-zone lighting and the Room Supervisor](#multi-zone-lighting-and-the-room-supervisor-phase-45-060)).
 
+**0.6.1 (Phase 4.6.0)** adds a **window and curtain manager**: windows per room with one or more cover layers (blackout, semitransparent / sheer, shade, custom), a direction, an editable preset library per window, and **explicitly confirmed manual preset control** with per-cover verification. Nothing moves automatically yet (see [Curtains](#curtains-phase-460-061)).
+
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
@@ -33,6 +35,7 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - treats a `switch.*` entity as a light unless you ticked it as a relay lighting output of a room (0.6.0)
 - sends a corrective command unless the room's Room Supervisor is set to **Automatic** (default: Observing) and the room is in Automatic; it never corrects a person's change and corrects another automation's change at most once, only if you allow it (0.6.0)
 - activates a zone from a forecast: zones follow sensor states only (0.6.0)
+- moves a cover unless an administrator applied a preset in the Curtains card and confirmed the listed targets; never automatically, never at start-up, discovery or a configuration change, and never because of a lighting mood (0.6.1)
 
 ## Requirements
 
@@ -894,6 +897,70 @@ Smart Occupancy never disables or changes your automations. Room by room:
 **Køkur / Stova**: (1) activity in the kitchen lights the kitchen only; (2) in the living room only the living room; (3) both occupied: each keeps its own levels, a shared light gets one command; (4) leave the kitchen: its own lights follow its vacancy action, a shared light stays on while Stova is occupied; (5) with *wait until the whole space is vacant*: the kitchen keeps its lights until Stova is vacant too.
 
 **Relay output**: (1) tick the switch in Advanced → Relay lighting outputs; (2) give it a zone or a per-light profile entry: it is switched with `switch.turn_on/turn_off` only; (3) the Overview's supervisor table shows its expected and actual on/off; (4) with the Supervisor in Automatic, block the relay (or unplug it while on): the supervisor corrects at most 3 times, then reports *Device failure*; plug it back: verified again; (5) switch it by hand: *Manual change*, never corrected.
+
+## Curtains (Phase 4.6.0, 0.6.1)
+
+A window manager with adjustable presets and reliable, explicitly initiated manual control. It is the foundation for the automatic curtain rules of the next phase; **in this version nothing moves on its own**.
+
+### Add the card
+
+**Edit dashboard → Add card → Smart Curtains** (`custom:smart-occupancy-curtains-card`). Optional settings: `title`, and `area` to show only one room's windows. No YAML is needed for anything else.
+
+### Windows
+
+- **Add window**: a name, a room (any Home Assistant area), a direction and its covers. **Suggestions** proposes windows from the covers no window uses yet: same area, same entity id apart from the layer word (`gardinur_kokur_vindeyga_ljost` + `…_myrk` = one window, `…_eystur_myrk` = another; `ljos`/`ljost` = sheer, `myrk` = blackout). Review corrects the name, room, covers and their types before anything is created.
+- One room can have several windows, and each window has its own direction: covers in one room are never assumed to face the same way.
+- **One cover belongs to one window.** A cover (or a cover group containing it, or a member of a group) already used by another window cannot be added.
+- Windows, layers and presets have stable ids. Renaming a window, preset or cover entity keeps every preset and future rule pointing at the right thing.
+- **Direction**: N, NE, E, SE, S, SW, W, NW, or an exact angle (0 = north, 90 = east, 180 = south).
+- **Mode**: *Off* (presets cannot be applied), *Observing* (default; nothing moves on its own, a person may still apply a preset) or *Automatic* (shown, not selectable: a later phase).
+- **Privacy**, **Sleep protection** and **Sun protection** are switched on and off per window. They are stored for the next phase and do not move anything now.
+
+### Presets
+
+Every window has its own preset library, stored separately from lighting moods (`.storage/smart_occupancy.curtains`).
+
+| Window | Starting presets (every value editable) |
+| --- | --- |
+| One cover, or covers of one type | Fully open 100 %, Half open 50 %, Fully closed 0 % |
+| Sheer + blackout (e.g. Stova Suður) | Fully open 100/100, Half shade 50/100, Full shade 0/100, Evening privacy 0/60, Full blackout 100/0 (sheer/blackout) |
+
+Positions are percent **open** (0 % = closed). Create, rename, edit, duplicate and delete presets; set each cover independently (slider, number or 0/25/50/75/100) or **Leave unchanged**. Positions must be whole numbers from 0 to 100 %. Templates are created only for a window that has no presets yet; nothing existing is overwritten. A cover added later is *Leave unchanged* in the existing presets until you set it.
+
+The card shows, per window, which preset the covers match now (within the position tolerance, default 3 points) or **Custom position**, and *Matches now* on each preset.
+
+### Applying a preset
+
+1. Choose the preset (the window's *selected* preset; selecting never moves anything).
+2. **Preview** shows each cover's current position, target and what would happen: *Will move*, *Already there*, *Leave unchanged*, *Unavailable*, *Not supported* or *Busy*. Nothing is sent.
+3. **Apply…** shows the same list and asks for confirmation. Only **Move N covers** sends commands, and only for exactly the targets you confirmed (if the preset changed in between, it is refused).
+
+The integration then sends one command per cover, all together, as one operation: `cover.set_cover_position` when the cover supports positions, `cover.open_cover` / `cover.close_cover` for open/close-only covers (only 0 % or 100 %). A cover already within the tolerance gets no command. It then follows each cover's reported position until it is at its target (not moving), the verification time passes (default 120 s) or the cover becomes unavailable, and records a result per cover: *Reached*, *Already there*, *Left unchanged*, *Failed* (the command was rejected), *Timed out*, *Unavailable*, *Not supported*. The operation is *Succeeded*, *Already there*, *Partly succeeded*, *Timed out* or *Failed*. A cover in a running operation is busy: a second preset for it is refused rather than contradicting the first. Commands are never repeated.
+
+An operation interrupted by a restart is shown as *Interrupted* and is **not** resumed or sent again.
+
+### Manual changes
+
+A position change Smart Occupancy did not command (the NSPanel, a device button, another automation, a person in Home Assistant) is shown as the window's **manual change**, with the time and whether a person in Home Assistant made it. Reconnects and restarts are not counted. Nothing acts on it in this version; applying a preset clears it.
+
+### Automation (prepared, not running)
+
+Per window, choose which preset each future condition will use: Morning, Normal daytime, Direct sunlight, Evening privacy, Night, Sleep and Manual override (default: leave as it is). Defaults follow the starting presets (e.g. Morning → Half shade, Day → Fully open, Sun → Full shade, Night → Full blackout). Deleting a preset sets the conditions that used it to *Not set*. **No condition is evaluated or executed in this version**, and lighting moods are never read for curtains.
+
+### Sun protection
+
+- The window's direction, the current sun azimuth and elevation (`sun.sun`, or two sensors chosen under the card's ⚙ settings) and **Potentially exposed to direct sunshine** when the sun is above the window's minimum elevation (default 3°), within ± the exposure width (default 70°) of its direction, and not behind an **obstruction**.
+- **Obstructions** model blocked sun, such as an east-facing window behind a hill: between two directions, the sun must be higher than a given elevation to reach the window.
+- `sensor.sun_angle` (0° = the sun faces the south-facing windows) is shown as the house's calibrated reference. Its sign and formula are **not assumed**: the integration compares it with the standard azimuth over the day and reports the relation (for example *sun_angle ≈ azimuth − 113°*, and the azimuth at which it reads 0°) only once readings over at least 30° of sun movement fit within 2°. Until then it is *not validated*. It is never used to move a cover.
+- Exposure is geometry only (no clouds or brightness) and never moves a cover in this version.
+
+### Diagnostics
+
+Per window: actual versus desired (selected preset) position per cover, state and supported features, the recognised preset, the manual change, the last command with each cover's service, reported position and result, earlier commands, and **other automations that may move these covers**. An automation is listed when its actions call a cover service (`cover.*`, `homeassistant.turn_*`, a scene or a script) on the cover, its group, device, area or label, directly or through a scene or script. Enabled ones are warnings on the window card. They are only listed, never changed, disabled or deleted. Templated targets cannot be detected. Home Assistant's integration diagnostics include a `curtains` section.
+
+### Safe alongside the legacy curtain system
+
+The legacy automations (`auto_gardinur`, `cover_*_sudur`, `inngongd_nspanel` …) keep working as before; this version only reads their configuration to report them. `gardinur_state`, `input_boolean.sol` and the mood helpers are not read or written.
 
 ## Occupancy forecast (Phase 4, 0.5.0)
 

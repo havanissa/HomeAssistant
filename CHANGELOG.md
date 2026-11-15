@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.1 — Smart Window & Curtain Controller (Phase 4.6.0)
+
+### Added
+
+- **Curtains** (`curtains/` package, store `.storage/smart_occupancy.curtains` plus `.storage/smart_occupancy.curtains_state` for results): windows with a name, a room (area), one or more cover layers (blackout, semitransparent / sheer, shade, custom, optional own name), a compass direction or exact angle, mode (Off / Observing; Automatic reserved and refused), and Privacy / Sleep protection / Sun protection switches. Stable window, layer and preset ids; entity renames are followed.
+- **Discovery**: every `cover.*` entity with its area and capabilities; proposed windows from the covers no window uses (area + entity id without the layer word), confirmed or corrected before creation. One cover (or cover group member) can belong to only one window.
+- **Preset library per window**: Fully open / Half open / Fully closed, or Fully open / Half shade / Full shade / Evening privacy / Full blackout for sheer + blackout windows; every value editable; unlimited (24) named presets; rename, duplicate, delete; per-cover target or *Leave unchanged*; 0–100 % validation; selected preset; recognised preset or *Custom position*.
+- **Explicitly confirmed manual preset execution**: preview (no service calls), confirmation listing every cover and its target, `apply` requires `confirm: true` and the confirmed targets; one coordinated operation with one service call per cover (`set_cover_position`, or `open_cover` / `close_cover` for open/close-only covers); already-correct covers are skipped; reported positions verified (tolerance and timeout configurable); per-cover and overall results (reached, already there, failed, timed out, unavailable, not supported, partly succeeded, interrupted by restart); busy covers refuse contradictory commands; last result and history per window.
+- **Manual change detection** (position changes Smart Occupancy did not command), shown and kept for the next phase.
+- **Condition → preset mapping** per window (Morning, Normal daytime, Direct sunlight, Evening privacy, Night, Sleep, Manual override), stored only.
+- **Sun**: azimuth / elevation from `sun.sun` or sensors, potential direct-sun exposure per window (exposure width, minimum elevation, obstructions), `sensor.sun_angle` shown and validated against the azimuth from readings (sign and offset are fitted, never assumed).
+- **Competing automations**: automations whose actions may move a window's covers (directly, by group, device, area, label, scene or script) are listed per cover; enabled ones are warnings.
+- **Smart Curtains card** (`custom:smart-occupancy-curtains-card`): overview grouped by room; window view with General, Covers, Presets, Automation, Sun protection and Diagnostics; usable on phones.
+- Safety gate `assert_curtain_command_permitted`: only `CurtainOrigin.MANUAL_CONFIRMED` for a window that is not Off; automatic origins are always refused.
+- Websocket commands `smart_occupancy/curtains/model`, `subscribe`, `window/create`, `window/update`, `window/remove`, `preset/save`, `preset/duplicate`, `preset/delete`, `preset/select`, `preview`, `apply`, `manual/clear`, `settings`, `rescan`, `calibration/reset`; diagnostics section `curtains`.
+
+### Not changed
+
+- Occupancy, mood lighting, zones, the Room Supervisor, wall switches and forecasts. Lighting moods are not read for curtains.
+- No cover moves on its own, at start-up, at discovery, on a configuration change or migration. Existing curtain automations are not changed, disabled or deleted.
+
+### Not included
+
+- Automatic curtain control (Phase 4.6.1): condition evaluation, daylight / sun / sleep rules, manual hold policies.
+
 ## 0.6.0 — Multi-zone lighting and the Room Supervisor (Phase 4.5)
 
 ### Added

@@ -59,6 +59,7 @@ from .occupancy import (
     friendly_name,
     signal_health,
 )
+from .curtains.manager import CurtainManager
 from .forecast import ForecastManager
 from .occupancy_manager import OccupancyManager
 from .problems import ProblemTracker
@@ -277,6 +278,8 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         self.lighting = LightingController(hass, self)
         # Occupancy forecast (0.5.0): observation only, it never controls anything.
         self.forecast = ForecastManager(hass, self)
+        # Curtains (0.6.1): windows, presets and explicitly confirmed manual control only.
+        self.curtains = CurtainManager(hass)
         self.tracker = ProblemTracker(hass)
         self._unsubs: list[CALLBACK_TYPE] = []
         self._started_unsub: CALLBACK_TYPE | None = None

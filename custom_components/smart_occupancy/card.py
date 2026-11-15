@@ -3,7 +3,8 @@
 The cards are plain JavaScript modules shipped inside the integration
 (``frontend/smart-occupancy-room-card.js`` and, since Phase 0.3,
 ``frontend/smart-occupancy-lighting-cards.js`` with the Smart Lighting Profiles and
-the Smart Room Lighting cards). It is served from a static path
+the Smart Room Lighting cards, and since 0.6.1
+``frontend/smart-occupancy-curtains-card.js``, the Smart Curtains card). They are served from a static path
 and added to the frontend with ``frontend.add_extra_js_url``, the supported
 way for an integration to provide frontend code. Users do not need to add a
 dashboard resource, and no dashboard is changed.

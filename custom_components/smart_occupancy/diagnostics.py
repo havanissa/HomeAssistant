@@ -57,4 +57,6 @@ async def async_get_config_entry_diagnostics(
         "lighting": lighting.diagnostics(),
         # Occupancy forecast (0.5.0): settings, learning status, current forecasts (aggregates only).
         "forecast": coordinator.forecast.diagnostics(),
+        # Curtains (0.6.1): windows, presets, last results and manual changes.
+        "curtains": coordinator.curtains.diagnostics(),
     }
