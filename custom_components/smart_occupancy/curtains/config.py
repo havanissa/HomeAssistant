@@ -1,4 +1,4 @@
-"""Curtain configuration: windows, cover layers, presets and settings (0.6.1).
+"""Curtain configuration: windows, cover layers, presets and settings (0.6.1, automatic rules 0.6.2).
 
 Everything here is plain data with strict validation. Positions are percent
 open (Home Assistant's cover convention: 0 = closed, 100 = fully open). A
@@ -21,20 +21,24 @@ from typing import Any
 COVER_KINDS: tuple[str, ...] = ("blackout", "sheer", "shade", "custom")
 KIND_WORDS = {"blackout": "Blackout", "sheer": "Semitransparent / sheer", "shade": "Shade", "custom": "Custom"}
 
-# Operating modes of a window. Automatic is part of the model for the next
-# phase, but this build refuses to select it (see PERMITTED_MODES).
+# Operating modes of a window (0.6.2): Off, Observing (decides and explains, sends nothing) and
+# Automatic (sends the decided preset). Automatic is only set by the explicit enable action.
 WINDOW_MODES: tuple[str, ...] = ("off", "observing", "automatic")
-PERMITTED_MODES: frozenset[str] = frozenset({"off", "observing"})
+PERMITTED_MODES: frozenset[str] = frozenset(WINDOW_MODES)
 DEFAULT_MODE = "observing"
 
 COMPASS: dict[str, float] = {"N": 0.0, "NE": 45.0, "E": 90.0, "SE": 135.0, "S": 180.0, "SW": 225.0, "W": 270.0,
                              "NW": 315.0}
 
-# Future automatic conditions (Phase 4.6.1) -> the preset each one will use.
-CONDITIONS: tuple[str, ...] = ("morning", "day", "sun", "evening_privacy", "night", "sleep", "manual_override")
+# Automatic conditions -> the preset each one uses (per window). "Manual override" never sends a
+# command (the manual position is kept), and "Waiting for daylight" keeps the current position, so
+# neither of them has a preset of its own.
+CONDITIONS: tuple[str, ...] = ("morning", "day", "sun", "evening_privacy", "night", "sleep", "lamp",
+                               "manual_override")
 CONDITION_WORDS = {
     "morning": "Morning", "day": "Normal daytime", "sun": "Direct sunlight", "evening_privacy": "Evening privacy",
-    "night": "Night", "sleep": "Sleep", "manual_override": "Manual override",
+    "night": "Night", "sleep": "Sleep", "lamp": "Window lamp on", "manual_override": "Manual override",
+    "waiting": "Waiting for daylight",
 }
 
 MAX_WINDOWS = 64
@@ -237,6 +241,10 @@ class Window:
     presets: tuple[Preset, ...] = ()
     selected_preset: str | None = None
     conditions: Mapping[str, str | None] = field(default_factory=dict)
+    # Automatic rule settings set for this window only (see rules.py); everything else is inherited.
+    auto: Mapping[str, Any] = field(default_factory=dict)
+    # Automations an administrator reviewed and allowed to coexist with Automatic for these covers.
+    allowed_automations: tuple[str, ...] = ()
 
     @property
     def effective_bearing(self) -> float | None:
@@ -267,6 +275,7 @@ class Window:
             "sleep_protection": self.sleep_protection, "solar": self.solar.as_dict(),
             "presets": [p.as_dict() for p in self.presets], "selected_preset": self.selected_preset,
             "conditions": {c: self.conditions.get(c) for c in CONDITIONS},
+            "auto": _rules().dump(self.auto), "allowed_automations": list(self.allowed_automations),
         }
 
     @classmethod
@@ -302,7 +311,7 @@ class Window:
             layers=tuple(layers[:MAX_LAYERS]),
             direction=direction if direction in COMPASS and bearing is None else None,
             bearing=bearing,
-            # A stored mode this build does not permit (Automatic) is kept as Observing: nothing moves on its own.
+            # An unknown stored mode is kept as Observing: nothing moves on its own.
             mode=mode if mode in PERMITTED_MODES else DEFAULT_MODE,
             solar_protection=data.get("solar_protection") is True,
             privacy=data.get("privacy") is True,
@@ -311,6 +320,9 @@ class Window:
             presets=tuple(presets[:MAX_PRESETS]),
             selected_preset=selected if selected in preset_ids else None,
             conditions={c: (v if (v := raw_conditions.get(c)) in preset_ids else None) for c in CONDITIONS},
+            auto=_rules().load(data.get("auto"), "window"),
+            allowed_automations=tuple(a for a in data.get("allowed_automations") or ()
+                                      if isinstance(a, str) and a.startswith("automation."))[:64],
         )
 
 
@@ -355,9 +367,20 @@ class CurtainSettings:
 class CurtainConfig:
     windows: Mapping[str, Window] = field(default_factory=dict)
     settings: CurtainSettings = field(default_factory=CurtainSettings)
+    # Automatic rule settings for every window, and per room (area id); see rules.py.
+    defaults: Mapping[str, Any] = field(default_factory=dict)
+    rooms: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"windows": [w.as_dict() for w in self.windows.values()], "settings": self.settings.as_dict()}
+        rules = _rules()
+        return {"windows": [w.as_dict() for w in self.windows.values()], "settings": self.settings.as_dict(),
+                "defaults": rules.dump(self.defaults),
+                "rooms": {k: rules.dump(v) for k, v in self.rooms.items() if v}}
+
+    def rules_for(self, window: Window) -> tuple[dict[str, Any], dict[str, str]]:
+        """The effective automatic settings of a window and where each comes from."""
+        return _rules().resolve(self.defaults, self.rooms.get(window.area_id or "") if window.area_id else None,
+                                window.auto)
 
     @classmethod
     def from_dict(cls, data: Any) -> CurtainConfig:
@@ -375,7 +398,11 @@ class CurtainConfig:
             windows[window.window_id] = window
             if len(windows) >= MAX_WINDOWS:
                 break
-        return cls(windows=windows, settings=CurtainSettings.from_dict(data.get("settings")))
+        rules = _rules()
+        rooms_raw = data.get("rooms") if isinstance(data.get("rooms"), Mapping) else {}
+        rooms = {k: v for k, raw in rooms_raw.items() if isinstance(k, str) and (v := rules.load(raw, "room"))}
+        return cls(windows=windows, settings=CurtainSettings.from_dict(data.get("settings")),
+                   defaults=rules.load(data.get("defaults"), "global"), rooms=rooms)
 
     def owner_of(self, entity_id: str) -> str | None:
         return next((w.window_id for w in self.windows.values() if entity_id in w.entity_ids), None)
@@ -423,7 +450,7 @@ def default_presets(layers: tuple[CoverLayer, ...]) -> tuple[Preset, ...]:
 
 
 def default_conditions(presets: tuple[Preset, ...]) -> dict[str, str | None]:
-    """Suggested condition -> preset mapping for the default presets (editable; not used in this phase)."""
+    """Suggested condition -> preset mapping for the default presets (editable per window)."""
     ids = {p.preset_id for p in presets}
 
     def pick(*candidates: str) -> str | None:
@@ -436,8 +463,15 @@ def default_conditions(presets: tuple[Preset, ...]) -> dict[str, str | None]:
         "evening_privacy": pick("p_evening_privacy", "p_closed"),
         "night": pick("p_blackout", "p_closed"),
         "sleep": pick("p_blackout", "p_closed"),
+        "lamp": pick("p_half_shade", "p_half"),
         "manual_override": None,  # a manual move is kept as it is
     }
+
+
+def _rules():
+    from . import rules  # rules.py imports CurtainConfigError from here
+
+    return rules
 
 
 def with_layers(window: Window, layers: tuple[CoverLayer, ...]) -> Window:

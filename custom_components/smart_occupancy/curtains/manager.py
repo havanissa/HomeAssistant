@@ -1,8 +1,9 @@
-"""Curtain runtime (0.6.1): configuration store, confirmed manual presets, verification and observation.
+"""Curtain runtime (0.6.1, automatic 0.6.2): configuration store, presets, verification and observation.
 
-The only place that sends a cover command is ``async_apply``, and only after
-``assert_curtain_command_permitted`` accepted an explicit, confirmed manual
-request. Loading, starting, migrating, discovering, editing, previewing and
+Cover commands are sent only by an operation created with ``begin``: for an
+explicit, confirmed manual preset (``async_apply``) or for a window in
+Automatic (``auto.py``), and only after ``assert_curtain_command_permitted``
+accepted it. Loading, starting, migrating, discovering, editing, previewing and
 stopping never send anything.
 
 Applying a preset is one coordinated operation for the whole window: the
@@ -16,8 +17,10 @@ second preset for it is refused instead of sending a contradictory command.
 
 A position change that Smart Occupancy did not command (wall panel, device
 button, another automation, a person in Home Assistant) is recorded as the
-window's manual change. Nothing acts on it in this phase; it is shown and
-kept for the automatic rules of the next phase.
+window's manual change and becomes a manual hold for the automatic rules.
+Our own commands are recognised by the covers being busy in an operation, plus
+a settle window for late device reports, so they are never mistaken for
+manual changes.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ from homeassistant.util import dt as dt_util
 from ..occupancy import friendly_name
 from ..supervision import CurtainOrigin, assert_curtain_command_permitted
 from . import conflicts as cover_conflicts
+from .auto import AutoCurtains
 from .config import CurtainConfig, CurtainConfigError, Window, new_id, valid_position
 from .discovery import MOVING_STATES, available, capabilities, current_position, members
 from .executor import PENDING, at_target, build_plan, explain, overall
@@ -50,7 +54,7 @@ _LOGGER = logging.getLogger(__name__)
 
 STORE_KEY = "smart_occupancy.curtains"
 STORE_VERSION = 1
-STORE_MINOR_VERSION = 1
+STORE_MINOR_VERSION = 2   # 0.6.2: automatic rule settings (defaults, rooms, window auto); older data loads as is
 STATE_STORE_KEY = "smart_occupancy.curtains_state"
 STATE_STORE_VERSION = 1
 SIGNAL_CURTAINS_UPDATED = "smart_occupancy_curtains_updated"
@@ -71,7 +75,7 @@ def _iso(value: datetime | None) -> str | None:
 
 
 class CurtainManager:
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, occupancy: Any | None = None) -> None:
         self.hass = hass
         self._store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, STORE_KEY, minor_version=STORE_MINOR_VERSION)
         self._state_store: Store[dict[str, Any]] = Store(hass, STATE_STORE_VERSION, STATE_STORE_KEY)
@@ -91,6 +95,7 @@ class CurtainManager:
         self._dirty = False
         self._state_dirty = False
         self._started = False
+        self.auto = AutoCurtains(self, occupancy)
 
     # -------------------------------------------------------------- storage
     async def async_load(self) -> None:
@@ -105,8 +110,17 @@ class CurtainManager:
         self.manual = {k: v for k, v in (state.get("manual") or {}).items() if k in windows and isinstance(v, dict)}
         self.samples = [(float(a), float(b)) for a, b in state.get("samples") or ()
                         if isinstance(a, (int, float)) and isinstance(b, (int, float))]
-        # An operation that was running when Home Assistant stopped is not resumed and never re-sent.
+        self.auto.restore(state.get("auto"))
+        # An operation that was running when Home Assistant stopped is not resumed and never re-sent. Its
+        # covers may still be travelling and report the rest of that movement: those reports are ours, not
+        # a manual change.
         for op in self.last.values():
+            if op.get("status") == "running":
+                until = _now() + timedelta(seconds=self.config.settings.verify_timeout + SETTLE_SECONDS)
+                for item in op.get("items", ()):
+                    if item.get("status") in PENDING and isinstance(item.get("entity_id"), str):
+                        for e in members(self.hass, item["entity_id"]) | {item["entity_id"]}:
+                            self._ours_until[e] = until
             self._interrupt(op)
         for ops in self.history.values():
             for op in ops:
@@ -130,7 +144,10 @@ class CurtainManager:
     def _state_data(self) -> dict[str, Any]:
         self._state_dirty = False
         return {"last": self.last, "history": self.history, "manual": self.manual,
-                "samples": [list(s) for s in self.samples]}
+                "samples": [list(s) for s in self.samples], "auto": self.auto.export()}
+
+    def save_state(self) -> None:
+        self._save_state()
 
     def _save_state(self) -> None:
         self._state_dirty = True
@@ -155,14 +172,16 @@ class CurtainManager:
         self.revision += 1
         self._dirty = True
         self._store.async_delay_save(self._config_data, SAVE_DELAY_SECONDS)
-        for window_id in [w for w in self.last if w not in config.windows]:
+        for window_id in [w for w in {*self.last, *self.auto.runtimes} if w not in config.windows]:
             self.last.pop(window_id, None)
             self.history.pop(window_id, None)
             self.manual.pop(window_id, None)
+            self.auto.forget(window_id)
             self._save_state()
         if self._started:
             self._track()
         self._automations = None
+        self.auto.reconfigure()
         self.notify()
         return True
 
@@ -192,10 +211,12 @@ class CurtainManager:
         self._track()
         for event_type in ("automation_reloaded", "script_reloaded", er.EVENT_ENTITY_REGISTRY_UPDATED):
             self._unsubs.append(self.hass.bus.async_listen(event_type, self._on_automations_changed))
+        self.auto.start()
 
     @callback
     def async_stop(self) -> None:
         self._started = False
+        self.auto.stop()
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -245,6 +266,10 @@ class CurtainManager:
             self._sample()
         if entity_id.startswith("cover."):
             self._cover_changed(event)
+            if window := self._window_of(entity_id):
+                self.auto.on_cover(window.window_id)
+        if entity_id in (s.azimuth_entity, s.elevation_entity):
+            self.auto.on_sun()
         self.notify()
 
     def sun(self) -> SunNow:
@@ -299,13 +324,14 @@ class CurtainManager:
                     at := dt_util.parse_datetime(record.get("last") or "")) and (now - at).total_seconds() < MANUAL_MERGE_SECONDS:
                 record.update(to=current_position(new), last=_iso(now))
             else:
-                self.manual[window.window_id] = {
+                record = self.manual[window.window_id] = {
                     "at": _iso(now), "last": _iso(now), "entity_id": entity_id,
                     "name": friendly_name(self.hass, entity_id) or entity_id,
                     "from": current_position(old), "to": current_position(new),
                     "source": "person" if by_person else "outside",
                 }
             self._save_state()
+            self.auto.on_manual(window, record)
 
     @callback
     def clear_manual(self, window_id: str) -> None:
@@ -338,7 +364,10 @@ class CurtainManager:
 
     async def async_apply(self, window_id: str, preset_id: str, *, origin: CurtainOrigin, confirmed: bool,
                           expected: Mapping[str, Any] | None, user_id: str | None = None) -> dict[str, Any]:
-        """Apply a preset after an explicit confirmation. Returns once the commands are sent."""
+        """Apply a preset after an explicit confirmation. Returns once the commands are sent.
+
+        In Observing and Automatic the applied preset becomes a manual hold, so automatic control does
+        not undo the person's choice (see auto.py)."""
         window, preset = self._window_preset(window_id, preset_id)
         assert_curtain_command_permitted(origin, confirmed=confirmed, window_mode=window.mode, window_id=window_id)
         if expected is not None:
@@ -348,6 +377,20 @@ class CurtainManager:
                                          "The preset changed after it was confirmed: review the targets and confirm again")
         if window_id in self._running:
             raise CurtainConfigError("busy", "A preset is still being applied to this window")
+        self.manual.pop(window_id, None)  # the person chose this preset: a previous manual change is superseded
+        op, moves, context = self.begin(window, preset, origin, user_id=user_id)
+        if origin == CurtainOrigin.MANUAL_CONFIRMED:
+            self.auto.on_manual_preset(window, preset, op)
+        await self.async_run(op, moves, context)
+        return op
+
+    def begin(self, window: Window, preset, origin: CurtainOrigin, *, user_id: str | None = None,
+              condition: str | None = None, reason: str | None = None):
+        """Create a coordinated operation for every cover of a window (no await: callers can rely on the
+        window being busy at once). The commands are sent by ``async_run``."""
+        assert_curtain_command_permitted(origin, confirmed=origin == CurtainOrigin.MANUAL_CONFIRMED,
+                                         window_mode=window.mode, window_id=window.window_id)
+        window_id = window.window_id
         plan = build_plan(self.hass, window, preset, self.config.settings.tolerance, self._busy)
         op_id = new_id("op_")
         context = Context(user_id=user_id)
@@ -358,9 +401,10 @@ class CurtainManager:
             items.append({"layer_id": p.layer_id, "entity_id": p.entity_id, "name": p.name, "kind": p.kind,
                           "target": p.target, "service": p.service, "status": status, "detail": p.reason,
                           "start_position": p.current, "final_position": p.current})
-        op = {"op_id": op_id, "window_id": window_id, "preset_id": preset_id, "preset_name": preset.name,
+        op = {"op_id": op_id, "window_id": window_id, "preset_id": preset.preset_id, "preset_name": preset.name,
               "origin": origin.value, "user_id": user_id, "context_id": context.id, "started": _iso(started),
-              "finished": None, "status": "running", "items": items, "explanation": ""}
+              "finished": None, "status": "running", "items": items, "explanation": "",
+              "condition": condition, "reason": reason}
         moves = [i for i in items if i["status"] == "sent"]
         for item in moves:
             for e in members(self.hass, item["entity_id"]) | {item["entity_id"]}:
@@ -368,19 +412,21 @@ class CurtainManager:
         self._running[window_id] = op
         self.last[window_id] = op
         self.history[window_id] = [op, *self.history.get(window_id, [])][:HISTORY_LENGTH]
-        self.manual.pop(window_id, None)  # the person chose this preset: a previous manual change is superseded
         op["explanation"] = explain("running", items, preset.name)
         self._save_state()
-        _LOGGER.info("curtain_preset_apply window=%s preset=%s op=%s moves=%d origin=%s", window_id, preset_id, op_id,
-                     len(moves), origin.value)
+        _LOGGER.info("curtain_preset_apply window=%s preset=%s op=%s moves=%d origin=%s condition=%s", window_id,
+                     preset.preset_id, op_id, len(moves), origin.value, condition)
         self.notify()
+        return op, moves, context
+
+    async def async_run(self, op: dict[str, Any], moves: list[dict[str, Any]], context: Context) -> None:
+        window_id = op["window_id"]
         await asyncio.gather(*(self._send(item, context) for item in moves))
-        if window_id in self._running:
+        if window_id in self._running and self._running[window_id] is op:
             self._verify(op)
         if op["status"] == "running":
-            self._timers[op_id] = async_call_later(self.hass, self.config.settings.verify_timeout,
-                                                   callback(lambda _now: self._timeout(op)))
-        return op
+            self._timers[op["op_id"]] = async_call_later(self.hass, self.config.settings.verify_timeout,
+                                                         callback(lambda _now: self._timeout(op)))
 
     async def _send(self, item: dict[str, Any], context: Context) -> None:
         data: dict[str, Any] = {"entity_id": item["entity_id"]}
@@ -466,6 +512,7 @@ class CurtainManager:
         _LOGGER.info("curtain_preset_result window=%s preset=%s op=%s status=%s", op["window_id"],
                      op["preset_id"], op["op_id"], op["status"])
         self._save_state()
+        self.auto.on_op_finished(op)
         self.notify()
 
     # ---------------------------------------------------------- conflicts
@@ -482,6 +529,18 @@ class CurtainManager:
     def running(self, window_id: str) -> dict[str, Any] | None:
         return self._running.get(window_id)
 
+    def conflicts(self, window: Window) -> dict[str, list[dict[str, Any]]]:
+        return cover_conflicts.find(self.hass, window.entity_ids, self.automations())
+
+    def blocking_automations(self, window: Window) -> list[dict[str, Any]]:
+        """Enabled automations that may move this window's covers and that nobody explicitly allowed."""
+        seen: dict[str, dict[str, Any]] = {}
+        for found in self.conflicts(window).values():
+            for c in found:
+                if c["enabled"] and c["automation"] not in window.allowed_automations:
+                    seen.setdefault(c["automation"], c)
+        return list(seen.values())
+
     def diagnostics(self) -> dict[str, Any]:
         from .solar import calibrate
 
@@ -493,4 +552,5 @@ class CurtainManager:
             "busy": dict(self._busy),
             "sun": self.sun().as_dict(),
             "sun_angle_calibration": calibrate(self.samples),
+            "automatic": self.auto.diagnostics(),
         }

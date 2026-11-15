@@ -20,12 +20,14 @@ sends that profile to the room's lights (an enabled room, in Observing too).
 It is never triggered automatically, and the tested lights become a manual
 override, so automatic lighting does not act on them afterwards.
 
-Curtains (0.6.1) have their own gate, ``assert_curtain_command_permitted``.
-The only cover command this build permits is a person's explicit, confirmed
-**manual preset** request (``CurtainOrigin.MANUAL_CONFIRMED``) for a window
-that is not Off; it is allowed in Observing too, because a person asked for
-it. Every automatic origin is refused: automatic curtain control does not
-exist yet, whatever a window's stored mode says.
+Curtains have their own gate, ``assert_curtain_command_permitted``. A
+person's explicit, confirmed **manual preset** request
+(``CurtainOrigin.MANUAL_CONFIRMED``, 0.6.1) is permitted for a window that is
+not Off; it is allowed in Observing too, because a person asked for it. An
+**automatic** command (``CurtainOrigin.AUTOMATIC``, 0.6.2) is permitted only
+for a window whose mode is Automatic, which an administrator sets with an
+explicit confirmation per window; Observing and Off windows never receive an
+automatic command.
 """
 
 from __future__ import annotations
@@ -80,19 +82,24 @@ class CurtainOrigin(StrEnum):
     """Who asked for a cover command."""
 
     MANUAL_CONFIRMED = "manual_confirmed"  # an administrator confirmed this exact preset in the card
-    AUTOMATIC = "automatic"                # a future decision engine (Phase 4.6.1); refused in this build
+    AUTOMATIC = "automatic"                # the window's automatic decision engine (curtains/auto.py)
 
 
-# Automatic curtain control is not part of this build. Kept as a constant so a test can prove it stays off.
-AUTOMATIC_CURTAIN_CONTROL = False
+# Automatic curtain control exists from 0.6.2, per window and only in Automatic mode.
+AUTOMATIC_CURTAIN_CONTROL = True
 
 
 def assert_curtain_command_permitted(origin: CurtainOrigin, *, confirmed: bool, window_mode: str,
                                      window_id: str) -> None:
-    """Gate for every cover command (0.6.1)."""
-    if origin != CurtainOrigin.MANUAL_CONFIRMED or (origin == CurtainOrigin.AUTOMATIC and not AUTOMATIC_CURTAIN_CONTROL):
-        raise ControlNotPermittedError(f"Automatic curtain control is not available (window {window_id})")
-    if not confirmed:
-        raise ControlNotPermittedError(f"A preset for window {window_id} needs an explicit confirmation")
+    """Gate for every cover command (manual 0.6.1, automatic 0.6.2)."""
     if window_mode == "off":
         raise ControlNotPermittedError(f"Window {window_id} is Off")
+    if origin == CurtainOrigin.MANUAL_CONFIRMED:
+        if not confirmed:
+            raise ControlNotPermittedError(f"A preset for window {window_id} needs an explicit confirmation")
+        return
+    if origin == CurtainOrigin.AUTOMATIC and AUTOMATIC_CURTAIN_CONTROL:
+        if window_mode != "automatic":
+            raise ControlNotPermittedError(f"Window {window_id} is not in Automatic: nothing is sent automatically")
+        return
+    raise ControlNotPermittedError(f"Curtain command not permitted (window {window_id})")

@@ -1,10 +1,14 @@
-"""Websocket API of the Curtains card (0.6.1): ``smart_occupancy/curtains/*``.
+"""Websocket API of the Curtains card (0.6.1, automatic 0.6.2): ``smart_occupancy/curtains/*``.
 
-Reads (``model``, ``preview``, ``subscribe``) are open to every authenticated
-user and never move anything. Every write is admin only and saves to the
-curtain store without a reload. ``apply`` is the only command that leads to
-cover commands: it needs ``confirm: true`` and the exact targets the person
-confirmed (``expected``); the integration then sends the commands itself.
+Reads (``model``, ``preview``, ``auto/preview``, ``subscribe``) are open to
+every authenticated user and never move anything. Every write is admin only and
+saves to the curtain store without a reload. Two commands can lead to cover
+commands: ``apply`` (a manual preset; needs ``confirm: true`` and the exact
+targets the person confirmed) and ``auto/enable`` (turns one window to
+Automatic after the person reviewed its intended preset, safety conditions and
+conflicts; needs ``confirm: true`` and is refused while a blocker remains).
+``resume`` releases a manual hold of a window, which an Automatic window
+then follows at once. Automatic cannot be set through ``window/update``.
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from homeassistant.helpers.event import async_call_later
 from ..const import DOMAIN, VERSION
 from ..occupancy import friendly_name
 from ..supervision import ControlNotPermittedError, CurtainOrigin
-from . import conflicts as cover_conflicts
+from . import conflicts as cover_conflicts, rules as curtain_rules
 from .config import (
     COMPASS,
     CONDITION_WORDS,
@@ -181,6 +185,8 @@ def window_model(hass: HomeAssistant, mgr: CurtainManager, window: Window,
         "running": mgr.running(window.window_id) is not None,
         "history": mgr.history.get(window.window_id, []),
         "problems": _problems(hass, window, layers, window.solar_protection, mgr.config),
+        "auto": mgr.auto.model(window),
+        "allowed_automations": list(window.allowed_automations),
     }
 
 
@@ -223,7 +229,30 @@ def build_model(hass: HomeAssistant, mgr: CurtainManager, connection) -> dict[st
         "modes": list(WINDOW_MODES),
         "permitted_modes": sorted(PERMITTED_MODES),
         "conditions": list(CONDITIONS),
+        "rules": {"schema": curtain_rules.schema(), "groups": [list(g) for g in curtain_rules.GROUPS],
+                  "global": curtain_rules.dump(config.defaults),
+                  "rooms": {k: curtain_rules.dump(v) for k, v in config.rooms.items()},
+                  "defaults": curtain_rules.dump(curtain_rules.defaults()), "weekdays": list(curtain_rules.WEEKDAYS)},
+        "entities": _entity_choices(hass),
     }
+
+
+def _entity_choices(hass: HomeAssistant) -> dict[str, list[dict[str, Any]]]:
+    """Suggestions for the entity pickers (any entity id can still be typed)."""
+    def item(state) -> dict[str, Any]:
+        return {"entity_id": state.entity_id, "name": friendly_name(hass, state.entity_id) or state.entity_id}
+
+    sleep = [item(x) for x in hass.states.async_all(("input_boolean", "binary_sensor"))
+             if x.domain == "input_boolean" or x.attributes.get("device_class") in (None, "occupancy", "presence")]
+    lux = [item(x) for x in hass.states.async_all("sensor")
+           if x.attributes.get("device_class") == "illuminance" or x.attributes.get("unit_of_measurement") == "lx"]
+    lights = [item(x) for x in hass.states.async_all("light")]
+
+    def key(d: dict[str, Any]) -> tuple[bool, str]:
+        return not d["entity_id"].startswith("input_boolean."), d["name"].casefold()
+
+    return {"sleep": sorted(sleep, key=key)[:400], "lux": sorted(lux, key=key)[:200],
+            "light": sorted(lights, key=key)[:400]}
 
 
 # ------------------------------------------------------------ validation
@@ -317,9 +346,9 @@ def _apply_fields(hass: HomeAssistant, config: CurtainConfig, window: Window, ms
         mode = msg["mode"]
         if mode not in WINDOW_MODES:
             raise CurtainConfigError("invalid_mode", "The mode must be Off, Observing or Automatic")
-        if mode not in PERMITTED_MODES:
-            raise CurtainConfigError("mode_not_available",
-                                     "Automatic curtain control comes in a later phase: use Observing for now")
+        if mode == "automatic" and window.mode != "automatic":
+            raise CurtainConfigError("confirm_required", "Automatic is enabled with its own confirmation: review the "
+                                     "intended preset, safety and conflicts first (auto/enable)")
         changes["mode"] = mode
     for flag in ("solar_protection", "privacy", "sleep_protection"):
         if flag in msg:
@@ -444,7 +473,10 @@ def ws_window_update(hass, mgr, msg, connection):
     window = _window(mgr, msg["window_id"])
     if "layers" in msg and mgr.running(window.window_id):
         raise CurtainConfigError("busy", "Wait until the preset being applied has finished")
-    mgr.async_set(mgr.config.with_window(_apply_fields(hass, mgr.config, window, msg)))
+    updated = _apply_fields(hass, mgr.config, window, msg)
+    if updated.mode != window.mode:
+        mgr.auto.mode_changing(window, updated.mode)
+    mgr.async_set(mgr.config.with_window(updated))
 
 
 @websocket_api.websocket_command({vol.Required("type"): "smart_occupancy/curtains/window/remove",
@@ -635,8 +667,175 @@ def ws_calibration_reset(hass, mgr, msg, connection):
     mgr.reset_calibration()
 
 
+# ------------------------------------------------------- automatic (0.6.2)
+def enable_review(hass: HomeAssistant, mgr: CurtainManager, window: Window) -> dict[str, Any]:
+    """What enabling Automatic would do now: the intended condition and preset, every cover's plan,
+    the blockers that refuse it and the warnings the person should know about. Nothing moves."""
+    decision = mgr.auto.evaluate(window.window_id)
+    model = mgr.auto.model(window)
+    values = model["values"]
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not window.layers:
+        blockers.append("The window has no covers.")
+    if not window.presets:
+        blockers.append("The window has no presets.")
+    for layer in window.layers:
+        if hass.states.get(layer.entity_id) is None:
+            blockers.append(f"{layer.entity_id} does not exist in Home Assistant.")
+        elif not available(hass.states.get(layer.entity_id)):
+            warnings.append(f"{layer.label or friendly_name(hass, layer.entity_id) or layer.entity_id} is unavailable: "
+                            "nothing is sent until it reports again.")
+    conflicts = mgr.blocking_automations(window)
+    for c in conflicts:
+        blockers.append(f"Enabled automation {c['name'] or c['automation']} may also move "
+                        f"{friendly_name(hass, c['entity_id']) or c['entity_id']} ({c['detail']}). Disable it, or allow "
+                        "it in Diagnostics if it does not compete.")
+    blockers += [f"Settings: {w}." for w in model["warnings"]]
+    if not values["lux_entity"]:
+        warnings.append("No outdoor light sensor: " + ("the window opens when the sun is clearly up (fallback)."
+                        if values["fallback"] == "sun" else "the window never opens automatically. Choose a sensor "
+                        "under Automatic → Daylight, or allow the sun fallback."))
+    elif model["light"]["value"] is None:
+        warnings.append(f"The outdoor light sensor {values['lux_entity']} is unavailable: no automatic opening.")
+    if window.sleep_protection:
+        state = hass.states.get(values["sleep_entity"]) if values["sleep_entity"] else None
+        if state is None or state.state not in ("on", "off"):
+            warnings.append(f"The sleep source {values['sleep_entity'] or '(none)'} is unavailable: the window does "
+                            "not open automatically until it reports.")
+    if values["lamp_enabled"] and (not values["lamp_entity"] or not window.conditions.get("lamp")):
+        warnings.append("The window lamp override needs a lamp and a Lamp On preset.")
+    unset = [CONDITION_WORDS[c] for c in ("morning", "day", "night", "sleep", "evening_privacy", "sun")
+             if not window.conditions.get(c) and (c != "sleep" or window.sleep_protection)
+             and (c != "evening_privacy" or window.privacy) and (c != "sun" or window.solar_protection)]
+    if unset:
+        warnings.append(f"No preset for {', '.join(unset)}: the covers are kept as they are then.")
+    if window.solar_protection and window.effective_bearing is None:
+        warnings.append("Sun protection needs the window's direction.")
+    if model["hold"]:
+        warnings.append("A manual hold is active; it is kept until it ends (or use Resume).")
+    preset = window.preset(decision.preset_id) if decision else None
+    plan = mgr.preview(window.window_id, preset.preset_id)["items"] if preset else []
+    return {"window_id": window.window_id, "mode": window.mode, "decision": decision.as_dict() if decision else None,
+            "preset_id": preset.preset_id if preset else None, "preset_name": preset.name if preset else None,
+            "items": plan, "moves": sum(1 for i in plan if i["decision"] == "move"), "blockers": blockers,
+            "warnings": warnings, "conflicts": conflicts, "precedence": model["precedence"], "hold": model["hold"]}
+
+
+@websocket_api.websocket_command({vol.Required("type"): "smart_occupancy/curtains/auto/preview",
+                                  vol.Required("window_id"): str})
+@websocket_api.async_response
+@_guard
+def ws_auto_preview(hass, mgr, msg, connection):
+    return enable_review(hass, mgr, _window(mgr, msg["window_id"]))
+
+
+@websocket_api.websocket_command({vol.Required("type"): "smart_occupancy/curtains/auto/enable",
+                                  vol.Required("window_id"): str, vol.Required("confirm"): bool})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_guard
+def ws_auto_enable(hass, mgr, msg, connection):
+    """Turn one window to Automatic after the person reviewed ``auto/preview``. Other windows are not touched."""
+    window = _window(mgr, msg["window_id"])
+    if msg["confirm"] is not True:
+        raise CurtainConfigError("confirm_required", "Enabling Automatic needs an explicit confirmation")
+    if window.mode == "automatic":
+        return {"mode": "automatic"}
+    review = enable_review(hass, mgr, window)
+    if review["blockers"]:
+        raise CurtainConfigError("blocked", review["blockers"][0])
+    mgr.auto.mode_changing(window, "automatic")
+    mgr.async_set(mgr.config.with_window(replace(window, mode="automatic")))
+    return {"mode": "automatic"}
+
+
+@websocket_api.websocket_command({vol.Required("type"): "smart_occupancy/curtains/resume",
+                                  vol.Required("window_id"): str})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_guard
+def ws_resume(hass, mgr, msg, connection):
+    """Resume Automatic Curtains: release the window's manual hold and apply the current condition."""
+    window = _window(mgr, msg["window_id"])
+    if window.mode == "off":
+        raise CurtainConfigError("off", "This window is Off")
+    mgr.auto.resume(window.window_id)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "smart_occupancy/curtains/auto/settings",
+    vol.Required("scope"): vol.In(curtain_rules.ALL_SCOPES),
+    vol.Optional("area_id"): str,
+    vol.Optional("window_id"): str,
+    vol.Required("values"): dict,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_guard
+def ws_auto_settings(hass, mgr, msg, connection):
+    """Set (or, with null, remove) automatic rule settings for every window, one room or one window."""
+    scope = msg["scope"]
+    config = mgr.config
+
+    def merged(current: dict[str, Any]) -> dict[str, Any]:
+        out = dict(current)
+        for key, value in msg["values"].items():
+            clean = curtain_rules.validate(key, value, scope)
+            if clean is None:
+                out.pop(key, None)
+            else:
+                out[key] = clean
+        return out
+
+    if scope == curtain_rules.GLOBAL:
+        new = replace(config, defaults=merged(dict(config.defaults)))
+        affected = list(new.windows.values())
+    elif scope == curtain_rules.ROOM:
+        area_id = msg.get("area_id")
+        if not area_id or ar.async_get(hass).async_get_area(area_id) is None:
+            raise CurtainConfigError("unknown_area", "Choose an existing room (area)")
+        room = merged(dict(config.rooms.get(area_id, {})))
+        rooms = {k: v for k, v in config.rooms.items() if k != area_id}
+        if room:
+            rooms[area_id] = room
+        new = replace(config, rooms=rooms)
+        affected = [w for w in new.windows.values() if w.area_id == area_id]
+    else:
+        window = _window(mgr, msg.get("window_id") or "")
+        updated = replace(window, auto=merged(dict(window.auto)))
+        new = config.with_window(updated)
+        affected = [updated]
+    for window in affected or [Window("_", "_")]:
+        values, _ = new.rules_for(window)
+        if problems := curtain_rules.consistency(values):
+            raise CurtainConfigError("inconsistent", problems[0])
+    mgr.async_set(new)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "smart_occupancy/curtains/automation/allow",
+                                  vol.Required("window_id"): str, vol.Required("automation"): str,
+                                  vol.Required("allowed"): bool})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_guard
+def ws_automation_allow(hass, mgr, msg, connection):
+    """Mark a listed automation as reviewed: it may coexist with Automatic for this window (or undo that).
+    The automation itself is never changed, disabled or deleted."""
+    window = _window(mgr, msg["window_id"])
+    automation = msg["automation"]
+    if not automation.startswith("automation."):
+        raise CurtainConfigError("invalid_automation", "Choose an automation")
+    allowed = [a for a in window.allowed_automations if a != automation]
+    if msg["allowed"]:
+        allowed.append(automation)
+    mgr.async_set(mgr.config.with_window(replace(window, allowed_automations=tuple(allowed))))
+    mgr.auto.evaluate(window.window_id, force_notify=True)
+
+
 CURTAIN_HANDLERS = (
     ws_model, ws_subscribe, ws_window_create, ws_window_update, ws_window_remove, ws_preset_save,
     ws_preset_duplicate, ws_preset_delete, ws_preset_select, ws_preview, ws_apply, ws_manual_clear, ws_settings,
-    ws_rescan, ws_calibration_reset,
+    ws_rescan, ws_calibration_reset, ws_auto_preview, ws_auto_enable, ws_resume, ws_auto_settings,
+    ws_automation_allow,
 )

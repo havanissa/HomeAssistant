@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.6.2 — Autonomous curtain control (Phase 4.6.1)
+
+### Added
+
+- **Automatic mode per window** (`curtains/logic.py` pure decisions, `curtains/auto.py` runtime, `curtains/rules.py` settings): Off / Observing (default; decides and explains, sends nothing) / Automatic (sends the decided preset without further confirmation). Automatic is enabled only through `auto/preview` + `auto/enable` (`confirm: true`), which show the intended condition and preset, every cover's plan, blockers, warnings and precedence; `window/update` refuses it.
+- **Conditions**: Sleep, Night (workday / free-day times, free days), Evening privacy (measured dusk or sun below −4°), Waiting for daylight (keeps the position), Sun protection (geometry *and* measured strong light, with hold times and hysteresis), Window lamp, Morning (duration or until a time) and Normal daytime; Manual override. Each uses the window's condition → preset mapping (new mapping: *Window lamp on*).
+- **Daylight evidence**: outdoor illuminance sensor with daylight / dusk thresholds, stability periods, hysteresis, a minimum sun elevation and staleness (`last_reported`); optional conservative sun fallback for windows without a sensor. A clock never opens a window; missing evidence never opens one; sleep blocks opening in sleep-protected rooms; an unavailable sleep source never authorises an opening.
+- **Sleep mode** settings: source entity (default `input_boolean.sleep`), what happens when sleep ends (morning / current condition / keep until Resume), opening after sleep needs daylight, sleep wins over the lamp, sleep ends earlier manual holds.
+- **Window lamp override**: lamp entity, Lamp On preset, release delay, conditions that win over the lamp; after release the current condition applies.
+- **Manual holds** from manual moves and from presets applied by hand: until the next phase, for N minutes, until the room has been empty (occupancy), until resumed; protective conditions can end earlier holds; **Resume automatic curtains** (`resume`); holds persist across restarts.
+- **Movement safety**: start-up settle (120 s), never contradicting a running movement, unavailable / busy covers block, dead band, no repeated targets, minimum interval, daily budget (Sleep and Night exempt), bounded retries (1 min, 5 min), no replay after restart.
+- **Competing automations** block enabling and automatic sending until disabled or explicitly allowed per window (`automation/allow`); scripts called as actions are now detected too.
+- Settings for all windows, per room and per window (`auto/settings`), with the source of every value; card forms generated from the settings schema.
+- **Smart Curtains card**: automatic condition, preset, explanation, status and evidence chips on every window, desired positions, Resume, the enable review, the Automatic tab (conditions, flags, settings by scope), Diagnostics (decision log, precedence, evidence, allow automation). Diagnostics section `curtains.automatic`.
+- Tests: `tests/test_curtains_auto.py` (incident replay of 11-12 / 11-13, modes, per-window activation, single and layered windows, sleep, lamp and bypasses, manual holds and Resume, stale / unavailable light, flapping, sun protection, failures and delayed reports, budget and interval, restart, settings scopes, no effect on occupancy / lighting / forecasts) and pure-logic tests.
+
+### Changed
+
+- `assert_curtain_command_permitted` permits `CurtainOrigin.AUTOMATIC` for windows in Automatic only (`AUTOMATIC_CURTAIN_CONTROL = True`).
+- A preset applied by hand in Observing / Automatic becomes a manual hold.
+- After a restart, the rest of an interrupted movement is not mistaken for a manual change.
+- Curtain store minor version 2 (`defaults`, `rooms`, window `auto`, `allowed_automations`); 0.6.1 data loads unchanged and every window stays as it was (Observing).
+
+### Not changed
+
+- Occupancy, mood lighting, zones, the Room Supervisor, wall switches and forecasts. Lighting moods are not read for curtains.
+
+### Not included
+
+- Thermal optimisation (temperatures, solar gain) and weather / cloud input.
+
+
 ## 0.6.1 — Smart Window & Curtain Controller (Phase 4.6.0)
 
 ### Added

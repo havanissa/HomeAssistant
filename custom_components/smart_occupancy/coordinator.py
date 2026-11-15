@@ -278,8 +278,9 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         self.lighting = LightingController(hass, self)
         # Occupancy forecast (0.5.0): observation only, it never controls anything.
         self.forecast = ForecastManager(hass, self)
-        # Curtains (0.6.1): windows, presets and explicitly confirmed manual control only.
-        self.curtains = CurtainManager(hass)
+        # Curtains: windows, presets, confirmed manual control (0.6.1) and per-window Automatic (0.6.2).
+        # Occupancy is only read (for the "until the room has been empty" manual hold).
+        self.curtains = CurtainManager(hass, self.occupancy)
         self.tracker = ProblemTracker(hass)
         self._unsubs: list[CALLBACK_TYPE] = []
         self._started_unsub: CALLBACK_TYPE | None = None
