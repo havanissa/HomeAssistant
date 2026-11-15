@@ -308,7 +308,8 @@ async def test_diagnostics(hass: HomeAssistant, home: Home) -> None:
     entry = await setup_entry(hass, opts)
     hass.states.async_set(home.radar, "on")
     diag = await async_get_config_entry_diagnostics(hass, entry)
-    assert diag["phase"] == "0.6.0"
+    assert diag["phase"] == "0.6.1"
+    assert diag["curtains"]["config"]["windows"] == [] and diag["curtains"]["running"] == []
     assert diag["occupancy"][home.pilot_area]["timing"]["inactivity_timeout"] == 600
     room = diag["rooms"][home.pilot_area]
     assert room["active_signals_now"] == {"maintain": [home.radar]}

@@ -7,8 +7,8 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.6.0"
-VERSION: Final = "0.6.0"
+PHASE: Final = "0.6.1"
+VERSION: Final = "0.6.1"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -214,7 +214,9 @@ OCCUPANCY_SAVE_DELAY_SECONDS: Final = 15
 CARD_URL_BASE: Final = "/smart_occupancy_static"
 CARD_FILENAME: Final = "smart-occupancy-room-card.js"
 LIGHTING_CARD_FILENAME: Final = "smart-occupancy-lighting-cards.js"
-CARD_FILENAMES: Final = (CARD_FILENAME, LIGHTING_CARD_FILENAME)
+# Curtains (0.6.1): windows, presets and confirmed manual control.
+CURTAINS_CARD_FILENAME: Final = "smart-occupancy-curtains-card.js"
+CARD_FILENAMES: Final = (CARD_FILENAME, LIGHTING_CARD_FILENAME, CURTAINS_CARD_FILENAME)
 
 # Mood lighting (Phase 0.3) -------------------------------------------------
 # User configuration of mood lighting (profiles, room overrides, activation).

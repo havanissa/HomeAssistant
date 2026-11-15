@@ -19,9 +19,18 @@ asks for it in the room card and confirms it, and only then the integration
 sends that profile to the room's lights (an enabled room, in Observing too).
 It is never triggered automatically, and the tested lights become a manual
 override, so automatic lighting does not act on them afterwards.
+
+Curtains (0.6.1) have their own gate, ``assert_curtain_command_permitted``.
+The only cover command this build permits is a person's explicit, confirmed
+**manual preset** request (``CurtainOrigin.MANUAL_CONFIRMED``) for a window
+that is not Off; it is allowed in Observing too, because a person asked for
+it. Every automatic origin is refused: automatic curtain control does not
+exist yet, whatever a window's stored mode says.
 """
 
 from __future__ import annotations
+
+from enum import StrEnum
 
 from .const import OperatingMode
 
@@ -65,3 +74,25 @@ def assert_switch_control_permitted(switch_active: bool, area_id: str, switch_id
     """Gate for wall switch button actions: only switches set to Active, in an enabled room."""
     if not switch_active:
         raise ControlNotPermittedError(f"Switch {switch_id} in room {area_id} is not Active")
+
+
+class CurtainOrigin(StrEnum):
+    """Who asked for a cover command."""
+
+    MANUAL_CONFIRMED = "manual_confirmed"  # an administrator confirmed this exact preset in the card
+    AUTOMATIC = "automatic"                # a future decision engine (Phase 4.6.1); refused in this build
+
+
+# Automatic curtain control is not part of this build. Kept as a constant so a test can prove it stays off.
+AUTOMATIC_CURTAIN_CONTROL = False
+
+
+def assert_curtain_command_permitted(origin: CurtainOrigin, *, confirmed: bool, window_mode: str,
+                                     window_id: str) -> None:
+    """Gate for every cover command (0.6.1)."""
+    if origin != CurtainOrigin.MANUAL_CONFIRMED or (origin == CurtainOrigin.AUTOMATIC and not AUTOMATIC_CURTAIN_CONTROL):
+        raise ControlNotPermittedError(f"Automatic curtain control is not available (window {window_id})")
+    if not confirmed:
+        raise ControlNotPermittedError(f"A preset for window {window_id} needs an explicit confirmation")
+    if window_mode == "off":
+        raise ControlNotPermittedError(f"Window {window_id} is Off")

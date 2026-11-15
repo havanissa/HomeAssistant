@@ -13,12 +13,19 @@ from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 
 from custom_components.smart_occupancy.card import CARD_DIR, CARD_URL, LIGHTING_CARD_URL
-from custom_components.smart_occupancy.const import CARD_FILENAME, LIGHTING_CARD_FILENAME, VERSION
+from custom_components.smart_occupancy.const import (
+    CARD_FILENAME,
+    CARD_URL_BASE,
+    CURTAINS_CARD_FILENAME,
+    LIGHTING_CARD_FILENAME,
+    VERSION,
+)
 
 from .conftest import Pilot, pilot_options, setup_entry
 
 CARD_FILE = CARD_DIR / CARD_FILENAME
 LIGHTING_FILE = CARD_DIR / LIGHTING_CARD_FILENAME
+CURTAINS_FILE = CARD_DIR / CURTAINS_CARD_FILENAME
 
 try:
     import hass_frontend  # noqa: F401  (home-assistant-frontend package)
@@ -49,6 +56,14 @@ async def test_card_served_and_registered(hass: HomeAssistant, hass_client, pilo
     body = await response.text()
     assert "customElements.define(MOOD_CARD, SmartOccupancyMoodEditorCard)" in body
     assert "customElements.define(ROOM_CARD, SmartOccupancyRoomLightingCard)" in body
+    assert f'const VERSION = "{VERSION}"' in body
+
+    curtains_url = f"{CARD_URL_BASE}/{CURTAINS_CARD_FILENAME}"
+    assert f"{curtains_url}?v={VERSION}" in hass.data[DATA_EXTRA_MODULE_URL].urls
+    response = await client.get(curtains_url)
+    assert response.status == 200
+    body = await response.text()
+    assert "customElements.define(CARD, SmartOccupancyCurtainsCard)" in body
     assert f'const VERSION = "{VERSION}"' in body
 
 
@@ -97,8 +112,32 @@ def test_lighting_cards_never_control_lights() -> None:
     assert "if (!confirm(" in test and "sends real commands" in test  # never without asking
 
 
+def test_curtains_card_never_moves_a_cover_itself() -> None:
+    """The Curtains card talks to the curtain websocket API only, and applies a preset only after a confirmation
+    that lists every cover and its target (the integration then sends the commands)."""
+    source = CURTAINS_FILE.read_text(encoding="utf-8")
+    assert "import " not in source.split("*/", 1)[1]
+    assert "callService" not in source and "call_service" not in source
+    assert "http://" not in source and "https://cdn" not in source
+    commands = set(re.findall(r"type: `\$\{WS\}/([a-z_/]+)`", source))
+    assert commands == {
+        "subscribe", "model", "preview", "apply", "window/create", "window/update", "window/remove", "preset/save",
+        "preset/duplicate", "preset/delete", "preset/select", "manual/clear", "settings", "rescan", "calibration/reset",
+    }, commands
+    assert source.count("type: `${WS}/apply`") == 1
+    apply = source.split("async _applyConfirmed() {", 1)[1].split("\n  }\n", 1)[0]
+    assert "confirm: true" in apply and "expected: c.plan.positions" in apply and "if (!c || !c.plan" in apply
+    # Only the confirmation's own button runs it; Apply… first shows the plan.
+    assert source.count('data-action="apply-confirm"') == 1
+    assert 'case "apply": this._openPlan(el.dataset.window, el.dataset.preset, "confirm")' in source
+    assert "mood" not in source.lower().replace("moods are never used", "")
+    for tab in ("General", "Covers", "Presets", "Automation", "Sun protection", "Diagnostics"):
+        assert f'"{tab}"' in source
+    assert "@container (max-width: 480px)" in source  # usable on phones
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
-@pytest.mark.parametrize("path", [CARD_FILE, LIGHTING_FILE])
+@pytest.mark.parametrize("path", [CARD_FILE, LIGHTING_FILE, CURTAINS_FILE])
 def test_card_javascript_parses(path: Path) -> None:
     subprocess.run(["node", "--check", str(path)], check=True, cwd=Path(__file__).parent)
 
