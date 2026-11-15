@@ -84,6 +84,8 @@ class LightIndex:
 
     hass: HomeAssistant
     categories: tuple[LightCategory, ...]
+    # Relay lighting outputs (0.6.0): switch entities designated as lights; indexed like lights (labels, areas).
+    extra: frozenset[str] = frozenset()
     lights: dict[str, LightInfo] = field(default_factory=dict)
     by_area: dict[str, list[str]] = field(default_factory=dict)
     by_category: dict[str, list[str]] = field(default_factory=dict)
@@ -105,7 +107,7 @@ class LightIndex:
         categories_of: dict[str, list[str]] = {}
         dev_reg = dr.async_get(hass)
         for entry in er.async_get(hass).entities.values():
-            if entry.domain != LIGHT_DOMAIN or entry.disabled_by is not None:
+            if (entry.domain != LIGHT_DOMAIN and entry.entity_id not in self.extra) or entry.disabled_by is not None:
                 continue
             device = dev_reg.async_get(entry.device_id) if entry.device_id else None
             labels = set(entry.labels) | (set(device.labels) if device else set())
@@ -184,7 +186,8 @@ class LightIndex:
         """Lights in an area that carry a category label (automatic discovery)."""
         return [
             e for e in self.by_area.get(area_id, [])
-            if self.categories_of.get(e) and not (exclude_label and exclude_label in self.lights[e].labels)
+            if e.startswith("light.") and self.categories_of.get(e)
+            and not (exclude_label and exclude_label in self.lights[e].labels)
         ]
 
     def has_label(self, entity_id: str, label_id: str | None) -> bool:

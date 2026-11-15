@@ -66,6 +66,11 @@ States and transitions
 ``vacant``
     Quiet for the required time, or never occupied.
 
+Zone holds (0.6.0): an occupied zone of the room whose ``holds_room`` is set
+keeps an *occupied* room occupied (``external_hold``), like an active Maintain
+signal. A hold never makes a vacant or uncertain room occupied; when the last
+hold ends, the room's quiet period starts then.
+
 Any new evidence during ``possible_vacancy`` returns to occupancy. Because
 occupied -> vacant always needs at least ``exit_confirmation`` of quiet, and
 presence dropouts are bridged, the output does not toggle when sensors
@@ -316,6 +321,17 @@ class RoomEngine:
         self.result: RoomResult | None = None
         # Signals that start possible occupancy lighting: they cannot confirm occupancy on their own (0.3.11).
         self.preliminary: frozenset[str] = frozenset()
+        # Occupied zones that keep this (occupied) room occupied (0.6.0): their names.
+        self.external_hold: frozenset[str] = frozenset()
+
+    def set_hold(self, names: frozenset[str], now: datetime) -> bool:
+        """Zones holding the room occupied. Returns True if it changed. The quiet period restarts when one ends."""
+        if names == self.external_hold:
+            return False
+        if self.external_hold - names and self.occupied:
+            self._activity_floor = _later(self._activity_floor, now)
+        self.external_hold = names
+        return True
 
     def reconfigure(self, sensors: tuple[SensorAssignment, ...], timing: OccupancyTiming) -> None:
         """Apply changed signal assignments (enabled, role) and timing without losing what is known.
@@ -493,19 +509,23 @@ class RoomEngine:
                     f"All occupancy sensors are unavailable ({', '.join(v.track.label() for v in capable)}); "
                     f"keeping the last state ({_occupied_word(occupied)}). An outage never causes vacancy."
                 )
-        elif holding:
+        elif holding or (self.external_hold and prev_occupied):
             occupied = True
-            corroborated = self._corroborated(views, now, window)
+            corroborated = bool(holding) and self._corroborated(views, now, window)
+            if not holding:
+                # Only zones keep it occupied: the quiet period starts when the last of them ends.
+                self._activity_floor = _later(self._activity_floor, now)
+            what = [*(v.track.label() for v in holding), *(f"zone {z}" for z in sorted(self.external_hold))]
             if corroborated or (self.visit_confirmed and prev_occupied):
                 state = OccupancyState.CONFIRMED_OCCUPANCY
                 self.visit_confirmed = True
-                code = "occupied"
-                reason = f"Occupied: {_join(v.track.label() for v in holding)} active."
+                code = "occupied" if holding else "zone_hold"
+                reason = f"Occupied: {_join(what)} active."
             else:
                 state = OccupancyState.POSSIBLE_OCCUPANCY
                 code = "possible_occupancy"
                 reason = (
-                    f"Possible occupancy: {_join(v.track.label() for v in holding)}; "
+                    f"Possible occupancy: {_join(what)}; "
                     "waiting for confirmation by a second signal or sustained presence."
                 )
         else:

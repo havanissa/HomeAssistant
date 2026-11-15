@@ -77,6 +77,17 @@
  * vacant" has the Vacant profile's settings (lights it does not set, its own
  * light level) as room values or global defaults.
  *
+ * 0.6.0: multi-zone lighting and the Room Supervisor. Settings → Presence →
+ * Zones adds zones to a room (their sensors, detection, priority, lights with
+ * On / Off / Unchanged and only the controls each light supports, daylight,
+ * manual changes, the fail-safe when sensors are unavailable) and shows which
+ * rule controls each light; Shared space groups open-plan rooms. Settings →
+ * Advanced has the relay lighting outputs (switches explicitly used as lights)
+ * and the Room Supervisor (Observing / Automatic / Off, retry limits,
+ * tolerances). The Overview shows the supervisor's status, active zones,
+ * discrepancies, health, and each light's winning rule, expected and actual
+ * state on demand.
+ *
  * 0.5.0: occupancy forecast (observation only). The room card's Overview shows
  * the room's forecast (probability by horizon, confidence, the reason); the
  * Presence tab shows its details: learning status and history coverage, the
@@ -92,7 +103,7 @@
  * reports a change.
  */
 
-const VERSION = "0.5.0";
+const VERSION = "0.6.0";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -316,6 +327,20 @@ const VACANCY = [
   ["vacant_mood", "Vacant mood", "mdi:weather-night"],
   ["leave", "Leave unchanged", "mdi:lightbulb-on-outline"],
 ];
+// Zones and the Room Supervisor (0.6.0).
+const SUP_TONE = { healthy: "ok", observing: "info", waiting: "muted", mismatch: "warn", correcting: "info", degraded: "warn",
+  device_failure: "bad", conflict: "bad", unknown: "muted", off: "muted" };
+const SUP_MODE = { observing: "Observing", automatic: "Automatic", off: "Off" };
+const SUP_RESULT = { correct: ["Correct", "ok"], mismatch: ["Mismatch", "warn"], waiting: ["Waiting", "muted"], correcting: ["Correcting", "info"],
+  device_failure: ["Device failure", "bad"], override: ["Manual change", "info"], unavailable: ["Unavailable", "warn"],
+  not_supervised: ["Not supervised", "muted"], external: ["Changed elsewhere", "warn"], conflict: ["Conflict suspected", "bad"],
+  pending: ["Pending", "muted"], paused: ["Paused", "muted"], no_expectation: ["No expectation", "muted"] };
+const ZONE_FAILSAFE = { hold: "keeps its state", vacant: "treated as vacant", occupied: "treated as occupied" };
+const ZONE_FAILSAFE_LONG = { hold: "keep its last state", vacant: "treat as vacant", occupied: "occupied while the room is" };
+const supState = (d) => (!d ? "—" : d.state === "off" ? "Off" : d.state && d.state !== "on" ? d.state
+  : `${d.brightness_pct != null ? `${d.brightness_pct} %` : "On"}${d.color_temp_kelvin ? `, ${d.color_temp_kelvin} K` : ""}`);
+const zoneAction = (t) => (t.action === "off" ? "off" : t.action === "unchanged" ? "unchanged"
+  : `${t.brightness_pct != null ? `${t.brightness_pct} %` : "on"}${t.color_temp_kelvin ? ` ${t.color_temp_kelvin} K` : ""}`);
 const fmtSecs = (s) => (s == null ? "—" : s >= 3600 && s % 3600 === 0 ? `${s / 3600} h` : s >= 60 && s % 60 === 0 ? `${s / 60} min` : `${s} s`);
 
 const OCC = {
@@ -1291,6 +1316,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
           <span class="sub ${this._model.adaptive.status === "connected" ? "" : "warn"}">${esc(STATUS_WORDS[this._model.adaptive.status])}</span></b></div>` : ""}
         ${this._daylightSummary(r)}
       </div>
+      ${this._supervisorOverviewHtml(r)}
       ${this._forecastOverviewHtml(r)}
       ${this._switchQuickHtml(r)}
       ${issues ? `<div class="issues">${issues}</div>` : `<div class="note ok">No warnings.</div>`}
@@ -1670,6 +1696,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       <details class="dladv" ${this._ui.prGlobal ? "open" : ""}><summary data-action="toggle-pr-global">Global defaults (all rooms)</summary>
         <div class="global"><div class="sub"><b>Global setting</b> — every room that does not override a value follows it. Room overrides are not changed.</div>
         ${p.timing.map(grow).join("")}</div></details>
+      ${this._zonesHtml(r)}
       ${this._forecastHtml(r)}`;
   }
 
@@ -2638,6 +2665,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       <label class="switch"><input type="checkbox" data-control="auto-discover" ${s.auto_discover ? "checked" : ""} ${ro ? "disabled" : ""}> Manage labelled lights in this area automatically</label>${this._statusHtml("room")}
       <div class="stitle">Last decision</div>
       <div class="sub">${esc(d.last_reason || d.control_mode_reason)}${d.last_errors?.length ? ` · ${esc(d.last_errors.join("; "))}` : ""}</div>
+      ${this._relaysHtml(r)}
+      ${this._supervisorSettingsHtml(r)}
       <div class="stitle">All diagnostics</div>${this._problemsHtml(r.problems)}`;
   }
 
@@ -2649,11 +2678,308 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     this._requestRender();
   }
 
+  // ------------------------------------------------------------ zones and the Room Supervisor (0.6.0)
+  // Overview: the Room Supervisor in a few lines; the per-light table (rule, expected, actual) on demand.
+  _supervisorOverviewHtml(r) {
+    const s = r.supervisor;
+    if (!s) return "";
+    const z = r.zones || {};
+    const active = (z.zones || []).filter((x) => x.status?.active).map((x) => x.name);
+    const h = s.health || {};
+    const sensors = (h.unavailable_sensors || []).length;
+    const devices = (h.unavailable_devices || []).length;
+    const open = !!this._ui.supOpen;
+    return `<div class="section sup"><div class="modehead"><div class="stitle">Room Supervisor</div>
+        <span class="pill ${SUP_TONE[s.status] || "muted"}" title="${esc(s.reason)}">${esc(s.status_word)}</span></div>
+      <div class="sub">${esc(s.reason)}</div>
+      <div class="kvs">
+        <div><span>Supervisor</span><b>${esc(SUP_MODE[s.mode] || s.mode || "—")}</b></div>
+        <div><span>Active zones</span><b>${active.length ? esc(active.join(", ")) : (z.zones || []).length ? "none" : "no zones"}</b></div>
+        <div><span>Discrepancies</span><b class="${s.discrepancies ? "warn" : ""}">${s.discrepancies}</b></div>
+        <div><span>Last check OK</span><b>${s.last_ok ? `<time datetime="${esc(s.last_ok)}">${fmtTime(s.last_ok)}</time>` : "—"}</b></div>
+        <div><span>Sensors</span><b class="${sensors ? "warn" : ""}">${h.at ? (sensors ? `${sensors} unavailable` : "all available") : "—"}</b></div>
+        <div><span>Devices</span><b class="${devices ? "warn" : ""}">${h.at ? (devices ? `${devices} unavailable` : "all available") : "—"}</b></div>
+      </div>
+      <details class="dladv" ${open ? "open" : ""}><summary data-action="sup-toggle">Lights: winning rule, expected and actual</summary>${open ? this._supTargetsHtml(r) : ""}</details></div>`;
+  }
+
+  _supTargetsHtml(r) {
+    const detail = this._ui.supDetail;
+    const targets = detail?.targets || r.supervisor.targets || [];
+    if (!targets.length) return `<div class="muted">No light checked yet.</div>`;
+    const sel = this._ui.supTarget;
+    const rows = targets.map((t) => `<tr class="${t.entity_id === sel ? "on" : ""}">
+        <td><button class="link" data-action="sup-target" data-entity="${esc(t.entity_id)}" aria-expanded="${t.entity_id === sel}">${esc(t.name)}</button>${t.type === "relay" ? ` <span class="pill muted">relay</span>` : ""}</td>
+        <td>${esc((typeof t.rule === "string" ? t.rule : t.rule?.name) || "—")}</td><td>${esc(supState(t.desired))}</td><td>${esc(supState(t.actual))}</td>
+        <td><span class="pill ${SUP_RESULT[t.result]?.[1] || "muted"}">${esc(SUP_RESULT[t.result]?.[0] || t.result)}</span></td></tr>`).join("");
+    const t = sel && detail ? detail.targets.find((x) => x.entity_id === sel) : null;
+    const cmd = (c) => (c ? `${esc(c.service)} ${esc(supState(c.data && Object.keys(c.data).length ? { state: c.service.endsWith("turn_off") ? "off" : "on", ...c.data } : { state: c.service?.endsWith("turn_off") ? "off" : "on" }))} · <time datetime="${esc(c.at)}">${fmtTime(c.at)}</time>${c.error ? ` · <span class="bad">${esc(c.error)}</span>` : ""}` : "—");
+    const info = t ? `<div class="kvs supdet">
+        <div><span>Entity</span><b><code>${esc(t.entity_id)}</code></b></div>
+        <div><span>Type</span><b>${t.type === "relay" ? "Relay output (on/off)" : "Light"}</b></div>
+        <div><span>Winning rule</span><b>${esc(t.rule?.name || "—")}${(t.rule?.superseded || []).length ? ` <span class="sub">over ${esc(t.rule.superseded.join(", "))}</span>` : ""}</b></div>
+        <div><span>Why</span><b>${esc(t.reason || "—")}</b></div>
+        <div><span>Last command</span><b>${cmd(t.last_command)}</b></div>
+        <div><span>Last verification</span><b>${t.last_verification ? `${t.last_verification.ok ? "verified" : "not reached"} · ${fmtTime(t.last_verification.at)}` : "—"}</b></div>
+        <div><span>Last correction</span><b>${t.last_correction ? `attempt ${t.last_correction.attempt} · ${esc(t.last_correction.result)} · ${fmtTime(t.last_correction.at)}` : "—"}</b></div>
+        <div><span>Error</span><b>${esc(t.error || "—")}</b></div></div>` : "";
+    const ro = !this._canEdit;
+    return `<div class="tscroll"><table class="fct"><thead><tr><th>Light</th><th>Rule</th><th>Expected</th><th>Actual</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${info}
+      <div class="sub">Expected is what the winning rule requests; actual is what Home Assistant reports (it may differ from the physical light). A light set by a person is never corrected.</div>
+      <div>${ro ? "" : `<button class="btn ghost small" data-action="sup-check">Check now</button>`} <button class="link" data-action="tab" data-tab="advanced">Supervisor settings</button>${this._statusHtml("sup-check")}</div>
+      ${this._supLogHtml(r)}`;
+  }
+
+  _supLogHtml(r) {
+    const entries = (this._ui.supDetail || r.supervisor)?.decisions?.entries || [];
+    if (!entries.length) return `<div class="sub">The supervisor has logged nothing yet (routine successful checks are counted, not logged).</div>`;
+    return `<div class="stitle small">Supervisor log</div>${this._decisionList(entries.slice(0, 5), "sup")}`;
+  }
+
+  async _loadSupervisor(check = false) {
+    try {
+      this._ui.supDetail = await this._ws({ type: `${WS}/supervisor/room`, area_id: this._config.area, ...(check ? { check: true } : {}) });
+      if (check) this._status["sup-check"] = { ok: "Checked" };
+    } catch (err) { this._status["sup-check"] = { error: err?.message || String(err) }; }
+    this._requestRender();
+  }
+
+  // Settings → Presence → Zones: the room's zones, which rule controls each light, and its shared space.
+  _zonesHtml(r) {
+    const z = r.zones;
+    if (!z) return "";
+    const ro = !this._canEdit;
+    const draft = this._ui.zd;
+    const items = z.zones.map((zone) => {
+      const st = zone.status;
+      const [word, tone] = !zone.enabled ? ["Off", "muted"] : !st ? ["—", "muted"] : st.failsafe ? [`Sensor unavailable (${ZONE_FAILSAFE[st.failsafe]})`, "warn"]
+        : st.active ? ["Occupied", "ok"] : ["Vacant", "muted"];
+      const sensors = zone.sensors.map((e) => z.sensors.find((s) => s.entity_id === e)?.name || e).join(", ") || "no sensor";
+      const lights = zone.targets.map((t) => `${z.targets.find((x) => x.entity_id === t.entity_id)?.name || t.entity_id} ${zoneAction(t)}`).join(" · ") || "no light";
+      return `<li class="zrow"><div class="zmain"><b>${esc(zone.name)}</b> <span class="pill ${tone}">${esc(word)}</span> <span class="sub">priority ${zone.priority}</span>
+          <div class="sub">${esc(sensors)}</div><div class="sub">${esc(lights)}</div></div>
+          ${ro ? "" : `<button class="btn ghost small" data-action="zn-edit" data-zone="${esc(zone.id)}">Edit</button>`}</li>`;
+    }).join("");
+    const rules = z.rules.filter((x) => x.kind === "zone" || x.superseded.length);
+    return `<div class="stitle" id="so-zones">Zones</div>
+      <div class="sub">Optional parts of ${esc(r.name)} with their own sensors and lighting, e.g. a sink and a shower. A zone uses this room's sensors, and its lighting rule wins over the mood while it is occupied (the higher priority wins between zones). Home Assistant's areas are not changed. A room without zones works exactly as before.</div>
+      ${items ? `<ul class="plist">${items}</ul>` : `<div class="muted">No zones in this room.</div>`}
+      ${draft ? this._zoneFormHtml(r, draft) : ro || z.zones.length >= z.limits.max_zones ? "" : `<div><button class="btn small" data-action="zn-add"><ha-icon icon="mdi:plus"></ha-icon>Add zone</button></div>`}
+      ${this._statusHtml("zn")}
+      ${rules.length ? `<details class="dladv" ${this._ui.znRules ? "open" : ""}><summary data-action="zn-rules">Which rule controls each light now</summary>
+        <div class="tscroll"><table class="fct"><thead><tr><th>Light</th><th>Rule</th><th>Takes precedence over</th><th>Now</th></tr></thead><tbody>
+        ${z.rules.map((x) => `<tr><td>${esc(x.name)}</td><td>${esc(x.rule || "—")}</td><td>${esc(x.superseded.join(", ") || "—")}</td><td class="sub">${esc(x.reason)}</td></tr>`).join("")}</tbody></table></div></details>` : ""}
+      ${this._spaceHtml(r)}`;
+  }
+
+  _zoneFormHtml(r, d) {
+    const z = r.zones;
+    const lim = z.limits;
+    const sel = (key, value, options) => `<select data-control="zd-${key}" aria-label="${esc(key)}">${options.map(([v, l]) => `<option value="${v}" ${String(value) === String(v) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+    const sensors = z.sensors.map((s) => `<label class="chk"><input type="checkbox" data-control="zd-sensor" data-entity="${esc(s.entity_id)}" ${d.sensors.includes(s.entity_id) ? "checked" : ""}>
+        ${esc(s.name)} <span class="sub">${esc(s.kind_name)}${s.used ? "" : " · not used for occupancy (Presence)"}</span></label>`).join("");
+    const lights = z.targets.map((t) => {
+      const cur = d.targets.find((x) => x.entity_id === t.entity_id);
+      const caps = t.capabilities || {};
+      const on = cur && cur.action === "on";
+      const num = (key, min, max, ph) => `<input type="number" class="num" min="${min}" max="${max}" placeholder="${ph}" value="${cur?.[key] ?? ""}" data-control="zd-tnum" data-entity="${esc(t.entity_id)}" data-key="${key}" aria-label="${esc(`${t.name} ${key}`)}">`;
+      return `<li class="zlight"><label class="chk"><input type="checkbox" data-control="zd-target" data-entity="${esc(t.entity_id)}" ${cur ? "checked" : ""}> ${esc(t.name)}</label>${t.type === "relay" ? ` <span class="pill muted">relay</span>` : ""}
+        ${cur ? `<div class="zctl"><select data-control="zd-taction" data-entity="${esc(t.entity_id)}" aria-label="${esc(`${t.name} action`)}">${[["on", "On"], ["off", "Off"], ["unchanged", "Unchanged"]].map(([v, l]) => `<option value="${v}" ${cur.action === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+          ${on && caps.brightness ? `<span>${num("brightness_pct", 1, 100, "on")} %</span>` : ""}
+          ${on && caps.color_temp ? `<span>${num("color_temp_kelvin", lim.kelvin[0], lim.kelvin[1], "K")} K</span>` : ""}
+          ${cur.action !== "unchanged" && caps.transition ? `<span>${num("transition", 0, lim.transition[1], "s")} s fade</span>` : ""}</div>` : ""}</li>`;
+    }).join("");
+    const timing = [["correlation_window", "Confirmation window"], ["inactivity_timeout", "Hold after the last detection"],
+      ["exit_confirmation", "Exit confirmation"], ["dropout_grace", "Sensor dropout grace"]].map(([k, l]) => `<div class="frow"><label for="so-zt-${k}">${l}</label>
+        <div class="fval"><input id="so-zt-${k}" type="number" class="num" min="${lim.timing[k][0]}" max="${lim.timing[k][1]}" placeholder="${z.room_timing[k]}" value="${d.timing[k] ?? ""}" data-control="zd-timing" data-key="${k}"> s
+        <span class="sub">${d.timing[k] == null ? `room value (${fmtSecs(z.room_timing[k])})` : "zone value"}</span></div></div>`).join("");
+    return `<div class="zform" role="group" aria-label="${d.id ? `Zone ${esc(d.name)}` : "New zone"}">
+      <div class="frow"><label for="so-zname">Name</label><div class="fval"><input id="so-zname" type="text" maxlength="60" value="${esc(d.name)}" data-control="zd-name">
+        <label class="chk"><input type="checkbox" data-control="zd-enabled" ${d.enabled ? "checked" : ""}> Enabled</label></div></div>
+      <div class="stitle small">Presence sensors of this zone</div>
+      <div class="chks">${sensors || `<span class="muted">The room has no sensors.</span>`}</div>
+      <div class="frow"><label>Occupied</label><div class="fval">${sel("activation", d.activation, [["possible", "at the first detection"], ["confirmed", "when presence is confirmed"]])}</div></div>
+      <div class="frow"><label>Priority</label><div class="fval"><input type="number" class="num" min="${lim.priority[0]}" max="${lim.priority[1]}" value="${d.priority}" data-control="zd-priority"> <span class="sub">higher wins between zones</span></div></div>
+      <div class="stitle small">Lights of this zone</div>
+      <ul class="plist zlights">${lights}</ul>
+      <div class="sub">Only what each light supports is shown (a relay output switches on and off). Unchanged: the zone keeps the light as it is, and lower rules do not change it.</div>
+      <details class="dladv" ${this._ui.zdMore ? "open" : ""}><summary data-action="zn-more">Detection, daylight and manual changes</summary>
+        <div class="frow"><label>Keeps the room occupied</label><div class="fval"><label class="chk"><input type="checkbox" data-control="zd-holds_room" ${d.holds_room ? "checked" : ""}> while this zone is occupied</label></div></div>
+        <div class="frow"><label>If its sensors are unavailable</label><div class="fval">${sel("unavailable", d.unavailable, Object.entries(ZONE_FAILSAFE_LONG))}</div></div>
+        <div class="frow"><label>Manual changes</label><div class="fval">${sel("manual", d.manual, [["respect", "respected"], ["override", "zone wins over earlier ones"]])}</div></div>
+        <div class="frow"><label>Switch on in daylight</label><div class="fval">${sel("daylight", d.daylight, [["room", "only when the room needs light"], ["always", "always (ignore light level)"], ["below", "below its own light level"]])}
+          ${d.daylight === "below" ? `<input type="number" class="num" min="${lim.lux[0]}" max="${lim.lux[1]}" value="${d.on_below ?? ""}" data-control="zd-on_below" aria-label="Light level"> lx` : ""}</div></div>
+        <div class="frow"><label>When the zone ends</label><div class="fval">${sel("release", d.release, [["restore", "room rules take over"], ["leave", "lights stay as they are"]])}</div></div>
+        ${timing}
+      </details>
+      <div class="ibtns"><button class="btn small" data-action="zn-save">Save zone</button> <button class="link" data-action="zn-cancel">Cancel</button>
+        ${d.id ? `<button class="btn ghost small warnbtn" data-action="zn-delete">Delete zone</button>` : ""}</div></div>`;
+  }
+
+  _spaceHtml(r) {
+    const z = r.zones;
+    const ro = !this._canEdit;
+    const sp = z.space;
+    const d = this._ui.sd;
+    const moods = (this._model.moods || []).map((m) => m.name);
+    const head = `<div class="stitle">Shared space</div>
+      <div class="sub">Rooms that form one open-plan space (e.g. Køkur and Stova). Each room keeps its own occupancy, zones and lights; a light both rooms control is never switched off by one while the other is occupied.</div>`;
+    if (d) {
+      return `${head}<div class="zform" role="group" aria-label="Shared space">
+        <div class="frow"><label for="so-spname">Name</label><div class="fval"><input id="so-spname" type="text" maxlength="60" value="${esc(d.name)}" data-control="sd-name"></div></div>
+        <div class="chks">${z.space_rooms.map((x) => `<label class="chk"><input type="checkbox" data-control="sd-room" data-area="${esc(x.area_id)}" ${d.rooms.includes(x.area_id) ? "checked" : ""}> ${esc(x.name)}${x.adjacent ? ` <span class="sub">adjacent</span>` : ""}</label>`).join("")}</div>
+        <div class="frow"><label>Mood</label><div class="fval"><select data-control="sd-mood"><option value="">each room's own mood</option>${moods.map((m) => `<option ${m === d.mood_override ? "selected" : ""}>${esc(m)}</option>`).join("")}</select></div></div>
+        <div class="frow"><label>When a room is vacant</label><div class="fval"><select data-control="sd-vacancy"><option value="independent" ${d.vacancy === "independent" ? "selected" : ""}>it runs its own vacancy action</option>
+          <option value="together" ${d.vacancy === "together" ? "selected" : ""}>it waits until the whole space is vacant</option></select></div></div>
+        <div class="ibtns"><button class="btn small" data-action="sp-save">Save shared space</button> <button class="link" data-action="sp-cancel">Cancel</button>
+          ${d.id ? `<button class="btn ghost small warnbtn" data-action="sp-delete">Remove shared space</button>` : ""}</div>${this._statusHtml("sp")}</div>`;
+    }
+    if (!sp) return `${head}<div class="muted">${esc(r.name)} is not part of a shared space.</div>${ro ? "" : `<div><button class="btn ghost small" data-action="sp-edit">Create a shared space</button></div>`}${this._statusHtml("sp")}`;
+    return `${head}<div><b>${esc(sp.name)}</b>: ${esc(sp.rooms.map((a) => sp.room_names[a] || a).join(", "))}
+        <div class="sub">Mood: ${esc(sp.mood_override || "each room's own")} · ${sp.vacancy === "together" ? "vacant together" : "each room vacates on its own"}</div></div>
+      ${ro ? "" : `<div><button class="btn ghost small" data-action="sp-edit">Edit shared space</button></div>`}${this._statusHtml("sp")}`;
+  }
+
+  // Settings → Advanced: relay lighting outputs and the Room Supervisor's settings.
+  _relaysHtml(r) {
+    const z = r.zones;
+    if (!z) return "";
+    const ro = !this._canEdit;
+    const all = this._ui.rlAll;
+    const list = z.relay_candidates.filter((c) => all || c.chosen || c.in_area);
+    return `<div class="stitle">Relay lighting outputs</div>
+      <div class="sub">Switch entities that switch a light (a relay). Only the switches ticked here are used as lights of ${esc(r.name)}: they get on/off only (no brightness or colour) and are switched with switch.turn_on / switch.turn_off. Wall switches and other switches are never treated as lights.</div>
+      <div class="chks">${list.map((c) => `<label class="chk"><input type="checkbox" data-control="rl-relay" data-entity="${esc(c.entity_id)}" ${c.chosen ? "checked" : ""} ${ro ? "disabled" : ""}>
+        ${esc(c.name)} <code>${esc(c.entity_id)}</code>${c.in_area ? ` <span class="sub">in this room</span>` : ""}${c.missing ? ` <span class="sub warn">missing</span>` : ""}</label>`).join("") || `<span class="muted">No switch entity in this room.</span>`}</div>
+      <div><button class="link" data-action="rl-all">${all ? "Show this room's switches only" : "Show every switch"}</button>${this._statusHtml("rl")}</div>`;
+  }
+
+  _supervisorSettingsHtml(r) {
+    const s = r.supervisor;
+    if (!s) return "";
+    const ro = !this._canEdit;
+    const own = s.room_settings || {};
+    const glob = s.global_settings || {};
+    const modes = [["observing", "Observing", "mdi:eye-outline"], ["automatic", "Automatic", "mdi:auto-fix"], ["off", "Off", "mdi:power"]];
+    const num = (k, label, unit) => `<div class="frow"><label for="so-sup-${k}">${label}</label><div class="fval">
+        <input id="so-sup-${k}" type="number" class="num" placeholder="${glob[k]}" value="${own[k] ?? ""}" data-control="sup-num" data-key="${k}" ${ro ? "disabled" : ""}> ${unit}
+        <span class="pill ${own[k] != null ? "info" : "muted"}">${own[k] != null ? "Room override" : `Global default (${glob[k]})`}</span>${this._statusHtml(`sup-${k}`)}</div></div>`;
+    return `<div class="stitle">Room Supervisor</div>
+      <div class="sub">Checks that every light does what its winning rule requests. Observing reports differences only. Automatic also corrects a device that did not follow a command, at most ${glob.max_retries} times with growing delays and at most ${glob.max_per_hour} times an hour per device; a person's change is never corrected, and a change by another automation is reported, not fought.</div>
+      <div class="segs mode" role="radiogroup" aria-label="Room Supervisor mode">${modes.map(([v, l, icon]) => `<button class="seg ${s.mode === v ? "on" : ""}" role="radio" aria-checked="${s.mode === v}" data-action="sup-mode" data-value="${v}" ${ro ? "disabled" : ""}><ha-icon icon="${icon}"></ha-icon>${l}</button>`).join("")}</div>
+      <div class="sub">${own.mode ? `Room override · global default ${esc(SUP_MODE[glob.mode])}` : `Global default (${esc(SUP_MODE[glob.mode])})`}
+        ${own.mode && !ro ? ` <button class="link" data-action="sup-mode" data-value="">Use global default</button>` : ""}${this._statusHtml("sup-mode")}</div>
+      <details class="dladv" ${this._ui.supMore ? "open" : ""}><summary data-action="sup-more">More supervisor settings</summary>
+        ${num("verify_delay", "Verify after", "s")}${num("reconcile_interval", "Check every", "s")}${num("health_interval", "Sensor health every", "s")}
+        ${num("max_retries", "Corrections per mismatch", "")}${num("retry_delay", "First retry after", "s")}${num("max_per_hour", "Corrections per device per hour", "")}
+        ${num("brightness_tolerance", "Brightness tolerance", "%")}${num("kelvin_tolerance", "Colour temperature tolerance", "K")}
+        <div class="frow"><label>Changes by automations</label><div class="fval"><select data-control="sup-external" ${ro ? "disabled" : ""}>
+          <option value="" ${own.correct_external == null ? "selected" : ""}>global default (${glob.correct_external ? "correct once" : "report only"})</option>
+          <option value="false" ${own.correct_external === false ? "selected" : ""}>report only</option>
+          <option value="true" ${own.correct_external === true ? "selected" : ""}>correct once, then report a conflict</option></select>${this._statusHtml("sup-correct_external")}</div></div>
+        <details class="dladv" ${this._ui.supGlobal ? "open" : ""}><summary data-action="sup-global">Global defaults (all rooms)</summary>
+          <div class="segs mode small" role="radiogroup" aria-label="Global Room Supervisor mode">${modes.map(([v, l]) => `<button class="seg ${glob.mode === v ? "on" : ""}" role="radio" aria-checked="${glob.mode === v}" data-action="sup-gmode" data-value="${v}" ${ro ? "disabled" : ""}>${l}</button>`).join("")}</div>${this._statusHtml("supg-mode")}
+        </details></details>`;
+  }
+
+  _onZoneAction(a, el) {
+    const ui = this._ui;
+    const area = this._config.area;
+    const r = this._model.room;
+    if (a === "zn-add") {
+      ui.zd = { name: `Zone ${(r.zones.zones || []).length + 1}`, enabled: true, sensors: [], activation: "possible", priority: 50, holds_room: true,
+        unavailable: "hold", manual: "respect", daylight: "room", on_below: null, release: "restore", timing: {}, targets: [] };
+    } else if (a === "zn-edit") {
+      const zone = r.zones.zones.find((x) => x.id === el.dataset.zone);
+      ui.zd = zone ? JSON.parse(JSON.stringify({ ...zone, status: undefined })) : null;
+    } else if (a === "zn-cancel") ui.zd = null;
+    else if (a === "zn-more") { ui.zdMore = !el.parentElement.open; return; }
+    else if (a === "zn-rules") { ui.znRules = !el.parentElement.open; return; }
+    else if (a === "zn-save") {
+      const d = ui.zd;
+      const zone = { name: (d.name || "").trim() || "Zone", enabled: d.enabled, sensors: d.sensors, activation: d.activation, priority: Number(d.priority) || 50,
+        holds_room: d.holds_room, unavailable: d.unavailable, manual: d.manual, daylight: d.daylight, on_below: d.daylight === "below" ? d.on_below : null,
+        release: d.release, timing: Object.fromEntries(["correlation_window", "exit_confirmation", "inactivity_timeout", "dropout_grace"].map((k) => [k, d.timing[k] ?? null])),
+        targets: d.targets.map((t) => ({ entity_id: t.entity_id, action: t.action, brightness_pct: t.brightness_pct ?? null, color_temp_kelvin: t.color_temp_kelvin ?? null, transition: t.transition ?? null })) };
+      if (d.id) zone.id = d.id;
+      this._save("zn", { type: `${WS}/zone/set`, area_id: area, zone }, "Zone saved").then(() => { if (!this._status.zn?.error) { ui.zd = null; this._requestRender(); } });
+      return;
+    } else if (a === "zn-delete") {
+      if (!confirm(`Delete the zone ${ui.zd.name}? If it is occupied now, its lights follow ${r.name}'s other rules at once.`)) return;
+      this._save("zn", { type: `${WS}/zone/remove`, area_id: area, zone_id: ui.zd.id }, "Zone deleted");
+      ui.zd = null;
+    } else if (a === "sp-edit") {
+      const sp = r.zones.space;
+      ui.sd = sp ? { id: sp.id, name: sp.name, rooms: [...sp.rooms], mood_override: sp.mood_override, vacancy: sp.vacancy }
+        : { name: "Shared space", rooms: [area, ...r.zones.space_rooms.filter((x) => x.adjacent).map((x) => x.area_id)], mood_override: null, vacancy: "independent" };
+    } else if (a === "sp-cancel") ui.sd = null;
+    else if (a === "sp-save") {
+      const d = ui.sd;
+      this._save("sp", { type: `${WS}/space/set`, space: { ...(d.id ? { id: d.id } : {}), name: (d.name || "").trim() || "Shared space", rooms: d.rooms, mood_override: d.mood_override || null, vacancy: d.vacancy } }, "Shared space saved")
+        .then(() => { if (!this._status.sp?.error) { ui.sd = null; this._requestRender(); } });
+      return;
+    } else if (a === "sp-delete") {
+      if (!confirm(`Remove the shared space ${ui.sd.name}? Its rooms keep their own settings.`)) return;
+      this._save("sp", { type: `${WS}/space/remove`, space_id: ui.sd.id }, "Shared space removed");
+      ui.sd = null;
+    } else if (a === "rl-all") ui.rlAll = !ui.rlAll;
+    else if (a === "sup-toggle") { ui.supOpen = !el.parentElement.open; if (ui.supOpen) this._loadSupervisor(); return; }
+    else if (a === "sup-target") { ui.supTarget = ui.supTarget === el.dataset.entity ? null : el.dataset.entity; this._loadSupervisor(); }
+    else if (a === "sup-check") { this._status["sup-check"] = { busy: true }; this._loadSupervisor(true); }
+    else if (a === "sup-more") { ui.supMore = !el.parentElement.open; return; }
+    else if (a === "sup-global") { ui.supGlobal = !el.parentElement.open; return; }
+    else if (a === "sup-mode") {
+      const v = el.dataset.value || null;
+      if (v === "automatic" && !confirm(`Let the Room Supervisor correct lights in ${r.name}? It only sends a command when a device did not follow Smart Occupancy's own command, within the retry limits; it never corrects a person's change. It has no effect while the room is Observing.`)) return;
+      this._save("sup-mode", { type: `${WS}/supervisor/set`, area_id: area, mode: v }, v ? SUP_MODE[v] : "Uses the global default");
+    } else if (a === "sup-gmode") this._save("supg-mode", { type: `${WS}/supervisor/set`, mode: el.dataset.value }, "Global default");
+    this._render();
+  }
+
+  _onZoneControl(c, el) {
+    const ui = this._ui;
+    const area = this._config.area;
+    const d = ui.zd;
+    const sd = ui.sd;
+    const num = (v) => (v === "" ? null : Number(v));
+    if (c === "zd-name") d.name = el.value;
+    else if (c === "zd-enabled" || c === "zd-holds_room") d[c.slice(3)] = el.checked;
+    else if (c === "zd-sensor") d.sensors = el.checked ? [...new Set([...d.sensors, el.dataset.entity])] : d.sensors.filter((x) => x !== el.dataset.entity);
+    else if (["zd-activation", "zd-unavailable", "zd-manual", "zd-daylight", "zd-release"].includes(c)) d[c.slice(3)] = el.value;
+    else if (c === "zd-priority") d.priority = num(el.value) ?? 50;
+    else if (c === "zd-on_below") d.on_below = num(el.value);
+    else if (c === "zd-timing") { if (el.value === "") delete d.timing[el.dataset.key]; else d.timing[el.dataset.key] = Number(el.value); }
+    else if (c === "zd-target") {
+      d.targets = el.checked ? [...d.targets, { entity_id: el.dataset.entity, action: "on", brightness_pct: null, color_temp_kelvin: null, transition: null }]
+        : d.targets.filter((t) => t.entity_id !== el.dataset.entity);
+    } else if (c === "zd-taction") d.targets = d.targets.map((t) => (t.entity_id === el.dataset.entity ? { ...t, action: el.value } : t));
+    else if (c === "zd-tnum") d.targets = d.targets.map((t) => (t.entity_id === el.dataset.entity ? { ...t, [el.dataset.key]: num(el.value) } : t));
+    else if (c === "sd-name") sd.name = el.value;
+    else if (c === "sd-room") sd.rooms = el.checked ? [...new Set([...sd.rooms, el.dataset.area])] : sd.rooms.filter((x) => x !== el.dataset.area);
+    else if (c === "sd-mood") sd.mood_override = el.value || null;
+    else if (c === "sd-vacancy") sd.vacancy = el.value;
+    else if (c === "rl-relay") {
+      const chosen = new Set(this._model.room.zones.relays);
+      if (el.checked) chosen.add(el.dataset.entity); else chosen.delete(el.dataset.entity);
+      this._save("rl", { type: `${WS}/relay/set`, area_id: area, relays: [...chosen] }, el.checked ? "Used as a light" : "Not a light");
+      return;
+    } else if (c === "sup-num") {
+      this._save(`sup-${el.dataset.key}`, { type: `${WS}/supervisor/set`, area_id: area, [el.dataset.key]: num(el.value) }, el.value === "" ? "Uses the global default" : "Room override");
+      return;
+    } else if (c === "sup-external") {
+      this._save("sup-correct_external", { type: `${WS}/supervisor/set`, area_id: area, correct_external: el.value === "" ? null : el.value === "true" }, "Saved");
+      return;
+    }
+    this._render();
+  }
+
   _onAction(a, el) {
     const area = this._config.area;
     const ui = this._ui;
     if (a.startsWith("sw-")) { this._onSwitchAction(a, el); return; }
     if (a.startsWith("fc-")) { this._onForecastAction(a, el); return; }
+    if (/^(zn|sp|rl|sup)-/.test(a)) { this._onZoneAction(a, el); return; }
     if (a === "tab") this._openTab(el.dataset.tab);
     else if (a === "vac-action") this._setVacancy(el.dataset.value);
     else if (a === "ov-profile") {
@@ -2751,6 +3077,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const s = this._model.room.settings;
     if (c && c.startsWith("sw-")) { this._onSwitchControl(c, el); return; }
     if (c && c.startsWith("fc-")) { this._onForecastControl(c, el); return; }
+    if (c && /^(zd|sd|rl|sup)-/.test(c)) { this._onZoneControl(c, el); return; }
     if (c === "edit-mood") { this._mood = el.value; this._ui.edit = null; this._fetch(); }
     else if (c === "room-mood") this._save("room-mood", { type: `${WS}/room/set`, area_id: area, mood_override: el.value || null });
     else if (c === "pick-light" && el.value) { this._ui.edit = { scope: "light", target: el.value }; this._render(); }
@@ -3125,6 +3452,19 @@ const STYLE = `<style>
   .fct.small { font-size: 0.75em; }
   .fct.small th, .fct.small td { padding: 2px; text-align: center; }
   .tscroll { overflow-x: auto; }
+  /* Zones and the Room Supervisor (0.6.0) */
+  .section.sup { margin-top: 10px; }
+  .kvs b.warn { color: var(--warning-color, #ff9800); }
+  .zrow { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-bottom: 1px solid var(--divider-color); }
+  .zmain { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .zform { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--divider-color); border-radius: 8px; }
+  .chks { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  .chk { display: inline-flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+  .supdet { margin-top: 6px; }
+  .zlight { padding: 6px 0; border-bottom: 1px solid var(--divider-color); }
+  .zctl { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 4px 0 0 26px; }
+  .zform select { max-width: 100%; }
+  table.fct tr.on td { background: var(--secondary-background-color); }
   .fcf { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
   .fclearn { line-height: 1.5; }
   .chartcap { font-size: 0.85em; font-weight: 500; margin-top: 4px; }

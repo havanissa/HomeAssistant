@@ -8,6 +8,11 @@ member of it, its device, its area or floor, or one of its labels, and the
 actions call a light-related service (``light.*``, ``homeassistant.turn_*``,
 ``scene.*`` or a script that does). Scenes and scripts called by the
 automation are followed. Templated targets cannot be detected.
+
+Relay lighting outputs (0.6.0, ``switch.*`` entities designated as lights):
+an automation controls one when its actions call a switch-related service
+(``switch.*``, ``homeassistant.turn_*``, ``scene.*``, ``script.*``) and
+reference it in the same way. Lights are matched exactly as before.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from .lighting import LightIndex, expand_group
 from .occupancy import friendly_name
 
 _LIGHT_SERVICE_PREFIXES = ("light.", "scene.", "script.")
+_SWITCH_SERVICE_PREFIXES = ("switch.", "scene.", "script.")
 _LIGHT_SERVICES = frozenset({"homeassistant.turn_on", "homeassistant.turn_off", "homeassistant.toggle"})
 _MAX_DEPTH = 3
 
@@ -36,6 +42,7 @@ class References:
     floors: set[str] = field(default_factory=set)
     labels: set[str] = field(default_factory=set)
     controls_lights: bool = False
+    controls_switches: bool = False
     via_scene: dict[str, str] = field(default_factory=dict)  # light -> scene
     via_script: set[str] = field(default_factory=set)
 
@@ -46,6 +53,7 @@ class References:
         self.floors |= other.floors
         self.labels |= other.labels
         self.controls_lights |= other.controls_lights
+        self.controls_switches |= other.controls_switches
         self.via_scene.update(other.via_scene)
         self.via_script |= other.via_script
 
@@ -58,8 +66,9 @@ class AutomationInfo:
     refs: References
 
 
-def _calls_light_service(config: Any) -> bool:
-    """Does an action configuration call a light-related service?"""
+def _calls_light_service(config: Any, prefixes: tuple[str, ...] = _LIGHT_SERVICE_PREFIXES,
+                         device_domain: str = "light") -> bool:
+    """Does an action configuration call a light-related (or, for relays, switch-related) service?"""
     stack = [config]
     while stack:
         item = stack.pop()
@@ -67,10 +76,10 @@ def _calls_light_service(config: Any) -> bool:
             for key in ("action", "service"):
                 value = item.get(key)
                 if isinstance(value, str) and (
-                    value.startswith(_LIGHT_SERVICE_PREFIXES) or value in _LIGHT_SERVICES
+                    value.startswith(prefixes) or value in _LIGHT_SERVICES
                 ):
                     return True
-            if item.get("domain") == "light" and "device_id" in item:
+            if item.get("domain") == device_domain and "device_id" in item:
                 return True  # device action
             stack.extend(item.values())
         elif isinstance(item, list):
@@ -104,11 +113,15 @@ def _expand(hass: HomeAssistant, refs: References, depth: int, seen: set[str]) -
         if entity_id.startswith("scene.") and (state := hass.states.get(entity_id)):
             members = state.attributes.get(ATTR_ENTITY_ID) or []
             lights = [m for m in members if isinstance(m, str) and m.startswith("light.")]
-            for light in lights:
+            relays = [m for m in members if isinstance(m, str) and m.startswith("switch.")]
+            for light in (*lights, *relays):
                 refs.via_scene.setdefault(light, entity_id)
             if lights:
                 refs.entities |= set(lights)
                 refs.controls_lights = True
+            if relays:
+                refs.entities |= set(relays)
+                refs.controls_switches = True
         elif entity_id.startswith("script.") and scripts is not None:
             entity = scripts.get_entity(entity_id)
             script = getattr(entity, "script", None)
@@ -116,8 +129,10 @@ def _expand(hass: HomeAssistant, refs: References, depth: int, seen: set[str]) -
                 continue
             sub = _script_refs(script)
             sub.controls_lights = _calls_light_service(getattr(entity, "raw_config", None))
+            sub.controls_switches = _calls_light_service(getattr(entity, "raw_config", None),
+                                                         _SWITCH_SERVICE_PREFIXES, "switch")
             _expand(hass, sub, depth + 1, seen)
-            if sub.controls_lights:
+            if sub.controls_lights or sub.controls_switches:
                 refs.via_script.add(entity_id)
             refs.merge(sub)
 
@@ -138,7 +153,9 @@ def collect_automations(hass: HomeAssistant) -> list[AutomationInfo]:
             labels=set(getattr(entity, "referenced_labels", ()) or ()),
         )
         raw = getattr(entity, "raw_config", None) or {}
-        refs.controls_lights = _calls_light_service(raw.get("actions", raw.get("action")) if isinstance(raw, dict) else None)
+        actions = raw.get("actions", raw.get("action")) if isinstance(raw, dict) else None
+        refs.controls_lights = _calls_light_service(actions)
+        refs.controls_switches = _calls_light_service(actions, _SWITCH_SERVICE_PREFIXES, "switch")
         _expand(hass, refs, 0, set())
         out.append(AutomationInfo(
             entity_id=entity.entity_id,
@@ -220,7 +237,7 @@ def find_conflicts(
         found: list[Conflict] = []
         for auto in automations:
             refs = auto.refs
-            if not refs.controls_lights:
+            if not (refs.controls_switches if light.startswith("switch.") else refs.controls_lights):
                 continue
             hit: tuple[str, str] | None = None
             for entity_id, how in related.items():

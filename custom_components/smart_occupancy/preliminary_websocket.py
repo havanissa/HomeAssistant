@@ -20,7 +20,7 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN, LUX_MAX_THRESHOLD, LUX_MIN, TRANSITION_MAX, LightAction
 from .controller import LightingController
-from .lighting import light_capabilities
+from .targets import capabilities as target_capabilities, is_relay
 from .occupancy import friendly_name
 from .presence import _KIND_WORDS
 from .preliminary import (
@@ -70,7 +70,8 @@ def preliminary_model(hass: HomeAssistant, ctrl: LightingController, area_id: st
         state = hass.states.get(entity_id)
         return {"entity_id": entity_id, "name": friendly_name(hass, entity_id) or entity_id,
                 "state": state.state if state else None,
-                "capabilities": light_capabilities(hass, entity_id).as_dict(),
+                "capabilities": target_capabilities(hass, entity_id).as_dict(),
+                "type": "relay" if is_relay(entity_id) else "light",
                 "is_group": entity_id in managed.members or entity_id in managed.opaque_groups}
 
     targets = []
@@ -181,8 +182,9 @@ def ws_preliminary_set(hass: HomeAssistant, connection: websocket_api.ActiveConn
         targets: list[PreliminaryTarget] = []
         for item in msg["targets"]:
             entity_id = item["entity_id"]
-            if entity_id.split(".", 1)[0] != "light":
-                connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, f"{entity_id} is not a light")
+            if entity_id.split(".", 1)[0] != "light" and entity_id not in ctrl.lighting.room(area_id).relays:
+                connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT,
+                                      f"{entity_id} is not a light or a relay output of this room")
                 return
             if entity_id not in controlled and current.target(entity_id) is None:
                 connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT,

@@ -535,7 +535,7 @@ async def test_dashboard_settings_persist_and_samples_survive_restart(hass: Home
     assert ctrl.lighting.room(lit.area).daylight.uncertain == UncertainPolicy.STAY_OFF
     assert ctrl.lighting.daylight.outdoor_entity == OUTDOOR
     assert ctrl.daylight.rooms[lit.area].trusted[LUX].lux == 45
-    assert hass_storage["smart_occupancy.lighting"]["minor_version"] == 6  # 0.4.0: occupied and vacant profiles
+    assert hass_storage["smart_occupancy.lighting"]["minor_version"] == 7  # 0.6.0: zones, relays, Room Supervisor
 
 
 async def test_upgrade_from_032_store_migrates(hass: HomeAssistant, lit: Lit, freezer, lights,

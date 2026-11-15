@@ -91,6 +91,17 @@ a profile never sends a command (0.4.0): changes are used at the next
 trigger, or when the user explicitly tests a profile
 (``async_test_profile``), which sends real commands and keeps the tested
 lights as a manual override.
+
+Multi-zone lighting and the Room Supervisor (0.6.0): rooms may have logical
+zones (``zones.py``, ``zone_runtime.py``) with their own occupancy and
+lighting rules, relay outputs (``switch.*`` designated as lights,
+``targets.py``) and belong to a shared space. Every plan passes the central
+rule engine (``arbitration.py``) before it is executed, so each target gets
+one winning rule. Zone changes are applied by ``async_zones`` (only the
+targets whose winning rule changed). The Room Supervisor (``supervisor.py``)
+compares the effective plan with the reported device states and, where
+allowed, corrects genuine discrepancies through ``async_supervisor_correct``.
+A room without zones, relays or a shared space behaves exactly as before.
 """
 
 from __future__ import annotations
@@ -182,6 +193,7 @@ from .occupancy import friendly_name
 from .planner import (
     BLOCKED,
     CHANGE,
+    SKIPPED,
     UNCHANGED,
     Plan,
     PlanItem,
@@ -194,6 +206,12 @@ from .preliminary import TRIGGER as PRELIMINARY, ConfirmAction, EffectivePrelimi
 from .preliminary import evidence as prelim_evidence, preliminary_gate
 from .profiles import mood_chain, resolve
 from .supervision import ControlNotPermittedError, assert_room_control_permitted, assert_switch_control_permitted
+from . import arbitration as arb
+from .preliminary import preliminary_gate as zone_gate
+from .supervisor import Supervisor
+from .targets import by_domain, capabilities as target_capabilities, is_relay, service_data
+from .zone_runtime import ZoneManager
+from .zones import SpaceVacancy, ZoneDaylight, ZoneRelease
 from .switch_control import SwitchControl
 from .switch_inputs import SwitchInputs
 from .switches import ButtonEvent, SwitchConfig
@@ -306,6 +324,11 @@ class RoomRuntime:
     # Preliminary lights whose removal is still due (blocked by Observing or Manual mood, unavailable, or a
     # failed command): {entity: {"data", "since", "reason", "tries", "error"}}. Retried; never left forgotten.
     preliminary_cleanup: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Zones (0.6.0): the winning zone per target last applied, and lights a zone switched on (entity -> zone id).
+    zone_winners: dict[str, str] = field(default_factory=dict)
+    zone_owned: dict[str, str] = field(default_factory=dict)
+    # Shared space with joint vacancy (0.6.0): the vacancy action waits until every member room is vacant.
+    space_deferred: bool = False
 
     @property
     def preliminary_owned(self) -> dict[str, dict[str, Any]]:
@@ -333,6 +356,9 @@ class RoomRuntime:
             "last_vacancy": self.last_vacancy,
             "preliminary": self.preliminary,
             "preliminary_cleanup": self.preliminary_cleanup,
+            "zone_winners": self.zone_winners,
+            "zone_owned": self.zone_owned,
+            "space_deferred": self.space_deferred,
         }
 
     @classmethod
@@ -364,6 +390,11 @@ class RoomRuntime:
                                  if isinstance(e, str) and isinstance(i, dict) and isinstance(i.get("data"), dict)},
             # Continue counting visits, so the next visit is never mistaken for the recorded one.
             visit=int(activation.get("visit") or 0) if activation else 0,
+            zone_winners={e: z for e, z in (data.get("zone_winners") or {}).items()
+                          if isinstance(e, str) and isinstance(z, str)},
+            zone_owned={e: z for e, z in (data.get("zone_owned") or {}).items()
+                        if isinstance(e, str) and isinstance(z, str)},
+            space_deferred=bool(data.get("space_deferred", False)),
         )
 
 
@@ -434,6 +465,9 @@ class LightingController:
         # Decision log (0.3.7): rooms and switches, saved with this state store.
         self.decisions = DecisionLog(hass, self._on_decision)
         self.explain = LightingDecisions(self)
+        # Multi-zone lighting and the Room Supervisor (0.6.0).
+        self.zones = ZoneManager(hass, self, self._on_zones_changed)
+        self.supervisor = Supervisor(hass, self)
 
     # ------------------------------------------------------------ properties
     @property
@@ -447,7 +481,8 @@ class LightingController:
     @property
     def index(self) -> LightIndex:
         if self._index is None:
-            self._index = LightIndex(self.hass, self.config.categories)
+            relays = frozenset(e for r in self.lighting.rooms.values() for e in r.relays)
+            self._index = LightIndex(self.hass, self.config.categories, relays)
         return self._index
 
     @property
@@ -488,6 +523,7 @@ class LightingController:
         self.daylight.restore(data.get("daylight"))
         self._restored_switches = data.get("switches") if isinstance(data.get("switches"), dict) else {}
         self.decisions.restore(data.get("decisions"))
+        self.zones.restore(data.get("zones"))
         now = dt_util.utcnow()
         for area_id in self.config.enabled_rooms:
             rt = RoomRuntime.restore(rooms.get(area_id))
@@ -525,6 +561,8 @@ class LightingController:
         self.daylight.async_start()
         self.switch_inputs.async_start(self._restored_switches)
         self.switch_control.async_start()
+        self.zones.async_start()
+        self.supervisor.async_start()
         if self.hass.state is CoreState.running:
             self._on_started()
         else:
@@ -553,6 +591,8 @@ class LightingController:
                 self._resume_preliminary(area_id, result)
             if rt.preliminary_cleanup:
                 self._schedule_cleanup_retry(area_id)  # due before the restart: tried again shortly
+            # Zones active at start are the baseline (nothing is applied on start).
+            rt.zone_winners = self._zone_winners(area_id)
         self._automations = None
         self._conflicts = None
         _LOGGER.debug(
@@ -584,6 +624,8 @@ class LightingController:
         self.daylight.async_stop()
         self.switch_control.async_stop()
         self.switch_inputs.async_stop()
+        self.zones.async_stop()
+        self.supervisor.async_stop()
         self.decisions.async_stop()
         for task in list(self._tasks):
             task.cancel()
@@ -628,6 +670,8 @@ class LightingController:
         exclude_label = self.lighting.exclude_label
         out = ManagedRoom(area_id)
         explicit = [e for e in room_cfg.lights if e.split(".", 1)[0] == "light"]
+        # Relay lighting outputs (0.6.0): switches the user designated as lights of this room.
+        explicit += [e for e in room_lighting.relays if is_relay(e) and e not in explicit]
         discovered = index.labelled_in_area(area_id) if room_lighting.auto_discover else []
         out.explicit = set(explicit)
         out.discovered = set(discovered) - out.explicit
@@ -718,6 +762,8 @@ class LightingController:
         override = self.lighting.room(area_id).mood_override
         if override:
             return override, "room_override"
+        if (space := self.lighting.space_of(area_id)) is not None and space.mood_override:
+            return space.mood_override, "space"  # the shared space's mood (0.6.0)
         return status.mood, "global"
 
     def discovered_moods(self) -> list[dict[str, Any]]:
@@ -862,7 +908,7 @@ class LightingController:
                 category_name=cat.name if cat else None,
                 state=state.state if state else None,
                 attributes=dict(state.attributes) if state else {},
-                capabilities=light_capabilities(hass, entity_id),
+                capabilities=target_capabilities(hass, entity_id),
                 is_group=entity_id in managed.members or entity_id in managed.opaque_groups,
                 members=tuple(sorted(managed.members.get(entity_id, ()))),
                 covered_by=managed.covered_by.get(entity_id),
@@ -951,7 +997,11 @@ class LightingController:
             gate=self.daylight_gate(area_id, fresh=fresh),
             await_confirmation=self.preliminary_settings(area_id, lighting).active and assume is None,
             preliminary=owned,
+            assume_off=set(rt.zone_owned) if assume is None else set(),
         )
+        self._arbitrate(area_id, plan, targets, arb.rule_info(arb.RULE_OCCUPIED, f"Occupied profile ({mood})"
+                                                               if mood else "Occupied profile"),
+                        fresh=fresh, zones=assume is None)
         now = time.monotonic()
         force = self._adaptive_force.get(area_id, set())
         competing = self.adaptive_conflicts(area_id)
@@ -974,6 +1024,214 @@ class LightingController:
             item.adaptive_update = decision.as_dict(now)
             decisions[item.entity_id] = (target, decision)
         return plan, decisions
+
+    # ------------------------------------------------- rule arbitration (0.6.0)
+    def zone_claims(self, area_id: str, *, fresh: bool = False) -> dict[str, list[arb.Claim]]:
+        """Active zones' claims per target, the winner first. Empty for a room without active zones."""
+        active = self.zones.active(area_id)
+        if not active:
+            return {}
+        order = {z.id: i for i, z in enumerate(self.lighting.room(area_id).zones)}
+        gate = self.daylight_gate(area_id, fresh=fresh)
+        estimate = self.daylight.status(area_id).estimate
+        entries = []
+        for zr in active:
+            zone = zr.zone
+            if zone.daylight == ZoneDaylight.ALWAYS:
+                zgate = None
+            elif zone.daylight == ZoneDaylight.BELOW and zone.on_below is not None:
+                zgate = zone_gate(gate, estimate, zone.on_below)
+            else:
+                zgate = gate
+            entries.append((zone, order.get(zone.id, 99), zr.active_since, zgate))
+        return arb.claims_by_target(entries)
+
+    def _zone_winners(self, area_id: str) -> dict[str, str]:
+        controlled = set(self.managed_room(area_id).controlled)
+        return {e: c[0].zone.id for e, c in self.zone_claims(area_id).items() if e in controlled}
+
+    def _arbitrate(self, area_id: str, plan: Plan, targets: list[Target], rule: dict[str, Any], *,
+                   fresh: bool = False, zones: bool = True, keep: set[str] | None = None) -> None:
+        """One winning rule per target (arbitration.py): zone claims replace the profile's items; shared spaces."""
+        claims = self.zone_claims(area_id, fresh=fresh) if zones else {}
+        by_id = {t.entity_id: t for t in targets}
+        for index, item in enumerate(plan.items):
+            if keep and item.entity_id in keep:
+                continue  # already arbitrated (the Occupied plan's ambient items in a vacancy plan)
+            if item.rule is None:
+                item.rule = dict(rule)
+            target = by_id.get(item.entity_id)
+            if target is None or item.entity_id not in claims or target.excluded or target.covered_by:
+                continue
+            plan.items[index] = arb.zone_item(target, claims[item.entity_id], manual_mode=plan.manual_mode,
+                                              control_enabled=plan.control_enabled, replaced=item)
+        self._shared_rules(area_id, plan)
+
+    # ------------------------------------------------------- shared spaces (0.6.0)
+    def _shared_rules(self, area_id: str, plan: Plan) -> None:
+        """Shared targets of an open-plan space: never switched off while another member room is occupied,
+        and switched on by one room at a time (the first occupied member room in the space's order)."""
+        space = self.lighting.space_of(area_id)
+        if space is None:
+            return
+        members = [r for r in space.rooms if r in self.config.enabled_rooms]
+        if len(members) < 2:
+            return
+        occupied = {r for r in members if (res := self.coordinator.occupancy.result(r)) is not None and res.occupied}
+        controlled = {r: set(self.managed_room(r).controlled) for r in members}
+        for item in plan.items:
+            if item.decision != CHANGE:
+                continue
+            sharing = [r for r in members if r != area_id and item.entity_id in controlled[r]]
+            if not sharing:
+                continue
+            if item.service == "turn_off" and (busy := [r for r in sharing if r in occupied]):
+                item.decision, item.reason_code = BLOCKED, "shared_in_use"
+                item.reason = (f"Kept on: it also lights {', '.join(area_name(self.hass, r) or r for r in busy)} "
+                               f"(occupied) in the shared space {space.name}")
+            elif item.service == "turn_on":
+                owner = next((r for r in members if r in occupied and item.entity_id in controlled[r]), None)
+                if owner is not None and owner != area_id:
+                    item.decision, item.reason_code = SKIPPED, "shared_owner"
+                    item.reason = f"Controlled by {area_name(self.hass, owner) or owner} in the shared space {space.name}"
+
+    def _space_waits(self, area_id: str) -> list[str]:
+        """Member rooms that are still occupied, when the room's shared space vacates together."""
+        space = self.lighting.space_of(area_id)
+        if space is None or space.vacancy != SpaceVacancy.TOGETHER:
+            return []
+        return [r for r in space.rooms if r != area_id and r in self.config.enabled_rooms
+                and (res := self.coordinator.occupancy.result(r)) is not None and res.occupied]
+
+    @callback
+    def _space_vacated(self, area_id: str) -> None:
+        """A member room became vacant: rooms of its space that waited for it run their vacancy action now."""
+        space = self.lighting.space_of(area_id)
+        if space is None or self._space_waits(area_id):
+            return
+        for other in space.rooms:
+            rt = self.runtime.get(other)
+            if other == area_id or rt is None or not rt.space_deferred:
+                continue
+            rt.space_deferred = False
+            result = self.coordinator.occupancy.result(other)
+            if result is not None and result.state == OccupancyState.VACANT and result.occupied is False:
+                self._vacate(other, "space_vacant")
+        self._mark_dirty()
+
+    def effective_plan(self, area_id: str, trigger: str = "preview", *, fresh: bool = False) -> Plan:
+        """What lighting wants for every target now: the vacancy plan of a vacant room, else the Occupied plan.
+
+        Zone rules, manual overrides, shared spaces and every protection are applied (one winning rule per
+        target). Used by the zone executor and the Room Supervisor. Never sends anything.
+        """
+        result = self.coordinator.occupancy.result(area_id)
+        if result is not None and result.state == OccupancyState.VACANT and result.occupied is False:
+            return self.vacancy_plan(area_id, trigger, ambient=True, fresh=fresh)
+        return self.plan(area_id, trigger, fresh=fresh)
+
+    @property
+    def pending_rooms(self) -> set[str]:
+        """Rooms with a queued lighting application (the supervisor waits for it)."""
+        return set(self._pending)
+
+    def create_task(self, coro) -> None:
+        self._create_task(coro)
+
+    # ------------------------------------------------------------ zones (0.6.0)
+    @callback
+    def _on_zones_changed(self, area_id: str, zones: set[str]) -> None:
+        """A zone of the room became occupied or vacant: its lights follow the new winning rules."""
+        self._mark_dirty()
+        if not self._running or self._stopped or area_id not in self.config.enabled_rooms:
+            self._notify()
+            return
+        if self.room_active(area_id) and not self._manual:
+            self._create_task(self.async_zones(area_id, "zone", zones))
+        else:
+            self._create_task(self.async_zones(area_id, "zone", zones, observe=True))
+        self._notify()
+
+    async def async_zones(self, area_id: str, trigger: str = "zone", zones: set[str] | None = None, *,
+                          observe: bool = False) -> Plan | None:
+        """Apply the targets whose winning zone rule changed (gained, lost or another zone won)."""
+        if self._stopped:
+            return None
+        lock = self._locks.setdefault(area_id, asyncio.Lock())
+        async with lock:
+            if self._stopped:
+                return None
+            rt = self.runtime_for(area_id)
+            winners = self._zone_winners(area_id)
+            previous = dict(rt.zone_winners)
+            affected = {e for e in {*winners, *previous} if winners.get(e) != previous.get(e)}
+            released_owned = {e for e in rt.zone_owned if e not in winners}
+            if affected or trigger != "zone":
+                # (A reconnect or the end of Manual mood: lights a zone left on are handled again.)
+                affected |= released_owned
+            if not affected:
+                rt.zone_winners = winners
+                return None
+            plan = self.effective_plan(area_id, trigger, fresh=True)
+            # (Set before sending: a device may report while the command is being sent.)
+            rt.zone_winners = winners  # (Manual mood: dropped, never replayed - like every queued application)
+            items = {i.entity_id: i for i in plan.items}
+            changes = [items[e] for e in sorted(affected) if e in items and items[e].decision == CHANGE]
+            cleanup: list[str] = []
+            for entity_id in sorted(released_owned & affected):
+                item = items.get(entity_id)
+                zone = self.lighting.room(area_id).zone(rt.zone_owned[entity_id])
+                if zone is not None and zone.release == ZoneRelease.LEAVE:
+                    continue
+                if item is not None and item.decision != CHANGE and arb.releases(item) \
+                        and entity_id not in rt.overrides and self.hass.states.is_state(entity_id, "on"):
+                    cleanup.append(entity_id)
+            executing = plan.control_enabled and not plan.manual_mode and not observe and (changes or cleanup)
+            ok: list[PlanItem] = []
+            errors: dict[str, str] = {}
+            removed: list[str] = []
+            if executing:
+                errors = await self._execute(area_id, changes) if changes else {}
+                errors = {e: m for e, m in errors.items() if m != _PAUSED}
+                ok = [i for i in changes if i.entity_id not in errors]
+                for item in ok:
+                    rt.last_commands[item.entity_id] = (item.service or "", dict(item.data))
+                    rt.adaptive_sent.pop(item.entity_id, None)
+                self._note_zone_sent(area_id, ok)
+                for entity_id in cleanup:
+                    off = {"transition": 1} if target_capabilities(self.hass, entity_id).transition else {}
+                    err = await self._send(area_id, "turn_off", {entity_id: off}, purpose="zone_release")
+                    if err.get(entity_id) and err[entity_id] != _PAUSED:
+                        errors[entity_id] = err[entity_id]
+                    elif not err:
+                        removed.append(entity_id)
+                        rt.last_commands[entity_id] = ("turn_off", off)
+                        # (Still the zones' until it reports off: a device that ignores it is verified and retried.)
+            # Owned lights that no zone claims any more and that the remaining rule took over are no longer the zones'.
+            for entity_id in released_owned:
+                item = items.get(entity_id)
+                if item is not None and not arb.releases(item) and item.reason_code not in ("offline", "manual_mode"):
+                    rt.zone_owned.pop(entity_id, None)
+            decision = self.explain.zones(area_id, trigger, plan, zones or set(), [items[e] for e in sorted(affected)
+                                          if e in items], ok=ok if executing else None, errors=errors,
+                                          removed=removed if executing else cleanup, observing=not executing)
+            if decision is not None:
+                rt.last_trigger = trigger
+            self._finish(area_id, plan)
+            return plan
+
+    def _note_zone_sent(self, area_id: str, ok: list[PlanItem]) -> None:
+        """Lights switched on from off by a zone rule are the zones' (switched off again when no rule keeps them)."""
+        rt = self.runtime_for(area_id)
+        for item in ok:
+            rule = item.rule or {}
+            if rule.get("kind") == arb.RULE_ZONE:
+                if item.service == "turn_on" and item.current.get("state") != "on":
+                    rt.zone_owned.setdefault(item.entity_id, rule.get("zone") or "")
+                elif item.service == "turn_off":
+                    rt.zone_owned.pop(item.entity_id, None)
+            else:
+                rt.zone_owned.pop(item.entity_id, None)
 
     # ------------------------------------------------------------- triggers
     @callback
@@ -1045,6 +1303,9 @@ class LightingController:
             if result.occupied and rt.vacancy_deferred:
                 rt.vacancy_deferred.clear()  # someone is here: a deferred vacancy action is no longer due
                 self._mark_dirty()
+            if result.occupied and rt.space_deferred:
+                rt.space_deferred = False  # someone is back in this room: its vacancy is no longer due
+                self._mark_dirty()
             if result.state == OccupancyState.CONFIRMED_OCCUPANCY and not rt.visit_confirmed:
                 rt.visit_confirmed = True
                 new_visit = not rt.visit_started
@@ -1080,7 +1341,14 @@ class LightingController:
                         self.explain.vacancy_expired(area_id, rt.vacancy_wait[0])
                         rt.vacancy_wait = None
                     cleared = self._end_overrides(area_id, result)
-                    self._vacate(area_id, "vacant", cleared=cleared, skip=skip)
+                    if waits := self._space_waits(area_id):
+                        # Shared space that vacates together (0.6.0): this room's lights wait for the others.
+                        rt.space_deferred = True
+                        self._mark_dirty()
+                        self.explain.space_wait(area_id, waits)
+                    else:
+                        self._vacate(area_id, "vacant", cleared=cleared, skip=skip)
+                    self._space_vacated(area_id)
             if changed:
                 self._notify()
 
@@ -1165,12 +1433,13 @@ class LightingController:
             items = {i.entity_id: i for i in occupied_plan.items if i.persistent}
         state = OccupancyState.VACANT.value if assume else result.state.value if result else None
         occupied = False if assume else result.occupied if result else None
-        return build_vacancy_plan(
+        targets = targets if targets is not None else self._targets(area_id)
+        plan = build_vacancy_plan(
             area_id=area_id,
             action=action,
             mood=mood,
             vacant_mood=vacancy.mood,
-            targets=targets if targets is not None else self._targets(area_id),
+            targets=targets,
             resolve_current=lambda t: self.resolve(mood or "", area_id, t.entity_id, t.targets),
             resolve_vacant=lambda t: self.resolve(vacancy.mood or "", area_id, t.entity_id, t.targets),
             resolve_profile=lambda t: self.resolve(mood or "", area_id, t.entity_id, t.targets,
@@ -1185,6 +1454,11 @@ class LightingController:
             note=status.detail if status.manual or not mood else None,
             manual_mode=status.manual if manual is None else manual,
         )
+        name = {VacancyAction.VACANT_MOOD: f"Vacant profile ({mood})" if mood else "Vacant profile",
+                VacancyAction.TURN_OFF: "Vacancy: turn off", VacancyAction.LEAVE: "Vacancy: leave unchanged"}[action]
+        self._arbitrate(area_id, plan, targets, arb.rule_info(arb.RULE_VACANT, name), zones=not assume,
+                        keep=set(items or ()))
+        return plan
 
     async def async_vacate(self, area_id: str, trigger: str = "vacant", *, only: set[str] | None = None,
                            cleared: int = 0, skip: set[str] | None = None, ambient: bool = False) -> Plan | None:
@@ -1222,6 +1496,7 @@ class LightingController:
                     rt.last_commands[item.entity_id] = (item.service or "", dict(item.data))
                     rt.adaptive_sent[item.entity_id] = AdaptiveSent(sent_at, {
                         k: v for k, v in item.data.items() if k in ("brightness_pct", "color_temp_kelvin")})
+                self._note_zone_sent(area_id, ok)
             if plan.control_enabled and not plan.manual_mode:
                 # Due later: lights kept by a manual override made in the empty room, unavailable or failed ones.
                 handled = {i.entity_id for i in relevant}
@@ -1257,6 +1532,7 @@ class LightingController:
     def async_presence_changed(self) -> None:
         """Presence settings changed live (signals enabled or excluded, timing); occupancy was re-evaluated."""
         self._sync_preliminary_signals()
+        self.zones.async_config_changed()  # zones use the room's signals and timing
         self._notify()
 
     @callback
@@ -1380,6 +1656,8 @@ class LightingController:
                 _LOGGER.info("lighting_manual_mode_ended mood=%s", status.mood)
                 for area_id in list(self.runtime):
                     self._retry_preliminary_cleanup(area_id, "manual_ended")
+                    if self.runtime[area_id].zone_owned and self.room_active(area_id):
+                        self._create_task(self.async_zones(area_id, "manual_ended"))
         if status.mood == self._last_mood:
             if status.manual:
                 self._notify()
@@ -1558,11 +1836,20 @@ class LightingController:
                         self._retry_vacancy(area_id, {target}, "reconnected")
                     if rt and target in rt.preliminary_cleanup:
                         self._retry_preliminary_cleanup(area_id, "reconnected", {target})
+                    if rt and target in rt.zone_owned and target not in rt.zone_winners and self._running:
+                        self._create_task(self.async_zones(area_id, "reconnected"))
+                    self.supervisor.note_available(area_id, target)
             return
         if old.attributes.get("entity_id") != new.attributes.get("entity_id"):
             self._invalidate_managed()  # group membership changed
         if not _significant(old, new):
             return
+        if new.state == "off":
+            for area_id, target in self._light_targets.get(entity_id, ()):
+                rt = self.runtime.get(area_id)
+                if rt and target == entity_id and target in rt.zone_owned and target not in rt.zone_winners:
+                    del rt.zone_owned[target]  # a light a zone switched on and released is off: no longer the zones'
+                    self._mark_dirty()
         ctx = new.context
         now = time.monotonic()
         self._prune(now)
@@ -1584,6 +1871,7 @@ class LightingController:
             rt.last_external[target] = {
                 "at": _iso(dt_util.utcnow()), "source": source, "state": new.state, "entity_id": entity_id,
             }
+            self.supervisor.note_external(area_id, target, source)
             manual = source in ("ui", "wall_switch") or (
                 source == "unattributed" and self.lighting.unattributed == UnattributedPolicy.MANUAL
             )
@@ -1719,6 +2007,9 @@ class LightingController:
                 rt.last_commands[item.entity_id] = (item.service or "", dict(item.data))
                 rt.adaptive_sent[item.entity_id] = AdaptiveSent(sent_at, {
                     k: v for k, v in item.data.items() if k in ("brightness_pct", "color_temp_kelvin")})
+            self._note_zone_sent(area_id, ok)
+            if only is None:
+                rt.zone_winners = self._zone_winners(area_id)  # (the zone changes were applied with the rest)
             rt.last_errors = [f"{e}: {msg}" for e, msg in errors.items()]
             rt.last_result = "applied" if not errors else ("partial" if ok else "failed")
             rt.last_reason = _summary(plan.mood, relevant, trigger, failed=len(errors))
@@ -1761,12 +2052,20 @@ class LightingController:
         if rt.preliminary is not None and state == OccupancyState.POSSIBLE_VACANCY:
             # The stage started in possible occupancy; motion that stopped at once does not cancel it.
             state = OccupancyState.POSSIBLE_OCCUPANCY.value
-        return build_preliminary_plan(
+        plan = build_preliminary_plan(
             area_id=area_id, settings=settings, targets=targets, mood=mood, occupancy_state=state,
             occupied=result.occupied if result else None, control_enabled=self.room_active(area_id), gate=gate,
             manual_mode=status.manual, note=status.detail if status.manual or not mood else None,
             manual_off=manual_off,
         )
+        # A light a zone controls is left to the zone (0.6.0): zone rules rank above possible occupancy.
+        claims = self.zone_claims(area_id)
+        for item in plan.items:
+            if item.entity_id in claims:
+                arb.zone_skip(item, claims[item.entity_id][0])
+            else:
+                item.rule = arb.rule_info(arb.RULE_PRELIMINARY, "Possible occupancy")
+        return plan
 
     @callback
     def _start_preliminary(self, area_id: str, settings: EffectivePreliminary, found: list[str],
@@ -1828,7 +2127,8 @@ class LightingController:
             if changes:
                 assert_room_control_permitted(self.room_active(area_id), area_id)
                 for item in changes:  # one light per command: a failing light cannot hide another
-                    errors |= await self._send(area_id, item.service or "turn_on", {item.entity_id: item.data})
+                    errors |= await self._send(area_id, item.service or "turn_on", {item.entity_id: item.data},
+                                               purpose="preliminary")
                 paused = {e for e, m in errors.items() if m == _PAUSED}
                 errors = {e: m for e, m in errors.items() if m != _PAUSED}
                 ok = [i for i in changes if i.entity_id not in errors and i.entity_id not in paused]
@@ -1993,7 +2293,7 @@ class LightingController:
             data = {"transition": transition} if transition and light_capabilities(self.hass, entity_id).transition \
                 else {}
             assert_room_control_permitted(self.room_active(area_id), area_id)
-            errors = await self._send(area_id, "turn_off", {entity_id: data})
+            errors = await self._send(area_id, "turn_off", {entity_id: data}, purpose="preliminary_end")
             error = errors.get(entity_id)
             self._trace(area_id, "cleanup_call", light=entity_id, service="light.turn_off", data=data,
                         result=error or "accepted", state_after=self._light_snapshot(entity_id))
@@ -2178,7 +2478,7 @@ class LightingController:
         if turn_off and not self._manual and self.room_active(area_id):
             assert_room_control_permitted(self.room_active(area_id), area_id)
             for entity_id, data in turn_off.items():
-                errors |= await self._send(area_id, "turn_off", {entity_id: data})
+                errors |= await self._send(area_id, "turn_off", {entity_id: data}, purpose="preliminary_end")
             errors = {e: m for e, m in errors.items() if m != _PAUSED}
             rt = self.runtime_for(area_id)
             for entity_id, data in turn_off.items():
@@ -2254,19 +2554,23 @@ class LightingController:
             errors |= await self._send(area_id, service, data)
         return errors
 
-    async def _send(self, area_id: str, service: str, data_by_entity: dict[str, dict[str, Any]]) -> dict[str, str]:
-        """Send one light service to several lights, batched by identical data. Returns {entity: error}.
+    async def _send(self, area_id: str, service: str, data_by_entity: dict[str, dict[str, Any]], *,
+                    purpose: str = "lighting") -> dict[str, str]:
+        """Send one service to several targets, batched by domain and identical data. Returns {entity: error}.
 
-        Stops before every batch if Manual mode started (those lights are reported as paused).
+        Lights get ``light.<service>``; relay outputs ``switch.<service>`` with no light attributes (0.6.0).
+        Stops before every batch if Manual mode started (those lights are reported as paused). Every command
+        is reported to the Room Supervisor, which verifies it (``purpose`` says what sent it).
         """
-        batches: dict[str, list[str]] = {}
+        batches: dict[tuple[str, str], list[str]] = {}
         for entity_id, data in data_by_entity.items():
-            batches.setdefault(json.dumps(data, sort_keys=True), []).append(entity_id)
+            target = entity_id.split(".", 1)[0]
+            batches.setdefault((target, json.dumps(service_data(entity_id, data), sort_keys=True)), []).append(entity_id)
         context = Context()
         now = time.monotonic()
         self._own_contexts[context.id] = now
         errors: dict[str, str] = {}
-        for data_json, entity_ids in batches.items():
+        for (target_domain, data_json), entity_ids in batches.items():
             if self._manual or self._stopped:
                 errors.update({e: _PAUSED for e in entity_ids})
                 continue
@@ -2277,19 +2581,62 @@ class LightingController:
             data = {**payload, "entity_id": entity_ids}
             try:
                 async with asyncio.timeout(COMMAND_TIMEOUT_SECONDS):
-                    await self.hass.services.async_call("light", service, data, blocking=True, context=context)
+                    await self.hass.services.async_call(target_domain, service, data, blocking=True, context=context)
             except TimeoutError:
                 errors.update({e: "no response within timeout" for e in entity_ids})
             except (HomeAssistantError, ValueError) as err:
                 errors.update({e: str(err) or type(err).__name__ for e in entity_ids})
-            _LOGGER.debug("lighting_command area=%s service=light.%s data=%s", area_id, service, data)
+            _LOGGER.debug("lighting_command area=%s service=%s.%s data=%s", area_id, target_domain, service, data)
+        sent = {e: d for e, d in data_by_entity.items() if errors.get(e) != _PAUSED}
+        if sent:
+            self.supervisor.note_command(area_id, service, sent, errors, purpose)
         return errors
+
+    async def async_supervisor_correct(self, area_id: str, item: PlanItem, service: str, data: dict[str, Any], *,
+                                       purpose: str = "supervisor") -> dict[str, str]:
+        """A Room Supervisor correction: the winning rule's state, sent again (Automatic rooms only).
+
+        Checked again under the room lock: the room must still be Automatic, Main Mood not Manual, the target
+        available, without a manual override, and the plan must still want the same state.
+        """
+        lock = self._locks.setdefault(area_id, asyncio.Lock())
+        async with lock:
+            entity_id = item.entity_id
+            if self._stopped or self._manual or not self.room_active(area_id):
+                return {entity_id: "not permitted now (Observing or Manual mood)"}
+            rt = self.runtime_for(area_id)
+            if entity_id in rt.overrides:
+                return {entity_id: "manual override"}
+            current = next((i for i in self.effective_plan(area_id, "supervisor").items if i.entity_id == entity_id),
+                           None)
+            if current is None or current.reason_code in ("offline", "manual_override", "manual_mode", "conflict"):
+                return {entity_id: "no longer applicable"}
+            if purpose == "supervisor" and (current.service, current.data) != (service, data):
+                return {entity_id: "the rule changed meanwhile"}
+            result = self.coordinator.occupancy.result(area_id)
+            unconfirmed = result is not None and result.state != OccupancyState.CONFIRMED_OCCUPANCY
+            if purpose != "supervisor" and not (arb.releases(current) or current.service == "turn_off" or (
+                    purpose == "preliminary_end" and unconfirmed)):
+                return {entity_id: "a rule keeps it on now"}  # a removal (preliminary or zone light) no longer due
+            assert_room_control_permitted(self.room_active(area_id), area_id)
+            errors = await self._send(area_id, service, {entity_id: data}, purpose=purpose)
+            if not errors:
+                rt.last_commands[entity_id] = (service, dict(data))
+            self._mark_dirty()
+            return errors
 
     # ------------------------------------------------------ configuration
     @callback
     def _on_lighting_config_changed(self, old: LightingConfig, new: LightingConfig) -> None:
+        if any(old.room(a).relays != new.room(a).relays for a in {*old.rooms, *new.rooms}):
+            self._index = None  # relay outputs are indexed like lights (labels, categories)
         self._invalidate_managed()
         self._sync_preliminary_signals()
+        if any(old.room(a).zones != new.room(a).zones for a in {*old.rooms, *new.rooms}):
+            self.zones.async_config_changed()
+        if old.supervisor != new.supervisor or any(
+                old.room(a).supervisor != new.room(a).supervisor for a in {*old.rooms, *new.rooms}):
+            self.supervisor.async_config_changed()
         self.daylight.async_config_changed()
         self.coordinator.async_schedule_refresh()
         if old.adaptive != new.adaptive:
@@ -2317,8 +2664,10 @@ class LightingController:
                     self._schedule_apply(area_id, "activated")
                     self._retry_preliminary_cleanup(area_id, "activated")
                     continue
-                if o.mood_override != n.mood_override:
-                    self._schedule_apply(area_id, "room_mood_override")
+                os_, ns = old.space_of(area_id), new.space_of(area_id)
+                if o.mood_override != n.mood_override or (not n.mood_override and (
+                        (os_.mood_override if os_ else None) != (ns.mood_override if ns else None))):
+                    self._schedule_apply(area_id, "room_mood_override")  # (also the shared space's mood, 0.6.0)
                 # 0.4.0: editing a profile never sends a command. The change is used at the next trigger (mood,
                 # occupancy, daylight), or when the user explicitly tests the profile.
         self._notify()
@@ -2429,6 +2778,13 @@ class LightingController:
                 # Developer trace (0.3.11): the last steps of the possible occupancy pipeline, oldest first.
                 "trace": self.preliminary_trace(area_id),
             },
+            # Multi-zone lighting and the Room Supervisor (0.6.0).
+            "zones": {"status": self.zones.status(area_id), "winners": dict(rt.zone_winners),
+                      "owned": dict(rt.zone_owned), "history": self.zones.history(area_id)[-10:]},
+            "relays": list(room_lighting.relays),
+            "shared_space": (sp.as_dict() if (sp := self.lighting.space_of(area_id)) else None),
+            "space_deferred": rt.space_deferred,
+            "supervisor": self.supervisor.model(area_id, details=True),
         }
 
     def activation_review(self, area_id: str) -> dict[str, Any]:
@@ -2483,7 +2839,7 @@ class LightingController:
         self._dirty = False
         return {"rooms": {a: rt.persist() for a, rt in self.runtime.items()}, "adaptive": self.adaptive.persist(),
                 "daylight": self.daylight.persist(), "switches": self.switch_inputs.persist(),
-                "decisions": self.decisions.persist()}
+                "decisions": self.decisions.persist(), "zones": self.zones.persist()}
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -2494,6 +2850,7 @@ class LightingController:
             "rooms": {a: self.room_diagnostics(a) for a in sorted(self.config.enabled_rooms)},
             "tracked_entities": list(self._tracked),
             "daylight": self.daylight.diagnostics(),
+            "zones": self.zones.diagnostics(),
             "switches": {
                 "mqtt": self.switch_inputs.mqtt_state,
                 "bridge_devices": len(self.switch_inputs.bridge_devices),
@@ -2565,15 +2922,21 @@ class LightingController:
             window = OWN_CHANGE_WINDOW_SECONDS + float(payload.get("transition") or 0)
             for entity_id in entity_ids:
                 self._expected[entity_id] = (now + window, service)
-            try:
-                async with asyncio.timeout(COMMAND_TIMEOUT_SECONDS):
-                    await self.hass.services.async_call(
-                        "light", service, {**payload, "entity_id": entity_ids}, blocking=True, context=context)
-            except TimeoutError:
-                errors.update({e: "no response within timeout" for e in entity_ids})
-            except (HomeAssistantError, ValueError) as err:
-                errors.update({e: str(err) or type(err).__name__ for e in entity_ids})
-            _LOGGER.debug("person_light_command area=%s service=light.%s entities=%s data=%s", area_id, service,
+            for target_domain, ids in by_domain(entity_ids).items():
+                if target_domain not in ("light", "switch") or (target_domain == "switch" and service not in (
+                        "turn_on", "turn_off", "toggle")):
+                    errors.update({e: f"{target_domain}.{service} is not supported" for e in ids})
+                    continue
+                call = payload if target_domain == "light" else {}
+                try:
+                    async with asyncio.timeout(COMMAND_TIMEOUT_SECONDS):
+                        await self.hass.services.async_call(
+                            target_domain, service, {**call, "entity_id": ids}, blocking=True, context=context)
+                except TimeoutError:
+                    errors.update({e: "no response within timeout" for e in ids})
+                except (HomeAssistantError, ValueError) as err:
+                    errors.update({e: str(err) or type(err).__name__ for e in ids})
+            _LOGGER.debug("person_light_command area=%s service=%s entities=%s data=%s", area_id, service,
                           entity_ids, payload)
         return errors
 
