@@ -117,6 +117,17 @@ from 20 lx) and ``brightness_templates`` (none), and per room ``ambient``
 (disabled) and ``brightness`` (no light enrolled). No light is enrolled by
 the migration and nothing else changes, so every room behaves exactly as in
 0.6.6. A 0.6.6 install reads a 1.8 store as is and ignores the new keys.
+
+Store 1.9 (0.6.8, Phase 4.8) adds custom ambient categories, fixture types,
+Radar Distance Zones and Priority Inputs. The 0.6.7 categories become
+editable definitions with the stable ids ``none``, ``low`` and ``bright``
+(globally, and per room where a room had its own thresholds), so every
+brightness matrix keeps its values exactly. Every room gets no fixture
+classification and no Priority Input; every zone stays a sensor zone; no
+switch becomes a lighting output; the Priority Input safety lock is off but
+no input exists (a new one is disabled until it is reviewed and enabled).
+Nothing behaves differently after the migration. ``thresholds`` is still
+written, so a 0.6.7 install reads the default three categories.
 """
 
 from __future__ import annotations
@@ -155,10 +166,20 @@ from .const import (
     VacancyAction,
     VacantOthers,
 )
-from .ambient import GLOBAL_AMBIENT, AmbientSettings, RoomAmbient
+from .ambient import (
+    DEFAULT_LEVELS,
+    DEFAULT_MAX_LEVELS,
+    GLOBAL_AMBIENT,
+    AmbientSettings,
+    RoomAmbient,
+    levels_from_thresholds,
+    valid_thresholds,
+)
 from .brightness import LightMatrix, Template, matrices_from, templates_from
 from .const import LIGHTING_STORE_MINOR_VERSION
 from .daylight import DaylightConfig, RoomDaylight
+from .fixtures import Fixture, fixtures_from
+from .priority import PriorityInput, inputs_from
 from .models import IntegrationConfig, ProfileSetting, ProfileTable, _enum_or
 from .preliminary import PreliminaryDefaults, RoomPreliminary
 from .switches import ROOM_TARGET, SwitchConfig, SwitchSettings, switches_from
@@ -407,9 +428,15 @@ class RoomLighting:
     # Ambient light levels and brightness rules (0.6.7): the room's levels, and the enrolled lights' matrices.
     ambient: RoomAmbient = field(default_factory=RoomAmbient)
     brightness: dict[str, LightMatrix] = field(default_factory=dict)
+    # Fixture types and Priority Inputs (0.6.8).
+    fixtures: dict[str, Fixture] = field(default_factory=dict)
+    priority_inputs: tuple[PriorityInput, ...] = ()
 
     def zone(self, zone_id: str) -> ZoneConfig | None:
         return next((z for z in self.zones if z.id == zone_id), None)
+
+    def priority_input(self, input_id: str) -> PriorityInput | None:
+        return next((p for p in self.priority_inputs if p.id == input_id), None)
 
     def type_table(self, profile: Profile = Profile.OCCUPIED) -> ProfileTable:
         return self.vacant_overrides if profile == Profile.VACANT else self.mood_overrides
@@ -458,6 +485,8 @@ class RoomLighting:
             # (Columns of zones that no longer exist are dropped.)
             brightness=matrices_from(data.get("brightness"), [z.get("id") for z in data.get("zones") or []
                                                               if isinstance(z, dict)]),
+            fixtures=fixtures_from(data.get("fixtures")),
+            priority_inputs=inputs_from(data.get("priority_inputs")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -487,6 +516,8 @@ class RoomLighting:
             "ambient": self.ambient.as_dict(),
             "brightness": {e: m.as_dict() | {"zones": {z: c for z, c in m.as_dict()["zones"].items() if z in zone_ids}}
                            for e, m in self.brightness.items()},
+            "fixtures": {e: f.as_dict() for e, f in self.fixtures.items()},
+            "priority_inputs": [p.as_dict() for p in self.priority_inputs],
         }
 
     def matrix(self, entity_id: str) -> LightMatrix | None:
@@ -523,6 +554,8 @@ class LightingConfig:
     # Ambient light level defaults and saved brightness templates (0.6.7).
     ambient: AmbientSettings = GLOBAL_AMBIENT
     brightness_templates: tuple[Template, ...] = ()
+    # Priority Inputs safety lock (0.6.8): while on, no Priority Input sends anything.
+    priority_lock: bool = False
 
     def ambient_for(self, area_id: str) -> AmbientSettings:
         """The ambient level settings of one room: the global defaults with its own values applied."""
@@ -578,6 +611,7 @@ class LightingConfig:
             shared_spaces=spaces_from(data.get("shared_spaces")),
             ambient=AmbientSettings.from_dict(data.get("ambient"), defaults=True),
             brightness_templates=templates_from(data.get("brightness_templates")),
+            priority_lock=data.get("priority_lock") is True,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -601,6 +635,7 @@ class LightingConfig:
             "shared_spaces": [s.as_dict() for s in self.shared_spaces],
             "ambient": self.ambient.as_dict(),
             "brightness_templates": [t.as_dict() for t in self.brightness_templates],
+            "priority_lock": self.priority_lock,
         }
 
     def room(self, area_id: str) -> RoomLighting:
@@ -811,7 +846,27 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
         if any(t.entity_id == old for t in targets):
             changed = True
             targets = tuple(replace(t, entity_id=new) if t.entity_id == old else t for t in targets)
-        return replace(zone, sensors=sub_ids(zone.sensors), targets=targets)
+        radar = zone.radar
+        if radar is not None and old in (radar.presence, radar.distance):
+            changed = True
+            radar = replace(radar, presence=new if radar.presence == old else radar.presence,
+                            distance=new if radar.distance == old else radar.distance)
+        return replace(zone, sensors=sub_ids(zone.sensors), targets=targets, radar=radar)
+
+    def sub_fixtures(fixtures: dict[str, Fixture]) -> dict[str, Fixture]:
+        nonlocal changed
+        if old not in fixtures:
+            return fixtures
+        changed = True
+        return {(new if e == old else e): (replace(f, entity_id=new) if e == old else f) for e, f in fixtures.items()}
+
+    def sub_input(pi: PriorityInput) -> PriorityInput:
+        nonlocal changed
+        if pi.entity_id != old and old not in pi.targets:
+            return pi
+        changed = True
+        return replace(pi, entity_id=new if pi.entity_id == old else pi.entity_id,
+                       targets=tuple(new if t == old else t for t in pi.targets))
 
     def sub_matrices(matrices: dict[str, LightMatrix]) -> dict[str, LightMatrix]:
         nonlocal changed
@@ -834,6 +889,8 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
             daylight=sub_daylight(room.daylight),
             switches=tuple(sub_switch(s) for s in room.switches),
             brightness=sub_matrices(room.brightness),
+            fixtures=sub_fixtures(room.fixtures),
+            priority_inputs=tuple(sub_input(p) for p in room.priority_inputs),
         )
         for area_id, room in config.rooms.items()
     }
@@ -937,6 +994,30 @@ def migrate_store(old_major: int, old_minor: int, data: dict[str, Any]) -> dict[
                 room["ambient"] = RoomAmbient().as_dict()
             if not isinstance(room.get("brightness"), dict):
                 room["brightness"] = {}
+            rooms[area_id] = room
+        data["rooms"] = rooms
+    if old_minor < 9:
+        # Phase 4.8 (0.6.8): the three categories become editable definitions with stable ids (values kept
+        # exactly); no fixture classification, no Priority Input, every zone a sensor zone, safety lock off.
+        ambient = dict(data["ambient"]) if isinstance(data.get("ambient"), dict) else GLOBAL_AMBIENT.as_dict()
+        if ambient.get("levels") is None:
+            ambient["levels"] = [lv.as_dict() for lv in (
+                levels_from_thresholds(valid_thresholds(ambient.get("thresholds"))) or DEFAULT_LEVELS)]
+        ambient.setdefault("max_levels", DEFAULT_MAX_LEVELS)
+        data["ambient"] = ambient
+        data.setdefault("priority_lock", False)
+        rooms = {}
+        for area_id, room in (data.get("rooms") or {}).items():
+            room = dict(room) if isinstance(room, dict) else {}
+            room_ambient = dict(room["ambient"]) if isinstance(room.get("ambient"), dict) else RoomAmbient().as_dict()
+            if room_ambient.get("levels") is None and (own := levels_from_thresholds(
+                    valid_thresholds(room_ambient.get("thresholds")))) is not None:
+                room_ambient["levels"] = [lv.as_dict() for lv in own]
+            room["ambient"] = room_ambient
+            room.setdefault("fixtures", {})
+            room.setdefault("priority_inputs", [])
+            room["zones"] = [{**z, "detection": z.get("detection") or "sensors", "radar": z.get("radar")}
+                             if isinstance(z, dict) else z for z in room.get("zones") or []]
             rooms[area_id] = room
         data["rooms"] = rooms
     return data

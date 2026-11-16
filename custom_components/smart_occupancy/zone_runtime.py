@@ -18,6 +18,11 @@ A zone is **active** (its lighting rule applies) when:
 Zones with ``holds_room`` keep their (occupied) room occupied while they are
 active and have a known state (an unavailable zone never holds a room).
 
+Radar Distance Zones (0.6.8) have no engine: a ``radar.RadarTracker`` turns
+the radar's presence state and distance into the zone's active state (entry
+delay, exit delay, hysteresis, fail-safe), with the same room gating, holds,
+history and timer handling as every other zone.
+
 Only sensor states make a zone active: no prediction or forecast is used.
 Every transition is kept in a small bounded history per room (zone-aware data
 for later learning; observation only) and in the diagnostics.
@@ -28,7 +33,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +44,7 @@ from homeassistant.util import dt as dt_util
 from .const import ZONE_HISTORY_SIZE, OccupancyState
 from .engine import RoomEngine, RoomResult, SignalStatus, interpret
 from .occupancy import friendly_name
+from .radar import Distance, Evaluation, RadarTracker, fmt_m, presence_of, read_distance
 from .zones import ZoneActivation, ZoneConfig, ZoneUnavailable
 
 if TYPE_CHECKING:
@@ -55,12 +61,17 @@ def _iso(value: datetime | None) -> str | None:
 class ZoneRuntime:
     area_id: str
     zone: ZoneConfig
-    engine: RoomEngine
+    engine: RoomEngine | None
     active: bool = False
     active_since: datetime | None = None
     confirmed: bool = False
     failsafe: str | None = None  # the fail-safe in force while every zone signal is unavailable
     result: RoomResult | None = None
+    # Radar Distance Zone (0.6.8): the band tracker, its last evaluation and inputs.
+    radar: RadarTracker | None = None
+    radar_eval: Evaluation | None = None
+    reading: Distance | None = None
+    presence: bool | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -68,9 +79,43 @@ class ZoneRuntime:
 
     @property
     def known(self) -> bool:
+        if self.zone.is_radar:
+            return self.radar_eval is not None and self.radar_eval.known
         return self.result is not None and self.result.state != OccupancyState.UNCERTAIN
 
+    def radar_status(self, hass: HomeAssistant) -> dict[str, Any] | None:
+        cfg = self.zone.radar
+        if not self.zone.is_radar:
+            return None
+        if cfg is None:
+            return {"configured": False, "state": "unavailable", "reason": "radar entities not chosen"}
+        ev, reading = self.radar_eval, self.reading
+        state = "unavailable" if ev is None or not ev.known or (reading is not None and not reading.valid
+                                                                and self.presence) else (
+            "active" if self.active else "inactive")
+        return {
+            "configured": True, "presence_entity": cfg.presence, "distance_entity": cfg.distance,
+            "presence_name": friendly_name(hass, cfg.presence) or cfg.presence,
+            "distance_name": friendly_name(hass, cfg.distance) or cfg.distance,
+            "presence": self.presence, "distance_m": reading.metres if reading else None,
+            "distance_text": f"{fmt_m(reading.metres)} m" if reading and reading.valid else
+            (reading.problem if reading else None),
+            "distance_valid": bool(reading and reading.valid), "raw": reading.raw if reading else None,
+            "unit": reading.unit if reading else None,
+            "phase": ev.phase if ev else None, "reason": ev.reason if ev else None,
+            "due": _iso(ev.due) if ev else None, "state": state, "band": cfg.band(),
+            "min_m": cfg.min_m, "max_m": cfg.max_m, "hysteresis": cfg.hysteresis,
+        }
+
     def status(self, hass: HomeAssistant) -> dict[str, Any]:
+        if self.zone.is_radar:
+            radar = self.radar_status(hass) or {}
+            return {
+                "id": self.zone.id, "name": self.zone.name, "active": self.active, "since": _iso(self.active_since),
+                "state": radar.get("phase"), "occupied": self.active, "reason": radar.get("reason"),
+                "failsafe": self.failsafe, "sensors": [], "available": self.known, "vacancy_at": radar.get("due"),
+                "radar": radar,
+            }
         r = self.result
         sensors = []
         for v in (r.signals if r else ()):
@@ -114,8 +159,9 @@ class ZoneManager:
     def persist(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
         for area_id, room in self.rooms.items():
-            zones = {z.zone.id: {"engine": z.engine.persist(), "active": z.active, "since": _iso(z.active_since),
-                                 "confirmed": z.confirmed} for z in room.zones.values()}
+            zones = {z.zone.id: {"engine": z.engine.persist() if z.engine else None, "active": z.active,
+                                 "since": _iso(z.active_since), "confirmed": z.confirmed}
+                     for z in room.zones.values()}
             out[area_id] = {"zones": zones, "history": list(room.history)}
         return out
 
@@ -165,10 +211,13 @@ class ZoneManager:
                 maxlen=ZONE_HISTORY_SIZE))
             assigned = {s.entity_id: s for s in room_cfg.sensors}
             for zone in zones:
+                previous = old.zones.get(zone.id) if old else None
+                if zone.is_radar:
+                    room.zones[zone.id] = self._build_radar(area_id, zone, previous)
+                    continue
                 sensors = tuple(assigned[e] for e in zone.sensors if e in assigned)
                 timing = ctrl.config.timing_for(area_id).with_overrides(zone.timing)
-                previous = old.zones.get(zone.id) if old else None
-                if previous is not None:
+                if previous is not None and previous.engine is not None:
                     engine = previous.engine
                     engine.reconfigure(sensors, timing)
                     zr = ZoneRuntime(area_id, zone, engine, previous.active, previous.active_since, previous.confirmed,
@@ -210,6 +259,26 @@ class ZoneManager:
             if zones:
                 self._on_change(area_id, zones)
 
+    def _build_radar(self, area_id: str, zone: ZoneConfig, previous: ZoneRuntime | None) -> ZoneRuntime:
+        """A Radar Distance Zone: keeps its state over a reconfiguration; restored after a restart."""
+        zr = ZoneRuntime(area_id, zone, None)
+        if zone.radar is not None:
+            zr.radar = RadarTracker(zone.radar)
+            if previous is not None and previous.zone.is_radar:
+                zr.active, zr.active_since, zr.failsafe = previous.active, previous.active_since, previous.failsafe
+                if previous.radar is not None:
+                    zr.radar.phase, zr.radar.since = previous.radar.phase, previous.radar.since
+            else:
+                saved = ((self._restored.get(area_id) or {}).get("zones") or {}).get(zone.id) or {}
+                if saved.get("active"):
+                    # (Restored as active; the current readings decide at once, with the exit delay.)
+                    zr.active = True
+                    zr.active_since = dt_util.parse_datetime(saved.get("since") or "")
+                    zr.radar.restore(True, zr.active_since)
+            for entity_id in zone.radar.entities:
+                self._entity_zones.setdefault(entity_id, []).append((area_id, zone.id))
+        return zr
+
     # --------------------------------------------------------------- events
     @callback
     def _on_state(self, event: Event[EventStateChangedData]) -> None:
@@ -222,6 +291,9 @@ class ZoneManager:
         for area_id, zone_id in self._entity_zones.get(entity_id, ()):
             zr = self.rooms.get(area_id, _RoomZones()).zones.get(zone_id)
             if zr is None:
+                continue
+            if zr.engine is None:
+                rooms.setdefault(area_id, set()).add(zone_id)  # (a radar zone reads its entities when evaluated)
                 continue
             track = zr.engine.tracks[entity_id]
             zr.engine.observe(entity_id, interpret(new.state if new else None, inverted=track.assignment.inverted),
@@ -263,6 +335,10 @@ class ZoneManager:
         room_occupied = bool(result and result.occupied)
         changed: set[str] = set()
         for zone_id, zr in room.zones.items():
+            if zr.zone.is_radar:
+                if self._evaluate_radar(room, zr, now, room_vacant=room_vacant, room_occupied=room_occupied):
+                    changed.add(zone_id)
+                continue
             if only is None or zone_id in only:
                 zr.result = zr.engine.evaluate(now)
                 self._schedule(zr, now)
@@ -299,6 +375,45 @@ class ZoneManager:
         if changed and notify:
             self.ctrl.mark_dirty()
         return changed
+
+    def _evaluate_radar(self, room: _RoomZones, zr: ZoneRuntime, now: datetime, *, room_vacant: bool,
+                        room_occupied: bool) -> bool:
+        """One evaluation of a Radar Distance Zone; True when its active state changed."""
+        cfg = zr.zone.radar
+        if cfg is None or zr.radar is None:
+            active, zr.radar_eval = False, Evaluation(False, "inactive", "radar entities not chosen", known=False)
+        else:
+            zr.presence = presence_of(self.hass.states.get(cfg.presence))
+            zr.reading = read_distance(cfg, self.hass.states.get(cfg.distance), now)
+            zr.radar_eval = zr.radar.evaluate(zr.presence, zr.reading, now, failsafe=zr.zone.unavailable.value,
+                                              room_occupied=room_occupied)
+            active = zr.radar_eval.active
+            if cancel := self._timers.pop(zr.key, None):
+                cancel()
+            due = zr.radar_eval.due
+            if due is None and cfg.max_age and zr.reading.valid:
+                due = now + timedelta(seconds=cfg.max_age)  # (the reading goes stale then)
+            if due is not None and due > now and self._running:
+                self._timers[zr.key] = async_track_point_in_utc_time(self.hass, self._timer(zr.key), due)
+        if room_vacant:
+            active = False
+            if zr.radar is not None and zr.radar.phase != "inactive":
+                zr.radar.phase, zr.radar.since = "inactive", now
+        failsafe = zr.radar_eval.failsafe
+        if failsafe != zr.failsafe:
+            self._history(room, zr, "unavailable" if failsafe else "available", now, failsafe=failsafe)
+            zr.failsafe = failsafe
+        if active == zr.active:
+            return False
+        zr.active = active
+        zr.active_since = now if active else None
+        reading = zr.reading
+        self._history(room, zr, "occupied" if active else "vacant", now, state=zr.radar_eval.phase,
+                      reason="room vacant" if room_vacant and not active else zr.radar_eval.reason,
+                      distance=reading.metres if reading and reading.valid else None)
+        _LOGGER.debug("radar_zone_transition area=%s zone=%s active=%s reason=%s", zr.area_id, zr.zone.id, active,
+                      zr.radar_eval.reason)
+        return True
 
     def _schedule(self, zr: ZoneRuntime, now: datetime) -> None:
         if cancel := self._timers.pop(zr.key, None):

@@ -103,7 +103,7 @@
  * reports a change.
  */
 
-const VERSION = "0.6.7";
+const VERSION = "0.6.8";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -346,7 +346,7 @@ const MAIN_TABS = [
 // [key, name, icon, tooltip]
 const SETTINGS_TABS = [
   ["automatic", "Automatic", "mdi:lightning-bolt-outline", "Automatic: switch-on, daylight, possible occupancy and vacancy"],
-  ["lighting", "Lighting", "mdi:brightness-6", "Lighting: ambient light levels and brightness rules"],
+  ["lighting", "Lighting", "mdi:brightness-6", "Lighting: ambient light levels, brightness rules, fixture types and priority inputs"],
   ["presence", "Presence", "mdi:radar", "Presence: sensors and occupancy detection"],
   ["switches", "Switches", "mdi:toggle-switch-outline", "Switches: wall switches and remotes of this room"],
   ["advanced", "Advanced", "mdi:tune", "Advanced: settings, activation review and diagnostics"],
@@ -506,6 +506,8 @@ class SoLightingBase extends HTMLElement {
       this._lastLiveKey = key;
       if (this._onLive) this._onLive(); else this._requestRender();
     }
+    const radar = this._radarLiveKey ? this._radarLiveKey() : "";
+    if (radar && radar !== this._lastRadarKey) { this._lastRadarKey = radar; this._requestRender(); }
   }
 
   connectedCallback() {
@@ -1226,6 +1228,13 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     return [...(r?.lights || []).map((l) => l.entity_id), ...(r?.presence?.sensors || []).map((s) => s.entity_id)];
   }
 
+  // Radar entities of the open zone form (0.6.8): their changes only redraw the band (no refetch).
+  _radarLiveKey() {
+    const c = this._ui?.zd?.detection === "radar" ? this._ui.zd.radar : null;
+    if (!c) return "";
+    return [c.presence, c.distance].map((e) => (e ? this._hass?.states[e]?.last_updated || "" : "")).join("|");
+  }
+
   // A light or presence sensor changed: the Presence tab shows the integration's view, so it is fetched again.
   _onLive() { if ((this._ui.tab || "overview") === "presence") this._scheduleFetch(); else this._requestRender(); }
 
@@ -1358,6 +1367,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const hv = (x, extra = "") => { const i = HEALTH[x?.status] || HEALTH.healthy; return `<span class="${i.tone}">${i.label}</span>${extra}`; };
     const nConf = new Set((d.conflicts || []).filter((c) => c.enabled && !c.acknowledged).map((c) => c.automation)).size;
     const issues = this._issues(r);
+    const p48 = this._p48OverviewHtml(r);
     return `<div class="section auto ovmode">${this._lightingModeHtml(r, true)}</div>
       ${this._lastDecisionHtml(r.decisions, "log")}<div class="kvs">
         <div><span>Occupancy now</span><b>${esc(OCC[r.occupancy.state] || r.occupancy.state || "—")}${this._prelimNow(r)}</b></div>
@@ -1372,7 +1382,9 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
           <span class="sub ${this._model.adaptive.status === "connected" ? "" : "warn"}">${esc(STATUS_WORDS[this._model.adaptive.status])}</span></b></div>` : ""}
         ${this._daylightSummary(r)}
         ${this._ambientSummary(r)}
+        ${p48.kvs}
       </div>
+      ${p48.why}
       ${this._supervisorOverviewHtml(r)}
       ${this._forecastOverviewHtml(r)}
       ${this._switchQuickHtml(r)}
@@ -2812,7 +2824,9 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       const st = zone.status;
       const [word, tone] = !zone.enabled ? ["Off", "muted"] : !st ? ["—", "muted"] : st.failsafe ? [`Sensor unavailable (${ZONE_FAILSAFE[st.failsafe]})`, "warn"]
         : st.active ? ["Occupied", "ok"] : ["Vacant", "muted"];
-      const sensors = zone.sensors.map((e) => z.sensors.find((s) => s.entity_id === e)?.name || e).join(", ") || "no sensor";
+      const rs = st?.radar;
+      const sensors = zone.detection === "radar" ? (rs?.configured ? `Radar ${rs.band} · ${rs.presence_name}: ${rs.presence === true ? "detected" : rs.presence === false ? "clear" : "unavailable"} · distance ${rs.distance_text || "—"}`
+        : "Radar distance zone: radar entities not chosen") : zone.sensors.map((e) => z.sensors.find((s) => s.entity_id === e)?.name || e).join(", ") || "no sensor";
       const enrolled = this._enrolledLights(r);
       const lights = zone.targets.map((t) => `${z.targets.find((x) => x.entity_id === t.entity_id)?.name || t.entity_id} ${enrolled.has(t.entity_id) ? "(brightness rules)" : zoneAction(t)}`).join(" · ") || "no light";
       const links = zone.targets.filter((t) => enrolled.has(t.entity_id)).map((t) => `<button class="link" data-action="br-goto" data-entity="${esc(t.entity_id)}">${esc(z.targets.find((x) => x.entity_id === t.entity_id)?.name || t.entity_id)}: brightness rules</button>`).join("");
@@ -2824,7 +2838,8 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     return `<div class="stitle" id="so-zones">Zones</div>
       <div class="sub">Optional parts of ${esc(r.name)} with their own sensors and lighting, e.g. a sink and a shower. A zone uses this room's sensors, and its lighting rule wins over the mood while it is occupied (the higher priority wins between zones). Home Assistant's areas are not changed. A room without zones works exactly as before.</div>
       ${items ? `<ul class="plist">${items}</ul>` : `<div class="muted">No zones in this room.</div>`}
-      ${draft ? this._zoneFormHtml(r, draft) : ro || z.zones.length >= z.limits.max_zones ? "" : `<div><button class="btn small" data-action="zn-add"><ha-icon icon="mdi:plus"></ha-icon>Add zone</button></div>`}
+      ${draft ? this._zoneFormHtml(r, draft) : ro || z.zones.length >= z.limits.max_zones ? "" : `<div class="ibtns"><button class="btn small" data-action="zn-add"><ha-icon icon="mdi:plus"></ha-icon>Add zone</button>
+        ${(z.radar?.distance || []).some((x) => x.valid || x.problem === "unavailable") ? `<button class="btn ghost small" data-action="zn-add-radar"><ha-icon icon="mdi:radar"></ha-icon>Add radar distance zone</button>` : ""}</div>`}
       ${this._statusHtml("zn")}
       ${rules.length ? `<details class="dladv" ${this._ui.znRules ? "open" : ""}><summary data-action="zn-rules">Which rule controls each light now</summary>
         <div class="tscroll"><table class="fct"><thead><tr><th>Light</th><th>Rule</th><th>Takes precedence over</th><th>Now</th></tr></thead><tbody>
@@ -2840,6 +2855,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
   _zoneFormHtml(r, d) {
     const z = r.zones;
     const lim = z.limits;
+    const radarOk = (z.radar?.distance || []).some((x) => x.valid || x.problem === "unavailable");
     const sel = (key, value, options) => `<select data-control="zd-${key}" aria-label="${esc(key)}">${options.map(([v, l]) => `<option value="${v}" ${String(value) === String(v) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
     const sensors = z.sensors.map((s) => `<label class="chk"><input type="checkbox" data-control="zd-sensor" data-entity="${esc(s.entity_id)}" ${d.sensors.includes(s.entity_id) ? "checked" : ""}>
         ${esc(s.name)} <span class="sub">${esc(s.kind_name)}${s.used ? "" : " · not used for occupancy (Presence)"}</span></label>`).join("");
@@ -2868,24 +2884,65 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     return `<div class="zform" role="group" aria-label="${d.id ? `Zone ${esc(d.name)}` : "New zone"}">
       <div class="frow"><label for="so-zname">Name</label><div class="fval"><input id="so-zname" type="text" maxlength="60" value="${esc(d.name)}" data-control="zd-name">
         <label class="chk"><input type="checkbox" data-control="zd-enabled" ${d.enabled ? "checked" : ""}> Enabled</label></div></div>
-      <div class="stitle small">Presence sensors of this zone</div>
+      <div class="frow"><label>Detection</label><div class="fval">${sel("detection", d.detection || "sensors", [["sensors", "room sensors"], ...(radarOk || d.detection === "radar" ? [["radar", "radar distance"]] : [])])}
+        ${radarOk ? "" : `<span class="sub">Radar distance needs a distance sensor in metres, centimetres or millimetres.</span>`}</div></div>
+      ${d.detection === "radar" ? this._radarFormHtml(r, d) : `<div class="stitle small">Presence sensors of this zone</div>
       <div class="chks">${sensors || `<span class="muted">The room has no sensors.</span>`}</div>
-      <div class="frow"><label>Occupied</label><div class="fval">${sel("activation", d.activation, [["possible", "at the first detection"], ["confirmed", "when presence is confirmed"]])}</div></div>
+      <div class="frow"><label>Occupied</label><div class="fval">${sel("activation", d.activation, [["possible", "at the first detection"], ["confirmed", "when presence is confirmed"]])}</div></div>`}
       <div class="frow"><label>Priority</label><div class="fval"><input type="number" class="num" min="${lim.priority[0]}" max="${lim.priority[1]}" value="${d.priority}" data-control="zd-priority"> <span class="sub">higher wins between zones</span></div></div>
       <div class="stitle small">Lights of this zone</div>
       <ul class="plist zlights">${lights}</ul>
       <div class="sub">Only what each light supports is shown (a relay output switches on and off). Unchanged: the zone keeps the light as it is, and lower rules do not change it.</div>
       <details class="dladv" ${this._ui.zdMore ? "open" : ""}><summary data-action="zn-more">Detection, daylight and manual changes</summary>
         <div class="frow"><label>Keeps the room occupied</label><div class="fval"><label class="chk"><input type="checkbox" data-control="zd-holds_room" ${d.holds_room ? "checked" : ""}> while this zone is occupied</label></div></div>
-        <div class="frow"><label>If its sensors are unavailable</label><div class="fval">${sel("unavailable", d.unavailable, Object.entries(ZONE_FAILSAFE_LONG))}</div></div>
+        <div class="frow"><label>${d.detection === "radar" ? "If the distance or radar is unavailable" : "If its sensors are unavailable"}</label><div class="fval">${sel("unavailable", d.unavailable, d.detection === "radar"
+          ? [["hold", "keep its state while presence is detected"], ["vacant", "release it (after the exit delay)"], ["occupied", "active while presence is detected"]] : Object.entries(ZONE_FAILSAFE_LONG))}</div></div>
         <div class="frow"><label>Manual changes</label><div class="fval">${sel("manual", d.manual, [["respect", "respected"], ["override", "zone wins over earlier ones"]])}</div></div>
         <div class="frow"><label>Switch on in daylight</label><div class="fval">${sel("daylight", d.daylight, [["room", "only when the room needs light"], ["always", "always (ignore light level)"], ["below", "below its own light level"]])}
           ${d.daylight === "below" ? `<input type="number" class="num" min="${lim.lux[0]}" max="${lim.lux[1]}" value="${d.on_below ?? ""}" data-control="zd-on_below" aria-label="Light level"> lx` : ""}</div></div>
         <div class="frow"><label>When the zone ends</label><div class="fval">${sel("release", d.release, [["restore", "room rules take over"], ["leave", "lights stay as they are"]])}</div></div>
-        ${timing}
+        ${d.detection === "radar" ? "" : timing}
       </details>
       <div class="ibtns"><button class="btn small" data-action="zn-save">Save zone</button> <button class="link" data-action="zn-cancel">Cancel</button>
         ${d.id ? `<button class="btn ghost small warnbtn" data-action="zn-delete">Delete zone</button>` : ""}</div></div>`;
+  }
+
+  _radarMsg(c) {
+    const n = (v, dflt) => (v === null || v === undefined || v === "" ? dflt : Number(v));
+    return { presence: c.presence || "", distance: c.distance || "", min_m: n(c.min_m, 1), max_m: n(c.max_m, 3), attribute: c.attribute || null, unit: c.unit || null,
+      entry_delay: n(c.entry_delay, 2), exit_delay: n(c.exit_delay, 15), hysteresis: n(c.hysteresis, 0.2), max_age: c.max_age ? Number(c.max_age) : null };
+  }
+
+  _radarFormHtml(r, d) {
+    const z = r.zones;
+    const lim = z.limits.radar;
+    const c = d.radar || {};
+    const presence = z.radar?.presence || [];
+    const paired = presence.find((p) => p.entity_id === c.presence)?.distances || [];
+    const known = z.radar?.distance || [];
+    const dists = [...known, ...(c.distance && !known.some((x) => x.entity_id === c.distance) ? [{ entity_id: c.distance, name: c.distance, valid: false, problem: "current choice" }] : [])].sort((a, b) => (paired.some((x) => x.entity_id === b.entity_id) ? 1 : 0) - (paired.some((x) => x.entity_id === a.entity_id) ? 1 : 0));
+    const num = (key, min, max, step, unit) => `<input type="number" class="num" min="${min}" max="${max}" step="${step}" value="${c[key] ?? ""}" data-control="zd-rnum" data-key="${key}" aria-label="${esc(key)}"> ${unit}`;
+    const status = (z.zones.find((x) => x.id === d.id)?.status || {}).radar;
+    const t = this._ui.rtest;
+    return `<div class="stitle small">Radar</div>
+      <div class="frow"><label for="so-rd-p">Presence</label><div class="fval"><select id="so-rd-p" data-control="zd-rsel" data-key="presence"><option value="">Choose the radar's presence entity…</option>
+        ${presence.map((p) => `<option value="${esc(p.entity_id)}" ${c.presence === p.entity_id ? "selected" : ""}>${esc(p.name)} · ${esc(p.state ?? "—")}${p.distances.length ? " · has a distance sensor" : ""}</option>`).join("")}</select></div></div>
+      <div class="frow"><label for="so-rd-d">Distance</label><div class="fval"><select id="so-rd-d" data-control="zd-rsel" data-key="distance"><option value="">Choose the distance sensor…</option>
+        ${dists.map((x) => `<option value="${esc(x.entity_id)}" ${c.distance === x.entity_id ? "selected" : ""} ${x.valid || x.problem === "unavailable" || x.problem === "current choice" ? "" : "disabled"}>${esc(x.name)} · ${esc(x.valid ? `${x.metres} m (${x.state} ${x.unit})` : x.problem || x.state)}${paired.some((p) => p.entity_id === x.entity_id) ? " · same device" : ""}</option>`).join("")}</select>
+        ${c.presence && !paired.length ? `<span class="sub">No distance sensor of the same device was found: choose one yourself.</span>` : ""}</div></div>
+      <div class="frow"><label>Active between</label><div class="fval">${num("min_m", lim.distance[0], lim.distance[1], 0.05, "m")} and ${num("max_m", lim.distance[0], lim.distance[1], 0.05, "m")}</div></div>
+      ${this._radarBandHtml(c.presence && c.distance ? c : null, status)}
+      <div class="frow"><label>Test distance</label><div class="fval"><input type="number" class="num" min="0" max="${lim.distance[1]}" step="0.05" value="${t?.distance ?? ""}" data-control="zd-rtest" aria-label="Test distance in metres"> m
+        <button class="btn ghost small" data-action="zn-rtest" ${c.presence && c.distance ? "" : "disabled"}>Test</button>
+        ${t?.result ? `<span class="sub">${esc(t.result.where)}: a new zone ${t.result.fresh.settled.active ? "becomes active" : "stays inactive"}, an active one ${t.result.settled.settled.active ? "stays active" : "is released"} · nothing was sent</span>` : ""}</div></div>
+      <details class="dladv" ${this._ui.zdRadar ? "open" : ""}><summary data-action="zn-radar-more">Delays, hysteresis and units</summary>
+        <div class="frow"><label>Enter after</label><div class="fval">${num("entry_delay", 0, lim.delay[1], 0.5, "s")}</div></div>
+        <div class="frow"><label>Release after</label><div class="fval">${num("exit_delay", 0, lim.delay[1], 1, "s")}</div></div>
+        <div class="frow"><label>Hysteresis</label><div class="fval">${num("hysteresis", 0, lim.hysteresis[1], 0.05, "m")} <span class="sub">an active zone stays active this far outside the band</span></div></div>
+        <div class="frow"><label>Ignore a distance older than</label><div class="fval">${num("max_age", lim.max_age[0], lim.max_age[1], 10, "s")} <span class="sub">empty: no limit</span></div></div>
+        <div class="frow"><label>Distance attribute</label><div class="fval"><input type="text" maxlength="64" value="${esc(c.attribute || "")}" data-control="zd-rtext" data-key="attribute" placeholder="(the sensor's state)">
+          <select data-control="zd-rsel" data-key="unit" aria-label="Unit"><option value="">the sensor's unit</option>${lim.units.map((u) => `<option value="${u.id}" ${c.unit === u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}</select></div></div>
+      </details>`;
   }
 
   _spaceHtml(r) {
@@ -2960,7 +3017,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
   _lightingSettings(r) {
     const b = r.brightness;
     if (!b) return `<div class="muted">Lighting settings are not available for this room.</div>`;
-    return `${this._ambientHtml(r, b)}${this._brightnessRulesHtml(r, b)}`;
+    return `${this._ambientHtml(r, b)}${this._brightnessRulesHtml(r, b)}${this._fixturesHtml(r)}${this._priorityHtml(r)}`;
   }
 
   _ambientHtml(r, b) {
@@ -2982,11 +3039,6 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     }).join("");
     const basis = AMB_BASIS[st.basis] || [st.basis, "muted"];
     const measured = st.measured_lux != null ? `${Math.floor(st.measured_lux)} lx${st.sensor_name ? ` · ${st.sensor_name}` : ""}` : "no indoor reading";
-    const th = eff.thresholds || [5, 20];
-    const names = (b.levels || []).map((l) => l.name);
-    const thRow = (i) => `<div class="frow"><label for="so-am-th-${i}">${esc(names[i + 1] || "Level")} from</label><div class="fval">
-        <input id="so-am-th-${i}" type="number" class="num" min="${lim.threshold[0]}" max="${lim.threshold[1]}" value="${esc(th[i])}" data-control="am-th" data-index="${i}" ${dis}> lx
-        ${i === th.length - 1 ? pill("thresholds") : ""}${i === th.length - 1 ? inherit("thresholds", (glob.thresholds || []).join(" / ") + " lx") : ""}</div></div>`;
     const tun = (k, label, unit, max, step, help) => `<div class="frow"><label for="so-am-${k}">${label}</label><div class="fval">
         <input id="so-am-${k}" type="number" class="num" min="0" max="${max}" step="${step}" value="${esc(eff[k])}" data-control="am-num" data-key="${k}" ${dis}> ${unit}
         ${pill(k)}${inherit(k, `${glob[k]} ${unit}`)}${this._statusHtml(`am-${k}`)}<span class="sub">${esc(help)}</span></div></div>`;
@@ -3001,7 +3053,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const used = new Set((a.sensors || []).map((s) => s.entity_id));
     const cands = (r.daylight?.candidates || []).filter((x) => !used.has(x.entity_id) && (!x.outdoor || x.in_room));
     return `<div class="stitle" id="so-ambient">Ambient Light Levels</div>
-      <div class="sub">The natural light in ${esc(r.name)} in three categories, from the room's daylight sensors and estimates. Brightness Rules use the category to choose each enrolled light's brightness. A reading lit by the room's own lamps never raises the category.</div>
+      <div class="sub">The natural light in ${esc(r.name)} in categories (${(b.levels || []).length} now), from the room's daylight sensors and estimates. Brightness Rules use the category to choose each enrolled light's brightness. A reading lit by the room's own lamps never raises the category.</div>
       <label class="switch"><input type="checkbox" role="switch" data-control="am-enabled" ${a.enabled ? "checked" : ""} ${dis}> Ambient brightness control in ${esc(r.name)}</label>${this._statusHtml("am-enabled")}
       ${a.enabled ? "" : `<div class="sub">Off: enrolled lights keep their mood brightness. The category below is shown for reference.</div>`}
       <div class="amb" role="group" aria-label="Ambient light level now: ${esc(st.name)}">${levels}</div>
@@ -3021,9 +3073,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       ${sensors ? `<ul class="plist">${sensors}</ul>` : `<div class="muted">No indoor light sensor: the category is estimated from the outdoor sensor and the sun.</div>`}
       ${ro ? "" : `<div class="fval"><select data-control="dl-add" aria-label="Add an indoor light sensor"><option value="">Add a sensor…</option>
         ${cands.map((x) => `<option value="${esc(x.entity_id)}">${esc(x.name)}${x.value != null ? ` · ${esc(x.value)} lx` : ""}${x.area ? ` (${esc(x.area)})` : ""}</option>`).join("")}</select>${this._statusHtml("daylight")}</div>`}
-      <div class="stitle small">Thresholds</div>
-      ${th.map((_t, i) => thRow(i)).join("")}${this._statusHtml("am-thresholds")}
-      <div class="sub">A reading exactly at a threshold belongs to the brighter category.</div>
+      ${this._levelsHtml(r, b)}
       <details class="dladv" ${this._ui.amMore ? "open" : ""}><summary data-action="am-more">Stability, fallback and transitions</summary>
         ${tun("hysteresis", "Hysteresis", "lx", lim.hysteresis[1], 0.5, "a category is left downwards only this far below its threshold")}
         ${tun("stable_seconds", "Stable for", "s", lim.stable[1], 10, "a new category counts after it held this long (zones are never delayed)")}
@@ -3037,7 +3087,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         ${tun("min_interval", "Between changes", "s", lim.min_interval[1], 30, "at least this long between two brightness changes caused by the light level (0: no limit)")}
         <details class="dladv" ${this._ui.amGlobal ? "open" : ""}><summary data-action="am-global">Global defaults (all rooms)</summary>
           <div class="global"><div class="sub"><b>Global setting</b> — every room that does not override a value follows it.</div>
-            <div class="frow"><label>Thresholds</label><div class="fval">${(glob.thresholds || []).map((t, i) => `<input type="number" class="num" min="1" max="${lim.threshold[1]}" value="${esc(t)}" data-control="am-gth" data-index="${i}" aria-label="${esc(names[i + 1] || "Level")} from" ${dis}>`).join(" / ")} lx${this._statusHtml("amg-thresholds")}</div></div>
+            <div class="frow"><label>Categories</label><div class="fval"><span class="sub">${esc((a.global_levels || []).map((l) => `${l.name} from ${l.start} lx`).join(" · "))} — edit with “Edit global categories” above (at most ${esc(a.max_levels)})</span></div></div>
             ${gnum("hysteresis", "Hysteresis", "lx", lim.hysteresis[1], 0.5)}${gnum("stable_seconds", "Stable for", "s", lim.stable[1], 10)}
             ${gnum("transition", "Brightness fade", "s", lim.transition[1], 0.5)}${gnum("dead_band", "Dead band", "%", lim.dead_band[1], 1)}${gnum("min_interval", "Between changes", "s", lim.min_interval[1], 30)}
           </div></details>
@@ -3094,22 +3144,24 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const nb = l.now?.brightness;
     const cell = ui.brCell;
     const val = (col, level) => (col === "room" ? d.room[level] : (d.zones[col] || {})[level]);
-    const cellText = (v) => (v == null ? "—" : v === 0 ? "Off" : `${v} %`);
+    // On/off-only lights (relays, Dumb Lights, on/off lights): a value above 0 means On.
+    const cellText = (v) => (v == null ? "—" : v === 0 ? "Off" : l.onoff ? "On" : `${v} %`);
     const head = l.columns.map((c) => `<th scope="col">${esc(c.id === "room" ? "Room occupied" : `${c.name} zone`)}${c.id === "room" ? "" : `<span class="sub">priority ${c.priority}${c.active ? " · active" : ""}</span>`}</th>`).join("");
     const body = (b.levels || []).map((lv) => `<tr class="${lv.key === st.level ? "cur" : ""}"><th scope="row">${esc(lv.name)}${lv.key === st.level ? ` <span class="pill ok">now</span>` : ""}</th>${l.columns.map((c) => {
       const v = val(c.id, lv.key);
       const wins = d.enrolled && !d.dirty && nb && nb.column === c.id && nb.level === lv.key;
       const editing = cell && cell.col === c.id && cell.level === lv.key;
-      const label = `${c.id === "room" ? "Room occupied" : `${c.name} zone`}, ${lv.name}: ${v == null ? "not configured" : v === 0 ? "Off" : `${v} %`}`;
+      const label = `${c.id === "room" ? "Room occupied" : `${c.name} zone`}, ${lv.name}: ${v == null ? "not configured" : cellText(v)}`;
       return `<td><button class="cell ${v == null ? "unset" : v === 0 ? "off" : ""} ${wins ? "wins" : ""} ${editing ? "editing" : ""}" data-action="br-cell" data-col="${esc(c.id)}" data-level="${lv.key}" aria-label="${esc(label)}" ${dis}>${cellText(v)}</button></td>`;
     }).join("")}</tr>`).join("");
     const edCol = cell ? l.columns.find((c) => c.id === cell.col) : null;
     const edVal = cell ? val(cell.col, cell.level) : null;
     const editor = cell && edCol ? `<div class="celled" role="group" aria-label="Edit a brightness value">
         <div><b>${esc(edCol.id === "room" ? "Room occupied" : `${edCol.name} zone`)} · ${esc(AMB_NAME(b, cell.level))}</b></div>
-        <div class="fval"><input type="range" min="0" max="100" step="1" value="${edVal ?? 0}" data-control="br-cell-range" aria-label="Brightness (0 = Off)" ${dis}>
-          <b class="val" data-out-br>${esc(cellText(edVal))}</b></div>
-        <div class="ibtns"><button class="btn ghost small" data-action="br-cell-set" data-value="0" ${dis}>Off</button>
+        ${l.onoff ? `<div class="segs" role="radiogroup" aria-label="On or Off"><button class="seg ${edVal != null && edVal > 0 ? "on" : ""}" role="radio" aria-checked="${edVal != null && edVal > 0}" data-action="br-cell-set" data-value="100" ${dis}>On</button>
+          <button class="seg ${edVal === 0 ? "on" : ""}" role="radio" aria-checked="${edVal === 0}" data-action="br-cell-set" data-value="0" ${dis}>Off</button></div>` : `<div class="fval"><input type="range" min="0" max="100" step="1" value="${edVal ?? 0}" data-control="br-cell-range" aria-label="Brightness (0 = Off)" ${dis}>
+          <b class="val" data-out-br>${esc(cellText(edVal))}</b></div>`}
+        <div class="ibtns">${l.onoff ? "" : `<button class="btn ghost small" data-action="br-cell-set" data-value="0" ${dis}>Off</button>`}
           <button class="btn ghost small" data-action="br-cell-set" data-value="" ${dis}>Not configured</button>
           <button class="btn small" data-action="br-cell-done">Done</button></div>
         <div class="sub">${edCol.id === "room" ? "Not configured: the light keeps its mood brightness in this situation." : "Not configured: this zone does not claim the brightness (another active zone, else Room occupied decides)."}</div></div>` : "";
@@ -3142,11 +3194,11 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const override = l.override ? `<div class="note">Manual change (${esc(l.override.source || "manual")}) is respected ${l.override.until ? `until <time datetime="${esc(l.override.until)}">${fmtTime(l.override.until)}</time>` : "until the room is vacant"}.
         ${ro ? "" : `<button class="link" data-action="br-resume" data-entity="${esc(l.entity_id)}">Resume automatic lighting</button>`}${this._statusHtml("br-resume")}</div>` : "";
     return `<div class="brpanel">
-      ${caps.known && !caps.brightness ? `<div class="note">${esc(l.name)} switches on and off only: 0 % (Off) is off, and any other value is On. Percentage dimming is not supported.</div>` : ""}
+      ${l.onoff ? `<div class="note">${esc(l.name)} ${l.fixture?.kind === "dumb" ? "is a Dumb Light: it" : ""} switches on and off only: each value is On or Off (no dimming or colour is sent).</div>` : ""}
       ${override}
       <label class="switch"><input type="checkbox" data-control="br-enabled" ${d.enabled ? "checked" : ""} ${dis}> Use this brightness matrix</label>
       ${tools}
-      <div class="tscroll"><table class="fct brm"><caption class="sub">Rows: ambient light. Columns: who is in the room. Select a value to change it (0 % = Off, — = not configured).</caption>
+      <div class="tscroll"><table class="fct brm"><caption class="sub">Rows: ambient light. Columns: who is in the room. Select a value to change it (${l.onoff ? "On or Off" : "0 % = Off"}, — = not configured).</caption>
         <thead><tr><th scope="col">Ambient light</th>${head}</tr></thead><tbody>${body}</tbody></table></div>
       ${editor}${zoneNote}
       ${preview}
@@ -3170,6 +3222,390 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
   }
 
   _brMatrixMsg(d) { return { enabled: d.enabled, room: d.room, zones: d.zones, template: d.template }; }
+
+  // ------------------------------------------------ Phase 4.8 (0.6.8)
+  // Ambient categories: the room's (or the global) definitions as a table; editing previews every change on the
+  // server (ambient/levels) and a removed category with values needs a decision before it can be saved.
+  _levelsHtml(r, b) {
+    const a = b.ambient;
+    const ro = !this._canEdit;
+    const d = this._ui.lv;
+    if (d) return this._levelsEditorHtml(r, b, d);
+    const own = a.levels_source === "room";
+    const others = (a.global_rooms || []).filter((n) => n !== r.name);
+    const rows = (b.levels || []).map((l) => `<tr class="${l.key === a.status.level ? "cur" : ""}"><th scope="row">${esc(l.name)}${l.key === a.status.level ? ` <span class="pill ok">now</span>` : ""}</th>
+      <td>${esc(l.start)} lx</td><td class="sub">${esc(l.range)}</td></tr>`).join("");
+    return `<div class="stitle small">Categories</div>
+      <div class="sub">${own ? `${esc(r.name)} has its own categories.` : `${esc(r.name)} uses the global categories${others.length ? ` (like ${esc(others.slice(0, 4).join(", "))}${others.length > 4 ? "…" : ""})` : ""}.`}
+        Ranges are contiguous: each category starts where the one before ends, and the last has no upper limit.</div>
+      <div class="tscroll"><table class="fct lvt"><thead><tr><th scope="col">Category</th><th scope="col">Starts at</th><th scope="col">Range</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="sub">A reading exactly at a threshold belongs to the brighter category.</div>
+      ${ro ? "" : `<div class="ibtns"><button class="btn ghost small" data-action="lv-edit" data-scope="room">${own ? "Edit this room's categories" : "Own categories for this room"}</button>
+        <button class="btn ghost small" data-action="lv-edit" data-scope="global">Edit global categories</button>
+        ${own ? `<button class="link" data-action="lv-inherit">Use Global Levels</button>` : ""}</div>`}
+      ${this._statusHtml("lv")}`;
+  }
+
+  _levelsEditorHtml(r, b, d) {
+    const lim = b.limits;
+    const max = lim.levels[1];
+    const scope = d.scope === "global" ? "the global categories (every room without its own)" : `${esc(r.name)}'s own categories`;
+    const rows = d.inherit ? "" : d.levels.map((l, i) => {
+      const next = d.levels[i + 1];
+      const start = i === 0 ? 0 : l.start;
+      const range = start === "" || start == null || Number.isNaN(Number(start)) ? "—" : next ? (i === 0 ? `below ${next.start} lx` : `${start} to below ${next.start} lx`) : `${start} lx and above`;
+      return `<tr><td><input type="text" maxlength="40" value="${esc(l.name)}" data-control="lv-name" data-index="${i}" aria-label="Category ${i + 1} name"></td>
+        <td><input type="number" class="num" min="0" max="${lim.threshold[1]}" step="1" value="${esc(start)}" data-control="lv-start" data-index="${i}" ${i === 0 ? "disabled" : ""} aria-label="${esc(l.name || `Category ${i + 1}`)} starts at"> lx</td>
+        <td class="sub">${esc(range)}</td>
+        <td>${d.levels.length > lim.levels[0] ? `<button class="link" data-action="lv-remove" data-index="${i}" aria-label="Remove ${esc(l.name)}">Remove</button>` : ""}</td></tr>`;
+    }).join("");
+    const p = d.preview;
+    const review = (p?.rooms || []).filter((x) => x.removed.length || x.added.length || x.renamed.length || x.moved.length).map((x) => {
+      const after = x.after.map((l) => [l.id, l.name]);
+      const removed = x.removed.map((rm) => {
+        const cells = x.cells.filter((c) => c.level === rm.id);
+        const cur = d.resolve[rm.id];
+        const value = cur === undefined ? "" : cur === null ? "__delete" : cur;
+        return `<li><b>${esc(rm.name)}</b> is removed${cells.length ? `: ${cells.map((c) => `${esc(c.light)} · ${esc(c.column_name)} ${esc(c.text)}`).join("; ")}` : " (no values)"}
+          ${cells.length ? `<div class="fval"><select data-control="lv-resolve" data-id="${esc(rm.id)}" aria-label="What happens to the values of ${esc(rm.name)}">
+            <option value="" ${value === "" ? "selected" : ""}>Choose…</option>
+            ${after.map(([id, n]) => `<option value="${esc(id)}" ${value === id ? "selected" : ""}>Move them to ${esc(n)} (replaces its value)</option>`).join("")}
+            <option value="__delete" ${value === "__delete" ? "selected" : ""}>Delete them</option></select></div>` : ""}</li>`;
+      }).join("");
+      const notes = [
+        ...x.added.map((n) => `${esc(n)} is added: Not configured in every brightness matrix (nothing is switched on by it)`),
+        ...x.renamed.map((n) => `${esc(n.from)} is renamed ${esc(n.to)}: its values are kept`),
+        ...x.moved.map((n) => `${esc(n.name)} now starts at ${esc(n.to)} lx (was ${esc(n.from)} lx)`),
+        ...(x.fallback ? [`The fallback category ${esc(x.fallback.from)} is replaced by ${esc(x.fallback.to)}`] : []),
+      ];
+      return `<li><b>${esc(x.name)}</b>${x.source === "global" && d.scope === "global" ? "" : ""}<ul class="dlist">${removed}${notes.map((n) => `<li>${n}</li>`).join("")}</ul></li>`;
+    }).join("");
+    const ready = p && p.ready && !d.error;
+    return `<div class="zform" role="group" aria-label="Edit categories">
+      <div class="stitle small">${d.inherit ? `Use the global categories in ${esc(r.name)}` : `Edit ${scope}`}</div>
+      ${d.inherit ? `<div class="sub">${esc(r.name)}'s own categories are dropped; it follows the global ones again.</div>` : `
+      <div class="tscroll"><table class="fct lvt"><thead><tr><th scope="col">Name</th><th scope="col">Starts at</th><th scope="col">Range</th><th scope="col"><span class="vh">Remove</span></th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${d.levels.length < max ? `<div><button class="btn ghost small" data-action="lv-add"><ha-icon icon="mdi:plus"></ha-icon>Add category</button> <span class="sub">at most ${max}</span></div>` : `<div class="sub">At most ${max} categories.</div>`}`}
+      ${d.error ? `<div class="note warn" role="alert">${esc(d.error)}</div>` : ""}
+      ${!p ? (d.error ? "" : `<div class="sub">Checking the change…</div>`) : `<div class="brprev"><div class="stitle small">Review</div>
+        ${review ? `<ul class="dlist">${review}</ul>` : `<div class="sub">Nothing changes for any brightness matrix.</div>`}
+        ${(p.unaffected || []).length ? `<div class="sub">Keep their own categories (not changed): ${esc(p.unaffected.join(", "))}</div>` : ""}
+        ${p.unresolved.length ? `<div class="note warn">Choose what happens to the values of ${esc([...new Set(p.rooms.flatMap((x) => x.unresolved))].join(", "))} first.</div>` : ""}
+        <div class="sub">Saving sends no command: the category is classified again from the current light, and the next trigger uses the new values.</div></div>`}
+      <div class="ibtns"><button class="btn small" data-action="lv-save" ${ready ? "" : "disabled"}>Save categories</button> <button class="link" data-action="lv-cancel">Cancel</button>${this._statusHtml("lv")}</div></div>`;
+  }
+
+  _lvPreview() {
+    const d = this._ui.lv;
+    if (!d) return;
+    clearTimeout(this._lvTimer);
+    if (!d.inherit && d.levels.some((l, i) => i > 0 && (l.start === "" || l.start == null || Number.isNaN(Number(l.start))))) {
+      d.preview = null; d.error = "Every category needs the lux value it starts at."; this._requestRender(); return;
+    }
+    this._lvTimer = setTimeout(async () => {
+      try {
+        d.preview = (await this._ws(this._lvMsg(d))).preview;
+        d.error = null;
+      } catch (err) { d.preview = null; d.error = err?.message || String(err); }
+      this._requestRender();
+    }, 250);
+  }
+
+  _lvMsg(d, confirm = false) {
+    const msg = { type: `${WS}/ambient/levels`, levels: d.inherit ? null : d.levels.map((l, i) => ({ ...(l.id ? { id: l.id } : {}), name: (l.name || "").trim(), start: i === 0 ? 0 : (l.start === "" ? NaN : Number(l.start)) })) };
+    if (d.scope !== "global") msg.area_id = this._config.area;
+    if (Object.keys(d.resolve).length) msg.resolve = d.resolve;
+    if (confirm) msg.confirm = true;
+    return msg;
+  }
+
+  // Fixture Types: what each managed light is (Dumb Light — On/Off only, or a name and label of its own).
+  _fixturesHtml(r) {
+    const p = r.priority;
+    if (!p) return "";
+    const ro = !this._canEdit;
+    const d = this._ui.fx;
+    const capsText = (c) => (!c.known ? "capabilities unknown" : [c.brightness ? "dimming" : "on/off only", c.color_temp ? "white temperature" : null, c.color ? "colour" : null].filter(Boolean).join(", "));
+    const rows = p.lights.map((l) => {
+      const editing = d && d.entity_id === l.entity_id;
+      const narrowed = l.fixture?.kind === "dumb" && (l.entity_capabilities?.brightness || l.entity_capabilities?.color);
+      return `<li class="fxrow"><div class="lmain"><div><b>${esc(l.name)}</b> <code>${esc(l.entity_id)}</code> ${l.type === "relay" ? `<span class="pill muted">relay</span>` : ""}</div>
+          <div class="sub">${esc(l.fixture ? l.fixture.text : "Not classified")} · ${esc(capsText(l.capabilities))}${narrowed ? " (the light could do more; as a Dumb Light it is only switched on and off)" : ""}</div></div>
+        ${ro ? "" : `<button class="btn ghost small" data-action="fx-edit" data-entity="${esc(l.entity_id)}">${editing ? "Close" : "Classify"}</button>`}
+        ${editing ? this._fixtureFormHtml(p, l, d) : ""}</li>`;
+    }).join("");
+    const relays = (p.relay_candidates || []).filter((c) => !c.chosen);
+    return `<div class="stitle" id="so-fixtures">Fixture Types</div>
+      <div class="sub">What each managed light is. <b>Dumb Light — On/Off only</b> lights (a lamp on a relay, an on/off light) are only switched on and off: no brightness, colour or fade is ever sent, and their brightness matrix has On / Off values. A classification is a description: it never gives a light more than it can do, and Home Assistant's devices are not changed.</div>
+      ${rows ? `<ul class="plist">${rows}</ul>` : `<div class="muted">No light is managed in this room.</div>`}
+      ${ro ? "" : `<div class="fval"><select data-control="fx-relay" aria-label="Add a lamp on a relay"><option value="">Add a lamp on a relay (switch)…</option>
+        ${relays.map((c) => `<option value="${esc(c.entity_id)}">${esc(c.name)} · ${esc(c.entity_id)}${c.in_area ? " (this room)" : ""}</option>`).join("")}</select>
+        <span class="sub">Only a switch chosen here becomes a light; other switches are never treated as lights.</span></div>`}
+      ${this._statusHtml("fx")}`;
+  }
+
+  _fixtureFormHtml(p, l, d) {
+    const kinds = p.kinds.map((k) => `<option value="${esc(k.id)}" ${d.kind === k.id ? "selected" : ""}>${esc(k.name)}</option>`).join("");
+    const labels = p.labels.map((x) => `<option value="${esc(x.label_id)}" ${d.ha_label === x.label_id ? "selected" : ""}>${esc(x.name)}</option>`).join("");
+    return `<div class="zform" role="group" aria-label="Classify ${esc(l.name)}">
+      <div class="frow"><label for="so-fx-kind">Fixture type</label><div class="fval"><select id="so-fx-kind" data-control="fx-kind">${kinds}</select></div></div>
+      <div class="frow"><label for="so-fx-label">${d.kind === "custom" ? "Label" : "Extra label"}</label><div class="fval"><input id="so-fx-label" type="text" maxlength="60" value="${esc(d.label || "")}" data-control="fx-label" placeholder="${d.kind === "custom" ? "e.g. Cupboard light" : "optional"}"></div></div>
+      <div class="frow"><label for="so-fx-ha">Home Assistant label</label><div class="fval"><select id="so-fx-ha" data-control="fx-ha"><option value="">none</option>${labels}</select> <span class="sub">optional; descriptive only</span></div></div>
+      <div class="frow"><label for="so-fx-name">Display name</label><div class="fval"><input id="so-fx-name" type="text" maxlength="60" value="${esc(d.name || "")}" data-control="fx-name" placeholder="${esc(l.name)}"></div></div>
+      <div class="ibtns"><button class="btn small" data-action="fx-save">Save</button> <button class="link" data-action="fx-cancel">Cancel</button>
+        ${l.fixture ? `<button class="btn ghost small warnbtn" data-action="fx-remove">Remove classification</button>` : ""}</div></div>`;
+  }
+
+  // Priority Inputs: an input (door contact, input_boolean, switch) that forces lights On while it is active.
+  _priorityHtml(r) {
+    const p = r.priority;
+    if (!p) return "";
+    const ro = !this._canEdit;
+    const d = this._ui.pi;
+    const word = { active: ["Active", "ok"], inactive: ["Inactive", "muted"], disabled: ["Disabled", "muted"], unavailable: ["Input unavailable", "warn"],
+      missing: ["Input missing", "warn"], locked: ["Locked", "warn"], settling: ["Starting", "muted"] };
+    const name = (e) => p.lights.find((l) => l.entity_id === e)?.name || e;
+    const items = p.inputs.map((x) => {
+      const st = x.status || {};
+      const [w, tone] = word[st.status] || [st.status || "—", "muted"];
+      const pending = st.timer === "release" ? ` · releasing at ${fmtTime(st.timer_due)}` : st.timer === "grace" ? ` · held until ${fmtTime(st.timer_due)}` : st.timer === "entry" ? " · confirming" : "";
+      const hist = (st.history || []).slice().reverse().slice(0, 5).map((h) => `<li><time datetime="${esc(h.at)}">${fmtTime(h.at)}</time> ${esc(h.text)}</li>`).join("");
+      return `<li class="pirow"><div class="lmain"><div><b>${esc(x.name)}</b> <span class="pill ${tone}">${esc(w)}</span>${esc(pending)}</div>
+          <div class="sub">${esc(x.entity_name || x.entity_id || "no input chosen")}${x.entity_id ? ` is ${esc(st.input_state ?? "—")}; active when ${x.active_when === "on" ? "on (open)" : "off (normally closed contact)"}` : ""}</div>
+          <div class="sub">Forces On: ${esc(x.targets.map(name).join(", ") || "no light")}${x.brightness_pct != null ? ` · ${x.brightness_pct} % where dimmable` : ""}${x.missing_targets.length ? ` · missing: ${esc(x.missing_targets.join(", "))}` : ""}</div>
+          ${st.status === "unavailable" ? `<div class="note warn" role="status">The input is unavailable since ${fmtTime(st.unavailable_since)}: it is not read as open or closed. ${x.unavailable === "hold" ? `An active claim is held ${fmtSecs(x.grace)}, then released.` : x.unavailable === "keep" ? "An active claim is kept until it reports again." : "An active claim was released."}</div>` : ""}
+          ${hist ? `<details class="dladv"><summary>Activation history</summary><ul class="dlist">${hist}</ul></details>` : ""}</div>
+        ${ro ? "" : `<button class="btn ghost small" data-action="pi-edit" data-id="${esc(x.id)}">Edit</button>`}</li>`;
+    }).join("");
+    return `<div class="stitle" id="so-priority">Priority Inputs</div>
+      <div class="sub">An input that forces lights On while it is active, e.g. a cupboard door contact for the cupboard light: also when the room is vacant, in daylight and in Manual mood. When it ends, each light gets its current automatic rule (not its earlier state). An input does nothing until you review and enable it; unavailable lights, automation conflicts and manual changes stay protected.</div>
+      ${p.lock ? `<div class="note warn" role="status">The Priority Input safety lock is on: no input sends anything.${ro ? "" : ` <button class="link" data-action="pi-lock" data-value="false">Unlock</button>`}</div>` : ""}
+      ${items ? `<ul class="plist">${items}</ul>` : `<div class="muted">No Priority Input in this room.</div>`}
+      ${d ? this._priorityFormHtml(r, p, d) : ro || p.inputs.length >= p.limits.max_inputs ? "" : `<div class="ibtns"><button class="btn small" data-action="pi-add"><ha-icon icon="mdi:plus"></ha-icon>Add Priority Input</button>
+        ${p.lock ? "" : `<button class="link" data-action="pi-lock" data-value="true">Lock all Priority Inputs</button>`}</div>`}
+      ${this._statusHtml("pi")}`;
+  }
+
+  _priorityFormHtml(r, p, d) {
+    const lim = p.limits;
+    const sel = (key, value, options) => `<select data-control="pi-${key}" aria-label="${esc(key)}">${options.map(([v, l]) => `<option value="${esc(v)}" ${String(value) === String(v) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+    const num = (key, min, max, step, ph = "") => `<input type="number" class="num" min="${min}" max="${max}" step="${step}" value="${d[key] ?? ""}" placeholder="${ph}" data-control="pi-num" data-key="${key}" aria-label="${esc(key)}">`;
+    const cands = p.candidates.filter((c) => !p.lights.some((l) => l.entity_id === c.entity_id));
+    if (d.entity_id && !cands.some((c) => c.entity_id === d.entity_id)) cands.unshift({ entity_id: d.entity_id, name: d.entity_id, domain: d.entity_id.split(".")[0] });
+    const lights = p.lights.map((l) => `<label class="chk"><input type="checkbox" data-control="pi-target" data-entity="${esc(l.entity_id)}" ${d.targets.includes(l.entity_id) ? "checked" : ""}> ${esc(l.name)}
+      <span class="sub">${l.onoff ? "on/off" : "dimmable"}${l.claim ? ` · claimed by ${esc(l.claim.names.join(", "))}` : ""}</span></label>`).join("");
+    const pv = d.preview;
+    const preview = pv ? `<div class="brprev"><div class="stitle small">If ${esc(d.name || "it")} became active now</div><ul class="dlist">
+        ${pv.lights.map((x) => x.missing ? `<li>${esc(x.entity_id)}: not a light of this room</li>` : `<li><b>${esc(x.name)}</b>: ${esc(x.forced.decision === "change" ? `switched on${x.forced.data.brightness_pct ? ` at ${x.forced.data.brightness_pct} %` : ""}` : x.forced.reason)} <span class="sub">(now: ${esc(x.now.rule?.name || "—")})</span></li>`).join("")}</ul>
+        ${pv.notes.map((n) => `<div class="sub">${esc(n)}</div>`).join("")}
+        <div class="ibtns"><button class="btn small" data-action="pi-enable-confirm">Enable ${esc(d.name || "input")}</button> <button class="link" data-action="pi-preview-close">Not now</button></div></div>` : "";
+    return `<div class="zform" role="group" aria-label="${d.id ? `Priority Input ${esc(d.name)}` : "New Priority Input"}">
+      <div class="frow"><label for="so-pi-name">Name</label><div class="fval"><input id="so-pi-name" type="text" maxlength="60" value="${esc(d.name)}" data-control="pi-name"></div></div>
+      <div class="frow"><label for="so-pi-entity">Input</label><div class="fval"><select id="so-pi-entity" data-control="pi-entity"><option value="">Choose an input…</option>
+        ${cands.map((c) => `<option value="${esc(c.entity_id)}" ${d.entity_id === c.entity_id ? "selected" : ""}>${esc(c.name)} · ${esc(c.entity_id)}${c.contact ? " (contact)" : ""}${c.domain === "switch" ? " (switch: only if it is an input)" : ""}</option>`).join("")}</select></div></div>
+      <div class="frow"><label>Active when</label><div class="fval">${sel("active_when", d.active_when, [["on", "on (door open)"], ["off", "off (normally closed contact)"]])}</div></div>
+      <div class="stitle small">Lights it forces On</div>
+      <div class="chks">${lights || `<span class="muted">No light is managed in this room.</span>`}</div>
+      <div class="frow"><label>Brightness</label><div class="fval">${num("brightness_pct", 1, 100, 1, "last")} % <span class="sub">dimmable lights only; empty: the light's own last brightness</span></div></div>
+      <div class="frow"><label>Colour</label><div class="fval">${sel("appearance", d.appearance, [["none", "leave the colour"], ["mood", "the room mood's colour"], ["kelvin", "white at…"]])}
+        ${d.appearance === "kelvin" ? `${num("kelvin", lim.kelvin[0], lim.kelvin[1], 100, "4000")} K` : ""} <span class="sub">only where the light supports it</span></div></div>
+      <details class="dladv" ${this._ui.piMore ? "open" : ""}><summary data-action="pi-more">Timing, unavailable input and manual changes</summary>
+        <div class="frow"><label>Confirm after</label><div class="fval">${num("debounce", 0, lim.delay[1], 0.1)} s <span class="sub">0: at once; longer ignores contact bounce</span></div></div>
+        <div class="frow"><label>Release after</label><div class="fval">${num("release_delay", 0, lim.delay[1], 0.5)} s <span class="sub">after the input ends (absorbs a bouncing contact)</span></div></div>
+        <div class="frow"><label>If the input is unavailable</label><div class="fval">${sel("unavailable", d.unavailable, [["hold", "hold, then release"], ["release", "release at once"], ["keep", "keep until it reports again"]])}
+          ${d.unavailable === "hold" ? `${num("grace", 0, lim.grace[1], 10)} s` : ""}</div></div>
+        <div class="frow"><label>Earlier manual change</label><div class="fval"><label class="chk"><input type="checkbox" data-control="pi-override_manual" ${d.override_manual ? "checked" : ""}> may override a manual change made before the input became active</label></div></div>
+        <div class="frow"><label>Change while active</label><div class="fval">${sel("release_manual", d.release_manual, [["respect", "kept after release"], ["resume", "ended at release (the current rule takes over)"]])}</div></div>
+      </details>
+      ${preview}
+      <div class="ibtns"><button class="btn small" data-action="pi-save">Save</button>
+        ${d.id && !d.enabled ? `<button class="btn ghost small" data-action="pi-review">Review and enable</button>` : ""}
+        ${d.id && d.enabled ? `<button class="btn ghost small" data-action="pi-disable">Disable</button>` : ""}
+        <button class="link" data-action="pi-cancel">Cancel</button>
+        ${d.id ? `<button class="btn ghost small warnbtn" data-action="pi-delete">Delete</button>` : ""}</div>
+      <div class="sub">${d.enabled ? "Enabled: it acts when its input becomes active." : "Disabled: it sends nothing until you review and enable it."}</div></div>`;
+  }
+
+  _piMsg(d) {
+    const out = { name: (d.name || "").trim() || "Priority Input", entity_id: d.entity_id || null, active_when: d.active_when, targets: d.targets,
+      brightness_pct: d.brightness_pct ?? null, appearance: d.appearance, kelvin: d.appearance === "kelvin" ? (d.kelvin ?? 4000) : null,
+      debounce: d.debounce ?? 0, release_delay: d.release_delay ?? 2, unavailable: d.unavailable, grace: d.grace ?? 60,
+      override_manual: !!d.override_manual, release_manual: d.release_manual };
+    if (d.id) out.id = d.id;
+    return out;
+  }
+
+  _onP48Action(a, el) {
+    const ui = this._ui;
+    const area = this._config.area;
+    const r = this._model.room;
+    if (a === "lv-edit") {
+      const b = r.brightness;
+      const src = el.dataset.scope === "global" ? b.ambient.global_levels : b.levels;
+      ui.lv = { scope: el.dataset.scope, inherit: false, levels: src.map((l) => ({ id: l.id || l.key, name: l.name, start: l.start })), resolve: {}, preview: null, error: null };
+      this._lvPreview();
+    } else if (a === "lv-inherit") { ui.lv = { scope: "room", inherit: true, levels: [], resolve: {}, preview: null, error: null }; this._lvPreview(); }
+    else if (a === "lv-cancel") ui.lv = null;
+    else if (a === "lv-add") {
+      const d = ui.lv;
+      const last = d.levels[d.levels.length - 1];
+      d.levels.push({ name: `Level ${d.levels.length + 1}`, start: Math.max(Number(last?.start) || 0, 0) * 2 || 50 });
+      this._lvPreview();
+    } else if (a === "lv-remove") { ui.lv.levels.splice(Number(el.dataset.index), 1); ui.lv.levels[0].start = 0; this._lvPreview(); }
+    else if (a === "lv-save") {
+      const d = ui.lv;
+      this._save("lv", this._lvMsg(d, true), "Categories saved · nothing was sent").then(() => { if (!this._status.lv?.error) { ui.lv = null; this._requestRender(); } });
+      return;
+    } else if (a === "fx-edit") {
+      const l = r.priority.lights.find((x) => x.entity_id === el.dataset.entity);
+      ui.fx = ui.fx?.entity_id === l.entity_id ? null : { entity_id: l.entity_id, kind: l.fixture?.kind || "dumb", label: l.fixture?.label || "", ha_label: l.fixture?.ha_label || "", name: l.fixture?.name || "" };
+    } else if (a === "fx-cancel") ui.fx = null;
+    else if (a === "fx-save") {
+      const d = ui.fx;
+      this._save("fx", { type: `${WS}/fixture/set`, area_id: area, entity_id: d.entity_id, kind: d.kind, label: d.label || null, ha_label: d.ha_label || null, name: d.name || null }, "Saved · nothing was sent")
+        .then(() => { if (!this._status.fx?.error) { ui.fx = null; this._requestRender(); } });
+      return;
+    } else if (a === "fx-remove") {
+      this._save("fx", { type: `${WS}/fixture/remove`, area_id: area, entity_id: ui.fx.entity_id }, "Classification removed");
+      ui.fx = null;
+    } else if (a === "pi-add") {
+      ui.pi = { name: `Priority Input ${(r.priority.inputs || []).length + 1}`, entity_id: "", active_when: "on", targets: [], brightness_pct: 100, appearance: "none", kelvin: null,
+        debounce: 0, release_delay: 2, unavailable: "hold", grace: 60, override_manual: false, release_manual: "respect", enabled: false, preview: null };
+    } else if (a === "pi-edit") {
+      const x = r.priority.inputs.find((i) => i.id === el.dataset.id);
+      ui.pi = x ? { ...JSON.parse(JSON.stringify({ ...x, status: undefined, missing_targets: undefined, entity_name: undefined })), preview: null } : null;
+    } else if (a === "pi-cancel") ui.pi = null;
+    else if (a === "pi-more") { ui.piMore = !el.parentElement.open; return; }
+    else if (a === "pi-save") {
+      const d = ui.pi;
+      this._save("pi", { type: `${WS}/priority/set`, area_id: area, input: this._piMsg(d) }, "Saved · nothing was sent").then((res) => {
+        if (!this._status.pi?.error) { ui.pi = null; this._requestRender(); }
+      });
+      return;
+    } else if (a === "pi-review") {
+      const d = ui.pi;
+      this._ws({ type: `${WS}/priority/preview`, area_id: area, input: this._piMsg(d) }).then((res) => { d.preview = res; this._requestRender(); })
+        .catch((err) => { this._status.pi = { error: err?.message || String(err) }; this._requestRender(); });
+      return;
+    } else if (a === "pi-preview-close") ui.pi.preview = null;
+    else if (a === "pi-enable-confirm") {
+      const d = ui.pi;
+      this._save("pi", { type: `${WS}/priority/set`, area_id: area, input: { ...this._piMsg(d), enabled: true }, confirm: true }, "Enabled · it acts when its input becomes active")
+        .then(() => { if (!this._status.pi?.error) { ui.pi = null; this._requestRender(); } });
+      return;
+    } else if (a === "pi-disable") {
+      this._save("pi", { type: `${WS}/priority/set`, area_id: area, input: { id: ui.pi.id, enabled: false } }, "Disabled");
+      ui.pi = null;
+    } else if (a === "pi-delete") {
+      if (!confirm(`Delete the Priority Input ${ui.pi.name}? If it is active now, its lights get their current automatic rule.`)) return;
+      this._save("pi", { type: `${WS}/priority/remove`, area_id: area, input_id: ui.pi.id }, "Deleted");
+      ui.pi = null;
+    } else if (a === "pi-lock") {
+      const lock = el.dataset.value === "true";
+      if (lock && !confirm("Lock every Priority Input in every room? No input sends anything until you unlock them.")) return;
+      this._save("pi", { type: `${WS}/priority/lock`, lock }, lock ? "Locked" : "Unlocked");
+      return;
+    }
+    this._render();
+  }
+
+  _onP48Control(c, el) {
+    const ui = this._ui;
+    const area = this._config.area;
+    if (c === "lv-name" || c === "lv-start") {
+      const l = ui.lv.levels[Number(el.dataset.index)];
+      if (c === "lv-name") l.name = el.value; else l.start = el.value === "" ? "" : Number(el.value);
+      this._lvPreview();
+      return;
+    }
+    if (c === "lv-resolve") {
+      const v = el.value;
+      if (v === "") delete ui.lv.resolve[el.dataset.id]; else ui.lv.resolve[el.dataset.id] = v === "__delete" ? null : v;
+      this._lvPreview();
+      return;
+    }
+    if (c === "fx-relay") {
+      if (!el.value) return;
+      this._save("fx", { type: `${WS}/fixture/set`, area_id: area, entity_id: el.value, kind: "dumb", register_relay: true }, "Added as a Dumb Light · nothing was sent");
+      return;
+    }
+    if (c.startsWith("fx-")) {
+      const d = ui.fx;
+      if (c === "fx-kind") d.kind = el.value; else if (c === "fx-label") d.label = el.value; else if (c === "fx-ha") d.ha_label = el.value; else if (c === "fx-name") d.name = el.value;
+      if (c === "fx-kind") this._render();
+      return;
+    }
+    const d = ui.pi;
+    if (!d) return;
+    const num = (v) => (v === "" ? null : Number(v));
+    if (c === "pi-name") { d.name = el.value; return; }
+    if (c === "pi-entity") d.entity_id = el.value;
+    else if (["pi-active_when", "pi-appearance", "pi-unavailable", "pi-release_manual"].includes(c)) d[c.slice(3)] = el.value;
+    else if (c === "pi-target") d.targets = el.checked ? [...new Set([...d.targets, el.dataset.entity])] : d.targets.filter((x) => x !== el.dataset.entity);
+    else if (c === "pi-num") d[el.dataset.key] = num(el.value);
+    else if (c === "pi-override_manual") d.override_manual = el.checked;
+    d.preview = null;
+    this._render();
+  }
+
+  // Radar Distance Zone: the band, the margins, where the target is now (live from Home Assistant) and why.
+  _radarDistanceNow(cfg) {
+    const st = cfg?.distance ? this._hass?.states[cfg.distance] : null;
+    if (!st) return null;
+    const raw = cfg.attribute ? st.attributes?.[cfg.attribute] : st.state;
+    const unit = cfg.attribute ? cfg.unit : (st.attributes?.unit_of_measurement || cfg.unit);
+    const factor = { m: 1, cm: 0.01, mm: 0.001 }[unit];
+    const n = Number(raw);
+    if (!factor || raw === "" || raw == null || !Number.isFinite(n) || n < 0) return { valid: false, text: st.state === "unavailable" || st.state === "unknown" ? st.state : `${raw} ${unit || ""}`.trim() };
+    return { valid: true, m: n * factor };
+  }
+
+  _radarBandHtml(cfg, status) {
+    if (!cfg || !(cfg.max_m > cfg.min_m)) return "";
+    const now = this._radarDistanceNow(cfg);
+    const pres = cfg.presence ? this._hass?.states[cfg.presence]?.state : null;
+    const h = Number(cfg.hysteresis) || 0;
+    const scale = Math.max(cfg.max_m + h + 1, now?.valid ? now.m + 0.5 : 0, 4);
+    const pc = (m) => `${Math.max(0, Math.min(100, (m / scale) * 100)).toFixed(2)}%`;
+    const fm = (m) => (Math.round(m * 100) / 100).toFixed(m * 100 % 10 === 0 ? 1 : 2);
+    const where = !now ? "no distance" : !now.valid ? `distance ${now.text}` : now.m >= cfg.min_m && now.m <= cfg.max_m ? "inside the band"
+      : now.m >= cfg.min_m - h && now.m <= cfg.max_m + h ? "within the hysteresis margin" : "outside the band";
+    const zone = status ? (status.state === "unavailable" ? ["Unavailable", "warn"] : status.state === "active" ? ["Active", "ok"] : ["Inactive", "muted"]) : ["Not saved yet", "muted"];
+    return `<div class="band" role="img" aria-label="Radar band ${fm(cfg.min_m)} to ${fm(cfg.max_m)} m; target ${now?.valid ? `${fm(now.m)} m, ${where}` : where}">
+        <div class="bandbar"><span class="bradar"><ha-icon icon="mdi:radar"></ha-icon></span>
+          <span class="bmargin" style="left:${pc(cfg.min_m - h)};width:calc(${pc(cfg.max_m + h)} - ${pc(cfg.min_m - h)})"></span>
+          <span class="bactive" style="left:${pc(cfg.min_m)};width:calc(${pc(cfg.max_m)} - ${pc(cfg.min_m)})"></span>
+          ${now?.valid ? `<span class="bnow" style="left:${pc(now.m)}"><b>${fm(now.m)} m</b></span>` : ""}</div>
+        <div class="bandscale"><span style="left:0">0 m</span><span style="left:${pc(cfg.min_m)}">${fm(cfg.min_m)}</span><span style="left:${pc(cfg.max_m)}">${fm(cfg.max_m)}</span><span style="left:100%">${fm(scale)} m</span></div></div>
+      <div class="kvs">
+        <div><span>Zone</span><b><span class="pill ${zone[1]}">${zone[0]}</span>${status?.reason ? ` <span class="sub">${esc(status.reason)}</span>` : ""}</b></div>
+        <div><span>Radar presence</span><b>${esc(pres === "on" ? "detected" : pres === "off" ? "clear" : pres || "—")}</b></div>
+        <div><span>Distance now</span><b>${now?.valid ? `${fm(now.m)} m` : esc(now?.text || "—")} <span class="sub">${esc(where)}</span></b></div>
+        <div><span>Band</span><b>${fm(cfg.min_m)}–${fm(cfg.max_m)} m <span class="sub">margin ±${fm(h)} m</span></b></div>
+      </div>
+      <div class="sub">One reported distance is a radial band around the radar (every direction it sees), not a rectangle, and it cannot tell several people apart.</div>`;
+  }
+
+  // Overview (0.6.8): active Priority Inputs and radar zones, and why each light is On, Off or dimmed.
+  _p48OverviewHtml(r) {
+    const p = r.priority;
+    const z = r.zones;
+    const out = [];
+    const active = (p?.inputs || []).filter((x) => x.status?.active);
+    const warn = (p?.inputs || []).filter((x) => x.enabled && ["unavailable", "missing"].includes(x.status?.status));
+    if (active.length) out.push(`<div><span>Priority Inputs</span><b>${active.map((x) => `<span class="pill ok">${esc(x.name)}</span>`).join(" ")} <span class="sub">forcing ${esc([...new Set(active.flatMap((x) => x.targets))].length)} light(s) On</span></b></div>`);
+    if (warn.length) out.push(`<div><span>Priority Inputs</span><b><span class="pill warn">${esc(warn.map((x) => x.name).join(", "))}: input unavailable</span></b></div>`);
+    const radar = (z?.zones || []).filter((x) => x.detection === "radar" && x.enabled);
+    for (const x of radar) {
+      const rs = x.status?.radar;
+      out.push(`<div><span>${esc(x.name)} zone</span><b><span class="pill ${rs?.state === "active" ? "ok" : rs?.state === "unavailable" ? "warn" : "muted"}">${esc(rs?.state === "active" ? "Active" : rs?.state === "unavailable" ? "Unavailable" : "Inactive")}</span>
+        <span class="sub">radar ${esc(rs?.distance_text || "—")} · band ${esc(rs?.band || "")}</span></b></div>`);
+    }
+    const rules = z?.rules || [];
+    const why = rules.length ? `<details class="dladv"><summary>Why each light is on, off or dimmed</summary><div class="tscroll"><table class="fct"><thead><tr><th scope="col">Light</th><th scope="col">Winning rule</th><th scope="col">Requests</th><th scope="col">Why</th></tr></thead><tbody>
+      ${rules.map((x) => `<tr><td>${esc(x.name)}</td><td>${esc(x.rule || "—")}${x.superseded.length ? `<div class="sub">over ${esc(x.superseded.join(", "))}</div>` : ""}</td><td>${esc(x.requested?.state === "off" ? "Off" : x.requested?.state === "on" ? (x.requested.brightness_pct != null ? `${x.requested.brightness_pct} %` : "On") : "—")}</td><td class="sub">${esc(x.reason)}</td></tr>`).join("")}</tbody></table></div></details>` : "";
+    return { kvs: out.join(""), why };
+  }
 
   _onBrightnessAction(a, el) {
     const ui = this._ui;
@@ -3259,15 +3695,6 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const d = ui.brDraft;
     const num = (v) => (v === "" ? null : Number(v));
     if (c === "am-enabled") { this._save("am-enabled", { type: `${WS}/ambient/set`, area_id: area, enabled: el.checked }, el.checked ? "On · nothing was sent" : "Off"); return; }
-    if (c === "am-th" || c === "am-gth") {
-      const glob = c === "am-gth";
-      const th = [...((glob ? b.ambient.global : b.ambient.effective).thresholds || [5, 20])];
-      th[Number(el.dataset.index)] = Number(el.value);
-      const msg = { type: `${WS}/ambient/set`, thresholds: th };
-      if (!glob) msg.area_id = area;
-      this._save(glob ? "amg-thresholds" : "am-thresholds", msg, glob ? "Global default" : "Room override");
-      return;
-    }
     if (c === "am-num" || c === "am-sel") {
       const k = el.dataset.key;
       this._save(`am-${k}`, { type: `${WS}/ambient/set`, area_id: area, [k]: c === "am-num" ? num(el.value) : el.value || null }, el.value === "" ? "Uses the global default" : "Room override");
@@ -3312,21 +3739,39 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const ui = this._ui;
     const area = this._config.area;
     const r = this._model.room;
-    if (a === "zn-add") {
-      ui.zd = { name: `Zone ${(r.zones.zones || []).length + 1}`, enabled: true, sensors: [], activation: "possible", priority: 50, holds_room: true,
-        unavailable: "hold", manual: "respect", daylight: "room", on_below: null, release: "restore", timing: {}, targets: [] };
+    if (a === "zn-add" || a === "zn-add-radar") {
+      ui.zd = { name: a === "zn-add-radar" ? "Desk" : `Zone ${(r.zones.zones || []).length + 1}`, enabled: true, sensors: [], activation: "possible", priority: 50, holds_room: true,
+        unavailable: "hold", manual: "respect", daylight: "room", on_below: null, release: "restore", timing: {}, targets: [], detection: "sensors", radar: null };
+      ui.rtest = null;
+      if (a === "zn-add-radar") {
+        const pair = (r.zones.radar?.presence || []).find((p) => p.distances.length);
+        ui.zd.detection = "radar";
+        ui.zd.radar = { presence: pair?.entity_id || "", distance: pair?.distances[0]?.entity_id || "", min_m: 1, max_m: 3, entry_delay: 2, exit_delay: 15, hysteresis: 0.2, max_age: null, attribute: null, unit: null };
+      }
     } else if (a === "zn-edit") {
       const zone = r.zones.zones.find((x) => x.id === el.dataset.zone);
       ui.zd = zone ? JSON.parse(JSON.stringify({ ...zone, status: undefined })) : null;
+      ui.rtest = null;
     } else if (a === "zn-cancel") ui.zd = null;
     else if (a === "zn-more") { ui.zdMore = !el.parentElement.open; return; }
+    else if (a === "zn-radar-more") { ui.zdRadar = !el.parentElement.open; return; }
+    else if (a === "zn-rtest") {
+      const c = ui.zd.radar;
+      const t = ui.rtest || {};
+      const msg = (active) => ({ type: `${WS}/zone/radar_test`, area_id: area, radar: this._radarMsg(c), distance_m: t.distance ?? null, presence: true, active, unavailable: ui.zd.unavailable });
+      Promise.all([this._ws(msg(false)), this._ws(msg(true))]).then(([fresh, settled]) => { ui.rtest = { ...t, result: { where: fresh.where, fresh, settled } }; this._requestRender(); })
+        .catch((err) => { this._status.zn = { error: err?.message || String(err) }; this._requestRender(); });
+      return;
+    }
     else if (a === "zn-rules") { ui.znRules = !el.parentElement.open; return; }
     else if (a === "zn-save") {
       const d = ui.zd;
       const zone = { name: (d.name || "").trim() || "Zone", enabled: d.enabled, sensors: d.sensors, activation: d.activation, priority: Number(d.priority) || 50,
         holds_room: d.holds_room, unavailable: d.unavailable, manual: d.manual, daylight: d.daylight, on_below: d.daylight === "below" ? d.on_below : null,
         release: d.release, timing: Object.fromEntries(["correlation_window", "exit_confirmation", "inactivity_timeout", "dropout_grace"].map((k) => [k, d.timing[k] ?? null])),
-        targets: d.targets.map((t) => ({ entity_id: t.entity_id, action: t.action, brightness_pct: t.brightness_pct ?? null, color_temp_kelvin: t.color_temp_kelvin ?? null, transition: t.transition ?? null })) };
+        targets: d.targets.map((t) => ({ entity_id: t.entity_id, action: t.action, brightness_pct: t.brightness_pct ?? null, color_temp_kelvin: t.color_temp_kelvin ?? null, transition: t.transition ?? null })),
+        detection: d.detection || "sensors" };
+      if (zone.detection === "radar") zone.radar = this._radarMsg(d.radar || {});
       if (d.id) zone.id = d.id;
       this._save("zn", { type: `${WS}/zone/set`, area_id: area, zone }, "Zone saved").then(() => { if (!this._status.zn?.error) { ui.zd = null; this._requestRender(); } });
       return;
@@ -3369,6 +3814,21 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const sd = ui.sd;
     const num = (v) => (v === "" ? null : Number(v));
     if (c === "zd-name") d.name = el.value;
+    else if (c === "zd-detection") {
+      d.detection = el.value;
+      if (d.detection === "radar" && !d.radar) {
+        const pair = (this._model.room.zones.radar?.presence || []).find((p) => p.distances.length);
+        d.radar = { presence: pair?.entity_id || "", distance: pair?.distances[0]?.entity_id || "", min_m: 1, max_m: 3, entry_delay: 2, exit_delay: 15, hysteresis: 0.2, max_age: null, attribute: null, unit: null };
+      }
+    } else if (c === "zd-rsel" || c === "zd-rtext") {
+      d.radar = { ...(d.radar || {}), [el.dataset.key]: el.value || null };
+      if (el.dataset.key === "presence") {
+        const pair = (this._model.room.zones.radar?.presence || []).find((p) => p.entity_id === el.value);
+        if (pair?.distances.length && !d.radar.distance) d.radar.distance = pair.distances[0].entity_id;
+      }
+      if (c === "zd-rtext") return;
+    } else if (c === "zd-rnum") { d.radar = { ...(d.radar || {}), [el.dataset.key]: num(el.value) }; }
+    else if (c === "zd-rtest") { ui.rtest = { distance: num(el.value) }; return; }
     else if (c === "zd-enabled" || c === "zd-holds_room") d[c.slice(3)] = el.checked;
     else if (c === "zd-sensor") d.sensors = el.checked ? [...new Set([...d.sensors, el.dataset.entity])] : d.sensors.filter((x) => x !== el.dataset.entity);
     else if (["zd-activation", "zd-unavailable", "zd-manual", "zd-daylight", "zd-release"].includes(c)) d[c.slice(3)] = el.value;
@@ -3406,6 +3866,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     if (a.startsWith("fc-")) { this._onForecastAction(a, el); return; }
     if (/^(zn|sp|rl|sup)-/.test(a)) { this._onZoneAction(a, el); return; }
     if (/^(am|br)-/.test(a)) { this._onBrightnessAction(a, el); return; }
+    if (/^(lv|fx|pi)-/.test(a)) { this._onP48Action(a, el); return; }
     if (a === "tab") this._openTab(el.dataset.tab);
     else if (a === "vac-action") this._setVacancy(el.dataset.value);
     else if (a === "ov-profile") {
@@ -3505,6 +3966,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     if (c && c.startsWith("fc-")) { this._onForecastControl(c, el); return; }
     if (c && /^(zd|sd|rl|sup)-/.test(c)) { this._onZoneControl(c, el); return; }
     if (c && /^(am|br)-/.test(c)) { this._onBrightnessControl(c, el); return; }
+    if (c && /^(lv|fx|pi)-/.test(c)) { this._onP48Control(c, el); return; }
     if (c === "edit-mood") { this._mood = el.value; this._ui.edit = null; this._fetch(); }
     else if (c === "room-mood") this._save("room-mood", { type: `${WS}/room/set`, area_id: area, mood_override: el.value || null });
     else if (c === "pick-light" && el.value) { this._ui.edit = { scope: "light", target: el.value }; this._render(); }
@@ -3915,6 +4377,31 @@ const STYLE = `<style>
   .hmlegend .hm { width: 14px; }
   .hmramp { display: inline-block; width: 80px; height: 10px; border-radius: 3px;
     background: linear-gradient(to right, color-mix(in oklab, var(--fc-seq) 8%, var(--card-background-color, #fff)), var(--fc-seq)); }
+  /* Phase 4.8 (0.6.8): category table, fixture and priority rows, the radar distance band. */
+  .lvt input[type="text"] { width: 8em; max-width: 28vw; }
+  .lvt input.num { width: 4.5em; }
+  .lvt td { white-space: nowrap; }
+  .lvt td.sub { white-space: normal; }
+  .zform, .zform .brprev { grid-template-columns: minmax(0, 1fr); }
+  .zform .dlist select { width: 100%; }
+  .zform .brprev, .zform .dlist li { min-width: 0; overflow-wrap: anywhere; }
+  .lvt td, .lvt th { vertical-align: middle; }
+  .fxrow, .pirow { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; justify-content: space-between; }
+  .fxrow .lmain, .pirow .lmain { display: grid; gap: 2px; min-width: 0; flex: 1 1 14em; }
+  .fxrow .zform { flex-basis: 100%; }
+  .band { display: grid; gap: 4px; padding: 6px 0; }
+  .bandbar { position: relative; height: 28px; border-radius: 6px; background: var(--secondary-background-color); border: 1px solid var(--divider-color); margin-left: 26px; }
+  .bradar { position: absolute; left: -26px; top: 2px; color: var(--secondary-text-color); }
+  .bradar ha-icon { --mdc-icon-size: 22px; }
+  .bmargin { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--primary-color) 18%, transparent); }
+  .bactive { position: absolute; top: 4px; bottom: 4px; border-radius: 4px; background: color-mix(in srgb, var(--primary-color) 55%, transparent); border: 1px solid var(--primary-color); }
+  .bnow { position: absolute; top: -4px; bottom: -4px; width: 0; border-left: 3px solid var(--primary-text-color); }
+  .bnow b { position: absolute; top: -1.4em; left: 4px; font-size: 0.85em; white-space: nowrap; }
+  .bandscale { position: relative; height: 1.2em; margin-left: 26px; font-size: 0.8em; color: var(--secondary-text-color); }
+  .bandscale span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+  .bandscale span:first-child { transform: none; }
+  .bandscale span:last-child { transform: translateX(-100%); }
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
   /* Settings → Lighting (0.6.7): the ambient categories, the light list and each light's brightness matrix. */
   .amb { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5em, 1fr)); gap: 6px; }
   .amblevel { display: grid; gap: 2px; justify-items: start; padding: 8px 10px; border: 1px solid var(--divider-color); border-radius: 10px; }

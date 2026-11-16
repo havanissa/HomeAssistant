@@ -116,6 +116,20 @@ overrides, conflicts, offline devices, occupancy confirmation, shared spaces).
 A committed category change applies the enrolled lights again
 (``async_ambient_changed``, trigger ``ambient``); a zone change applies at
 once (``async_zones``). Rooms without enrolled lights behave exactly as before.
+
+Phase 4.8 (0.6.8): custom ambient categories (any number, stable ids;
+``ambient_levels.py``), fixture types (``fixtures.py``: a Dumb Light is
+commanded on/off only - its target capabilities are narrowed in ``_targets``),
+Radar Distance Zones (``radar.py``, inside the zone runtime) and **Priority
+Inputs** (``priority.py``, ``priority_runtime.py``): while an armed input is
+active, its claim is the winning rule of its lights in every plan
+(``_arbitrate``; ``arbitration.priority_item``). Its start and end are applied
+by ``async_priority`` through the same executor (``_send``): an active claim
+is sent even in an Observing room or Manual mood (an explicit, armed request,
+gated by ``assert_priority_control_permitted``); at release the current
+winning rule is applied in an Automatic room, and a light the input switched
+on that no automatic rule takes over is switched off (unless a person changed
+it). Rooms without these features behave exactly as before.
 """
 
 from __future__ import annotations
@@ -223,7 +237,15 @@ from .planner import (
 from .preliminary import TRIGGER as PRELIMINARY, ConfirmAction, EffectivePreliminary, effective as prelim_effective
 from .preliminary import evidence as prelim_evidence, preliminary_gate
 from .profiles import ResolvedSetting, mood_chain, resolve
-from .supervision import ControlNotPermittedError, assert_room_control_permitted, assert_switch_control_permitted
+from .supervision import (
+    ControlNotPermittedError,
+    assert_priority_control_permitted,
+    assert_room_control_permitted,
+    assert_switch_control_permitted,
+)
+from .fixtures import restrict as fixture_capabilities
+from .priority import PriorityInput, ReleaseManual
+from .priority_runtime import PriorityInputs
 from . import arbitration as arb
 from .preliminary import preliminary_gate as zone_gate
 from .supervisor import Supervisor
@@ -491,6 +513,8 @@ class LightingController:
         # Multi-zone lighting and the Room Supervisor (0.6.0).
         self.zones = ZoneManager(hass, self, self._on_zones_changed)
         self.supervisor = Supervisor(hass, self)
+        # Priority Inputs (0.6.8).
+        self.priority = PriorityInputs(hass, self)
 
     # ------------------------------------------------------------ properties
     @property
@@ -548,6 +572,7 @@ class LightingController:
         self._restored_switches = data.get("switches") if isinstance(data.get("switches"), dict) else {}
         self.decisions.restore(data.get("decisions"))
         self.zones.restore(data.get("zones"))
+        self.priority.restore(data.get("priority"))
         now = dt_util.utcnow()
         for area_id in self.config.enabled_rooms:
             rt = RoomRuntime.restore(rooms.get(area_id))
@@ -587,6 +612,7 @@ class LightingController:
         self.switch_control.async_start()
         self.zones.async_start()
         self.supervisor.async_start()
+        self.priority.async_start()
         if self.hass.state is CoreState.running:
             self._on_started()
         else:
@@ -617,6 +643,7 @@ class LightingController:
                 self._schedule_cleanup_retry(area_id)  # due before the restart: tried again shortly
             # Zones active at start are the baseline (nothing is applied on start).
             rt.zone_winners = self._zone_winners(area_id)
+        self.priority.async_started()  # (inputs are evaluated once they had time to settle)
         self._automations = None
         self._conflicts = None
         _LOGGER.debug(
@@ -651,6 +678,7 @@ class LightingController:
         self.switch_inputs.async_stop()
         self.zones.async_stop()
         self.supervisor.async_stop()
+        self.priority.async_stop()
         self.decisions.async_stop()
         for task in list(self._tasks):
             task.cancel()
@@ -919,21 +947,24 @@ class LightingController:
         hass = self.hass
         managed = self.managed_room(area_id)
         rt = self.runtime.get(area_id) or RoomRuntime()
-        acknowledged = set(self.lighting.room(area_id).acknowledged)
+        room = self.lighting.room(area_id)
+        acknowledged = set(room.acknowledged)
         out: list[Target] = []
         for entity_id in managed.targets:
             state = hass.states.get(entity_id)
             category = self.index.category_of(entity_id)
             cat = self.config.category(category) if category else None
             conflicts = self.conflicts(area_id).get(entity_id, [])
+            fixture = room.fixtures.get(entity_id)
             out.append(Target(
                 entity_id=entity_id,
-                name=friendly_name(hass, entity_id),
+                name=(fixture.name if fixture and fixture.name else None) or friendly_name(hass, entity_id),
                 category=category,
                 category_name=cat.name if cat else None,
                 state=state.state if state else None,
                 attributes=dict(state.attributes) if state else {},
-                capabilities=target_capabilities(hass, entity_id),
+                # (A Dumb Light is commanded on/off only, 0.6.8: never more than the entity supports.)
+                capabilities=fixture_capabilities(target_capabilities(hass, entity_id), fixture),
                 is_group=entity_id in managed.members or entity_id in managed.opaque_groups,
                 members=tuple(sorted(managed.members.get(entity_id, ()))),
                 covered_by=managed.covered_by.get(entity_id),
@@ -1016,7 +1047,7 @@ class LightingController:
         def resolve_fn(t: Target) -> ResolvedSetting:
             base = self.resolve(mood or "", area_id, t.entity_id, t.targets, config=lighting)
             matrix = bctx.matrices.get(t.entity_id) if bctx else None
-            decision = bright.decide(matrix, bctx.level, []) if matrix is not None else None
+            decision = bright.decide(matrix, bctx.level, [], bctx.status.name) if matrix is not None else None
             if decision is None:
                 return base
             return bright.merged_setting(decision, self.appearance(mood, area_id, t, lighting),
@@ -1095,7 +1126,8 @@ class LightingController:
             if entity_id not in controlled:
                 continue
             matrix = bctx.matrices.get(entity_id) if bctx else None
-            if matrix is not None and (d := bright.decide(matrix, bctx.level, _columns(cl))) is not None:
+            if matrix is not None and (d := bright.decide(matrix, bctx.level, _columns(cl), bctx.status.name)) \
+                    is not None:
                 if d.zone:
                     out[entity_id] = d.zone
                 continue  # the Room occupied cell decides: no zone rule
@@ -1111,6 +1143,8 @@ class LightingController:
         cell instead (a zone column replaces the profile's item; the Room occupied cell is already in it).
         """
         claims = self.zone_claims(area_id, fresh=fresh) if zones else {}
+        # Priority Inputs (0.6.8): an active, armed input's claim wins over every rule below it.
+        forced = self.priority.claims(area_id) if zones else {}
         by_id = {t.entity_id: t for t in targets}
         for index, item in enumerate(plan.items):
             if keep and item.entity_id in keep:
@@ -1121,17 +1155,23 @@ class LightingController:
             if target is None or target.excluded or target.covered_by:
                 continue
             matrix = brightness.matrices.get(item.entity_id) if brightness else None
+            decided = False
             if matrix is not None and plan.mood is not None:
                 cl = claims.get(item.entity_id, [])
-                decision = bright.decide(matrix, brightness.level, _columns(cl))
+                decision = bright.decide(matrix, brightness.level, _columns(cl), brightness.status.name)
                 if decision is not None:
-                    plan.items[index] = self._matrix_item(area_id, plan, target, item, decision, cl, brightness,
-                                                          lighting or self.lighting)
-                    continue
-            if item.entity_id not in claims:
-                continue
-            plan.items[index] = arb.zone_item(target, claims[item.entity_id], manual_mode=plan.manual_mode,
-                                              control_enabled=plan.control_enabled, replaced=item)
+                    item = plan.items[index] = self._matrix_item(area_id, plan, target, item, decision, cl,
+                                                                 brightness, lighting or self.lighting)
+                    decided = True
+            if not decided and item.entity_id in claims:
+                item = plan.items[index] = arb.zone_item(target, claims[item.entity_id], manual_mode=plan.manual_mode,
+                                                         control_enabled=plan.control_enabled, replaced=item)
+            if item.entity_id in forced:
+                claim = forced[item.entity_id]
+                look = None
+                if claim.winner.appearance.value == "mood":
+                    look = bright.appearance_of(self.appearance(plan.mood, area_id, target, lighting))
+                plan.items[index] = arb.priority_item(target, claim, replaced=item, look=look)
         self._shared_rules(area_id, plan)
 
     # ------------------------------------------------------ brightness rules (0.6.7)
@@ -1169,12 +1209,13 @@ class LightingController:
                      claims: list[arb.Claim], ctx: BrightnessContext, lighting: LightingConfig) -> PlanItem:
         """The plan item of an enrolled light: its matrix cell, the mood's appearance, every protection."""
         look = self.appearance(plan.mood, area_id, target, lighting)
+        decision.onoff = not target.capabilities.brightness
         if decision.zone:
             setting = bright.merged_setting(decision, look, transition=ctx.settings.transition)
             claim = next(c for c in claims if c.zone.id == decision.zone)
             gate = claim.gate if claim.gate is not None and claim.gate.policy == AutoOn.NEVER else None
             ordered = [replace(claim, gate=gate), *(c for c in claims if c is not claim)]
-            what = "off" if decision.off else f"{decision.value} %"
+            what = "off" if decision.off else "on" if decision.onoff else f"{decision.value} %"
             item = arb.zone_item(target, ordered, manual_mode=plan.manual_mode, control_enabled=plan.control_enabled,
                                  replaced=item, setting=setting, what=what, superseded=decision.superseded)
         else:
@@ -1218,7 +1259,8 @@ class LightingController:
         room = lighting.room(area_id)
         matrix = matrix or room.brightness.get(entity_id) or bright.find_template(
             lighting.brightness_templates, bright.DEFAULT_TEMPLATE).matrix(
-                entity_id, [z.id for z in room.zones if z.target(entity_id)])
+                entity_id, [z.id for z in room.zones if z.target(entity_id)],
+                levels=lighting.ambient_for(area_id).levels)
         matrix = replace(matrix, enabled=True)
         trial = lighting.with_room(area_id, replace(room, ambient=replace(room.ambient, enabled=True),
                                                     brightness=bright.with_matrix(room.brightness, matrix, entity_id)))
@@ -1270,6 +1312,8 @@ class LightingController:
         result = self.coordinator.occupancy.result(area_id)
         _LOGGER.debug("lighting_ambient area=%s old=%s new=%s basis=%s lights=%d", area_id, old, status.key,
                       status.basis, len(targets))
+        if self.lighting.room(area_id).ambient.enabled and self._running:
+            self.explain.ambient_changed(area_id, old, status)
         if not targets or result is None or not result.occupied:
             self._notify()
             return  # nothing follows the category now (vacancy behaviour is unchanged)
@@ -1321,8 +1365,8 @@ class LightingController:
         occupied = {r for r in members if (res := self.coordinator.occupancy.result(r)) is not None and res.occupied}
         controlled = {r: set(self.managed_room(r).controlled) for r in members}
         for item in plan.items:
-            if item.decision != CHANGE:
-                continue
+            if item.decision != CHANGE or (item.rule or {}).get("kind") == arb.RULE_PRIORITY:
+                continue  # (a Priority Input's request is this room's explicit claim)
             sharing = [r for r in members if r != area_id and item.entity_id in controlled[r]]
             if not sharing:
                 continue
@@ -2116,6 +2160,7 @@ class LightingController:
             manual = source in ("ui", "wall_switch") or (
                 source == "unattributed" and self.lighting.unattributed == UnattributedPolicy.MANUAL
             )
+            self.priority.note_change(area_id, target, manual=manual, off=new.state == "off")
             if manual:
                 self._note_preliminary_taken(area_id, target, source)
             if switched_on and (area_id, target) in self._prelim_removed:
@@ -2314,8 +2359,13 @@ class LightingController:
         )
         # A light a zone controls is left to the zone (0.6.0): zone rules rank above possible occupancy.
         claims = self.zone_claims(area_id)
+        forced = self.priority.claims(area_id)
         for item in plan.items:
-            if item.entity_id in claims:
+            if item.entity_id in forced:
+                item.decision, item.reason_code = SKIPPED, "priority"
+                item.reason = f"Forced on by the Priority Input {forced[item.entity_id].winner.name}"
+                item.rule = arb.rule_info(arb.RULE_PRIORITY, f"Priority Input: {forced[item.entity_id].winner.name}")
+            elif item.entity_id in claims:
                 arb.zone_skip(item, claims[item.entity_id][0])
             else:
                 item.rule = arb.rule_info(arb.RULE_PRELIMINARY, "Possible occupancy")
@@ -2809,12 +2859,13 @@ class LightingController:
         return errors
 
     async def _send(self, area_id: str, service: str, data_by_entity: dict[str, dict[str, Any]], *,
-                    purpose: str = "lighting") -> dict[str, str]:
+                    purpose: str = "lighting", explicit: bool = False) -> dict[str, str]:
         """Send one service to several targets, batched by domain and identical data. Returns {entity: error}.
 
         Lights get ``light.<service>``; relay outputs ``switch.<service>`` with no light attributes (0.6.0).
-        Stops before every batch if Manual mode started (those lights are reported as paused). Every command
-        is reported to the Room Supervisor, which verifies it (``purpose`` says what sent it).
+        Stops before every batch if Manual mode started (those lights are reported as paused), unless the
+        command is an explicit, armed request (``explicit``: a Priority Input, 0.6.8). Every command is reported
+        to the Room Supervisor, which verifies it (``purpose`` says what sent it).
         """
         batches: dict[tuple[str, str], list[str]] = {}
         for entity_id, data in data_by_entity.items():
@@ -2825,7 +2876,7 @@ class LightingController:
         self._own_contexts[context.id] = now
         errors: dict[str, str] = {}
         for (target_domain, data_json), entity_ids in batches.items():
-            if self._manual or self._stopped:
+            if (self._manual and not explicit) or self._stopped:
                 errors.update({e: _PAUSED for e in entity_ids})
                 continue
             payload = json.loads(data_json)
@@ -2845,6 +2896,159 @@ class LightingController:
         if sent:
             self.supervisor.note_command(area_id, service, sent, errors, purpose)
         return errors
+
+    # --------------------------------------------------------- priority inputs (0.6.8)
+    async def async_priority(self, area_id: str, input_id: str, event: str, *, reason: str | None = None,
+                             since: datetime | None = None, config: PriorityInput | None = None) -> Plan | None:
+        """A Priority Input's claim started (``activated``; ``kept`` after a restart) or ended (``released``).
+
+        Activated: its lights get the effective plan's item - its claim, the winning rule - and every one that
+        is not already like that is switched on, through the normal executor, also in an Observing room or in
+        Manual mood (an explicit, armed request). Released: the claim is gone from the plan; in an Automatic room
+        (not Manual mood) the light's current winning rule is applied. A light the input switched on from off,
+        that no automatic rule takes over and that nobody changed meanwhile, is switched off.
+        """
+        if self._stopped:
+            return None
+        lock = self._locks.setdefault(area_id, asyncio.Lock())
+        async with lock:
+            if self._stopped or area_id not in self.config.enabled_rooms:
+                return None
+            room = self.lighting.room(area_id)
+            pi = room.priority_input(input_id) or config
+            if pi is None:
+                return None
+            rt = self.runtime_for(area_id)
+            claims = self.priority.claims(area_id)
+            locked = self.lighting.priority_lock
+            released = event == "released"
+            if released and pi.release_manual == ReleaseManual.RESUME and since is not None:
+                # Its release policy ends a person's change made while it was active: the current rule takes over.
+                for entity_id in pi.targets:
+                    override = rt.overrides.get(entity_id)
+                    made = dt_util.parse_datetime((override or {}).get("since") or "")
+                    if override and entity_id not in claims and made is not None and made >= since:
+                        del rt.overrides[entity_id]
+                        self.priority.touched.discard((area_id, entity_id))
+                self._schedule_override_expiry()
+            plan = self.effective_plan(area_id, "priority", fresh=True)
+            items = {i.entity_id: i for i in plan.items}
+            automatic = self.room_active(area_id) and not self._manual
+            forced: list[PlanItem] = []      # the claim's own requests
+            ruled: list[PlanItem] = []       # the current winning rule after a release (Automatic rooms)
+            offs: list[str] = []             # lights it switched on that nothing takes over
+            relevant: list[PlanItem] = []
+            for entity_id in pi.targets:
+                item = items.get(entity_id)
+                if item is None:
+                    continue
+                relevant.append(item)
+                key = (area_id, entity_id)
+                if entity_id in claims:
+                    if item.decision == CHANGE and (item.rule or {}).get("kind") == arb.RULE_PRIORITY:
+                        forced.append(item)
+                    continue
+                if not released:
+                    continue
+                touched = key in self.priority.touched
+                owned = key in self.priority.owned
+                if automatic and item.decision == CHANGE:
+                    ruled.append(item)
+                elif (owned and not touched and entity_id not in rt.overrides and self.hass.states.is_state(
+                        entity_id, "on") and (not automatic or arb.releases(item) or item.service == "turn_off")
+                      and item.reason_code not in ("offline", "conflict", "excluded", "covered_by_group")):
+                    offs.append(entity_id)
+            errors: dict[str, str] = {}
+            ok: list[PlanItem] = []
+            removed: list[str] = []
+            blocked = None
+            if locked and (forced or offs):
+                blocked = "the Priority Input safety lock is on"
+            elif forced or offs:
+                try:
+                    assert_priority_control_permitted(pi.enabled or released, True, locked, area_id, pi.id)
+                except ControlNotPermittedError as err:
+                    blocked = str(err)
+            if blocked is None:
+                if forced:
+                    by_data: dict[str, dict[str, Any]] = {i.entity_id: i.data for i in forced}
+                    errors |= await self._send(area_id, "turn_on", by_data, purpose="priority", explicit=True)
+                    ok += [i for i in forced if i.entity_id not in errors]
+                    for item in forced:
+                        if item.entity_id not in errors and item.current.get("state") != "on":
+                            self.priority.owned[(area_id, item.entity_id)] = pi.id
+                for entity_id in offs:
+                    off = {"transition": 1} if target_capabilities(self.hass, entity_id).transition else {}
+                    err = await self._send(area_id, "turn_off", {entity_id: off}, purpose="priority_release",
+                                           explicit=True)
+                    if err:
+                        errors |= err
+                    else:
+                        removed.append(entity_id)
+                        rt.last_commands[entity_id] = ("turn_off", off)
+            if ruled:
+                err = await self._execute(area_id, ruled)
+                err = {e: m for e, m in err.items() if m != _PAUSED}
+                errors |= err
+                ok += [i for i in ruled if i.entity_id not in err]
+            for item in ok:
+                rt.last_commands[item.entity_id] = (item.service or "", dict(item.data))
+                rt.adaptive_sent.pop(item.entity_id, None)
+            self._note_zone_sent(area_id, ok)
+            if released:
+                for entity_id in pi.targets:
+                    if entity_id not in claims:
+                        self.priority.owned.pop((area_id, entity_id), None)
+                        self.priority.touched.discard((area_id, entity_id))
+            if blocked:
+                self.priority.note(area_id, pi.id, "blocked", f"Nothing sent: {blocked}")
+            elif errors:
+                self.priority.note(area_id, pi.id, "failed", "; ".join(f"{e}: {m}" for e, m in errors.items()))
+            self.explain.priority(area_id, pi, event, plan, relevant, ok=ok, errors=errors, removed=removed,
+                                  reason=reason, blocked=blocked, automatic=automatic)
+            rt.last_trigger = "priority"
+            self._finish(area_id, plan)
+            return plan
+
+    def priority_preview(self, area_id: str, pi: PriorityInput) -> dict[str, Any]:
+        """What an input would do to each of its lights if it became active now (with the inputs already
+        active). Never sends anything."""
+        from .priority import PriorityClaim
+
+        plan = self.effective_plan(area_id, "preview")
+        items = {i.entity_id: i for i in plan.items}
+        targets = {t.entity_id: t for t in self._targets(area_id)}
+        claims = self.priority.claims(area_id)
+        now = _iso(dt_util.utcnow())
+        lights = []
+        for entity_id in pi.targets:
+            target, item = targets.get(entity_id), items.get(entity_id)
+            if target is None or item is None:
+                lights.append({"entity_id": entity_id, "missing": True})
+                continue
+            existing = claims.get(entity_id)
+            claim = PriorityClaim(entity_id, [p for p in (existing.inputs if existing else []) if p.id != pi.id] + [pi],
+                                  {**(existing.since if existing else {}), pi.id: now})
+            look = bright.appearance_of(self.appearance(plan.mood, area_id, target)) \
+                if pi.appearance.value == "mood" else None
+            after = arb.priority_item(target, claim, replaced=item, look=look)
+            lights.append({"entity_id": entity_id, "name": target.name or entity_id, "now": item.as_dict(),
+                           "forced": after.as_dict(), "onoff": not target.capabilities.brightness})
+        notes = []
+        if not self.room_active(area_id):
+            notes.append("The room's automatic lighting is Observing: an enabled Priority Input still switches its "
+                         "lights on (like an Active wall switch). At release, a light it switched on is switched "
+                         "off again, because no automatic rule takes it over.")
+        if self._manual:
+            notes.append("Main Mood is Manual: an enabled Priority Input is not paused by it.")
+        if self.lighting.priority_lock:
+            notes.append("The Priority Input safety lock is on: nothing would be sent.")
+        return {"input": pi.as_dict(), "lights": lights, "notes": notes, "sends_now": False,
+                "locked": self.lighting.priority_lock}
+
+    def explain_priority_input(self, area_id: str, pi: PriorityInput, event: str, state: str) -> None:
+        """An input became unavailable: logged once per episode (shown prominently in the card)."""
+        self.explain.priority_unavailable(area_id, pi, state)
 
     async def async_supervisor_correct(self, area_id: str, item: PlanItem, service: str, data: dict[str, Any], *,
                                        purpose: str = "supervisor") -> dict[str, str]:
@@ -2891,6 +3095,9 @@ class LightingController:
         if old.supervisor != new.supervisor or any(
                 old.room(a).supervisor != new.room(a).supervisor for a in {*old.rooms, *new.rooms}):
             self.supervisor.async_config_changed()
+        if old.priority_lock != new.priority_lock or any(
+                old.room(a).priority_inputs != new.room(a).priority_inputs for a in {*old.rooms, *new.rooms}):
+            self.priority.async_config_changed()
         self.daylight.async_config_changed()
         self.coordinator.async_schedule_refresh()
         if old.adaptive != new.adaptive:
@@ -3041,6 +3248,11 @@ class LightingController:
             "supervisor": self.supervisor.model(area_id, details=True),
             # Brightness rules (0.6.7): a compact summary (no values that change by themselves).
             "brightness": self._brightness_summary(area_id),
+            # Priority Inputs (0.6.8): which are armed and which are active (details in the diagnostics).
+            "priority_inputs": {"configured": len(room_lighting.priority_inputs),
+                                "enabled": sorted(p.id for p in room_lighting.priority_inputs if p.enabled),
+                                "active": sorted(p.id for p in self.priority.active(area_id)),
+                                "lock": self.lighting.priority_lock},
         }
 
     def _brightness_summary(self, area_id: str) -> dict[str, Any]:
@@ -3103,7 +3315,8 @@ class LightingController:
         self._dirty = False
         return {"rooms": {a: rt.persist() for a, rt in self.runtime.items()}, "adaptive": self.adaptive.persist(),
                 "daylight": self.daylight.persist(), "switches": self.switch_inputs.persist(),
-                "decisions": self.decisions.persist(), "zones": self.zones.persist(), "ambient": self.ambient.persist()}
+                "decisions": self.decisions.persist(), "zones": self.zones.persist(), "ambient": self.ambient.persist(),
+                "priority": self.priority.persist()}
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -3116,6 +3329,7 @@ class LightingController:
             "daylight": self.daylight.diagnostics(),
             "ambient": self.ambient.diagnostics(),
             "zones": self.zones.diagnostics(),
+            "priority_inputs": self.priority.diagnostics(),
             "switches": {
                 "mqtt": self.switch_inputs.mqtt_state,
                 "bridge_devices": len(self.switch_inputs.bridge_devices),

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.util import dt as dt_util
 
-from .ambient import LEVEL_KEYS, AmbientStatus, AmbientTracker, classify, status as ambient_status
+from .ambient import AmbientStatus, AmbientTracker, classify, status as ambient_status
 
 if TYPE_CHECKING:
     from .controller import LightingController
@@ -32,6 +32,10 @@ _HISTORY = 20
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat(timespec="seconds") if value else None
+
+
+def _sig(value: list[Any]) -> tuple[Any, ...]:
+    return tuple(value)
 
 
 class AmbientLevels:
@@ -50,18 +54,26 @@ class AmbientLevels:
         rooms = data.get("rooms") if isinstance(data, dict) and isinstance(data.get("rooms"), dict) else {}
         for area_id, item in rooms.items():
             if isinstance(item, dict):
-                self.trackers[area_id] = AmbientTracker.restore(item)
+                # (Restored by category id: a category that no longer exists is classified again.)
+                self.trackers[area_id] = AmbientTracker.restore(item, self.ctrl.lighting.ambient_for(area_id).keys)
                 sig = item.get("signature")
-                self._signature[area_id] = tuple(sig) if isinstance(sig, list) else None
+                self._signature[area_id] = _sig(sig) if isinstance(sig, list) else None
 
     def persist(self) -> dict[str, Any]:
-        return {"rooms": {a: {**t.persist(), "signature": list(self._signature.get(a) or ())}
+        return {"rooms": {a: {**t.persist(self.ctrl.lighting.ambient_for(a).keys),
+                              "signature": list(self._signature.get(a) or ())}
                           for a, t in self.trackers.items() if t.committed is not None}}
 
     # ----------------------------------------------------------- evaluation
     def _settings_signature(self, area_id: str) -> tuple[Any, ...]:
+        """What the classification depends on: category ids and starts (not their names: a rename keeps the
+        committed category), hysteresis and the fallback."""
         s = self.ctrl.lighting.ambient_for(area_id)
-        return (*(s.thresholds or ()), s.hysteresis, s.fallback.value if s.fallback else None, s.fallback_level)
+        if s.keys == ("none", "low", "bright"):
+            # (The 0.6.7 form, so a store written by 0.6.7 is not classified again after the upgrade.)
+            return (*(s.thresholds or ()), s.hysteresis, s.fallback.value if s.fallback else None, s.fallback_level)
+        return (*(f"{lv.id}@{lv.start}" for lv in s.levels or ()), s.hysteresis,
+                s.fallback.value if s.fallback else None, s.fallback_level)
 
     def observe(self, area_id: str, daylight: DaylightStatus, now: datetime) -> AmbientStatus:
         """One daylight evaluation of a room: update its category (may tell the controller it changed)."""
@@ -90,14 +102,15 @@ class AmbientLevels:
         self._status[area_id] = st
         if old is not None:
             self._history.setdefault(area_id, deque(maxlen=_HISTORY)).append({
-                "at": _iso(now), "from": LEVEL_KEYS[old], "to": st.key, "basis": st.basis, "lux": st.lux_text()})
+                "at": _iso(now), "from": st.key_of(old), "to": st.key, "basis": st.basis, "lux": st.lux_text(),
+                "from_name": settings.name_of(st.key_of(old)), "to_name": st.name})
             self.ctrl.mark_dirty()
         held = st.basis == "held" and bool(ev.held)
         was_held = self._held.get(area_id, False)
         self._held[area_id] = held
         if room.ambient.enabled:
             if old is not None:
-                self.ctrl.async_ambient_changed(area_id, LEVEL_KEYS[old], st)
+                self.ctrl.async_ambient_changed(area_id, st.key_of(old) or "", st)
             elif held and not was_held:
                 self.ctrl.async_ambient_held(area_id, st)
         return st

@@ -5,12 +5,18 @@ brightness, and the mood chooses the appearance.*
 
 Matrix
 ------
-An enrolled light has a value per ambient category (``ambient.LEVELS``) for
-the **Room occupied** column and for each zone it is explicitly associated
-with (the zone lists it as a target). A value is a brightness percentage:
+An enrolled light has a value per ambient category for the **Room occupied**
+column and for each zone it is explicitly associated with (the zone lists it
+as a target). Cells are keyed by the category's stable id (0.6.8: the room's
+effective categories, ``ambient.AmbientSettings.levels``), so a renamed
+category keeps its values and a new one starts as *Not configured* (no value
+is invented). Values of a category that no longer exists are kept in storage
+until the reviewed removal reassigns or deletes them (``ambient_levels.py``).
+A value is a brightness percentage:
 
 * ``0`` is **Off** (``light.turn_off``, never ``turn_on`` with 0 %),
-* ``1``-``100`` is On at that brightness (On for an on/off-only light or relay),
+* ``1``-``100`` is On at that brightness (On for an on/off-only light, a relay
+  or a Dumb Light; their editor offers On / Off and stores On as 100),
 * ``None`` is *Not configured*: a zone cell does not claim the brightness
   (another active zone with a value, else the Room occupied value of the same
   category applies); a Room occupied cell (with no zone value either) leaves
@@ -42,7 +48,7 @@ from dataclasses import dataclass, field, replace
 import math
 from typing import TYPE_CHECKING, Any
 
-from .ambient import LEVEL_KEYS, LEVEL_NAMES
+from .ambient import _ID as LEVEL_ID, DEFAULT_LEVELS, LEVEL_KEYS, MAX_LEVELS_LIMIT, AmbientLevel
 from .const import AdjustMode, DaylightCondition, LightAction
 
 if TYPE_CHECKING:  # (profiles imports the lighting configuration, which imports this module)
@@ -66,17 +72,27 @@ def _cell(value: Any) -> int | None:
     return int(round(min(max(number, 0), 100)))
 
 
-def cells_from(data: Any) -> dict[str, int | None]:
+def cells_from(data: Any, keys: Iterable[str] | None = None) -> dict[str, int | None]:
+    """Cells by category id. ``keys``: exactly these categories; None: every valid category id given."""
     data = data if isinstance(data, dict) else {}
-    return {k: _cell(data.get(k)) for k in LEVEL_KEYS}
+    if keys is not None:
+        return {k: _cell(data.get(k)) for k in keys}
+    out = {k: _cell(v) for k, v in data.items() if isinstance(k, str) and LEVEL_ID.match(k)}
+    return dict(list(out.items())[:MAX_LEVELS_LIMIT * 2])
 
 
-def cells_as_dict(cells: Mapping[str, int | None]) -> dict[str, int | None]:
-    return {k: cells.get(k) for k in LEVEL_KEYS}
+def cells_as_dict(cells: Mapping[str, int | None], keys: Iterable[str] | None = None) -> dict[str, int | None]:
+    if keys is None:
+        return dict(cells)
+    return {k: cells.get(k) for k in keys}
 
 
-def describe_value(value: int | None) -> str:
-    return "Not configured" if value is None else "Off" if value == 0 else f"{value} %"
+def describe_value(value: int | None, *, onoff: bool = False) -> str:
+    if value is None:
+        return "Not configured"
+    if value == 0:
+        return "Off"
+    return "On" if onoff else f"{value} %"
 
 
 # ------------------------------------------------------------ configuration
@@ -86,7 +102,7 @@ class LightMatrix:
 
     entity_id: str
     enabled: bool = True
-    room: dict[str, int | None] = field(default_factory=lambda: dict.fromkeys(LEVEL_KEYS))
+    room: dict[str, int | None] = field(default_factory=dict)
     zones: dict[str, dict[str, int | None]] = field(default_factory=dict)
     template: str | None = None      # the template it was created from ("Restore defaults")
     enrolled_at: str | None = None
@@ -114,6 +130,24 @@ class LightMatrix:
         cells = self.room if column == ROOM else self.zones.get(column) or {}
         return cells.get(level)
 
+    def columns(self) -> dict[str, dict[str, int | None]]:
+        return {ROOM: self.room, **self.zones}
+
+    def configured_cells(self, level: str) -> dict[str, int]:
+        """Column -> value of every configured cell of one category."""
+        return {c: v for c, cells in self.columns().items() if (v := cells.get(level)) is not None}
+
+    def remapped(self, moves: Mapping[str, str | None]) -> LightMatrix:
+        """Categories removed in a reviewed change: ``{removed: target}`` moves a value (it replaces the target's
+        value), ``{removed: None}`` deletes it."""
+        def move(cells: dict[str, int | None]) -> dict[str, int | None]:
+            out = {k: v for k, v in cells.items() if k not in moves}
+            for old, new in moves.items():
+                if new is not None and cells.get(old) is not None:
+                    out[new] = cells[old]
+            return out
+        return replace(self, room=move(self.room), zones={z: move(c) for z, c in self.zones.items()})
+
     @property
     def configured(self) -> bool:
         return any(v is not None for v in self.room.values()) or any(
@@ -129,29 +163,72 @@ def matrices_from(data: Any, zone_ids: Iterable[str]) -> dict[str, LightMatrix]:
     return out
 
 
+def _levels_from(data: Any) -> tuple[AmbientLevel, ...]:
+    out: list[AmbientLevel] = []
+    for item in data if isinstance(data, (list, tuple)) else []:
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and LEVEL_ID.match(item["id"]) \
+                and isinstance(item.get("start"), (int, float)) and not isinstance(item.get("start"), bool) \
+                and all(lv.id != item["id"] for lv in out) and (not out or item["start"] > out[-1].start):
+            out.append(AmbientLevel(item["id"], str(item.get("name") or item["id"])[:40], int(item["start"])))
+    return tuple(out) if len(out) >= 2 and out[0].start == 0 else DEFAULT_LEVELS
+
+
+def map_cells(cells: Mapping[str, int | None], source: tuple[AmbientLevel, ...],
+              target: tuple[AmbientLevel, ...]) -> dict[str, int | None]:
+    """Values of ``source`` categories for ``target`` categories (0.6.8): the same id takes its own value;
+    another category takes the value of the source category its start lies in."""
+    out: dict[str, int | None] = {}
+    for level in target:
+        if level.id in cells and any(s.id == level.id for s in source):
+            out[level.id] = cells.get(level.id)
+            continue
+        containing = next((s for s in reversed(source) if level.start >= s.start), source[0])
+        out[level.id] = cells.get(containing.id)
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class Template:
-    """A matrix for a kind of fixture: the Room occupied column and one column applied to every zone."""
+    """A matrix for a kind of fixture: the Room occupied column and one column applied to every zone.
+
+    0.6.8: a template keeps the categories it was made for (``levels``; the built-ins: the default ones) and
+    is mapped onto a room's own categories when it is applied (``for_levels``).
+    """
 
     id: str
     name: str
     room: dict[str, int | None]
     zone: dict[str, int | None]
     builtin: bool = False
+    levels: tuple[AmbientLevel, ...] = DEFAULT_LEVELS
 
     @classmethod
     def from_dict(cls, data: Any) -> Template | None:
         if not isinstance(data, dict) or not isinstance(data.get("id"), str) or not data["id"]:
             return None
         name = str(data.get("name") or data["id"]).strip()[:60] or data["id"]
-        return cls(id=data["id"], name=name, room=cells_from(data.get("room")), zone=cells_from(data.get("zone")))
+        levels = _levels_from(data.get("levels"))
+        keys = [lv.id for lv in levels]
+        return cls(id=data["id"], name=name, room=cells_from(data.get("room"), keys),
+                   zone=cells_from(data.get("zone"), keys), levels=levels)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "name": self.name, "room": cells_as_dict(self.room), "zone": cells_as_dict(self.zone),
-                "builtin": self.builtin}
+        keys = [lv.id for lv in self.levels]
+        return {"id": self.id, "name": self.name, "room": cells_as_dict(self.room, keys),
+                "zone": cells_as_dict(self.zone, keys), "builtin": self.builtin,
+                "levels": [lv.as_dict() for lv in self.levels]}
 
-    def matrix(self, entity_id: str, zone_ids: Iterable[str], **kw: Any) -> LightMatrix:
-        return LightMatrix(entity_id=entity_id, room=dict(self.room), zones={z: dict(self.zone) for z in zone_ids},
+    def for_levels(self, levels: tuple[AmbientLevel, ...]) -> Template:
+        """This template for other categories (values mapped by id, else by lux range)."""
+        if tuple(lv.id for lv in levels) == tuple(lv.id for lv in self.levels):
+            return self
+        return replace(self, room=map_cells(self.room, self.levels, levels),
+                       zone=map_cells(self.zone, self.levels, levels), levels=levels)
+
+    def matrix(self, entity_id: str, zone_ids: Iterable[str], levels: tuple[AmbientLevel, ...] | None = None,
+               **kw: Any) -> LightMatrix:
+        t = self.for_levels(levels) if levels else self
+        return LightMatrix(entity_id=entity_id, room=dict(t.room), zones={z: dict(t.zone) for z in zone_ids},
                            template=self.id, **kw)
 
 
@@ -207,6 +284,8 @@ class MatrixDecision:
     value: int                  # 0 = Off
     superseded: list[str] = field(default_factory=list)
     explanation: str = ""
+    level_name: str = ""
+    onoff: bool = False         # an on/off-only target (relay, Dumb Light): any value above 0 is On
 
     @property
     def off(self) -> bool:
@@ -218,7 +297,8 @@ class MatrixDecision:
 
     def as_dict(self) -> dict[str, Any]:
         return {"column": self.column, "column_name": self.column_name, "level": self.level,
-                "level_name": LEVEL_NAMES[self.level], "value": self.value, "text": describe_value(self.value),
+                "level_name": self.level_name or self.level, "value": self.value,
+                "text": describe_value(self.value, onoff=self.onoff), "onoff": self.onoff,
                 "superseded": list(self.superseded), "explanation": self.explanation}
 
 
@@ -228,13 +308,15 @@ def _why_wins(winner: ColumnClaim, other: ColumnClaim) -> str:
     return f"{winner.name} zone wins over {other.name} zone (same priority; listed first)"
 
 
-def decide(matrix: LightMatrix, level: str, claims: list[ColumnClaim]) -> MatrixDecision | None:
+def decide(matrix: LightMatrix, level: str, claims: list[ColumnClaim], level_name: str | None = None,
+           ) -> MatrixDecision | None:
     """The cell that decides the light now (the room is occupied); None leaves it to its previous rules.
 
     ``claims`` are the active zones that list the light, ordered by the zone arbitration (winner first).
     """
     if not matrix.enabled:
         return None
+    name = level_name or level
     # A zone without a value for this category does not claim the brightness.
     candidates = [(c, v) for c in claims if (v := matrix.value(c.zone_id, level)) is not None]
     unset = [c for c in claims if matrix.value(c.zone_id, level) is None]
@@ -242,17 +324,17 @@ def decide(matrix: LightMatrix, level: str, claims: list[ColumnClaim]) -> Matrix
         (winner, value), others = candidates[0], candidates[1:]
         superseded = [f"{c.name} zone" for c, _v in others] + ["Room occupied"]
         reasons = [_why_wins(winner, c) for c, _v in others]
-        reasons += [f"{c.name} zone has no value for {LEVEL_NAMES[level]}" for c in unset]
-        name = f"{winner.name} zone"
-        text = "; ".join(reasons) if reasons else f"{name} is active"
-        return MatrixDecision(matrix.entity_id, winner.zone_id, name, level, value, superseded, text)
+        reasons += [f"{c.name} zone has no value for {name}" for c in unset]
+        column = f"{winner.name} zone"
+        text = "; ".join(reasons) if reasons else f"{column} is active"
+        return MatrixDecision(matrix.entity_id, winner.zone_id, column, level, value, superseded, text, name)
     value = matrix.room.get(level)
     if value is None:
         return None
     return MatrixDecision(matrix.entity_id, ROOM, "Room occupied", level, value,
                           explanation="no active zone of this light" if not claims else
-                          f"{', '.join(c.name for c in claims)} zone has no value for {LEVEL_NAMES[level]}: "
-                          "the Room occupied value applies")
+                          f"{', '.join(c.name for c in claims)} zone has no value for {name}: "
+                          "the Room occupied value applies", level_name=name)
 
 
 # ------------------------------------------------------------------- setting

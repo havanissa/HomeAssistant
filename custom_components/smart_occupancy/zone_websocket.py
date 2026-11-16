@@ -6,6 +6,12 @@ every supervised target). Writes are admin only and go to the lighting store
 (no reload). Nothing here sends a light command; ``supervisor/check`` runs
 one reconciliation now (which may correct a device only in a room whose
 supervisor is Automatic, exactly like the periodic check).
+
+Radar Distance Zones (0.6.8): ``zone/set`` takes ``detection: "radar"`` with
+a ``radar`` block; ``zone/radar_candidates`` lists radar presence entities and
+the distance sensors **of the same device** (from the device registry; never
+paired by similar names), with their current readings; ``zone/radar_test``
+evaluates a test distance against a draft band without sending anything.
 """
 
 from __future__ import annotations
@@ -24,6 +30,18 @@ from .controller import LightingController
 from .discovery import area_name
 from .occupancy import friendly_name
 from .presence import _KIND_WORDS
+from .radar import (
+    DELAY_MAX as RADAR_DELAY_MAX,
+    DISTANCE_MAX,
+    HYSTERESIS_MAX as RADAR_HYSTERESIS_MAX,
+    MAX_AGE_MAX,
+    UNIT_NAMES,
+    UNITS,
+    RadarConfig,
+    presence_of,
+    read_distance,
+    simulate,
+)
 from .targets import capabilities, is_relay
 from .zones import (
     KELVIN_MAX,
@@ -39,6 +57,7 @@ from .zones import (
     ZoneAction,
     ZoneConfig,
     ZoneDaylight,
+    ZoneDetection,
     ZoneManual,
     ZoneRelease,
     ZoneUnavailable,
@@ -119,7 +138,11 @@ def zones_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> 
                    "lux": [LUX_MIN, LUX_MAX_THRESHOLD], "transition": [0, TRANSITION_MAX],
                    "timing": {k: list(TIMING_PARAMETERS[k][1:]) for k in ("correlation_window", "exit_confirmation",
                                                                           "inactivity_timeout", "dropout_grace")},
-                   "max_zones": MAX_ZONES, "max_targets": MAX_ZONE_TARGETS},
+                   "max_zones": MAX_ZONES, "max_targets": MAX_ZONE_TARGETS,
+                   "radar": {"distance": [0, DISTANCE_MAX], "delay": [0, RADAR_DELAY_MAX],
+                             "hysteresis": [0, RADAR_HYSTERESIS_MAX], "max_age": [1, MAX_AGE_MAX],
+                             "units": [{"id": u, "name": UNIT_NAMES[u]} for u in UNITS]}},
+        "radar": radar_candidates(hass, area_id, [s.entity_id for s in room_cfg.sensors]),
         "relays": list(room_lighting.relays),
         "relay_candidates": relay_candidates(hass, area_id, room_lighting.relays),
         "space": space.as_dict() | {"room_names": {r: area_name(hass, r) or r for r in space.rooms}} if space else None,
@@ -142,8 +165,23 @@ _TARGET = vol.Schema({
     vol.Optional("color_temp_kelvin"): _NONE_OR(vol.All(vol.Coerce(int), vol.Range(min=KELVIN_MIN, max=KELVIN_MAX))),
     vol.Optional("transition"): _NONE_OR(vol.All(vol.Coerce(float), vol.Range(min=0, max=TRANSITION_MAX))),
 })
+_METRES = vol.All(vol.Coerce(float), vol.Range(min=0, max=DISTANCE_MAX))
+_RADAR = vol.Schema({
+    vol.Required("presence"): cv.entity_id,
+    vol.Required("distance"): cv.entity_id,
+    vol.Required("min_m"): _METRES,
+    vol.Required("max_m"): _METRES,
+    vol.Optional("attribute"): vol.Any(None, vol.All(str, vol.Length(max=64))),
+    vol.Optional("unit"): vol.Any(None, vol.In(list(UNITS))),
+    vol.Optional("entry_delay"): vol.All(vol.Coerce(float), vol.Range(min=0, max=RADAR_DELAY_MAX)),
+    vol.Optional("exit_delay"): vol.All(vol.Coerce(float), vol.Range(min=0, max=RADAR_DELAY_MAX)),
+    vol.Optional("hysteresis"): vol.All(vol.Coerce(float), vol.Range(min=0, max=RADAR_HYSTERESIS_MAX)),
+    vol.Optional("max_age"): vol.Any(None, vol.All(vol.Coerce(int), vol.Range(min=1, max=MAX_AGE_MAX))),
+})
 _ZONE = vol.Schema({
     vol.Optional("id"): vol.All(str, vol.Length(min=1, max=60)),
+    vol.Optional("detection"): vol.In([d.value for d in ZoneDetection]),
+    vol.Optional("radar"): vol.Any(None, _RADAR),
     vol.Optional("name"): vol.All(str, vol.Strip, vol.Length(min=1, max=60)),
     vol.Optional("enabled"): bool,
     vol.Optional("sensors"): [cv.entity_id],
@@ -184,6 +222,9 @@ def ws_zone_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
             return
         name = data.get("name") or f"Zone {len(room.zones) + 1}"
         current = ZoneConfig(id=slug(name, {z.id for z in room.zones}), name=name)
+    if (error := _radar_error(hass, data, current)) is not None:
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, error)
+        return
     assigned = {s.entity_id for s in ctrl.config.room(area_id).sensors}
     if unknown := [e for e in data.get("sensors", []) if e not in assigned]:
         connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT,
@@ -213,6 +254,119 @@ def ws_zone_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
     zones = tuple(zone if z.id == zone.id else z for z in room.zones) if room.zone(zone.id) else (*room.zones, zone)
     ctrl.store.async_set(ctrl.with_room(area_id, zones=zones))
     connection.send_result(msg["id"], {"revision": ctrl.store.revision, "zone": zone.as_dict()})
+
+
+def _radar_error(hass: HomeAssistant, data: dict[str, Any], current: ZoneConfig) -> str | None:
+    """Why a Radar Distance Zone cannot be saved like this (None: it can)."""
+    detection = data.get("detection", current.detection.value)
+    if detection != ZoneDetection.RADAR.value:
+        return None
+    radar = data.get("radar", current.radar.as_dict() if current.radar else None)
+    if not radar:
+        return "A Radar Distance Zone needs a radar presence entity and a distance sensor"
+    if radar["max_m"] <= radar["min_m"]:
+        return "The maximum distance must be larger than the minimum"
+    if radar["presence"].split(".", 1)[0] not in ("binary_sensor", "input_boolean"):
+        return f"{radar['presence']} is not an on/off presence entity (binary_sensor or input_boolean)"
+    if radar["presence"] == radar["distance"] and not radar.get("attribute"):
+        return "Choose the distance sensor (the presence entity reports no distance by itself)"
+    if radar.get("attribute") and not radar.get("unit"):
+        return "A distance attribute has no unit: choose metres, centimetres or millimetres"
+    cfg = RadarConfig.from_dict(radar)
+    if cfg is None:
+        return "Invalid radar settings"
+    state = hass.states.get(cfg.distance)
+    if state is None:
+        return f"{cfg.distance} does not exist"
+    reading = read_distance(cfg, state)
+    if not reading.valid and reading.problem not in ("unavailable",):
+        return f"{cfg.distance} cannot be used as a distance: {reading.problem}"
+    return None
+
+
+def radar_candidates(hass: HomeAssistant, area_id: str, room_sensors: list[str]) -> dict[str, Any]:
+    """Radar presence entities and the distance sensors of the **same device** (device registry), with readings.
+
+    Pairs come from device associations only, never from similar entity names; every distance sensor with a
+    supported unit is also offered for manual selection.
+    """
+    from homeassistant.helpers import device_registry as dr
+
+    ent_reg, dev_reg = er.async_get(hass), dr.async_get(hass)
+
+    def area_of(entry) -> str | None:
+        device = dev_reg.async_get(entry.device_id) if entry.device_id else None
+        return entry.area_id or (device.area_id if device else None)
+
+    def distance_info(entity_id: str) -> dict[str, Any]:
+        state = hass.states.get(entity_id)
+        unit = state.attributes.get("unit_of_measurement") if state else None
+        reading = read_distance(RadarConfig(presence=entity_id, distance=entity_id), state)
+        return {"entity_id": entity_id, "name": friendly_name(hass, entity_id) or entity_id,
+                "state": state.state if state else None, "unit": unit, "metres": reading.metres,
+                "valid": reading.valid, "problem": reading.problem}
+
+    distances: dict[str, dict[str, Any]] = {}
+    by_device: dict[str, list[str]] = {}
+    for entry in ent_reg.entities.values():
+        if entry.domain != "sensor" or entry.disabled_by is not None or entry.platform == DOMAIN:
+            continue
+        state = hass.states.get(entry.entity_id)
+        unit = (state.attributes.get("unit_of_measurement") if state else None) or entry.unit_of_measurement
+        dc = entry.device_class or entry.original_device_class or (state.attributes.get("device_class")
+                                                                    if state else None)
+        if unit not in UNITS and dc != "distance":
+            continue
+        info = distance_info(entry.entity_id) | {"in_area": area_of(entry) == area_id,
+                                                 "device_class": dc, "device_id": entry.device_id}
+        distances[entry.entity_id] = info
+        if entry.device_id:
+            by_device.setdefault(entry.device_id, []).append(entry.entity_id)
+    presences = []
+    for entry in ent_reg.entities.values():
+        if entry.domain != "binary_sensor" or entry.disabled_by is not None or entry.platform == DOMAIN:
+            continue
+        dc = entry.device_class or entry.original_device_class
+        paired = by_device.get(entry.device_id or "", [])
+        if entry.entity_id not in room_sensors and not paired and dc not in ("occupancy", "presence"):
+            continue
+        if area_of(entry) != area_id and entry.entity_id not in room_sensors and not paired:
+            continue
+        state = hass.states.get(entry.entity_id)
+        presences.append({
+            "entity_id": entry.entity_id, "name": friendly_name(hass, entry.entity_id) or entry.entity_id,
+            "state": state.state if state else None, "detected": presence_of(state),
+            "room_sensor": entry.entity_id in room_sensors, "in_area": area_of(entry) == area_id,
+            # Distance sensors of the same physical device (the only automatic pairing).
+            "distances": [{"entity_id": d, "match": "device_class" if distances[d]["device_class"] == "distance"
+                           else "unit"} for d in sorted(paired)],
+        })
+    presences.sort(key=lambda p: (not p["distances"], not p["room_sensor"], p["name"].casefold()))
+    return {"presence": presences[:50],
+            "distance": sorted(distances.values(), key=lambda d: (not d["in_area"], d["name"].casefold()))[:100]}
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "smart_occupancy/lighting/zone/radar_test",
+    vol.Required("area_id"): str,
+    vol.Required("radar"): _RADAR,
+    vol.Optional("distance_m"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0, max=DISTANCE_MAX))),
+    vol.Optional("presence"): vol.Any(None, bool),
+    vol.Optional("active"): bool,
+    vol.Optional("unavailable"): vol.In([a.value for a in ZoneUnavailable]),
+})
+@callback
+def ws_zone_radar_test(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """What a test distance would do to a (draft) Radar Distance Zone. Never sends a light command."""
+    if (ctrl := _controller(hass, connection, msg)) is None or _room(ctrl, connection, msg) is None:
+        return
+    cfg = RadarConfig.from_dict(msg["radar"])
+    if cfg is None:
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, "The maximum must be larger than the minimum")
+        return
+    result = simulate(cfg, msg.get("presence", True), msg.get("distance_m"), active=msg.get("active", False),
+                      failsafe=msg.get("unavailable", "hold"))
+    connection.send_result(msg["id"], {**result, "sent": False})
 
 
 @websocket_api.websocket_command({
@@ -384,5 +538,5 @@ def ws_supervisor_room(hass: HomeAssistant, connection: websocket_api.ActiveConn
     connection.send_result(msg["id"], ctrl.supervisor.model(area_id, details=True))
 
 
-ZONE_HANDLERS = (ws_zone_set, ws_zone_remove, ws_relay_set, ws_space_set, ws_space_remove, ws_supervisor_set,
+ZONE_HANDLERS = (ws_zone_set, ws_zone_radar_test, ws_zone_remove, ws_relay_set, ws_space_set, ws_space_remove, ws_supervisor_set,
                  ws_supervisor_room)

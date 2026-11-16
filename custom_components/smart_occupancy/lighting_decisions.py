@@ -61,6 +61,7 @@ TRIGGER_WORDS = {
     "became_bright": "daylight is enough", "profile_test": "profile test",
     "zone": "zone occupancy changed", "space_vacant": "shared space vacant", "supervisor": "Room Supervisor",
     "ambient": "ambient light level changed", "resumed": "automatic lighting resumed",
+    "priority": "Priority Input",
 }
 VACANCY_WORDS = {"turn_off": "Turn off", "vacant_mood": "Vacant mood", "leave": "Leave unchanged"}
 _SOURCE_WORDS = {
@@ -1054,7 +1055,21 @@ class LightingDecisions:
         now_active = {z.zone.id for z in ctrl.zones.active(area_id)}
         started = sorted(names.get(z, z) for z in changed if z in now_active)
         ended = sorted(names.get(z, z) for z in changed if z not in now_active)
-        heads = [f"{n} zone activated" for n in started] + [f"{n} zone ended" for n in ended]
+
+        def head_of(zone_id: str, on: bool) -> str:
+            zr = ctrl.zones.zone(area_id, zone_id)
+            name = names.get(zone_id, zone_id)
+            if zr is None or not zr.zone.is_radar or zr.zone.radar is None or zr.radar_eval is None:
+                return f"{name} zone {'activated' if on else 'ended'}"
+            reading = zr.reading
+            where = f"distance {reading.metres:.1f} m" if reading and reading.valid else (
+                reading.problem if reading else "no distance")
+            if on:
+                return f"Radar {name} zone activated, {where} within {zr.zone.radar.band()}"
+            return f"Radar {name} zone released ({zr.radar_eval.reason})"
+
+        heads = ([head_of(z, True) for z in sorted(changed, key=lambda z: names.get(z, z)) if z in now_active]
+                 + [head_of(z, False) for z in sorted(changed, key=lambda z: names.get(z, z)) if z not in now_active])
         head = " · ".join(heads) or "Zone lighting re-evaluated"
         would = observing or ok is None
         parts: list[str] = []
@@ -1120,6 +1135,102 @@ class LightingDecisions:
             explanation=text, mode=MODE_OBSERVING if not plan.control_enabled else self.mode(area_id),
             status=status, target=_names([i.name or i.entity_id for i in items]) or None, details=details,
             key=("zone", head, status), checks=checks or None, verify_after=self._verify_delay(ok or []),
+        )
+
+    # ------------------------------------------------------------ priority inputs (0.6.8)
+    def priority(self, area_id: str, pi: Any, event: str, plan: Plan, items: list[PlanItem], *, ok: list[PlanItem],
+                 errors: dict[str, str], removed: list[str], reason: str | None, blocked: str | None,
+                 automatic: bool) -> Decision:
+        """A Priority Input became active or was released: what its lights did and why."""
+        sent = {i.entity_id for i in ok}
+        released = event == "released"
+        input_name = pi.name
+        if released:
+            why = {"inactive": "input inactive", "unavailable": "input unavailable", "removed": "input removed",
+                   "unavailable_grace": "input unavailable for longer than its grace period",
+                   "disabled": "disabled or locked"}.get(reason or "", reason or "")
+            head = f"{input_name} released" + (f" ({why})" if why else "")
+        elif event == "kept":
+            head = f"{input_name} still active after the restart"
+        else:
+            head = f"{input_name} Priority Input active"
+        parts: list[str] = []
+        for item in items:
+            name = item.name or item.entity_id
+            rule = item.rule or {}
+            if item.entity_id in removed:
+                parts.append(f"{name} switched off (it switched it on; no automatic rule takes it over)")
+            elif item.entity_id in sent and rule.get("kind") == "priority":
+                parts.append(f"{name} forced {_value(item)}"
+                             + (f", overriding {_names(rule['superseded'])}" if rule.get("superseded") else ""))
+            elif item.entity_id in sent:
+                parts.append(f"{name} → {_value(item)} (current rule: {rule.get('name') or '—'})")
+            elif item.entity_id in errors:
+                parts.append(f"{name}: failed ({errors[item.entity_id]})")
+            elif rule.get("kind") == "priority":
+                parts.append(f"{name}: {item.reason[0].lower()}{item.reason[1:]}" if item.reason else name)
+            elif released:
+                want = ("Off" if item.service == "turn_off" else _value(item) if item.service == "turn_on" else
+                        "no change")
+                tail = "" if automatic else " (room Observing or Manual mood: not applied)"
+                parts.append(f"current rule {rule.get('name') or '—'} requests {want}{tail}"
+                             if item.decision in (CHANGE, UNCHANGED) else
+                             f"{name}: {item.reason[0].lower()}{item.reason[1:]}" if item.reason else name)
+        text = f"{head}. {'; '.join(p.rstrip('.') for p in parts)}." if parts else f"{head}."
+        if blocked:
+            text += f" Nothing was sent: {blocked}."
+            status = BLOCKED
+        elif errors and not sent and not removed:
+            status = FAILED
+        elif errors:
+            status = PARTIAL
+        elif sent or removed:
+            status = DISPATCHED
+        else:
+            status = NO_CHANGE
+        checks: list[Check] = []
+        for item in ok:
+            checks.extend(light_checks(item.service or "", {item.entity_id: item.data}))
+        checks.extend(light_checks("turn_off", {e: {} for e in removed}))
+        if status == DISPATCHED and not checks:
+            status = EXECUTED
+        details = {"trigger": TRIGGER_WORDS["priority"], "input": input_name, "entity": pi.entity_id,
+                   "event": event, "targets": [f"{i.name or i.entity_id}: {(i.rule or {}).get('name')} — "
+                                               f"{i.decision}: {i.reason}" for i in items]}
+        if reason:
+            details["reason"] = reason
+        return self.log.record(
+            area_id, module=MODULE_LIGHTING, trigger="priority", kind="priority", action=head, explanation=text,
+            mode=self.mode(area_id), status=status, target=_names([i.name or i.entity_id for i in items]) or None,
+            details=details, key=("priority", pi.id, event, status), checks=checks or None,
+            verify_after=self._verify_delay(ok),
+        )
+
+    def priority_unavailable(self, area_id: str, pi: Any, state: str) -> Decision:
+        policy = {"hold": f"held for {pi.grace:g} s, then released", "release": "released at once",
+                  "keep": "kept until it reports again"}.get(pi.unavailable.value, pi.unavailable.value)
+        return self.log.record(
+            area_id, module=MODULE_LIGHTING, trigger="priority", kind="priority", action="Priority Input unavailable",
+            explanation=(f"{pi.name}: input {pi.entity_id} is {state}. It is not read as open or closed; an active "
+                         f"claim is {policy}."),
+            mode=self.mode(area_id), status=NOTED, target=pi.name, details={"input": pi.name, "state": state},
+            key=("priority_unavailable", pi.id),
+        )
+
+    def ambient_changed(self, area_id: str, old: str, status: Any) -> Decision:
+        """"Kamar Norður ambient light 12 lx: Low light" (rooms with ambient brightness control)."""
+        from .discovery import area_name
+
+        room = area_name(self.ctrl.hass, area_id) or area_id
+        lux = status.lux_text()
+        was = status.settings.name_of(old)
+        text = f"{room} ambient light {lux + ': ' if lux else ''}{status.name} (was {was})."
+        if status.contaminated and status.basis != "held":
+            text += " The indoor sensor is lit by the room's lamps; only a lower category is accepted from it."
+        return self.log.record(
+            area_id, module=MODULE_LIGHTING, trigger="ambient", kind="ambient", action=f"Ambient: {status.name}",
+            explanation=text, mode=self.mode(area_id), status=NOTED, target=status.name,
+            details={"from": was, "to": status.name, "lux": lux, "basis": status.basis}, key=("ambient", status.key),
         )
 
     # ------------------------------------------------------------ brightness rules (0.6.7)

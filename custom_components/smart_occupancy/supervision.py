@@ -20,6 +20,14 @@ sends that profile to the room's lights (an enabled room, in Observing too).
 It is never triggered automatically, and the tested lights become a manual
 override, so automatic lighting does not act on them afterwards.
 
+A **Priority Input** (0.6.8) is an explicit request too, deliberately armed:
+an administrator enables each input after reviewing it. Its commands pass
+``assert_priority_control_permitted``: the input must be enabled, its room
+enabled, and the global Priority Input safety lock off. It is not blocked by
+the room's Observing mode or paused by Manual mood (like an Active wall
+switch); it never bypasses device availability or automation conflicts
+(those are protections of the plan itself).
+
 Curtains have their own gate, ``assert_curtain_command_permitted``. A
 person's explicit, confirmed **manual preset** request
 (``CurtainOrigin.MANUAL_CONFIRMED``, 0.6.1) is permitted for a window that is
@@ -76,6 +84,17 @@ def assert_switch_control_permitted(switch_active: bool, area_id: str, switch_id
     """Gate for wall switch button actions: only switches set to Active, in an enabled room."""
     if not switch_active:
         raise ControlNotPermittedError(f"Switch {switch_id} in room {area_id} is not Active")
+
+
+def assert_priority_control_permitted(enabled: bool, room_enabled: bool, locked: bool, area_id: str,
+                                      input_id: str) -> None:
+    """Gate for Priority Input commands: an enabled input, an enabled room, the safety lock off."""
+    if locked:
+        raise ControlNotPermittedError("Priority Inputs are locked (safety lock)")
+    if not room_enabled:
+        raise ControlNotPermittedError(f"Room {area_id} is not enabled")
+    if not enabled:
+        raise ControlNotPermittedError(f"Priority Input {input_id} in room {area_id} is not enabled")
 
 
 class CurtainOrigin(StrEnum):
