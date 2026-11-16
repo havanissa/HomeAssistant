@@ -421,6 +421,12 @@ def _group_issues(ctrl: LightingController, area_id: str) -> list[dict[str, Any]
     return out
 
 
+def _brightness_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> dict[str, Any]:
+    from .brightness_websocket import brightness_model
+
+    return brightness_model(hass, ctrl, area_id)
+
+
 def _zones_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> dict[str, Any]:
     from .zone_websocket import zones_model
 
@@ -539,6 +545,8 @@ def room_model(hass: HomeAssistant, ctrl: LightingController, area_id: str, mood
         # Zones, relay outputs, shared space (0.6.0) and the Room Supervisor's summary (details: supervisor/room).
         "zones": _zones_model(hass, ctrl, area_id) if area_id in ctrl.config.enabled_rooms else None,
         "supervisor": ctrl.supervisor.model(area_id) if area_id in ctrl.config.enabled_rooms else None,
+        # Ambient light levels and brightness rules (0.6.7): Settings → Lighting.
+        "brightness": _brightness_model(hass, ctrl, area_id) if area_id in ctrl.config.enabled_rooms else None,
         "occupancy": {
             "state": result.state.value if result else None,
             "occupied": result.occupied if result else None,
@@ -1165,6 +1173,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     if hass.data.get(_REGISTERED):
         return
     hass.data[_REGISTERED] = True
+    from .brightness_websocket import BRIGHTNESS_HANDLERS
     from .forecast_websocket import FORECAST_HANDLERS
     from .preliminary_websocket import PRELIMINARY_HANDLERS
     from .profile_websocket import PROFILE_HANDLERS
@@ -1173,7 +1182,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     from .zone_websocket import ZONE_HANDLERS
 
     for handler in (*SWITCH_HANDLERS, *PRESENCE_HANDLERS, *PRELIMINARY_HANDLERS, *PROFILE_HANDLERS, *FORECAST_HANDLERS,
-                    *ZONE_HANDLERS, *CURTAIN_HANDLERS):
+                    *ZONE_HANDLERS, *CURTAIN_HANDLERS, *BRIGHTNESS_HANDLERS):
         websocket_api.async_register_command(hass, handler)
     for handler in (
         ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_adaptive_set, ws_room_set,

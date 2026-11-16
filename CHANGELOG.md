@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.7 — Ambient light levels and multi-zone brightness rules (Phase 4.7)
+
+### Added
+
+- **Ambient Light Levels** (`ambient.py`, `brightness_runtime.py`; room card Settings → **Lighting**): No light / Low light / Bright per room, default thresholds 5 and 20 lx (a value equal to a threshold is in the higher category), global defaults with room overrides, hysteresis (downwards only), stability period, fallback policy (*keep the last reliable category* or a fallback category). It consumes the daylight monitor's evidence (no new sensor subscription or estimator; the indoor sensors are the room's daylight sensors). A lamp-lit reading is an upper bound: it can keep or lower the category, never raise it (no feedback loop); the hold is shown and logged once per episode. The committed category survives a restart (lighting state store, key `ambient`).
+- **Brightness Rules** (`brightness.py`): an optional matrix per enrolled light, ambient category × Room occupied / each zone that lists the light; 0 % = Off, *Not configured* distinct from Off; built-in templates (General, Floor, Task, Ceiling, Accent) and saved global templates; copy from another light, copy the Room column to a zone, restore defaults, pause. Enrolment needs a preview first (`brightness/preview`, then `brightness/set` with `confirm`) and never sends a command.
+- **One rule engine**: the Occupied plan resolves the Room occupied cell, the zone arbitration replaces it with the winning zone's cell (priority, then list order; never combined). On/off and brightness come from the matrix, colour, colour temperature (also the global one) and effect from the room's mood. Category changes apply the enrolled lights (trigger `ambient`, optional minimum interval); zone changes apply at once. Brightness dead band, transition. *Resume automatic lighting* hands an enrolled light back to its matrix at once.
+- Decision log: *“Room occupied, Low light (≈ 12 lx), Floor Light → 15 %, colour from Hygge (2700 K)”*, zone wins with the reason, *“Ambient sensor affected by room lighting. Holding No light classification …”*; details list each light's matrix cell. Ambient status and history in the integration diagnostics; compact summary in the room sensor.
+- Card: Settings → **Lighting** with *Ambient Light Levels* (category now, measured vs. estimated value, confidence, sensors, thresholds, stability / fallback / transition / dead band / interval, global defaults) and *Brightness Rules* (light list, matrix with a slider per cell, preview, enrol, save, leave, resume); Overview line *Ambient light*; the Zones editor links each enrolled light to its matrix instead of showing its brightness inputs.
+- Websocket: `ambient/set`, `brightness/preview`, `brightness/set`, `brightness/remove`, `brightness/template`; editor model key `brightness`.
+- Tests: `tests/test_brightness.py` (27: boundaries, thresholds, hysteresis and dwell, stale/invalid data, lamp-lit readings and the feedback loop, matrix columns, priority and tie-break, Off and Not configured cells, mood vs. brightness ownership, every light kind and relays, possible occupancy and preliminary lighting, unavailable and late devices, Supervisor, Observing, rooms without the feature, Manual mood, wall switch, rate limit, dead band, restart, shared light, websocket API, migration and renames, the Kamar Norður acceptance scenario); card test for the Lighting section.
+
+### Changed
+
+- Lighting store 1.7 → 1.8 (global `ambient`, `brightness_templates`; per room `ambient` off and `brightness` empty). No light is enrolled and no room changes behaviour.
+- The Room Supervisor treats a light within the brightness dead band as correct.
+
+### Not changed
+
+- Lights that are not enrolled, rooms without ambient brightness control, vacancy behaviour, possible occupancy lighting, zone occupancy and timing, manual override policy, wall switches, Manual mood, Observing / Automatic, shared spaces and the Room Supervisor's modes.
+
 ## 0.6.6 — Centralized curtain configuration (Phase 4.6.4 addendum)
 
 ### Changed

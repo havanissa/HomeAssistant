@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.util import dt as dt_util
 
-from .const import DECISION_VERIFY_SECONDS, AutoOn, SensorKind, VacancyAction, VacantOthers
+from .const import DECISION_VERIFY_SECONDS, KELVIN_TOLERANCE, AutoOn, SensorKind, VacancyAction, VacantOthers
 from .daylight import BRIGHT, DARK, GATE_CODES, GATE_NOT_NEEDED, GATE_UNCERTAIN
 from .decisions import (
     BLOCKED,
@@ -60,6 +60,7 @@ TRIGGER_WORDS = {
     "retry": "retry of a preliminary light switch-off", "manual_ended": "Manual mood ended",
     "became_bright": "daylight is enough", "profile_test": "profile test",
     "zone": "zone occupancy changed", "space_vacant": "shared space vacant", "supervisor": "Room Supervisor",
+    "ambient": "ambient light level changed", "resumed": "automatic lighting resumed",
 }
 VACANCY_WORDS = {"turn_off": "Turn off", "vacant_mood": "Vacant mood", "leave": "Leave unchanged"}
 _SOURCE_WORDS = {
@@ -116,6 +117,33 @@ def _until(iso: str | None) -> str:
 
 def _cap(text: str) -> str:
     return text[:1].upper() + text[1:] if text else text
+
+
+def _value(item: PlanItem) -> str:
+    """"45 %", "On" (on/off only) or "Off": what an enrolled light is set to."""
+    if item.service == "turn_off":
+        return "Off"
+    return f"{item.data['brightness_pct']} %" if "brightness_pct" in item.data else "On"
+
+
+def brightness_phrase(item: PlanItem, context: str | None = None) -> str | None:
+    """"Room occupied, Low light (12 lx), Floor Light → 15 %, colour from Hygge (2700 K)" (0.6.7)."""
+    b = (item.rule or {}).get("brightness")
+    if not b:
+        return None
+    look = ""
+    if item.service == "turn_on":
+        colour = {k: v for k, v in item.data.items() if k in ("color_temp_kelvin", "rgb_color", "hs_color", "effect")}
+        cur = item.current
+        same = cur.get("state") == "on" and all(
+            (abs(float(cur.get(k) or 0) - float(v)) <= KELVIN_TOLERANCE) if k == "color_temp_kelvin"
+            else cur.get(k) == v for k, v in colour.items())
+        if cur.get("state") == "on" and (same or not colour):
+            look = ", colour unchanged"
+        elif colour and b.get("appearance"):
+            look = f", {b['appearance']}"
+    head = b.get("context") if context is None else context
+    return f"{head + ', ' if head else ''}{item.name or item.entity_id} → {_value(item)}{look}"
 
 
 def _signal_phrase(view: SignalView) -> str:
@@ -210,6 +238,10 @@ class LightingDecisions:
             return f"The {mood} lighting settings changed" if mood else "The lighting settings changed"
         if trigger == "reconnected":
             return "A light that was offline is available again"
+        if trigger == "ambient":
+            return f"Ambient light changed to {self.ctrl.ambient.status(area_id).label()}"
+        if trigger == "resumed":
+            return "Automatic lighting was resumed"
         return f"Triggered by {TRIGGER_WORDS.get(trigger, trigger)}"
 
     def _blocked_reasons(self, items: list[PlanItem]) -> list[str]:
@@ -296,7 +328,8 @@ class LightingDecisions:
             sent = [i for i in ok]
             failed = [i for i in changes if i.entity_id in errors]
             stopped = [i for i in changes if paused and i.entity_id in paused]
-            text = f"{why}{light_clause}: {self._result_phrase(sent, mood)}."
+            text = self._matrix_text(why, light_clause, sent, mood, activation) \
+                or f"{why}{light_clause}: {self._result_phrase(sent, mood)}."
             if failed:
                 text += " Failed: " + "; ".join(f"{i.name or i.entity_id}: {errors[i.entity_id]}" for i in failed) + "."
             if stopped:
@@ -316,8 +349,9 @@ class LightingDecisions:
                     checks = None  # a partial failure stays partial
         elif changes and not plan.control_enabled:
             status = OBSERVED
-            text = f"{why}{light_clause}: would {self._result_phrase(changes, mood, would=True)}. " \
-                   "Observing: nothing was sent." + tail
+            text = (self._matrix_text(why, light_clause, changes, mood, activation, would=True)
+                    or f"{why}{light_clause}: would {self._result_phrase(changes, mood, would=True)}.") \
+                + " Observing: nothing was sent." + tail
             details["service"] = [f"{i.entity_id.split('.', 1)[0]}.{i.service} {i.name or i.entity_id} {i.data}" for i in changes]
         elif activation and gated and not turning_on:
             code = gated[0].reason_code
@@ -341,12 +375,24 @@ class LightingDecisions:
             status = NO_CHANGE
             if activation:
                 action = "Keep lights on" if any(i.current.get("state") == "on" for i in unchanged) else "No change"
-            text = f"{why}: lighting already matches {mood}."
+            rules = [i for i in unchanged if (i.rule or {}).get("brightness")]
+            if rules and len(rules) == len(unchanged):
+                text = f"{why}: " + "; ".join(
+                    f"{i.name or i.entity_id} already {(i.rule or {})['brightness']['text']}" for i in rules) + "."
+            else:
+                text = f"{why}: lighting already matches {mood}."
         else:
             status = NO_CHANGE
             action = "No change"
             text = f"{why}: no light is controlled in {mood}."
 
+        if any((i.rule or {}).get("brightness") for i in relevant):
+            st = ctrl.ambient.status(area_id)
+            details["ambient_level"] = st.label()
+            details["brightness_rules"] = [
+                f"{i.name or i.entity_id}: {b['column_name']} · {b['level_name']} → {b['text']}"
+                + (f" ({b['explanation']})" if b.get("explanation") else "")
+                for i in relevant if (b := (i.rule or {}).get("brightness"))]
         key = ("plan", "activation" if activation else trigger, action, status, *codes)
         if activation and trigger != "became_dark" and rt.decision_visit == rt.visit and (
                 status == NO_CHANGE or self.log.repeats(area_id, key)):
@@ -359,6 +405,20 @@ class LightingDecisions:
             action=action, explanation=text, mode=mode, status=status, target=target or mood, details=details,
             key=key, checks=checks, verify_after=self._verify_delay(changes),
         )
+
+    def _matrix_text(self, why: str, light_clause: str, items: list[PlanItem], mood: str | None, activation: bool,
+                     *, would: bool = False) -> str | None:
+        """The explanation when brightness rules decided some of the lights (0.6.7); None otherwise."""
+        matrix = [i for i in items if (i.rule or {}).get("brightness")]
+        if not matrix:
+            return None
+        phrases = [p for i in matrix if (p := brightness_phrase(i))]
+        others = [i for i in items if i not in matrix]
+        rest = f"; {'would ' if would else ''}{self._result_phrase(others, mood, would=would)}" if others else ""
+        lead = "Would set: " if would else ""
+        if activation and not others:
+            return f"{lead}{'; '.join(phrases)}."
+        return f"{why}{light_clause}: {lead}{'; '.join(phrases)}{rest}."
 
     @staticmethod
     def _verify_delay(items: list[PlanItem]) -> float:
@@ -1004,6 +1064,15 @@ class LightingDecisions:
             rule = item.rule or {}
             superseded = rule.get("superseded") or []
             over = f", overriding {_names(superseded)}" if superseded else ""
+            b = rule.get("brightness")
+            if b and item.decision == CHANGE and (would or item.entity_id in sent):
+                column = b.get("column")
+                zone_named = column != "room" and names.get(column, column) in started
+                context = b.get("ambient_label") if zone_named else (
+                    f"Room still occupied, {b.get('ambient_label')}" if column == "room" else b.get("context"))
+                parts.append(("would set: " if would else "") + (brightness_phrase(item, context) or name)
+                             + (f" ({b['explanation']})" if b.get("superseded") and len(b["superseded"]) > 1 else ""))
+                continue
             if item.decision == CHANGE and (would or item.entity_id in sent):
                 what = "switched off" if item.service == "turn_off" else (
                     f"set to {item.data['brightness_pct']} %" if "brightness_pct" in item.data else "switched on")
@@ -1051,6 +1120,19 @@ class LightingDecisions:
             explanation=text, mode=MODE_OBSERVING if not plan.control_enabled else self.mode(area_id),
             status=status, target=_names([i.name or i.entity_id for i in items]) or None, details=details,
             key=("zone", head, status), checks=checks or None, verify_after=self._verify_delay(ok or []),
+        )
+
+    # ------------------------------------------------------------ brightness rules (0.6.7)
+    def ambient_held(self, area_id: str, status: Any) -> Decision:
+        """The ambient category is held: the indoor sensor sees the room's own lamps (once per episode)."""
+        details = {"ambient_level": status.name, "trigger": "ambient light evidence",
+                   "measured_lux": None if status.measured_lux is None else round(status.measured_lux),
+                   "natural_light": status.evidence.text, "contamination": status.contamination,
+                   "sensor": status.sensor_name or status.sensor}
+        return self.log.record(
+            area_id, module=MODULE_LIGHTING, trigger="ambient", kind="ambient", action="Hold ambient level",
+            explanation=status.note or f"Holding {status.name}.", mode=self.mode(area_id), status=NOTED,
+            target=status.name, details=details, key=("ambient_hold", status.key),
         )
 
     def space_wait(self, area_id: str, waits: list[str]) -> Decision:

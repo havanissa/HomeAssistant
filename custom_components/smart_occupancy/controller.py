@@ -102,6 +102,20 @@ targets whose winning rule changed). The Room Supervisor (``supervisor.py``)
 compares the effective plan with the reported device states and, where
 allowed, corrects genuine discrepancies through ``async_supervisor_correct``.
 A room without zones, relays or a shared space behaves exactly as before.
+
+Ambient light levels and brightness rules (0.6.7, ``ambient.py``,
+``brightness.py``): a room with ambient brightness control has an ambient
+category (No light / Low light / Bright) that follows the daylight monitor's
+evidence (``brightness_runtime.py``; lamp-lit readings never raise it). For a
+light enrolled in the brightness rules, while the room is occupied, its
+matrix owns on/off and brightness and the mood owns colour, colour
+temperature and effect: the Occupied plan resolves the Room occupied cell
+(``_plan``) and the arbitration replaces it with the winning zone's cell
+(``_arbitrate``). Both still pass every protection of the plan (manual mood,
+overrides, conflicts, offline devices, occupancy confirmation, shared spaces).
+A committed category change applies the enrolled lights again
+(``async_ambient_changed``, trigger ``ambient``); a zone change applies at
+once (``async_zones``). Rooms without enrolled lights behave exactly as before.
 """
 
 from __future__ import annotations
@@ -142,6 +156,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from . import brightness as bright
 from . import mood as mood_mod
 from .adaptive import (
     DEFERRED,
@@ -157,6 +172,8 @@ from .adaptive import (
 )
 from .conflicts import AutomationInfo, Conflict, collect_automations, find_conflicts
 from .daylight import BRIGHT, DARK, GATE_CODES, GATE_NEVER, GATE_NOT_NEEDED, GATE_UNCERTAIN, DaylightGate
+from .ambient import AmbientStatus
+from .brightness_runtime import AmbientLevels
 from .daylight_monitor import DaylightMonitor, DaylightStatus
 from .decisions import DecisionLog
 from .engine import RoomResult, SignalStatus
@@ -183,7 +200,7 @@ from .const import (
     VacancyAction,
     Profile,
 )
-from .const import ALL_MOODS
+from .const import ALL_MOODS, AdjustMode, LightAction
 from .discovery import area_name
 from .lighting import LightIndex, expand_group, light_capabilities
 from .lighting_config import LightingConfig, LightingStore, table_get
@@ -201,10 +218,11 @@ from .planner import (
     build_plan,
     build_preliminary_plan,
     build_vacancy_plan,
+    matches,
 )
 from .preliminary import TRIGGER as PRELIMINARY, ConfirmAction, EffectivePreliminary, effective as prelim_effective
 from .preliminary import evidence as prelim_evidence, preliminary_gate
-from .profiles import mood_chain, resolve
+from .profiles import ResolvedSetting, mood_chain, resolve
 from .supervision import ControlNotPermittedError, assert_room_control_permitted, assert_switch_control_permitted
 from . import arbitration as arb
 from .preliminary import preliminary_gate as zone_gate
@@ -329,6 +347,8 @@ class RoomRuntime:
     zone_owned: dict[str, str] = field(default_factory=dict)
     # Shared space with joint vacancy (0.6.0): the vacancy action waits until every member room is vacant.
     space_deferred: bool = False
+    # Brightness rules (0.6.7): when an ambient level change last changed lights (monotonic; not persisted).
+    ambient_applied_at: float | None = None
 
     @property
     def preliminary_owned(self) -> dict[str, dict[str, Any]]:
@@ -457,6 +477,9 @@ class LightingController:
         self._source_controllers: tuple[list[SourceController], list[AutomationInfo]] | None = None
         self._adaptive_conflicts: dict[str, dict[str, list[dict[str, Any]]]] | None = None
         self.daylight = DaylightMonitor(hass, self)
+        # Ambient light levels of the brightness rules (0.6.7): fed by the daylight monitor's evaluations.
+        self.ambient = AmbientLevels(self)
+        self._ambient_timers: dict[str, CALLBACK_TYPE] = {}
         # Contexts of commands sent for a wall switch press (their own state reports are not new overrides).
         self._switch_commands: dict[str, float] = {}
         self._restored_switches: dict[str, Any] = {}
@@ -521,6 +544,7 @@ class LightingController:
         self.adaptive.restore(data.get("adaptive"))
         self.adaptive.async_configure(self.lighting.adaptive)
         self.daylight.restore(data.get("daylight"))
+        self.ambient.restore(data.get("ambient"))
         self._restored_switches = data.get("switches") if isinstance(data.get("switches"), dict) else {}
         self.decisions.restore(data.get("decisions"))
         self.zones.restore(data.get("zones"))
@@ -616,10 +640,11 @@ class LightingController:
                 cancel()
                 setattr(self, attr, None)
         self._cancel_adaptive()
-        for cancel in (*self._prelim_timers.values(), *self._cleanup_timers.values()):
+        for cancel in (*self._prelim_timers.values(), *self._cleanup_timers.values(), *self._ambient_timers.values()):
             cancel()
         self._prelim_timers.clear()
         self._cleanup_timers.clear()
+        self._ambient_timers.clear()
         self.adaptive.async_stop()
         self.daylight.async_stop()
         self.switch_control.async_stop()
@@ -983,25 +1008,39 @@ class LightingController:
         occupied = result.occupied if result else None
         if assume == Profile.OCCUPIED:
             state, occupied = OccupancyState.CONFIRMED_OCCUPANCY.value, True
+        gate = self.daylight_gate(area_id, fresh=fresh)
+        # Brightness rules (0.6.7): while the room is occupied, an enrolled light's Room occupied cell.
+        bctx = self.brightness_context(area_id, lighting, occupied=bool(occupied) and state not in (
+            None, OccupancyState.UNCERTAIN.value))
+
+        def resolve_fn(t: Target) -> ResolvedSetting:
+            base = self.resolve(mood or "", area_id, t.entity_id, t.targets, config=lighting)
+            matrix = bctx.matrices.get(t.entity_id) if bctx else None
+            decision = bright.decide(matrix, bctx.level, []) if matrix is not None else None
+            if decision is None:
+                return base
+            return bright.merged_setting(decision, self.appearance(mood, area_id, t, lighting),
+                                         transition=bctx.settings.transition)
+
         plan = build_plan(
             area_id=area_id,
             mood=mood,
             targets=targets,
-            resolve_fn=lambda t: self.resolve(mood or "", area_id, t.entity_id, t.targets, config=lighting),
+            resolve_fn=resolve_fn,
             occupancy_state=state,
             occupied=occupied,
             trigger=trigger,
             control_enabled=self.room_active(area_id),
             note=note,
             manual_mode=status.manual,
-            gate=self.daylight_gate(area_id, fresh=fresh),
+            gate=gate,
             await_confirmation=self.preliminary_settings(area_id, lighting).active and assume is None,
             preliminary=owned,
             assume_off=set(rt.zone_owned) if assume is None else set(),
         )
         self._arbitrate(area_id, plan, targets, arb.rule_info(arb.RULE_OCCUPIED, f"Occupied profile ({mood})"
                                                                if mood else "Occupied profile"),
-                        fresh=fresh, zones=assume is None)
+                        fresh=fresh, zones=assume is None, brightness=bctx, lighting=lighting)
         now = time.monotonic()
         force = self._adaptive_force.get(area_id, set())
         competing = self.adaptive_conflicts(area_id)
@@ -1047,12 +1086,30 @@ class LightingController:
         return arb.claims_by_target(entries)
 
     def _zone_winners(self, area_id: str) -> dict[str, str]:
+        """The zone whose rule decides each target now (an enrolled light: the zone column of its matrix)."""
         controlled = set(self.managed_room(area_id).controlled)
-        return {e: c[0].zone.id for e, c in self.zone_claims(area_id).items() if e in controlled}
+        claims = self.zone_claims(area_id)
+        bctx = self.brightness_context(area_id, self.lighting, occupied=True) if claims else None
+        out: dict[str, str] = {}
+        for entity_id, cl in claims.items():
+            if entity_id not in controlled:
+                continue
+            matrix = bctx.matrices.get(entity_id) if bctx else None
+            if matrix is not None and (d := bright.decide(matrix, bctx.level, _columns(cl))) is not None:
+                if d.zone:
+                    out[entity_id] = d.zone
+                continue  # the Room occupied cell decides: no zone rule
+            out[entity_id] = cl[0].zone.id
+        return out
 
     def _arbitrate(self, area_id: str, plan: Plan, targets: list[Target], rule: dict[str, Any], *,
-                   fresh: bool = False, zones: bool = True, keep: set[str] | None = None) -> None:
-        """One winning rule per target (arbitration.py): zone claims replace the profile's items; shared spaces."""
+                   fresh: bool = False, zones: bool = True, keep: set[str] | None = None,
+                   brightness: BrightnessContext | None = None, lighting: LightingConfig | None = None) -> None:
+        """One winning rule per target (arbitration.py): zone claims replace the profile's items; shared spaces.
+
+        ``brightness`` (0.6.7, Occupied plans of an occupied room): an enrolled light gets its matrix's winning
+        cell instead (a zone column replaces the profile's item; the Room occupied cell is already in it).
+        """
         claims = self.zone_claims(area_id, fresh=fresh) if zones else {}
         by_id = {t.entity_id: t for t in targets}
         for index, item in enumerate(plan.items):
@@ -1061,11 +1118,195 @@ class LightingController:
             if item.rule is None:
                 item.rule = dict(rule)
             target = by_id.get(item.entity_id)
-            if target is None or item.entity_id not in claims or target.excluded or target.covered_by:
+            if target is None or target.excluded or target.covered_by:
+                continue
+            matrix = brightness.matrices.get(item.entity_id) if brightness else None
+            if matrix is not None and plan.mood is not None:
+                cl = claims.get(item.entity_id, [])
+                decision = bright.decide(matrix, brightness.level, _columns(cl))
+                if decision is not None:
+                    plan.items[index] = self._matrix_item(area_id, plan, target, item, decision, cl, brightness,
+                                                          lighting or self.lighting)
+                    continue
+            if item.entity_id not in claims:
                 continue
             plan.items[index] = arb.zone_item(target, claims[item.entity_id], manual_mode=plan.manual_mode,
                                               control_enabled=plan.control_enabled, replaced=item)
         self._shared_rules(area_id, plan)
+
+    # ------------------------------------------------------ brightness rules (0.6.7)
+    def brightness_context(self, area_id: str, lighting: LightingConfig | None = None, *,
+                           occupied: bool) -> BrightnessContext | None:
+        """The ambient category and the enrolled matrices of a room whose brightness rules apply now."""
+        lighting = lighting or self.lighting
+        room = lighting.room(area_id)
+        if not occupied or not room.ambient.enabled or area_id not in self.config.enabled_rooms:
+            return None
+        matrices = {e: m for e, m in room.brightness.items() if m.enabled}
+        if not matrices:
+            return None
+        status = self.ambient.status(area_id)
+        return BrightnessContext(status.key, status, lighting.ambient_for(area_id), matrices)
+
+    def enrolled(self, area_id: str) -> set[str]:
+        """Controlled lights of a room whose brightness rules are active (enrolled, enabled, room switched on)."""
+        room = self.lighting.room(area_id)
+        if not room.ambient.enabled:
+            return set()
+        return {e for e in self.managed_room(area_id).controlled if room.matrix(e) is not None}
+
+    def appearance(self, mood: str | None, area_id: str, target: Target, lighting: LightingConfig | None = None,
+                   ) -> ResolvedSetting | None:
+        """The light's colour, colour temperature and effect in a mood (its Occupied profile taken as On)."""
+        if not mood:
+            return None
+        resolved = resolve(lighting or self.lighting, mood, area_id, target.entity_id, target.targets)
+        if resolved.action != LightAction.ON:
+            resolved.action = LightAction.ON  # (an Off mood has dropped its colour: nothing is lent)
+        return apply_global(resolved, self.adaptive.values)
+
+    def _matrix_item(self, area_id: str, plan: Plan, target: Target, item: PlanItem, decision: bright.MatrixDecision,
+                     claims: list[arb.Claim], ctx: BrightnessContext, lighting: LightingConfig) -> PlanItem:
+        """The plan item of an enrolled light: its matrix cell, the mood's appearance, every protection."""
+        look = self.appearance(plan.mood, area_id, target, lighting)
+        if decision.zone:
+            setting = bright.merged_setting(decision, look, transition=ctx.settings.transition)
+            claim = next(c for c in claims if c.zone.id == decision.zone)
+            gate = claim.gate if claim.gate is not None and claim.gate.policy == AutoOn.NEVER else None
+            ordered = [replace(claim, gate=gate), *(c for c in claims if c is not claim)]
+            what = "off" if decision.off else f"{decision.value} %"
+            item = arb.zone_item(target, ordered, manual_mode=plan.manual_mode, control_enabled=plan.control_enabled,
+                                 replaced=item, setting=setting, what=what, superseded=decision.superseded)
+        else:
+            item.rule = arb.rule_info(arb.RULE_BRIGHTNESS, f"Brightness rules: Room occupied · {ctx.status.name}",
+                                      superseded=[f"{c.zone.name} zone" for c in claims] or None)
+        status = ctx.status
+        context = (f"{decision.column_name} active" if decision.zone else "Room occupied") + f", {status.label()}"
+        item.rule = {**(item.rule or {}), "brightness": {
+            **decision.as_dict(), "ambient": status.key, "ambient_name": status.name, "ambient_label": status.label(),
+            "ambient_basis": status.basis, "context": context,
+            "appearance": bright.describe_appearance(look, plan.mood) if not decision.off else None,
+            "mood": plan.mood}}
+        self._matrix_fixups(target, item, decision, ctx)
+        return item
+
+    @staticmethod
+    def _matrix_fixups(target: Target, item: PlanItem, decision: bright.MatrixDecision, ctx: BrightnessContext) -> None:
+        """On/off-only devices and the brightness dead band of an enrolled light's item."""
+        if not decision.off and not target.capabilities.brightness:
+            item.unsupported = [n for n in item.unsupported if n.get("field") != "brightness_pct"]
+            item.unsupported.append({"field": "brightness_pct", "level": "info",
+                                     "message": f"on/off only: {decision.value} % means On (dimming is not supported)"})
+        band = ctx.settings.dead_band or 0
+        if item.decision != CHANGE or item.service != "turn_on" or target.state != "on" or not band \
+                or "brightness_pct" not in item.data:
+            return
+        current = target.attributes.get("brightness")
+        if not isinstance(current, (int, float)):
+            return
+        now = current / 255 * 100
+        rest = {k: v for k, v in item.data.items() if k not in ("brightness_pct", "transition")}
+        if abs(now - item.data["brightness_pct"]) <= band and (not rest or matches(target, "turn_on", rest)):
+            item.decision, item.reason_code = UNCHANGED, "dead_band"
+            item.reason = (f"Within the brightness dead band (±{band} %): {round(now)} % is close enough to "
+                           f"{item.data['brightness_pct']} %")
+
+    def brightness_preview(self, area_id: str, entity_id: str, matrix: bright.LightMatrix | None = None,
+                           ) -> dict[str, Any]:
+        """What enrolling a light (or saving a draft matrix) would mean now. Never sends anything."""
+        lighting = self.lighting
+        room = lighting.room(area_id)
+        matrix = matrix or room.brightness.get(entity_id) or bright.find_template(
+            lighting.brightness_templates, bright.DEFAULT_TEMPLATE).matrix(
+                entity_id, [z.id for z in room.zones if z.target(entity_id)])
+        matrix = replace(matrix, enabled=True)
+        trial = lighting.with_room(area_id, replace(room, ambient=replace(room.ambient, enabled=True),
+                                                    brightness=bright.with_matrix(room.brightness, matrix, entity_id)))
+        # "Before": the light's previous rules (as if it were not enrolled), even when it already is.
+        without = lighting.with_room(area_id, replace(room, brightness=bright.with_matrix(room.brightness, None,
+                                                                                          entity_id)))
+        before = next((i for i in self._preview_plan(area_id, without).items if i.entity_id == entity_id), None)
+        after_plan = self._preview_plan(area_id, trial)
+        after = next((i for i in after_plan.items if i.entity_id == entity_id), None)
+        mood, _ = self.room_mood(area_id)
+        target = next((t for t in self._targets(area_id) if t.entity_id == entity_id), None)
+        current = self.resolve(mood, area_id, entity_id, target.targets) if mood and target else None
+        zone_targets = [(z.name, z.target(entity_id)) for z in room.zones if z.target(entity_id)]
+        notes = bright.conflicts(mood_name=mood, mood=current, zone_targets=zone_targets, adaptive_brightness=bool(
+            current and current.brightness_mode in (AdjustMode.GLOBAL, AdjustMode.OFFSET)))
+        caps = target.capabilities if target else None
+        if caps is not None and not caps.brightness:
+            notes.append("This light switches on and off only: 0 % is Off and any other value is On "
+                         "(percentage dimming is not supported).")
+        if not room.ambient.enabled:
+            notes.append("Ambient brightness control is off in this room: the matrix is used once it is switched on.")
+        result = self.coordinator.occupancy.result(area_id)
+        return {
+            "entity_id": entity_id, "name": friendly_name(self.hass, entity_id) or entity_id, "mood": mood,
+            "ambient": self.ambient.status(area_id).as_dict(),
+            "occupancy": result.state.value if result else None,
+            "zones": [{"id": z.zone.id, "name": z.zone.name} for z in self.zones.active(area_id)],
+            "before": before.as_dict() if before else None,
+            "after": after.as_dict() if after else None,
+            "would_send": bool(after and after.decision == CHANGE and self.room_active(area_id)),
+            "sends_now": False,  # enrolling never sends a command; the next trigger applies it
+            "conflicts": notes,
+            "matrix": matrix.as_dict(),
+        }
+
+    def _preview_plan(self, area_id: str, lighting: LightingConfig) -> Plan:
+        result = self.coordinator.occupancy.result(area_id)
+        if result is not None and result.state == OccupancyState.VACANT and result.occupied is False:
+            return self.vacancy_plan(area_id, "preview", ambient=True)
+        plan, _ = self._plan(area_id, "preview", config=lighting)
+        return plan
+
+    @callback
+    def async_ambient_changed(self, area_id: str, old: str, status: AmbientStatus) -> None:
+        """A room's committed ambient category changed: its enrolled lights follow (only while occupied)."""
+        if not self._running or self._stopped or area_id not in self.config.enabled_rooms:
+            return
+        targets = self.enrolled(area_id)
+        result = self.coordinator.occupancy.result(area_id)
+        _LOGGER.debug("lighting_ambient area=%s old=%s new=%s basis=%s lights=%d", area_id, old, status.key,
+                      status.basis, len(targets))
+        if not targets or result is None or not result.occupied:
+            self._notify()
+            return  # nothing follows the category now (vacancy behaviour is unchanged)
+        if self.room_active(area_id) and not self._manual:
+            rt = self.runtime_for(area_id)
+            interval = self.lighting.ambient_for(area_id).min_interval or 0
+            wait = (rt.ambient_applied_at + interval - time.monotonic()) if rt.ambient_applied_at and interval else 0
+            if wait > 0:
+                self._defer_ambient(area_id, wait)
+            else:
+                self._schedule_apply(area_id, "ambient", targets)
+        elif not self._manual:
+            plan = self.plan(area_id, "ambient")
+            self.explain.plan(area_id, "ambient", plan, [i for i in plan.items if i.entity_id in targets])
+        self._notify()
+
+    @callback
+    def _defer_ambient(self, area_id: str, wait: float) -> None:
+        """The minimum interval between automatic brightness changes: apply the newest category when it ends."""
+        if area_id in self._ambient_timers:
+            return
+
+        @callback
+        def fire(_now: datetime) -> None:
+            self._ambient_timers.pop(area_id, None)
+            result = self.coordinator.occupancy.result(area_id)
+            if (targets := self.enrolled(area_id)) and result is not None and result.occupied:
+                self._schedule_apply(area_id, "ambient", targets)
+
+        self._ambient_timers[area_id] = async_call_later(self.hass, wait, fire)
+
+    @callback
+    def async_ambient_held(self, area_id: str, status: AmbientStatus) -> None:
+        """The ambient category is held because lamplight reaches the sensor (logged once per episode)."""
+        if not self._running or self._stopped or not self.enrolled(area_id):
+            return
+        self.explain.ambient_held(area_id, status)
 
     # ------------------------------------------------------- shared spaces (0.6.0)
     def _shared_rules(self, area_id: str, plan: Plan) -> None:
@@ -1952,6 +2193,10 @@ class LightingController:
         n = len(ended)
         if ended:
             self._retry_vacancy(area_id, ended, "override_expired")
+            # Resume (0.6.7): an enrolled light's brightness rules take over again at once (occupied room).
+            result = self.coordinator.occupancy.result(area_id)
+            if (resume := ended & self.enrolled(area_id)) and result is not None and result.occupied:
+                self._schedule_apply(area_id, "resumed", resume)
         if n:
             self._mark_dirty()
             self._schedule_override_expiry()
@@ -2010,6 +2255,15 @@ class LightingController:
             self._note_zone_sent(area_id, ok)
             if only is None:
                 rt.zone_winners = self._zone_winners(area_id)  # (the zone changes were applied with the rest)
+            else:
+                winners = self._zone_winners(area_id)
+                for entity_id in only:
+                    if entity_id in winners:
+                        rt.zone_winners[entity_id] = winners[entity_id]
+                    else:
+                        rt.zone_winners.pop(entity_id, None)
+            if trigger == "ambient" and ok:
+                rt.ambient_applied_at = time.monotonic()
             rt.last_errors = [f"{e}: {msg}" for e, msg in errors.items()]
             rt.last_result = "applied" if not errors else ("partial" if ok else "failed")
             rt.last_reason = _summary(plan.mood, relevant, trigger, failed=len(errors))
@@ -2785,7 +3039,17 @@ class LightingController:
             "shared_space": (sp.as_dict() if (sp := self.lighting.space_of(area_id)) else None),
             "space_deferred": rt.space_deferred,
             "supervisor": self.supervisor.model(area_id, details=True),
+            # Brightness rules (0.6.7): a compact summary (no values that change by themselves).
+            "brightness": self._brightness_summary(area_id),
         }
+
+    def _brightness_summary(self, area_id: str) -> dict[str, Any]:
+        room = self.lighting.room(area_id)
+        if not room.ambient.enabled and not room.brightness:
+            return {"enabled": False, "enrolled": 0}
+        status = self.ambient.status(area_id)
+        return {"enabled": room.ambient.enabled, "level": status.key, "held": status.basis == "held",
+                "enrolled": sum(1 for m in room.brightness.values() if m.enabled)}
 
     def activation_review(self, area_id: str) -> dict[str, Any]:
         """What enabling lighting control would mean for a room."""
@@ -2839,7 +3103,7 @@ class LightingController:
         self._dirty = False
         return {"rooms": {a: rt.persist() for a, rt in self.runtime.items()}, "adaptive": self.adaptive.persist(),
                 "daylight": self.daylight.persist(), "switches": self.switch_inputs.persist(),
-                "decisions": self.decisions.persist(), "zones": self.zones.persist()}
+                "decisions": self.decisions.persist(), "zones": self.zones.persist(), "ambient": self.ambient.persist()}
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -2850,6 +3114,7 @@ class LightingController:
             "rooms": {a: self.room_diagnostics(a) for a in sorted(self.config.enabled_rooms)},
             "tracked_entities": list(self._tracked),
             "daylight": self.daylight.diagnostics(),
+            "ambient": self.ambient.diagnostics(),
             "zones": self.zones.diagnostics(),
             "switches": {
                 "mqtt": self.switch_inputs.mqtt_state,
@@ -3059,6 +3324,20 @@ def _summary(mood: str | None, items, trigger: str, *, failed: int = 0) -> str:
     if n := counts.get("skipped"):
         parts.append(f"{n} not controlled")
     return " · ".join(parts)
+
+
+@dataclass(slots=True, frozen=True)
+class BrightnessContext:
+    """The brightness rules of an occupied room now: its ambient category and enrolled matrices (0.6.7)."""
+
+    level: str
+    status: AmbientStatus
+    settings: Any
+    matrices: dict[str, bright.LightMatrix]
+
+
+def _columns(claims: list[arb.Claim]) -> list[bright.ColumnClaim]:
+    return [bright.ColumnClaim(c.zone.id, c.zone.name, c.zone.priority, c.order) for c in claims]
 
 
 def _motion(result: RoomResult) -> bool:

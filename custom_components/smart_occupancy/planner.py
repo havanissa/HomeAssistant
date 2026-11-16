@@ -233,6 +233,8 @@ def _source_text(source: dict[str, str] | None, mood: str | None) -> str:
     if not source:
         return "default"
     level = source.get("level")
+    if level == "brightness":
+        return "brightness rules"
     if level == "global":
         m = source.get("mood")
         return f"global {m}" + ("" if (m or "").casefold() == (mood or "").casefold() else " (inherited)")
@@ -504,6 +506,8 @@ def build_plan(
             "became_dark": "the room became dark",
             "preview": f"it does not match {mood}",
             PRELIMINARY_TRIGGER: "occupancy is possible",
+            "ambient": "the ambient light level changed",
+            "resumed": "automatic lighting was resumed",
         }.get(trigger, trigger)
         ambient = " Ambient: applied regardless of occupancy." if resolved.is_persistent and not occupied else ""
         light = ""

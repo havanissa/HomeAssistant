@@ -457,7 +457,7 @@ class Supervisor:
         if item.decision == SKIPPED:
             return NOT_SUPERVISED, item.reason, None
         if item.decision == UNCHANGED and code in ("already", "zone_unchanged", "vacant_ignore", "vacant_unset",
-                                                  "stays_off"):
+                                                  "stays_off", "dead_band"):
             return CORRECT, item.reason, desired
         if item.decision == UNCHANGED and code == "already_sent":
             if now < tc.pending_until:
