@@ -52,6 +52,7 @@ RULE_ZONE = "zone"
 RULE_OCCUPIED = "occupied"
 RULE_VACANT = "vacant"
 RULE_PRELIMINARY = "preliminary"
+RULE_BRIGHTNESS = "brightness"  # an enrolled light's Room occupied brightness rule (0.6.7)
 RULE_NONE = "none"
 
 
@@ -100,12 +101,19 @@ def _manual_wins(override: dict[str, Any] | None, claim: Claim) -> bool:
 
 
 def zone_item(t: Target, claims: list[Claim], *, manual_mode: bool, control_enabled: bool,
-              replaced: PlanItem | None = None) -> PlanItem:
-    """The plan item of the winning zone claim for one target (same protections as every plan item)."""
+              replaced: PlanItem | None = None, setting: ResolvedSetting | None = None, what: str | None = None,
+              superseded: list[str] | None = None) -> PlanItem:
+    """The plan item of the winning zone claim for one target (same protections as every plan item).
+
+    Brightness rules (0.6.7): ``setting`` replaces the zone target's own values (the matrix brightness with
+    the mood's appearance), ``what`` describes it and ``superseded`` names the rules it takes precedence over.
+    """
     claim = claims[0]
     zt = claim.zone.target(t.entity_id)
     action = zt.action if zt else ZoneAction.UNCHANGED
-    if action == ZoneAction.ON:
+    if setting is not None:
+        resolved = setting
+    elif action == ZoneAction.ON:
         resolved = ResolvedSetting(action=LightAction.ON, brightness_pct=zt.brightness_pct,
                                    color_temp_kelvin=zt.color_temp_kelvin, transition=zt.transition)
     elif action == ZoneAction.OFF:
@@ -113,10 +121,12 @@ def zone_item(t: Target, claims: list[Claim], *, manual_mode: bool, control_enab
     else:
         resolved = ResolvedSetting()
     service, data, requested, unsupported = build_command(resolved, t.capabilities)
-    superseded = [c.label() for c in claims[1:]]
-    lower = replaced.rule.get("name") if replaced is not None and replaced.rule else None
-    if replaced is not None and replaced.service is not None and replaced.decision != SKIPPED and lower:
-        superseded.append(lower)
+    if superseded is None:
+        superseded = [c.label() for c in claims[1:]]
+        lower = replaced.rule.get("name") if replaced is not None and replaced.rule else None
+        if replaced is not None and replaced.service is not None and replaced.decision != SKIPPED and lower:
+            superseded.append(lower)
+    what = what or (zt.describe() if zt else "")
     item = PlanItem(
         entity_id=t.entity_id, name=t.name, category=t.category, category_name=t.category_name,
         is_group=t.is_group, current=t.current(), resolved=resolved, requested=requested, service=service,
@@ -137,6 +147,8 @@ def zone_item(t: Target, claims: list[Claim], *, manual_mode: bool, control_enab
         set_(SKIPPED, "excluded", f"Excluded from automatic management ({t.excluded})")
     elif t.covered_by:
         set_(SKIPPED, "covered_by_group", f"Member of managed group {t.covered_by}; controlled through the group")
+    elif service is None and setting is not None:
+        set_(UNCHANGED, "zone_unchanged", f"Left as it is: the {zone} zone's brightness rule sets nothing{over}")
     elif service is None:
         set_(UNCHANGED, "zone_unchanged", f"Left as it is: the {zone} zone says Unchanged{over}")
     elif t.offline:
@@ -150,12 +162,12 @@ def zone_item(t: Target, claims: list[Claim], *, manual_mode: bool, control_enab
     elif service == "turn_on" and t.state != "on" and claim.gate is not None and (block := claim.gate.blocks()):
         set_(BLOCKED, block[0], f"{block[1]} ({zone} zone)")
     elif matches(t, service, data):
-        set_(UNCHANGED, "already", f"Already as the {zone} zone sets it ({zt.describe() if zt else ''}){over}")
+        set_(UNCHANGED, "already", f"Already as the {zone} zone sets it ({what}){over}")
     elif t.last_command == (service, data):
         set_(UNCHANGED, "already_sent", "The same command was already sent and the light was not changed since")
     else:
         verb = "Will" if control_enabled else "Would"
-        what = "switch off" if service == "turn_off" else f"set {zt.describe() if zt else 'on'}"
+        what = "switch off" if service == "turn_off" else f"set {what or 'on'}"
         manual = " (its manual override predates the zone)" if t.override else ""
         set_(CHANGE, "change", f"{verb} {what} because the {zone} zone is occupied{over}{manual}.")
     return item

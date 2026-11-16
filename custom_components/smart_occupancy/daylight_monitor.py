@@ -25,6 +25,10 @@ committed vacant decision is reported (``async_daylight_vacant``), so a
 vacant room can switch decorative lights on when it becomes dark and off
 again when daylight is enough.
 
+Ambient light levels (0.6.7): every evaluation is also passed to the
+brightness rules' ambient categories (``brightness_runtime.AmbientLevels``),
+and their pending stability deadline is one of the room's deadlines.
+
 Trusted samples and calibration ratios are kept in the lighting state store
 (``.storage/smart_occupancy.lighting_state``), so a restart does not lose them.
 """
@@ -540,6 +544,8 @@ class DaylightMonitor:
             vacant_decision=v_instant, vacant_committed=v_committed,
         )
         room.status = status
+        # Ambient light levels (0.6.7) follow this same evidence (no sensor subscription of their own).
+        self.ctrl.ambient.observe(area_id, status, now)
         if old is not None:
             _LOGGER.debug("daylight_decision area=%s old=%s new=%s basis=%s text=%s", area_id, old,
                           room.tracker.committed, result.estimate.basis, result.estimate.text)
@@ -569,6 +575,8 @@ class DaylightMonitor:
             candidates.append(due)
         if room.vacant_on_below is not None and (due := room.vacant.due(cfg.stable_seconds)) is not None:
             candidates.append(due)
+        if (due := self.ctrl.ambient.due(area_id)) is not None:
+            candidates.append(due)  # an ambient category waiting for its stability period (0.6.7)
         if status.contamination.until is not None:
             candidates.append(status.contamination.until)
         for sample in (status.trusted, room.bound):

@@ -9,6 +9,7 @@ import pytest
 from homeassistant.core import State
 
 from custom_components.smart_occupancy.const import AutoOn, Darkness, Reliability, ReportMode, UncertainPolicy
+from custom_components.smart_occupancy.ambient import GLOBAL_AMBIENT
 from custom_components.smart_occupancy.daylight import (
     BRIGHT,
     DARK,
@@ -352,10 +353,12 @@ def test_store_migration_keeps_activated_rooms_on_confirmed_occupancy() -> None:
     assert config.room("done").daylight.on_first_motion is True
     assert config.room("active").daylight.auto_on == AutoOn.DARK
     # Later minors only add keys (1.5, 0.3.9: possible occupancy lighting, disabled; 1.6, 0.4.0: vacant profiles;
-    # 1.7, 0.6.0: the Room Supervisor (Observing) and no shared space).
+    # 1.7, 0.6.0: the Room Supervisor (Observing) and no shared space; 1.8, 0.6.7: ambient level defaults and no
+    # brightness template).
     assert migrate_store(1, 2, {"rooms": {}}) == {"rooms": {}, "preliminary": PreliminaryDefaults().as_dict(),
                                                   "global_vacant": {}, "vacant": {"others": "off", "on_below": None},
-                                                  "supervisor": GLOBAL_SUPERVISOR.as_dict(), "shared_spaces": []}
+                                                  "supervisor": GLOBAL_SUPERVISOR.as_dict(), "shared_spaces": [],
+                                                  "ambient": GLOBAL_AMBIENT.as_dict(), "brightness_templates": []}
     with pytest.raises(NotImplementedError):
         migrate_store(2, 1, {})
 

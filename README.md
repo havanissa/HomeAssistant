@@ -26,6 +26,8 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **0.6.6 (Phase 4.6.4, centralized)**: **Global Schedule** (when) and **Global Modes** (which preset, per window or single cover) are the only configuration of the normal curtain routine. Window settings define the window itself: its covers, adjustable presets, direction, sun / sleep / lamp protections, manual-move behaviour and mode. Settings from earlier versions keep working until a reviewed migration moves them (see [Centralized configuration](#centralized-configuration-064--066)).
 
+**0.6.7 (Phase 4.7)** adds **ambient light levels and brightness rules**: each room classifies its natural light as *No light*, *Low light* or *Bright* (lamp-lit readings never raise the category), and a light you enrol gets a brightness matrix (category × Room occupied / each of its zones) that owns its on/off and brightness while the room is occupied, while the mood keeps choosing its colour (see [Ambient light levels and brightness rules](#ambient-light-levels-and-brightness-rules-phase-47-067)).
+
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
@@ -36,7 +38,8 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - switches a light on in an empty room, unless the room is in **Automatic**, its vacancy behaviour is the *Vacant profile*, and that profile switches the light on in the current mood (only when it is dark, unless you made that light an exception) (0.4.0)
 - changes a light because you edited a profile; only an explicit, confirmed **Test** sends commands (0.4.0)
 - switches a light on for *possible* occupancy, unless the room is in **Automatic** and that light was chosen as its preliminary light (0.3.9); it switches off only a preliminary light it switched on itself and nobody changed since
-- switches lights off, or changes their brightness or colour, because of daylight or a lux reading, except a light that a room's Vacant profile wants *only when dark*: in an empty room it is switched off again when daylight is enough (0.4.0)
+- switches lights off, or changes their brightness or colour, because of daylight or a lux reading, except a light that a room's Vacant profile wants *only when dark*: in an empty room it is switched off again when daylight is enough (0.4.0), and a light you enrolled in a room's Brightness Rules, whose on/off and brightness follow the room's ambient category while it is occupied (0.6.7; never its colour)
+- enrols a light in Brightness Rules by itself, or sends a command because a light was enrolled, a matrix was saved or the ambient levels were edited (0.6.7)
 - switches a light on because the global brightness or colour temperature changed
 - sends any automatic lighting command while Main Mood is **Manual**
 - calculates its own adaptive lighting: it only reads the values your existing system publishes
@@ -915,6 +918,49 @@ Smart Occupancy never disables or changes your automations. Room by room:
 
 **Relay output**: (1) tick the switch in Advanced → Relay lighting outputs; (2) give it a zone or a per-light profile entry: it is switched with `switch.turn_on/turn_off` only; (3) the Overview's supervisor table shows its expected and actual on/off; (4) with the Supervisor in Automatic, block the relay (or unplug it while on): the supervisor corrects at most 3 times, then reports *Device failure*; plug it back: verified again; (5) switch it by hand: *Manual change*, never corrected.
 
+## Ambient light levels and brightness rules (Phase 4.7, 0.6.7)
+
+*Occupancy chooses the scope, ambient light chooses the brightness, and the mood chooses the appearance. One rule engine, one winning command per light.*
+
+### Ambient Light Levels (Settings → Lighting)
+
+Each room has three ambient categories, by default **No light** (below 5 lx), **Low light** (5 to below 20 lx) and **Bright** (20 lx and above). A reading exactly at a threshold belongs to the brighter category. Thresholds are global defaults (*Global defaults (all rooms)*) with room overrides. The section shows the category now (highlighted), the ambient value and how it is known (*measured*, *estimated*, *measured with lamps on*, *held*, *fallback*), the raw indoor reading separately (marked *lit by lamps* when the room's lamps reach the sensor), the confidence, the room's indoor sensors with their status, and recent category changes.
+
+The category follows the **daylight monitor's evidence** (`daylight.py`, `daylight_monitor.py`); there is no second sensor subscription or estimator, and the indoor sensors are the room's daylight sensors (one list, also in Settings → Automatic). The value classified is the room's **natural** light, never a lamp-lit reading:
+
+- A reading taken while a lamp of the room is on (or settling after it went off) only says natural light is *at most* that value. It can keep or lower the category, **never raise it**. So the loop *4 lx → floor lamp on → sensor 23 lx → Bright → lamp off → 4 lx → on…* cannot happen: the category stays *No light* and the card says *“Ambient sensor affected by room lighting. Holding No light classification until trustworthy evidence is available.”* (logged once per episode).
+- Estimates (outdoor light × the room's factor, a recent trusted reading scaled by the outdoor change, the sun) are shown as estimates (≈).
+- Unavailable, stale or invalid readings are uncertain. **When uncertain**: *Keep the last reliable category* (default) or *Use the fallback category*; before anything is known the fallback category (default Low light) is used.
+- **Hysteresis** (default 2 lx): a category is left downwards only that far below its threshold (moving up happens at the threshold). **Stable for** (default 120 s): a new category counts after it held that long. Editing the levels never sends a command.
+
+The same section has the brightness tuning: **Brightness fade** (transition, default 2 s, only for lights that support transitions), **Dead band** (default 3 %: a smaller brightness difference is not sent) and **Between changes** (optional minimum time between two brightness changes caused by the light level; zones are never delayed).
+
+### Brightness Rules (Settings → Lighting)
+
+The room's managed lights are listed; nothing is enrolled automatically. Select a light to see its **brightness matrix**: rows are the ambient categories, columns are **Room occupied** and each zone that lists the light (Settings → Presence → Zones). Example for a floor lamp in Kamar Norður:
+
+| Ambient light | Room occupied | Desk zone | Seating zone |
+|---|---:|---:|---:|
+| No light | 15 % | 65 % | 30 % |
+| Low light | 15 % | 45 % | 20 % |
+| Bright | Off | 80 % | — |
+
+- Select a value to change it with a slider (0–100 %). **0 % is Off** (`light.turn_off`, never `turn_on` at 0 %). **—** is *Not configured*: a zone without a value does not claim the brightness (another active zone, else Room occupied decides); a Room occupied cell without a value leaves the light to its mood in that situation.
+- Tools: templates (*General light*, *Floor light*, *Task / desk lamp*, *Ceiling light*, *Accent / LED strip*, and your own *Save as template*, shared by all rooms), *Copy from light*, *Copy Room column to* a zone, *Restore defaults*, and *Use this brightness matrix* (pause without deleting).
+- **Enrolling** shows a preview first: the light's current behaviour (*Today without rules*), the behaviour with the matrix, the ambient category, the room and zone occupancy, the colour it would get, whether a command would be sent, and what changes for it (a mood brightness, the global brightness adjustment, a zone's own brightness, Off or Ignore in a mood, ambient lights). **Enrolling and saving never send a command**: the next trigger (occupancy, a zone, the light level, the mood) applies it.
+- An on/off-only light or relay output: 0 % is Off, any other value is On; the card says dimming is not supported.
+
+What an enrolled light does, **while the room is occupied** (vacancy behaviour is unchanged):
+
+- Room occupied → the Room occupied value of the current category; a zone becomes active → that zone's value at once (no lux stability wait); the zone ends → back to Room occupied; the category changes → the new value after the stability period.
+- Two active zones that list the light: the existing zone arbitration picks one (higher priority, then the zone listed first). Values are never combined or averaged and only one command is sent; the log and the matrix show *“Desk zone wins over Seating zone due to higher priority”*.
+- **The mood owns the appearance**: colour, white colour temperature (a global colour temperature too) and effect come from the room's mood; only the light's capabilities are used. A mood change updates the colour without replacing the matrix brightness; a brightness change keeps the mood's colour. The mood's own brightness, a zone's brightness and the global brightness adjustment are not used for an enrolled light.
+- Every protection still applies: Manual mood, manual overrides (and *Resume automatic lighting*, which hands the light back to its matrix at once), wall switches, Observing, automation conflicts, unavailable devices, occupancy confirmation (Off is not sent on possible occupancy), possible occupancy lighting, shared spaces and the Room Supervisor, which compares the light with its matrix value (an Off cell is expected, not a fault).
+
+A light that is not enrolled, and a room without ambient brightness control, behave exactly as in 0.6.6.
+
+Decision log examples: *“Room occupied, Low light (≈ 12 lx), Floor Light → 15 %, colour from Hygge (2700 K).”* · *“Desk zone activated. Low light (≈ 12 lx), Floor Light → 45 %, colour unchanged.”* · *“Ambient light changed to Bright (≈ 24 lx): Desk zone active, Bright (≈ 24 lx), Floor Light → 80 %.”* · *“Desk zone ended. Room still occupied, Bright (≈ 24 lx), Floor Light → Off.”*
+
 ## Curtains (Phase 4.6.0, 0.6.1)
 
 A window manager with adjustable presets, explicitly initiated manual control (0.6.1) and, per window, autonomous control (0.6.2, see [Automatic curtains](#automatic-curtains-phase-461-062)). Every window starts in **Observing**: it decides and explains, but nothing moves on its own.
@@ -1526,6 +1572,8 @@ The suite covers:
 Observe rooms are asserted never to call a light service. Any test that logs an ERROR, or in which Home Assistant reports deprecated usage, fails. CI (`.github/workflows/validate.yml`) runs hassfest, HACS validation and the tests on Home Assistant 2026.10.4 and 2026.11.1.
 
 ## Upgrading
+
+**From 0.6.6.** Nothing to configure, and nothing changes in any room. The lighting store is migrated from 1.7 to 1.8: the global ambient defaults are added (5 and 20 lx, 2 lx hysteresis, 120 s stability, keep the last reliable category), every room gets ambient brightness control **off** and no enrolled light. Profiles, zones and their targets, overrides and every other setting are kept. The room card gets a **Lighting** section under Settings. The room mood-lighting sensor gets one unrecorded attribute (`brightness`). 0.6.6 can be reinstalled; it ignores the new keys.
 
 **From 0.5.0.** Nothing to configure, and nothing changes in any room. The lighting store is migrated from 1.6 to 1.7: every room gets no zone, no relay output and no supervisor override; there is no shared space; the global Room Supervisor mode is **Observing** (it compares and reports, and never sends a command). The supervisor's own log appears under Overview → Room Supervisor. The room mood-lighting sensor gets a few unrecorded attributes (`active_zones`, `supervisor`, `supervisor_discrepancies`, `relays`, `shared_space`). 0.5.0 can be reinstalled; it ignores the new keys.
 

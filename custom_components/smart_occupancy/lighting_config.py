@@ -40,14 +40,18 @@ Persisted shape (store version 1)::
                           "signals": null, "targets": [{...}]},            #   lighting (preliminary.RoomPreliminary)
           "zones": [{...}],                            # 0.6.0: logical zones (zones.ZoneConfig)
           "relays": [switch entity ids],               # 0.6.0: switches designated as lighting outputs
-          "supervisor": {...}}},                       # 0.6.0: Room Supervisor overrides (null: global)
+          "supervisor": {...},                         # 0.6.0: Room Supervisor overrides (null: global)
+          "ambient": {"enabled": false, "thresholds": null, ...},   # 0.6.7: ambient levels (ambient.RoomAmbient)
+          "brightness": {light entity id: {...}}}},     # 0.6.7: brightness matrices (brightness.LightMatrix)
       "daylight": {"outdoor_entity": null, ...},     # 0.3.3: global daylight settings (daylight.DaylightConfig)
       "switch_settings": {"mqtt_base_topic": "zigbee2mqtt"},  # 0.3.5 (switches.SwitchSettings)
       "preliminary": {"enabled": false, "timeout": 30, ...},  # 0.3.9: global defaults (preliminary.PreliminaryDefaults)
       "global_vacant": {mood: {category_key: setting}},       # 0.4.0: global Vacant profile
       "vacant": {"others": "off", "on_below": null},          # 0.4.0: global Vacant profile defaults
       "supervisor": {"mode": "observing", ...},              # 0.6.0: Room Supervisor defaults
-      "shared_spaces": [{...}]                               # 0.6.0: open-plan spaces (zones.SharedSpace)
+      "shared_spaces": [{...}],                              # 0.6.0: open-plan spaces (zones.SharedSpace)
+      "ambient": {"thresholds": [5, 20], ...},               # 0.6.7: ambient level defaults (ambient.AmbientSettings)
+      "brightness_templates": [{...}]                        # 0.6.7: saved matrix templates (brightness.Template)
     }
 
 The tables without "vacant" in their name are the **Occupied** profile (every
@@ -106,6 +110,13 @@ gets no zone, no relay and no supervisor override; the global Supervisor mode
 is Observing (it never sends a command), and there is no shared space, so no
 room behaves differently after the migration. A 0.5.0 install reads a 1.7
 store as is and ignores the new keys.
+
+Store 1.8 (0.6.7) adds ambient light levels and brightness rules: the global
+``ambient`` defaults (No light below 5 lx, Low light below 20 lx, Bright
+from 20 lx) and ``brightness_templates`` (none), and per room ``ambient``
+(disabled) and ``brightness`` (no light enrolled). No light is enrolled by
+the migration and nothing else changes, so every room behaves exactly as in
+0.6.6. A 0.6.6 install reads a 1.8 store as is and ignores the new keys.
 """
 
 from __future__ import annotations
@@ -144,6 +155,8 @@ from .const import (
     VacancyAction,
     VacantOthers,
 )
+from .ambient import GLOBAL_AMBIENT, AmbientSettings, RoomAmbient
+from .brightness import LightMatrix, Template, matrices_from, templates_from
 from .const import LIGHTING_STORE_MINOR_VERSION
 from .daylight import DaylightConfig, RoomDaylight
 from .models import IntegrationConfig, ProfileSetting, ProfileTable, _enum_or
@@ -391,6 +404,9 @@ class RoomLighting:
     zones: tuple[ZoneConfig, ...] = ()
     relays: tuple[str, ...] = ()
     supervisor: SupervisorSettings = field(default_factory=SupervisorSettings)
+    # Ambient light levels and brightness rules (0.6.7): the room's levels, and the enrolled lights' matrices.
+    ambient: RoomAmbient = field(default_factory=RoomAmbient)
+    brightness: dict[str, LightMatrix] = field(default_factory=dict)
 
     def zone(self, zone_id: str) -> ZoneConfig | None:
         return next((z for z in self.zones if z.id == zone_id), None)
@@ -438,9 +454,14 @@ class RoomLighting:
             zones=zones_from(data.get("zones")),
             relays=tuple(e for e in _ids(data.get("relays")) if e.startswith("switch.")),
             supervisor=SupervisorSettings.from_dict(data.get("supervisor")),
+            ambient=RoomAmbient.from_dict(data.get("ambient")),
+            # (Columns of zones that no longer exist are dropped.)
+            brightness=matrices_from(data.get("brightness"), [z.get("id") for z in data.get("zones") or []
+                                                              if isinstance(z, dict)]),
         )
 
     def as_dict(self) -> dict[str, Any]:
+        zone_ids = {z.id for z in self.zones}
         return {
             "control_enabled": self.control_enabled,
             "activated_at": self.activated_at,
@@ -463,7 +484,15 @@ class RoomLighting:
             "zones": [z.as_dict() for z in self.zones],
             "relays": list(self.relays),
             "supervisor": self.supervisor.as_dict(),
+            "ambient": self.ambient.as_dict(),
+            "brightness": {e: m.as_dict() | {"zones": {z: c for z, c in m.as_dict()["zones"].items() if z in zone_ids}}
+                           for e, m in self.brightness.items()},
         }
+
+    def matrix(self, entity_id: str) -> LightMatrix | None:
+        """The enrolled, enabled brightness matrix of a light (0.6.7); None when it is not enrolled."""
+        matrix = self.brightness.get(entity_id)
+        return matrix if matrix is not None and matrix.enabled else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,6 +520,13 @@ class LightingConfig:
     # Room Supervisor defaults and shared (open-plan) spaces (0.6.0).
     supervisor: SupervisorSettings = GLOBAL_SUPERVISOR
     shared_spaces: tuple[SharedSpace, ...] = ()
+    # Ambient light level defaults and saved brightness templates (0.6.7).
+    ambient: AmbientSettings = GLOBAL_AMBIENT
+    brightness_templates: tuple[Template, ...] = ()
+
+    def ambient_for(self, area_id: str) -> AmbientSettings:
+        """The ambient level settings of one room: the global defaults with its own values applied."""
+        return self.ambient.merged(self.room(area_id).ambient.settings)
 
     def supervisor_for(self, area_id: str) -> SupervisorSettings:
         """The Room Supervisor settings of one room: the global defaults with its own values applied."""
@@ -540,6 +576,8 @@ class LightingConfig:
             vacant=VacantDefaults.from_dict(data.get("vacant")),
             supervisor=GLOBAL_SUPERVISOR.merged(SupervisorSettings.from_dict(data.get("supervisor"))),
             shared_spaces=spaces_from(data.get("shared_spaces")),
+            ambient=AmbientSettings.from_dict(data.get("ambient"), defaults=True),
+            brightness_templates=templates_from(data.get("brightness_templates")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -561,6 +599,8 @@ class LightingConfig:
             "vacant": self.vacant.as_dict(),
             "supervisor": self.supervisor.as_dict(),
             "shared_spaces": [s.as_dict() for s in self.shared_spaces],
+            "ambient": self.ambient.as_dict(),
+            "brightness_templates": [t.as_dict() for t in self.brightness_templates],
         }
 
     def room(self, area_id: str) -> RoomLighting:
@@ -773,6 +813,13 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
             targets = tuple(replace(t, entity_id=new) if t.entity_id == old else t for t in targets)
         return replace(zone, sensors=sub_ids(zone.sensors), targets=targets)
 
+    def sub_matrices(matrices: dict[str, LightMatrix]) -> dict[str, LightMatrix]:
+        nonlocal changed
+        if old not in matrices:
+            return matrices
+        changed = True
+        return {(new if e == old else e): (replace(m, entity_id=new) if e == old else m) for e, m in matrices.items()}
+
     rooms = {
         area_id: replace(
             room,
@@ -786,6 +833,7 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
             vacant_light_overrides=sub_table(room.vacant_light_overrides),
             daylight=sub_daylight(room.daylight),
             switches=tuple(sub_switch(s) for s in room.switches),
+            brightness=sub_matrices(room.brightness),
         )
         for area_id, room in config.rooms.items()
     }
@@ -875,6 +923,20 @@ def migrate_store(old_major: int, old_minor: int, data: dict[str, Any]) -> dict[
             room.setdefault("relays", [])
             if not isinstance(room.get("supervisor"), dict):
                 room["supervisor"] = SupervisorSettings().as_dict()
+            rooms[area_id] = room
+        data["rooms"] = rooms
+    if old_minor < 8:
+        # Ambient light levels and brightness rules (0.6.7): disabled in every room, no light enrolled.
+        if not isinstance(data.get("ambient"), dict):
+            data["ambient"] = GLOBAL_AMBIENT.as_dict()
+        data.setdefault("brightness_templates", [])
+        rooms = {}
+        for area_id, room in (data.get("rooms") or {}).items():
+            room = dict(room) if isinstance(room, dict) else {}
+            if not isinstance(room.get("ambient"), dict):
+                room["ambient"] = RoomAmbient().as_dict()
+            if not isinstance(room.get("brightness"), dict):
+                room["brightness"] = {}
             rooms[area_id] = room
         data["rooms"] = rooms
     return data

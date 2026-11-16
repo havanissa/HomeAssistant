@@ -7,8 +7,8 @@ from typing import Final
 
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
-PHASE: Final = "0.6.6"
-VERSION: Final = "0.6.6"
+PHASE: Final = "0.6.7"
+VERSION: Final = "0.6.7"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -230,7 +230,8 @@ LIGHTING_STORE_VERSION: Final = 1
 # Minor 6 (0.4.0): occupied and vacant lighting profiles (vacant tables empty; a 0.3.8 vacant mood is kept).
 # Minor 7 (0.6.0): zones, relay lighting outputs, shared spaces and the Room Supervisor (none configured;
 # the supervisor starts Observing, so no room behaves differently).
-LIGHTING_STORE_MINOR_VERSION: Final = 7
+# Minor 8 (0.6.7): ambient light levels and brightness rules (disabled in every room; no light enrolled).
+LIGHTING_STORE_MINOR_VERSION: Final = 8
 LIGHTING_STORE_KEY: Final = "smart_occupancy.lighting"
 LIGHTING_SAVE_DELAY_SECONDS: Final = 1
 # Runtime state of mood lighting (manual overrides, last applied profile).

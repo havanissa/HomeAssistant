@@ -518,6 +518,8 @@ class RoomMoodLightingSensor(RoomOccupancyEntity, SensorEntity):
         "auto_on", "vacancy",
         # 0.6.0: a compact summary only (the details are in the room card and the diagnostics).
         "active_zones", "supervisor", "supervisor_discrepancies", "relays", "shared_space", "space_deferred",
+        # 0.6.7: the brightness rules' compact summary (ambient level, enrolled lights).
+        "brightness",
     })
 
     async def async_added_to_hass(self) -> None:

@@ -103,7 +103,7 @@
  * reports a change.
  */
 
-const VERSION = "0.6.6";
+const VERSION = "0.6.7";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -346,6 +346,7 @@ const MAIN_TABS = [
 // [key, name, icon, tooltip]
 const SETTINGS_TABS = [
   ["automatic", "Automatic", "mdi:lightning-bolt-outline", "Automatic: switch-on, daylight, possible occupancy and vacancy"],
+  ["lighting", "Lighting", "mdi:brightness-6", "Lighting: ambient light levels and brightness rules"],
   ["presence", "Presence", "mdi:radar", "Presence: sensors and occupancy detection"],
   ["switches", "Switches", "mdi:toggle-switch-outline", "Switches: wall switches and remotes of this room"],
   ["advanced", "Advanced", "mdi:tune", "Advanced: settings, activation review and diagnostics"],
@@ -384,6 +385,11 @@ const supState = (d) => (!d ? "—" : d.state === "off" ? "Off" : d.state && d.s
   : `${d.brightness_pct != null ? `${d.brightness_pct} %` : "On"}${d.color_temp_kelvin ? `, ${d.color_temp_kelvin} K` : ""}`);
 const zoneAction = (t) => (t.action === "off" ? "off" : t.action === "unchanged" ? "unchanged"
   : `${t.brightness_pct != null ? `${t.brightness_pct} %` : "on"}${t.color_temp_kelvin ? ` ${t.color_temp_kelvin} K` : ""}`);
+// Ambient light levels and brightness rules (0.6.7): the evidence behind the category, in words (and a tone).
+const AMB_ICON = { none: "mdi:weather-night", low: "mdi:weather-sunset", bright: "mdi:white-balance-sunny" };
+const AMB_BASIS = { measured: ["measured", "ok"], estimated: ["estimated", "info"], bound: ["measured with lamps on", "info"],
+  held: ["held", "warn"], fallback: ["fallback", "warn"], uncertain: ["uncertain", "warn"] };
+const AMB_NAME = (b, key) => ((b.levels || []).find((l) => l.key === key) || {}).name || key;
 const fmtSecs = (s) => (s == null ? "—" : s >= 3600 && s % 3600 === 0 ? `${s / 3600} h` : s >= 60 && s % 60 === 0 ? `${s / 60} min` : `${s} s`);
 
 const OCC = {
@@ -737,6 +743,11 @@ class SoLightingBase extends HTMLElement {
     if (el.dataset?.control === "dl-threshold") {
       const out = this.shadowRoot.querySelector("[data-out-dl]");
       if (out) out.textContent = `${el.value} lx`;
+      return;
+    }
+    if (el.dataset?.control === "br-cell-range") {  // (0.6.7) the brightness value while the slider moves
+      const out = this.shadowRoot.querySelector("[data-out-br]");
+      if (out) out.textContent = Number(el.value) === 0 ? "Off" : `${el.value} %`;
       return;
     }
     if (!el.dataset?.ed) return;
@@ -1227,6 +1238,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     const tab = ROOM_TABS.some(([k]) => k === this._ui.tab) ? this._ui.tab : "overview";
     const content = { overview: () => this._overview(r), log: () => this._log(r), lights: () => this._lights(r), automatic: () => this._automatic(r),
       presence: () => this._presence(r), switches: () => this._switches(r), overrides: () => this._overrides(r), preview: () => this._preview(r),
+      lighting: () => this._lightingSettings(r),
       advanced: () => this._advanced(r) }[tab]();
     const inSettings = isSetting(tab);
     const mainKey = inSettings ? "settings" : tab;
@@ -1359,6 +1371,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         ${this._model.adaptive?.status && this._model.adaptive.status !== "not_configured" ? `<div><span>Global adjustment</span><b>${esc(globalNow(this._model.adaptive))}
           <span class="sub ${this._model.adaptive.status === "connected" ? "" : "warn"}">${esc(STATUS_WORDS[this._model.adaptive.status])}</span></b></div>` : ""}
         ${this._daylightSummary(r)}
+        ${this._ambientSummary(r)}
       </div>
       ${this._supervisorOverviewHtml(r)}
       ${this._forecastOverviewHtml(r)}
@@ -2800,9 +2813,11 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       const [word, tone] = !zone.enabled ? ["Off", "muted"] : !st ? ["—", "muted"] : st.failsafe ? [`Sensor unavailable (${ZONE_FAILSAFE[st.failsafe]})`, "warn"]
         : st.active ? ["Occupied", "ok"] : ["Vacant", "muted"];
       const sensors = zone.sensors.map((e) => z.sensors.find((s) => s.entity_id === e)?.name || e).join(", ") || "no sensor";
-      const lights = zone.targets.map((t) => `${z.targets.find((x) => x.entity_id === t.entity_id)?.name || t.entity_id} ${zoneAction(t)}`).join(" · ") || "no light";
+      const enrolled = this._enrolledLights(r);
+      const lights = zone.targets.map((t) => `${z.targets.find((x) => x.entity_id === t.entity_id)?.name || t.entity_id} ${enrolled.has(t.entity_id) ? "(brightness rules)" : zoneAction(t)}`).join(" · ") || "no light";
+      const links = zone.targets.filter((t) => enrolled.has(t.entity_id)).map((t) => `<button class="link" data-action="br-goto" data-entity="${esc(t.entity_id)}">${esc(z.targets.find((x) => x.entity_id === t.entity_id)?.name || t.entity_id)}: brightness rules</button>`).join("");
       return `<li class="zrow"><div class="zmain"><b>${esc(zone.name)}</b> <span class="pill ${tone}">${esc(word)}</span> <span class="sub">priority ${zone.priority}</span>
-          <div class="sub">${esc(sensors)}</div><div class="sub">${esc(lights)}</div></div>
+          <div class="sub">${esc(sensors)}</div><div class="sub">${esc(lights)}</div>${links ? `<div>${links}</div>` : ""}</div>
           ${ro ? "" : `<button class="btn ghost small" data-action="zn-edit" data-zone="${esc(zone.id)}">Edit</button>`}</li>`;
     }).join("");
     const rules = z.rules.filter((x) => x.kind === "zone" || x.superseded.length);
@@ -2817,15 +2832,27 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
       ${this._spaceHtml(r)}`;
   }
 
+  // Lights of the room that are enrolled in its brightness rules (0.6.7).
+  _enrolledLights(r) {
+    return new Set((r.brightness?.lights || []).filter((l) => l.matrix).map((l) => l.entity_id));
+  }
+
   _zoneFormHtml(r, d) {
     const z = r.zones;
     const lim = z.limits;
     const sel = (key, value, options) => `<select data-control="zd-${key}" aria-label="${esc(key)}">${options.map(([v, l]) => `<option value="${v}" ${String(value) === String(v) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
     const sensors = z.sensors.map((s) => `<label class="chk"><input type="checkbox" data-control="zd-sensor" data-entity="${esc(s.entity_id)}" ${d.sensors.includes(s.entity_id) ? "checked" : ""}>
         ${esc(s.name)} <span class="sub">${esc(s.kind_name)}${s.used ? "" : " · not used for occupancy (Presence)"}</span></label>`).join("");
+    const enrolled = this._enrolledLights(r);
     const lights = z.targets.map((t) => {
       const cur = d.targets.find((x) => x.entity_id === t.entity_id);
       const caps = t.capabilities || {};
+      if (enrolled.has(t.entity_id)) {
+        // (0.6.7) Its brightness in this zone is a column of its brightness matrix: edited there, not here.
+        return `<li class="zlight"><label class="chk"><input type="checkbox" data-control="zd-target" data-entity="${esc(t.entity_id)}" ${cur ? "checked" : ""}> ${esc(t.name)}</label>
+          <div class="sub">On/off and brightness come from its Brightness Rules${cur ? "" : " (tick it to give it a column for this zone)"}.
+          <button class="link" data-action="br-goto" data-entity="${esc(t.entity_id)}">Open its brightness matrix</button></div></li>`;
+      }
       const on = cur && cur.action === "on";
       const num = (key, min, max, ph) => `<input type="number" class="num" min="${min}" max="${max}" placeholder="${ph}" value="${cur?.[key] ?? ""}" data-control="zd-tnum" data-entity="${esc(t.entity_id)}" data-key="${key}" aria-label="${esc(`${t.name} ${key}`)}">`;
       return `<li class="zlight"><label class="chk"><input type="checkbox" data-control="zd-target" data-entity="${esc(t.entity_id)}" ${cur ? "checked" : ""}> ${esc(t.name)}</label>${t.type === "relay" ? ` <span class="pill muted">relay</span>` : ""}
@@ -2927,6 +2954,360 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
         </details></details>`;
   }
 
+  // ------------------------------------------------ Settings → Lighting (0.6.7)
+  // Ambient Light Levels and Brightness Rules. Occupancy chooses the scope, ambient light the brightness, and the
+  // mood the appearance. Every value comes from the integration; the card adds no diagnosis of its own.
+  _lightingSettings(r) {
+    const b = r.brightness;
+    if (!b) return `<div class="muted">Lighting settings are not available for this room.</div>`;
+    return `${this._ambientHtml(r, b)}${this._brightnessRulesHtml(r, b)}`;
+  }
+
+  _ambientHtml(r, b) {
+    const a = b.ambient;
+    const st = a.status;
+    const ro = !this._canEdit;
+    const dis = ro ? "disabled" : "";
+    const own = a.settings || {};
+    const glob = a.global || {};
+    const eff = a.effective || {};
+    const lim = b.limits;
+    const pill = (k) => `<span class="pill ${own[k] != null ? "info" : "muted"}">${own[k] != null ? "Room override" : "Global default"}</span>`;
+    const inherit = (k, text) => (own[k] != null && !ro ? `<button class="link" data-action="am-inherit" data-key="${k}">Use global default (${esc(text)})</button>` : "");
+    const levels = (st.levels || []).map((l) => {
+      const on = l.key === st.level;
+      const range = l.below == null ? `${l.from} lx and above` : l.from ? `${l.from} to below ${l.below} lx` : `below ${l.below} lx`;
+      return `<div class="amblevel ${on ? "on" : ""}" ${on ? 'aria-current="true"' : ""}><ha-icon icon="${AMB_ICON[l.key] || "mdi:brightness-6"}"></ha-icon>
+        <b>${esc(l.name)}</b><span class="sub">${esc(range)}</span>${on ? `<span class="pill ok">Now</span>` : ""}</div>`;
+    }).join("");
+    const basis = AMB_BASIS[st.basis] || [st.basis, "muted"];
+    const measured = st.measured_lux != null ? `${Math.floor(st.measured_lux)} lx${st.sensor_name ? ` · ${st.sensor_name}` : ""}` : "no indoor reading";
+    const th = eff.thresholds || [5, 20];
+    const names = (b.levels || []).map((l) => l.name);
+    const thRow = (i) => `<div class="frow"><label for="so-am-th-${i}">${esc(names[i + 1] || "Level")} from</label><div class="fval">
+        <input id="so-am-th-${i}" type="number" class="num" min="${lim.threshold[0]}" max="${lim.threshold[1]}" value="${esc(th[i])}" data-control="am-th" data-index="${i}" ${dis}> lx
+        ${i === th.length - 1 ? pill("thresholds") : ""}${i === th.length - 1 ? inherit("thresholds", (glob.thresholds || []).join(" / ") + " lx") : ""}</div></div>`;
+    const tun = (k, label, unit, max, step, help) => `<div class="frow"><label for="so-am-${k}">${label}</label><div class="fval">
+        <input id="so-am-${k}" type="number" class="num" min="0" max="${max}" step="${step}" value="${esc(eff[k])}" data-control="am-num" data-key="${k}" ${dis}> ${unit}
+        ${pill(k)}${inherit(k, `${glob[k]} ${unit}`)}${this._statusHtml(`am-${k}`)}<span class="sub">${esc(help)}</span></div></div>`;
+    const gnum = (k, label, unit, max, step) => `<div class="frow"><label for="so-amg-${k}">${label}</label><div class="fval">
+        <input id="so-amg-${k}" type="number" class="num" min="0" max="${max}" step="${step}" value="${esc(glob[k])}" data-control="am-gnum" data-key="${k}" ${dis}> ${unit}${this._statusHtml(`amg-${k}`)}</div></div>`;
+    const fbOpt = (v, l, cur) => `<option value="${v}" ${cur === v ? "selected" : ""}>${esc(l)}</option>`;
+    const sensors = (a.sensors || []).map((s, i) => `<li class="psens"><ha-icon icon="mdi:brightness-5"></ha-icon><div class="psmain">
+        <b>${esc(s.name || s.entity_id)}</b> <code>${esc(s.entity_id)}</code> <span class="pill ${i ? "muted" : "info"}">${i ? `fallback ${i}` : "preferred"}</span>
+        <div class="sub ${s.status === "ok" ? "" : "warn"}">${esc(s.status === "ok" ? `${Math.floor(s.value)} lx · reported ${fmtTime(s.reported_at)}` : `${s.status}: ${s.detail}`)}
+          · ${esc(s.reliability === "low" ? "less reliable" : "reliable")}${s.max_age ? ` · stale after ${s.max_age} min` : ""}</div></div>
+        ${ro ? "" : `<div class="ibtns">${i ? `<button class="link" data-action="dl-up" data-index="${i}">prefer</button>` : ""}<button class="link" data-action="dl-remove" data-index="${i}">remove</button></div>`}</li>`).join("");
+    const used = new Set((a.sensors || []).map((s) => s.entity_id));
+    const cands = (r.daylight?.candidates || []).filter((x) => !used.has(x.entity_id) && (!x.outdoor || x.in_room));
+    return `<div class="stitle" id="so-ambient">Ambient Light Levels</div>
+      <div class="sub">The natural light in ${esc(r.name)} in three categories, from the room's daylight sensors and estimates. Brightness Rules use the category to choose each enrolled light's brightness. A reading lit by the room's own lamps never raises the category.</div>
+      <label class="switch"><input type="checkbox" role="switch" data-control="am-enabled" ${a.enabled ? "checked" : ""} ${dis}> Ambient brightness control in ${esc(r.name)}</label>${this._statusHtml("am-enabled")}
+      ${a.enabled ? "" : `<div class="sub">Off: enrolled lights keep their mood brightness. The category below is shown for reference.</div>`}
+      <div class="amb" role="group" aria-label="Ambient light level now: ${esc(st.name)}">${levels}</div>
+      <div class="kvs">
+        <div><span>Ambient now</span><b>${esc(st.label)} <span class="pill ${basis[1]}">${esc(basis[0])}</span></b></div>
+        <div><span>Measured indoors</span><b>${esc(measured)}${st.contaminated ? ` <span class="pill warn">lit by lamps</span>` : ""}</b></div>
+        <div><span>Natural light</span><b>${esc(String(st.text || "").replace(/^Natural light: /, ""))}</b></div>
+        <div><span>Confidence</span><b>${esc(st.confidence ? st.confidence[0].toUpperCase() + st.confidence.slice(1) : "—")}</b></div>
+        <div><span>Category since</span><b>${st.since ? `<time datetime="${esc(st.since)}">${fmtTime(st.since)}</time>` : "—"}</b></div>
+        <div><span>Last trustworthy</span><b>${st.reliable_at ? `<time datetime="${esc(st.reliable_at)}">${fmtTime(st.reliable_at)}</time>` : "—"}</b></div>
+      </div>
+      ${st.contaminated && st.contamination ? `<div class="sub">Indoor reading not used as natural light: ${esc(st.contamination)}</div>` : ""}
+      ${st.note ? `<div class="note warn" role="status">${esc(st.note)}</div>` : ""}
+      ${st.candidate ? `<div class="sub">Changing to <b>${esc(AMB_NAME(b, st.candidate))}</b>${st.candidate_due ? ` at <time datetime="${esc(st.candidate_due)}">${fmtTime(st.candidate_due)}</time>` : ""} if the light level holds.</div>` : ""}
+      <div class="stitle small">Indoor light sensors</div>
+      <div class="sub">The same sensors as daylight switch-on (Settings → Automatic): the first usable one is used, the others are fallbacks.</div>
+      ${sensors ? `<ul class="plist">${sensors}</ul>` : `<div class="muted">No indoor light sensor: the category is estimated from the outdoor sensor and the sun.</div>`}
+      ${ro ? "" : `<div class="fval"><select data-control="dl-add" aria-label="Add an indoor light sensor"><option value="">Add a sensor…</option>
+        ${cands.map((x) => `<option value="${esc(x.entity_id)}">${esc(x.name)}${x.value != null ? ` · ${esc(x.value)} lx` : ""}${x.area ? ` (${esc(x.area)})` : ""}</option>`).join("")}</select>${this._statusHtml("daylight")}</div>`}
+      <div class="stitle small">Thresholds</div>
+      ${th.map((_t, i) => thRow(i)).join("")}${this._statusHtml("am-thresholds")}
+      <div class="sub">A reading exactly at a threshold belongs to the brighter category.</div>
+      <details class="dladv" ${this._ui.amMore ? "open" : ""}><summary data-action="am-more">Stability, fallback and transitions</summary>
+        ${tun("hysteresis", "Hysteresis", "lx", lim.hysteresis[1], 0.5, "a category is left downwards only this far below its threshold")}
+        ${tun("stable_seconds", "Stable for", "s", lim.stable[1], 10, "a new category counts after it held this long (zones are never delayed)")}
+        <div class="frow"><label for="so-am-fb">When uncertain</label><div class="fval"><select id="so-am-fb" data-control="am-sel" data-key="fallback" ${dis}>
+          ${fbOpt("hold", "Keep the last reliable category", eff.fallback)}${fbOpt("level", "Use the fallback category", eff.fallback)}</select>
+          <select data-control="am-sel" data-key="fallback_level" aria-label="Fallback category" ${dis}>${(b.levels || []).map((l) => fbOpt(l.key, l.name, eff.fallback_level)).join("")}</select>
+          ${pill("fallback")}${inherit("fallback", glob.fallback === "hold" ? "keep" : "fallback")}${this._statusHtml("am-fallback")}${this._statusHtml("am-fallback_level")}
+          <span class="sub">Unavailable, stale or invalid readings and lamp-lit readings are uncertain evidence; before anything is known the fallback category is used.</span></div></div>
+        ${tun("transition", "Brightness fade", "s", lim.transition[1], 0.5, "uses the light's own transition when it supports one")}
+        ${tun("dead_band", "Dead band", "%", lim.dead_band[1], 1, "smaller brightness differences are not sent")}
+        ${tun("min_interval", "Between changes", "s", lim.min_interval[1], 30, "at least this long between two brightness changes caused by the light level (0: no limit)")}
+        <details class="dladv" ${this._ui.amGlobal ? "open" : ""}><summary data-action="am-global">Global defaults (all rooms)</summary>
+          <div class="global"><div class="sub"><b>Global setting</b> — every room that does not override a value follows it.</div>
+            <div class="frow"><label>Thresholds</label><div class="fval">${(glob.thresholds || []).map((t, i) => `<input type="number" class="num" min="1" max="${lim.threshold[1]}" value="${esc(t)}" data-control="am-gth" data-index="${i}" aria-label="${esc(names[i + 1] || "Level")} from" ${dis}>`).join(" / ")} lx${this._statusHtml("amg-thresholds")}</div></div>
+            ${gnum("hysteresis", "Hysteresis", "lx", lim.hysteresis[1], 0.5)}${gnum("stable_seconds", "Stable for", "s", lim.stable[1], 10)}
+            ${gnum("transition", "Brightness fade", "s", lim.transition[1], 0.5)}${gnum("dead_band", "Dead band", "%", lim.dead_band[1], 1)}${gnum("min_interval", "Between changes", "s", lim.min_interval[1], 30)}
+          </div></details>
+      </details>
+      ${(a.history || []).length ? `<details class="dladv"><summary>Recent category changes</summary><ul class="dlist">${a.history.slice().reverse().map((x) => `<li><time datetime="${esc(x.at)}">${fmtTime(x.at)}</time> ${esc(AMB_NAME(b, x.from))} → <b>${esc(AMB_NAME(b, x.to))}</b> <span class="sub">${esc(x.lux || "")} · ${esc((AMB_BASIS[x.basis] || [x.basis])[0])}</span></li>`).join("")}</ul></details>` : ""}`;
+  }
+
+  _brightnessRulesHtml(r, b) {
+    const ro = !this._canEdit;
+    const open = this._ui.brOpen;
+    const rows = (b.lights || []).map((l) => {
+      const isOpen = open === l.entity_id;
+      const m = l.matrix;
+      const [word, tone] = !m ? ["Not enrolled", "muted"] : !m.enabled ? ["Paused", "warn"] : !b.ambient.enabled ? ["Enrolled · control off", "warn"] : ["Enrolled", "ok"];
+      const nb = l.now?.brightness;
+      const now = nb ? `${nb.column_name} · ${nb.level_name} → ${nb.text}` : l.now ? (l.now.rule || "") : "";
+      return `<li class="brrow ${isOpen ? "open" : ""}" id="so-br-${esc(l.entity_id.replace(/\W/g, "_"))}">
+        <button class="brbtn" data-action="br-open" data-entity="${esc(l.entity_id)}" aria-expanded="${isOpen}">
+          <ha-icon icon="${l.type === "relay" ? "mdi:electric-switch" : "mdi:lightbulb-outline"}"></ha-icon>
+          <span class="lmain"><b>${esc(l.name)}</b><span class="sub">${esc(now)}</span></span>
+          <span class="pill ${tone}">${esc(word)}</span></button>
+        ${isOpen ? this._brPanelHtml(r, b, l, ro) : ""}</li>`;
+    }).join("");
+    return `<div class="stitle" id="so-brules">Brightness Rules</div>
+      <div class="sub">An enrolled light gets its on/off and brightness from occupancy, its zones and the ambient level; its mood keeps choosing the colour and colour temperature. Lights that are not enrolled keep every mood and zone setting. Select a light to see or edit its brightness matrix.</div>
+      ${b.ambient.enabled ? "" : `<div class="note warn">Ambient brightness control is off in ${esc(r.name)}: enrolled lights follow their mood until it is switched on (above).</div>`}
+      ${rows ? `<ul class="plist brlist">${rows}</ul>` : `<div class="muted">No light is managed in this room.</div>`}`;
+  }
+
+  // The draft of the open light's matrix: the stored matrix, or a template for a light that is not enrolled.
+  _brDraft(b, l) {
+    const ui = this._ui;
+    if (ui.brDraft && ui.brDraft.entity_id === l.entity_id) return ui.brDraft;
+    const zones = l.columns.filter((c) => c.id !== "room").map((c) => c.id);
+    let m = l.matrix;
+    if (!m) {
+      const t = (b.templates || []).find((x) => x.id === b.default_template) || b.templates[0];
+      m = { enabled: true, room: { ...t.room }, zones: Object.fromEntries(zones.map((z) => [z, { ...t.zone }])), template: t.id };
+    }
+    ui.brDraft = { entity_id: l.entity_id, enabled: m.enabled !== false, room: { ...m.room }, template: m.template || null,
+      zones: Object.fromEntries(zones.map((z) => [z, { ...((m.zones || {})[z] || Object.fromEntries((b.levels || []).map((x) => [x.key, null]))) }])),
+      dirty: !l.matrix, enrolled: !!l.matrix };
+    ui.brPreview = null;
+    this._brLoadPreview();
+    return ui.brDraft;
+  }
+
+  _brPanelHtml(r, b, l, ro) {
+    const d = this._brDraft(b, l);
+    const ui = this._ui;
+    const dis = ro ? "disabled" : "";
+    const caps = l.capabilities || {};
+    const st = b.ambient.status;
+    const nb = l.now?.brightness;
+    const cell = ui.brCell;
+    const val = (col, level) => (col === "room" ? d.room[level] : (d.zones[col] || {})[level]);
+    const cellText = (v) => (v == null ? "—" : v === 0 ? "Off" : `${v} %`);
+    const head = l.columns.map((c) => `<th scope="col">${esc(c.id === "room" ? "Room occupied" : `${c.name} zone`)}${c.id === "room" ? "" : `<span class="sub">priority ${c.priority}${c.active ? " · active" : ""}</span>`}</th>`).join("");
+    const body = (b.levels || []).map((lv) => `<tr class="${lv.key === st.level ? "cur" : ""}"><th scope="row">${esc(lv.name)}${lv.key === st.level ? ` <span class="pill ok">now</span>` : ""}</th>${l.columns.map((c) => {
+      const v = val(c.id, lv.key);
+      const wins = d.enrolled && !d.dirty && nb && nb.column === c.id && nb.level === lv.key;
+      const editing = cell && cell.col === c.id && cell.level === lv.key;
+      const label = `${c.id === "room" ? "Room occupied" : `${c.name} zone`}, ${lv.name}: ${v == null ? "not configured" : v === 0 ? "Off" : `${v} %`}`;
+      return `<td><button class="cell ${v == null ? "unset" : v === 0 ? "off" : ""} ${wins ? "wins" : ""} ${editing ? "editing" : ""}" data-action="br-cell" data-col="${esc(c.id)}" data-level="${lv.key}" aria-label="${esc(label)}" ${dis}>${cellText(v)}</button></td>`;
+    }).join("")}</tr>`).join("");
+    const edCol = cell ? l.columns.find((c) => c.id === cell.col) : null;
+    const edVal = cell ? val(cell.col, cell.level) : null;
+    const editor = cell && edCol ? `<div class="celled" role="group" aria-label="Edit a brightness value">
+        <div><b>${esc(edCol.id === "room" ? "Room occupied" : `${edCol.name} zone`)} · ${esc(AMB_NAME(b, cell.level))}</b></div>
+        <div class="fval"><input type="range" min="0" max="100" step="1" value="${edVal ?? 0}" data-control="br-cell-range" aria-label="Brightness (0 = Off)" ${dis}>
+          <b class="val" data-out-br>${esc(cellText(edVal))}</b></div>
+        <div class="ibtns"><button class="btn ghost small" data-action="br-cell-set" data-value="0" ${dis}>Off</button>
+          <button class="btn ghost small" data-action="br-cell-set" data-value="" ${dis}>Not configured</button>
+          <button class="btn small" data-action="br-cell-done">Done</button></div>
+        <div class="sub">${edCol.id === "room" ? "Not configured: the light keeps its mood brightness in this situation." : "Not configured: this zone does not claim the brightness (another active zone, else Room occupied decides)."}</div></div>` : "";
+    const zones = l.columns.filter((c) => c.id !== "room");
+    const others = (b.lights || []).filter((x) => x.matrix && x.entity_id !== l.entity_id);
+    const tools = ro ? "" : `<div class="brtools">
+        <select data-control="br-template" aria-label="Apply a template"><option value="">Template…</option>${(b.templates || []).map((t) => `<option value="${esc(t.id)}">${esc(t.name)}${t.builtin ? "" : " (saved)"}</option>`).join("")}</select>
+        ${others.length ? `<select data-control="br-copy-light" aria-label="Copy from another light"><option value="">Copy from light…</option>${others.map((x) => `<option value="${esc(x.entity_id)}">${esc(x.name)}</option>`).join("")}</select>` : ""}
+        ${zones.length ? `<select data-control="br-copy-room" aria-label="Copy the Room occupied column to a zone"><option value="">Copy Room column to…</option>${zones.map((z) => `<option value="${esc(z.id)}">${esc(z.name)} zone</option>`).join("")}</select>` : ""}
+        <button class="link" data-action="br-restore">Restore defaults</button>
+        <button class="link" data-action="br-save-template">Save as template</button></div>`;
+    const p = ui.brPreview && ui.brPreview.entity_id === l.entity_id ? ui.brPreview : null;
+    const conflicts = p?.conflicts || [];
+    const resolved = (item) => (item ? (item.service === "turn_off" ? "Off" : item.service === "turn_on" ? summary(item.resolved) : "No command") : "—");
+    const after = p?.after;
+    const ab = after?.rule?.brightness;
+    const zoneNote = zones.length ? "" : `<div class="sub">No zone lists ${esc(l.name)}: add it to a zone's lights (Settings → Presence → Zones) to get a zone column.</div>`;
+    const preview = !p ? `<div class="sub">Loading the preview…</div>` : `<div class="brprev">
+        <div class="stitle small">${d.enrolled ? "Preview" : "Before enrolling"}</div>
+        <div class="kvs">
+          <div><span>Now</span><b>${esc(p.occupancy ? (OCC[p.occupancy] || p.occupancy) : "—")}${p.zones?.length ? ` · ${esc(p.zones.map((z) => `${z.name} zone`).join(", "))} active` : ""} · ${esc(p.ambient?.label || "")}</b></div>
+          <div><span>Mood</span><b>${esc(p.mood || "no mood")}</b></div>
+          <div><span>Today without rules</span><b>${esc(resolved(p.before))} <span class="sub">${esc(p.before?.rule?.name || "")}</span></b></div>
+          <div><span>With these rules</span><b>${esc(ab ? `${ab.column_name} · ${ab.level_name} → ${ab.text}` : resolved(after))}${ab?.appearance ? ` <span class="sub">${esc(ab.appearance)}</span>` : ""}</b></div>
+          <div><span>Command</span><b>${after ? esc(after.decision === "change" ? (p.would_send ? (d.enrolled ? "sent at the next trigger" : "sent at the next trigger after enrolling") : "would be sent (room Observing)") : after.decision === "unchanged" ? "none needed (already like this)" : after.reason) : "—"}</b></div>
+        </div>
+        ${ab?.explanation && (ab.superseded || []).length > 1 ? `<div class="sub">${esc(ab.explanation)}</div>` : ""}
+        ${conflicts.length ? `<div class="note warn"><b>What changes for this light</b><ul class="dlist">${conflicts.map((c) => `<li>${esc(c)}</li>`).join("")}</ul></div>` : ""}
+        <div class="sub">${d.enrolled ? "Saving never sends a command: the next trigger (occupancy, a zone, the light level, the mood) applies it." : "Enrolling sends no command: the light follows its matrix from the next trigger."}</div></div>`;
+    const override = l.override ? `<div class="note">Manual change (${esc(l.override.source || "manual")}) is respected ${l.override.until ? `until <time datetime="${esc(l.override.until)}">${fmtTime(l.override.until)}</time>` : "until the room is vacant"}.
+        ${ro ? "" : `<button class="link" data-action="br-resume" data-entity="${esc(l.entity_id)}">Resume automatic lighting</button>`}${this._statusHtml("br-resume")}</div>` : "";
+    return `<div class="brpanel">
+      ${caps.known && !caps.brightness ? `<div class="note">${esc(l.name)} switches on and off only: 0 % (Off) is off, and any other value is On. Percentage dimming is not supported.</div>` : ""}
+      ${override}
+      <label class="switch"><input type="checkbox" data-control="br-enabled" ${d.enabled ? "checked" : ""} ${dis}> Use this brightness matrix</label>
+      ${tools}
+      <div class="tscroll"><table class="fct brm"><caption class="sub">Rows: ambient light. Columns: who is in the room. Select a value to change it (0 % = Off, — = not configured).</caption>
+        <thead><tr><th scope="col">Ambient light</th>${head}</tr></thead><tbody>${body}</tbody></table></div>
+      ${editor}${zoneNote}
+      ${preview}
+      ${ro ? "" : `<div class="ibtns">${d.enrolled ? `<button class="btn small" data-action="br-save" ${d.dirty ? "" : "disabled"}>Save changes</button>
+          ${d.dirty ? `<button class="link" data-action="br-discard">Discard changes</button>` : ""}
+          <button class="btn ghost small warnbtn" data-action="br-remove">Leave brightness rules</button>`
+        : `<button class="btn small" data-action="br-enrol" ${p ? "" : "disabled"}>Enrol in Ambient Brightness Control</button> <button class="link" data-action="br-close">Cancel</button>`}
+        ${this._statusHtml("br")}</div>`}</div>`;
+  }
+
+  async _brLoadPreview() {
+    const d = this._ui.brDraft;
+    if (!d) return;
+    clearTimeout(this._brTimer);
+    this._brTimer = setTimeout(async () => {
+      const msg = { type: `${WS}/brightness/preview`, area_id: this._config.area, entity_id: d.entity_id,
+        matrix: { enabled: true, room: d.room, zones: d.zones } };
+      try { this._ui.brPreview = await this._ws(msg); } catch (err) { this._ui.brPreview = { entity_id: d.entity_id, conflicts: [err?.message || String(err)] }; }
+      this._requestRender();
+    }, 250);
+  }
+
+  _brMatrixMsg(d) { return { enabled: d.enabled, room: d.room, zones: d.zones, template: d.template }; }
+
+  _onBrightnessAction(a, el) {
+    const ui = this._ui;
+    const area = this._config.area;
+    const b = this._model.room.brightness;
+    const d = ui.brDraft;
+    if (a === "am-inherit") {
+      const k = el.dataset.key;
+      this._save(`am-${k}`, { type: `${WS}/ambient/set`, area_id: area, [k]: null }, "Uses the global default");
+      if (k === "fallback") this._save("am-fallback_level", { type: `${WS}/ambient/set`, area_id: area, fallback_level: null }, "Uses the global default");
+      return;
+    }
+    if (a === "am-more") { ui.amMore = !el.parentElement.open; return; }
+    if (a === "am-global") { ui.amGlobal = !el.parentElement.open; return; }
+    if (a === "br-open") {
+      const e = el.dataset.entity;
+      ui.brOpen = ui.brOpen === e ? null : e;
+      ui.brDraft = null; ui.brCell = null; ui.brPreview = null;
+    } else if (a === "br-close") { ui.brOpen = null; ui.brDraft = null; ui.brCell = null; }
+    else if (a === "br-cell") ui.brCell = (ui.brCell && ui.brCell.col === el.dataset.col && ui.brCell.level === el.dataset.level) ? null : { col: el.dataset.col, level: el.dataset.level };
+    else if (a === "br-cell-set") { this._brSetCell(el.dataset.value === "" ? null : Number(el.dataset.value)); return; }
+    else if (a === "br-cell-done") ui.brCell = null;
+    else if (a === "br-restore") {
+      const t = (b.templates || []).find((x) => x.id === (d.template || b.default_template)) || b.templates[0];
+      this._brApplyTemplate(t);
+      return;
+    } else if (a === "br-save-template") {
+      const name = prompt("Template name (it is saved for every room):", d.template ? `${(b.templates.find((t) => t.id === d.template) || {}).name || "My"} copy` : "My light");
+      if (!name) return;
+      const zone = Object.values(d.zones)[0] || Object.fromEntries((b.levels || []).map((x) => [x.key, null]));
+      this._save("br", { type: `${WS}/brightness/template`, op: "save", name, room: d.room, zone }, "Template saved");
+      return;
+    } else if (a === "br-discard") { ui.brDraft = null; ui.brCell = null; }
+    else if (a === "br-save" || a === "br-enrol") {
+      const msg = { type: `${WS}/brightness/set`, area_id: area, entity_id: d.entity_id, matrix: this._brMatrixMsg(d) };
+      if (a === "br-enrol") msg.confirm = true;
+      this._save("br", msg, a === "br-enrol" ? "Enrolled · nothing was sent" : "Saved · nothing was sent").then(() => {
+        if (!this._status.br?.error) { ui.brDraft = null; ui.brCell = null; this._requestRender(); }
+      });
+      return;
+    } else if (a === "br-remove") {
+      const l = b.lights.find((x) => x.entity_id === d.entity_id);
+      if (!confirm(`${l?.name || d.entity_id} leaves the brightness rules and follows its mood and zone settings again from the next trigger. Its matrix is deleted.`)) return;
+      this._save("br", { type: `${WS}/brightness/remove`, area_id: area, entity_id: d.entity_id }, "Left the brightness rules");
+      ui.brDraft = null; ui.brCell = null;
+      return;
+    } else if (a === "br-resume") {
+      this._save("br-resume", { type: `${WS}/override/clear`, area_id: area, entity_id: el.dataset.entity }, "Automatic lighting resumed");
+      return;
+    } else if (a === "br-goto") {
+      ui.tab = "lighting"; ui.settingsTab = "lighting";
+      ui.brOpen = el.dataset.entity; ui.brDraft = null; ui.brCell = null; ui.brPreview = null; ui.zd = null;
+      this._render();
+      requestAnimationFrame(() => this.shadowRoot.getElementById(`so-br-${el.dataset.entity.replace(/\W/g, "_")}`)?.scrollIntoView({ block: "nearest" }));
+      return;
+    }
+    this._render();
+  }
+
+  _brSetCell(value) {
+    const ui = this._ui;
+    const d = ui.brDraft;
+    const cell = ui.brCell;
+    if (!d || !cell) return;
+    if (cell.col === "room") d.room = { ...d.room, [cell.level]: value };
+    else d.zones = { ...d.zones, [cell.col]: { ...(d.zones[cell.col] || {}), [cell.level]: value } };
+    d.dirty = true;
+    this._brLoadPreview();
+    this._render();
+  }
+
+  _brApplyTemplate(t) {
+    const d = this._ui.brDraft;
+    if (!d || !t) return;
+    d.room = { ...t.room };
+    d.zones = Object.fromEntries(Object.keys(d.zones).map((z) => [z, { ...t.zone }]));
+    d.template = t.id;
+    d.dirty = true;
+    this._brLoadPreview();
+    this._render();
+  }
+
+  _onBrightnessControl(c, el) {
+    const area = this._config.area;
+    const ui = this._ui;
+    const b = this._model.room.brightness;
+    const d = ui.brDraft;
+    const num = (v) => (v === "" ? null : Number(v));
+    if (c === "am-enabled") { this._save("am-enabled", { type: `${WS}/ambient/set`, area_id: area, enabled: el.checked }, el.checked ? "On · nothing was sent" : "Off"); return; }
+    if (c === "am-th" || c === "am-gth") {
+      const glob = c === "am-gth";
+      const th = [...((glob ? b.ambient.global : b.ambient.effective).thresholds || [5, 20])];
+      th[Number(el.dataset.index)] = Number(el.value);
+      const msg = { type: `${WS}/ambient/set`, thresholds: th };
+      if (!glob) msg.area_id = area;
+      this._save(glob ? "amg-thresholds" : "am-thresholds", msg, glob ? "Global default" : "Room override");
+      return;
+    }
+    if (c === "am-num" || c === "am-sel") {
+      const k = el.dataset.key;
+      this._save(`am-${k}`, { type: `${WS}/ambient/set`, area_id: area, [k]: c === "am-num" ? num(el.value) : el.value || null }, el.value === "" ? "Uses the global default" : "Room override");
+      return;
+    }
+    if (c === "am-gnum") {
+      if (el.value === "") return;
+      this._save(`amg-${el.dataset.key}`, { type: `${WS}/ambient/set`, [el.dataset.key]: Number(el.value) }, "Global default");
+      return;
+    }
+    if (!d) return;
+    if (c === "br-cell-range") { this._brSetCell(Math.round(Number(el.value))); return; }
+    if (c === "br-enabled") { d.enabled = el.checked; d.dirty = true; }
+    else if (c === "br-template" && el.value) { this._brApplyTemplate((b.templates || []).find((t) => t.id === el.value)); return; }
+    else if (c === "br-copy-light" && el.value) {
+      const src = b.lights.find((x) => x.entity_id === el.value)?.matrix;
+      if (!src) return;
+      d.room = { ...src.room };
+      const first = Object.values(src.zones || {})[0];
+      d.zones = Object.fromEntries(Object.keys(d.zones).map((z) => [z, { ...((src.zones || {})[z] || first || d.zones[z]) }]));
+      d.template = src.template || null;
+      d.dirty = true;
+    } else if (c === "br-copy-room" && el.value) {
+      d.zones = { ...d.zones, [el.value]: { ...d.room } };
+      d.dirty = true;
+    } else return;
+    this._brLoadPreview();
+    this._render();
+  }
+
+  // Overview: the ambient category in one line (rooms with ambient brightness control).
+  _ambientSummary(r) {
+    const a = r.brightness?.ambient;
+    if (!a || !a.enabled) return "";
+    const st = a.status;
+    const n = (r.brightness.lights || []).filter((l) => l.matrix && l.matrix.enabled).length;
+    return `<div><span>Ambient light</span><b><span class="pill ${st.basis === "held" || st.basis === "fallback" ? "warn" : "info"}">${esc(st.name)}</span>
+      <span class="sub">${esc([(AMB_BASIS[st.basis] || [st.basis])[0], st.lux_text].filter(Boolean).join(", "))} · ${n} light${n === 1 ? "" : "s"} with brightness rules</span></b></div>`;
+  }
+
   _onZoneAction(a, el) {
     const ui = this._ui;
     const area = this._config.area;
@@ -3024,6 +3405,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     if (a.startsWith("sw-")) { this._onSwitchAction(a, el); return; }
     if (a.startsWith("fc-")) { this._onForecastAction(a, el); return; }
     if (/^(zn|sp|rl|sup)-/.test(a)) { this._onZoneAction(a, el); return; }
+    if (/^(am|br)-/.test(a)) { this._onBrightnessAction(a, el); return; }
     if (a === "tab") this._openTab(el.dataset.tab);
     else if (a === "vac-action") this._setVacancy(el.dataset.value);
     else if (a === "ov-profile") {
@@ -3122,6 +3504,7 @@ class SmartOccupancyRoomLightingCard extends SoLightingBase {
     if (c && c.startsWith("sw-")) { this._onSwitchControl(c, el); return; }
     if (c && c.startsWith("fc-")) { this._onForecastControl(c, el); return; }
     if (c && /^(zd|sd|rl|sup)-/.test(c)) { this._onZoneControl(c, el); return; }
+    if (c && /^(am|br)-/.test(c)) { this._onBrightnessControl(c, el); return; }
     if (c === "edit-mood") { this._mood = el.value; this._ui.edit = null; this._fetch(); }
     else if (c === "room-mood") this._save("room-mood", { type: `${WS}/room/set`, area_id: area, mood_override: el.value || null });
     else if (c === "pick-light" && el.value) { this._ui.edit = { scope: "light", target: el.value }; this._render(); }
@@ -3532,6 +3915,36 @@ const STYLE = `<style>
   .hmlegend .hm { width: 14px; }
   .hmramp { display: inline-block; width: 80px; height: 10px; border-radius: 3px;
     background: linear-gradient(to right, color-mix(in oklab, var(--fc-seq) 8%, var(--card-background-color, #fff)), var(--fc-seq)); }
+  /* Settings → Lighting (0.6.7): the ambient categories, the light list and each light's brightness matrix. */
+  .amb { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5em, 1fr)); gap: 6px; }
+  .amblevel { display: grid; gap: 2px; justify-items: start; padding: 8px 10px; border: 1px solid var(--divider-color); border-radius: 10px; }
+  .amblevel ha-icon { --mdc-icon-size: 20px; color: var(--secondary-text-color); }
+  .amblevel.on { border: 2px solid var(--primary-color); background: var(--secondary-background-color); }
+  .amblevel.on ha-icon { color: var(--state-light-active-color, var(--amber-color, #ffc107)); }
+  .brlist { gap: 8px; }
+  .brrow { border: 1px solid var(--divider-color); border-radius: 10px; }
+  .brrow.open { border-color: var(--primary-color); }
+  .brbtn { display: flex; gap: 8px; align-items: center; width: 100%; padding: 8px 10px; border: none; background: none; text-align: left; min-height: 44px; }
+  .brbtn > ha-icon { --mdc-icon-size: 20px; color: var(--secondary-text-color); }
+  .brbtn .lmain { display: grid; gap: 2px; }
+  .brpanel { display: grid; gap: 10px; padding: 0 10px 10px; grid-template-columns: minmax(0, 1fr); }
+  .brtools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .brm { width: 100%; border-collapse: collapse; }
+  .brm caption { text-align: left; padding-bottom: 4px; }
+  .brm th, .brm td { padding: 4px; text-align: center; border-bottom: 1px solid var(--divider-color); }
+  .brm thead th { font-weight: 500; font-size: 0.9em; vertical-align: bottom; }
+  .brm thead th .sub { display: block; font-weight: normal; }
+  .brm tbody th { text-align: left; font-weight: 500; white-space: nowrap; }
+  .brm tr.cur th, .brm tr.cur td { background: var(--secondary-background-color); }
+  .cell { min-width: 4.2em; min-height: 40px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--divider-color); background: var(--card-background-color); font-weight: 500; }
+  .cell.off { color: var(--secondary-text-color); }
+  .cell.unset { color: var(--secondary-text-color); border-style: dashed; font-weight: normal; }
+  .cell.wins { border: 2px solid var(--primary-color); }
+  .cell.editing { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: var(--primary-color); }
+  .celled { display: grid; gap: 6px; padding: 10px; border-radius: 10px; border: 1px solid var(--primary-color); }
+  .brprev { display: grid; gap: 6px; padding: 8px 10px; border-radius: 8px; background: var(--secondary-background-color); }
+  .brprev .kvs { grid-template-columns: minmax(0, 1fr); }
+  @container (max-width: 420px) { .amb { grid-template-columns: minmax(0, 1fr); } .cell { min-width: 3.4em; padding: 4px; } }
 </style>`;
 
 if (!customElements.get(MOOD_CARD)) {

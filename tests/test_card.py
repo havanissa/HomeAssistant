@@ -106,6 +106,8 @@ def test_lighting_cards_never_control_lights() -> None:
         # 0.6.0 zones, shared spaces, relay outputs and Room Supervisor settings, and the supervisor's view of a room
         # (its "Check now" runs the same reconciliation as the periodic check; the card never calls a service)
         "zone/set", "zone/remove", "space/set", "space/remove", "relay/set", "supervisor/set", "supervisor/room",
+        # 0.6.7 ambient light levels and brightness rules (settings, previews and templates; never a light command)
+        "ambient/set", "brightness/preview", "brightness/set", "brightness/remove", "brightness/template",
     }, commands
     assert source.count(f"type: `${{WS}}/profile/test`") == 1 and "confirm: true" in source
     test = source.split("_testProfile(profile, mood) {", 1)[1].split("\n  }\n", 1)[0]
@@ -368,3 +370,28 @@ def test_possible_occupancy_controls() -> None:
                  "Use global default", "Global defaults (all rooms)", "precedence", "same as normal", "aria-pressed"):
         assert text in prelim, text
     assert "callService" not in prelim and "preliminary/set" in prelim
+
+
+def test_lighting_settings_ambient_levels_and_brightness_rules() -> None:
+    """0.6.7: Settings → Lighting: ambient levels (live category, sensors, thresholds) and per-light matrices."""
+    source = LIGHTING_FILE.read_text(encoding="utf-8")
+    assert '["lighting", "Lighting", "mdi:brightness-6"' in source
+    ambient = source[source.index("  _ambientHtml(r, b) {"):source.index("  _brightnessRulesHtml(r, b) {")]
+    for text in ("Ambient Light Levels", 'data-control="am-enabled"', "amblevel", 'aria-current="true"', "st.label",
+                 "Measured indoors", "Natural light", "Confidence", "st.note", 'data-control="dl-add"',
+                 'data-action="dl-remove"', 'data-control="am-th"', "belongs to the brighter category",
+                 '"hysteresis"', '"stable_seconds"', '"fallback"', '"dead_band"', '"min_interval"', '"transition"',
+                 "Global defaults (all rooms)", "fmtTime(st.since)"):
+        assert text in ambient, text
+    rules = source[source.index("  _brightnessRulesHtml(r, b) {"):source.index("  async _brLoadPreview() {")]
+    for text in ("Brightness Rules", 'data-action="br-open"', '"Room occupied"', 'data-action="br-cell"',
+                 'data-control="br-cell-range"', 'data-value="0"', "Not configured", 'data-control="br-template"',
+                 'data-control="br-copy-light"', 'data-control="br-copy-room"', 'data-action="br-restore"',
+                 'data-action="br-save-template"', "Before enrolling", "Enrolling sends no command",
+                 'data-action="br-enrol"', 'data-action="br-resume"', "switches on and off only", "tscroll"):
+        assert text in rules, text
+    actions = source[source.index("  _onBrightnessAction(a, el) {"):source.index("  _brSetCell(value) {")]
+    assert "confirm = true" in actions and "callService" not in actions
+    # The Zones editor links to the matrix instead of repeating it.
+    zones = source[source.index("  _zonesHtml(r) {"):source.index("  _spaceHtml(r) {")]
+    assert zones.count('data-action="br-goto"') == 2 and "brightness matrix" in zones
