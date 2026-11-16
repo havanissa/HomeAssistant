@@ -321,13 +321,20 @@ def test_household_phase_reasons_and_next_transitions() -> None:
         ("night", 0, 420), ("morning", 420, 720), ("day", 720, 990), ("evening", 990, 1290), ("night", 1290, 1440)]
 
 
-def test_inheritance_global_room_window() -> None:
-    w = Window("w1", "Kamar", area_id="kamar", auto={"night_start_workday": "20:45"})
+def test_inheritance_only_before_the_migration() -> None:
+    """Room / window schedule values from 0.6.5 still count until the migration is applied (unchanged behaviour);
+    a centralized configuration has one schedule for the whole house."""
+    w = Window("w1", "Kamar", area_id="kamar", auto=rules.load({"night_start_workday": "20:45"}, "window",
+                                                               legacy=True))
     other = Window("w2", "Stova", area_id="stova")
-    cfg = CurtainConfig(windows={"w1": w, "w2": other},
+    cfg = CurtainConfig(windows={"w1": w, "w2": other}, centralized=False,
                         defaults=rules.load({"night_start_workday": "21:30", "evening_rule": "first"}, "global"),
                         rooms={"kamar": rules.load({"night_start_workday": "21:00", "evening_time_workday": "17:30"},
-                                                   "room")})
+                                                   "room", legacy=True)})
+    assert rules.load({"night_start_workday": "20:45"}, "window") == {}       # new data: refused
+    central = CurtainConfig(windows=cfg.windows, defaults=cfg.defaults, rooms=cfg.rooms)
+    assert central.rules_for(w)[0]["night_start_workday"] == "21:30"          # one schedule for every window
+    assert central.rules_for(w)[1]["evening_time_workday"] == "default"
     v1, s1 = cfg.rules_for(w)
     v2, s2 = cfg.rules_for(other)
     assert (v1["night_start_workday"], s1["night_start_workday"]) == ("20:45", "window")
@@ -474,29 +481,27 @@ async def test_preview_policies_and_next_transition(hass, pilot, house, covers, 
     assert r.auto(s)["defer"] is None
 
 
-async def test_room_and_window_schedules_and_use_global(hass, pilot, house, covers, admin_ws, freezer, faroe) -> None:
+async def test_no_room_or_window_schedules(hass, pilot, house, covers, admin_ws, freezer, faroe) -> None:
+    """0.6.6: the Global Schedule is the only clock. Room and window schedules are refused; the window settings
+    keep their own protections (e.g. sleep behaviour)."""
     _e, r = await begin(hass, pilot, freezer, covers, admin_ws, "2026-11-19T13:00:00+00:00", lux=3000, elevation=5)
     api = r.api
     k = await kamar(api, house)
     s = await stova(api, house)
     await api.ok("schedule/change", scope="global", values={"night_start_workday": "21:30"})
-    await api.ok("schedule/change", scope="room", area_id=house.kamar, values={"night_start_workday": "21:00"})
-    await api.ok("schedule/change", scope="window", window_id=s, values={"evening_rule": "time"})
+    err = await api.error("schedule/change", scope="room", area_id=house.kamar, values={"night_start_workday": "21:00"})
+    assert err["code"] == "wrong_scope" and "Global Schedule" in err["message"]
+    err = await api.error("auto/settings", scope="window", window_id=s, values={"evening_rule": "time"})
+    assert err["code"] == "wrong_scope"
+    await api.ok("schedule/change", scope="window", window_id=k, values={"sleep_end": "hold"})   # a protection
     model = await api.ok("model")
+    assert model["centralized"] and not model["migration"]["pending"]
+    schema = {x["key"]: x for x in model["rules"]["schema"]}
+    assert all(schema[key]["scopes"] == ["global"] for key in ("night_start_workday", "night_end_workday",
+                                                               "morning_mode", "evening_rule", "free_days"))
     win = {w["window_id"]: w for w in model["windows"]}
-    assert (win[k]["auto"]["values"]["night_start_workday"], win[k]["auto"]["sources"]["night_start_workday"]) == (
-        "21:00", "room")
-    assert win[s]["auto"]["sources"]["night_start_workday"] == "global"
-    assert win[s]["auto"]["sources"]["evening_rule"] == "window"
-    over = {(o["scope"], o["name"]): o for o in model["schedule"]["overrides"]}
-    assert over[("room", "Kamar Erva")]["keys"] == [{"key": "night_start_workday", "label": "Night from (normal "
-                                                     "evenings)", "value": "21:00"}]
-    assert over[("window", "Stova Suður")]["keys"][0]["value"] == "At a time"
-    # "Use Global Schedule": the local values go; the window inherits again.
-    await api.ok("schedule/change", scope="room", area_id=house.kamar, values={"night_start_workday": None})
-    await api.ok("schedule/change", scope="window", window_id=s, values={"evening_rule": None})
-    assert (await api.ok("model"))["schedule"]["overrides"] == []
-    assert r.mgr.config.rules_for(r.mgr.config.windows[k])[0]["night_start_workday"] == "21:30"
+    assert win[k]["auto"]["sources"]["night_start_workday"] == "global"
+    assert win[k]["auto"]["sources"]["sleep_end"] == "window"
     assert covers.calls == []
 
 

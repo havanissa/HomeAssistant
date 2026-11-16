@@ -248,11 +248,18 @@ def test_rule_settings_validation_and_resolution() -> None:
     assert rules.validate("night_start_free", " 23:45 ", "global") == "23:45"
     assert rules.validate("daylight_lux", None, "window") is None
     for key, value, code in (("daylight_lux", 0, "invalid_daylight_lux"), ("daylight_lux", 2.5, "invalid_daylight_lux"),
-                             ("night_end_free", "25:00", "invalid_night_end_free"),
                              ("sleep_entity", "light.x", "invalid_sleep_entity"), ("nope", 1, "unknown_setting")):
         with pytest.raises(CurtainConfigError) as err:
             rules.validate(key, value, "window")
         assert err.value.code == code
+    with pytest.raises(CurtainConfigError) as err:
+        rules.validate("night_end_free", "25:00", "global")
+    assert err.value.code == "invalid_night_end_free"
+    # 0.6.6: schedule times belong to the Global Schedule only; a room or window cannot set them any more.
+    for scope in ("room", "window"):
+        with pytest.raises(CurtainConfigError) as err:
+            rules.validate("night_end_free", "08:00", scope)
+        assert err.value.code == "wrong_scope" and "Global Schedule" in str(err.value)
     with pytest.raises(CurtainConfigError) as err:
         rules.validate("lamp_entity", LAMP, "global")
     assert err.value.code == "wrong_scope"

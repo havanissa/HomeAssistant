@@ -105,6 +105,17 @@ class CurtainManager:
         """Load the configuration and the last results. Never moves a cover (also not after a restart)."""
         data = await self._store.async_load()
         self.config = CurtainConfig.from_dict(data) if data else CurtainConfig()
+        if not self.config.centralized:
+            from dataclasses import replace
+
+            from .migration import plan
+
+            if not plan(self.config):
+                # 0.6.6: nothing is configured outside Global Schedule / Global Modes, so centralizing changes
+                # nothing; otherwise the old settings stay active until the reviewed migration is applied.
+                self.config = replace(self.config, centralized=True)
+                self._dirty = True
+                self._store.async_delay_save(self._config_data, SAVE_DELAY_SECONDS)
         state = await self._state_store.async_load() or {}
         windows = self.config.windows
         self.last = {k: v for k, v in (state.get("last") or {}).items() if k in windows and isinstance(v, dict)}

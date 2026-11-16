@@ -257,7 +257,7 @@ def _matrix(config: CurtainConfig, windows: Mapping[str, Window], rooms_by_id: M
         groups.setdefault(window.area_id if window.area_id in rooms_by_id else None, []).append(window)
     order = sorted(groups, key=lambda a: (a is None, rooms_by_id.get(a or "", "").casefold()))
     for area_id in order:
-        if area_id is not None:
+        if area_id is not None and not config.centralized:   # room overrides exist only before the migration
             cells = {}
             for mode in MODES:
                 value = config.room_modes.get(area_id, {}).get(mode)
@@ -268,7 +268,8 @@ def _matrix(config: CurtainConfig, windows: Mapping[str, Window], rooms_by_id: M
             rows.append({"kind": "room", "area_id": area_id, "name": rooms_by_id[area_id], "cells": cells,
                          "options": _shared(config, area_id)})
         else:
-            rows.append({"kind": "room", "area_id": None, "name": "No room", "cells": None, "options": []})
+            rows.append({"kind": "room", "area_id": area_id, "name": rooms_by_id.get(area_id or "", "No room"),
+                         "cells": None, "options": []})
         for window in sorted(groups[area_id], key=lambda w: w.name.casefold()):
             cells = {}
             for mode in MODES:
@@ -405,6 +406,10 @@ def _set(hass: HomeAssistant, config: CurtainConfig, op: Mapping[str, Any]) -> t
     mode = _mode(op)
     level = op.get("level")
     value = op.get("value") or None
+    if value is not None:
+        # 0.6.6: no room, window or cover overrides any more: Global Modes is the one place for mode presets.
+        raise CurtainConfigError("managed_globally", "Room, window and cover overrides are no longer used: assign "
+                                 "the window or cover in Global Modes")
     word = "Use Global Setting" if value is None else "No action" if value == NO_ACTION else None
     if level == "room":
         area_id = op.get("area_id")
@@ -497,7 +502,7 @@ def apply_ops(hass: HomeAssistant, config: CurtainConfig, ops: list[Any]) -> tup
         elif kind == "set":
             config, line = _set(hass, config, op)
         elif kind == "adopt":
-            config, line = _adopt(config, op)
+            raise CurtainConfigError("managed_globally", "Old overrides are moved with the reviewed migration")
         else:
             raise CurtainConfigError("invalid_ops", f"Unknown change {kind}")
         lines.append(line)

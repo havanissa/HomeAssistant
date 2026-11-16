@@ -414,7 +414,7 @@ class Window:
             conditions={c: (v if (v := raw_conditions.get(c)) in preset_ids or (v == NO_ACTION and c in MODES)
                             else None) for c in CONDITIONS},
             cover_modes=cover_modes,
-            auto=_rules().load(data.get("auto"), "window"),
+            auto=_rules().load(data.get("auto"), "window", legacy=True),
             allowed_automations=tuple(a for a in data.get("allowed_automations") or ()
                                       if isinstance(a, str) and a.startswith("automation."))[:64],
         )
@@ -503,6 +503,10 @@ class CurtainConfig:
     # (resolved in each window of the room) or NO_ACTION}.
     modes: Mapping[str, tuple[Assignment, ...]] = field(default_factory=dict)
     room_modes: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    # 0.6.6 (Phase 4.6.4 addendum): Global Schedule and Global Modes are the only configuration of schedules and
+    # mode presets. False only for a store from 0.6.5 or earlier until its reviewed migration is applied:
+    # until then old room / window / cover settings keep working exactly as before (never silently changed).
+    centralized: bool = True
 
     def as_dict(self) -> dict[str, Any]:
         rules = _rules()
@@ -510,7 +514,8 @@ class CurtainConfig:
                 "defaults": rules.dump(self.defaults),
                 "rooms": {k: rules.dump(v) for k, v in self.rooms.items() if v},
                 "modes": {m: [a.as_dict() for a in self.modes.get(m, ())] for m in MODES if self.modes.get(m)},
-                "room_modes": {k: dict(v) for k, v in self.room_modes.items() if v}}
+                "room_modes": {k: dict(v) for k, v in self.room_modes.items() if v},
+                "centralized": self.centralized}
 
     def assignment(self, mode: str, window_id: str, layer_id: str | None) -> Assignment | None:
         """The assignment of this exact target in a mode."""
@@ -519,7 +524,7 @@ class CurtainConfig:
     def rules_for(self, window: Window) -> tuple[dict[str, Any], dict[str, str]]:
         """The effective automatic settings of a window and where each comes from."""
         return _rules().resolve(self.defaults, self.rooms.get(window.area_id or "") if window.area_id else None,
-                                window.auto)
+                                window.auto, legacy=not self.centralized)
 
     @classmethod
     def from_dict(cls, data: Any) -> CurtainConfig:
@@ -539,7 +544,8 @@ class CurtainConfig:
                 break
         rules = _rules()
         rooms_raw = data.get("rooms") if isinstance(data.get("rooms"), Mapping) else {}
-        rooms = {k: v for k, raw in rooms_raw.items() if isinstance(k, str) and (v := rules.load(raw, "room"))}
+        rooms = {k: v for k, raw in rooms_raw.items()
+                 if isinstance(k, str) and (v := rules.load(raw, "room", legacy=True))}
         # Global Modes (0.6.4; absent before). An assignment of a window or cover that no longer exists, or a
         # second one for covers already assigned in that mode, is dropped. One whose preset is missing is
         # kept (it acts as No action and is reported) so nothing is silently re-pointed.
@@ -562,7 +568,9 @@ class CurtainConfig:
                       and (kept := {m: x for m, x in v.items() if m in MODES and isinstance(x, str) and x})}
         return cls(windows=windows, settings=CurtainSettings.from_dict(data.get("settings")),
                    defaults=rules.load(data.get("defaults"), "global"), rooms=rooms, modes=modes,
-                   room_modes=room_modes)
+                   room_modes=room_modes,
+                   # A store written before 0.6.6 has no flag: its old settings stay active until migrated.
+                   centralized=data.get("centralized") is True or not data)
 
     def owner_of(self, entity_id: str) -> str | None:
         return next((w.window_id for w in self.windows.values() if entity_id in w.entity_ids), None)

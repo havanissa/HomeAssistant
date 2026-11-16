@@ -1,10 +1,17 @@
 /*
- * Smart Occupancy curtains card (served by the smart_occupancy integration, 0.6.5).
+ * Smart Occupancy curtains card (served by the smart_occupancy integration, 0.6.6).
  *
  *   type: custom:smart-occupancy-curtains-card
  *   title: Curtains        # optional
  *   area: stova            # optional: only the windows of one room
- *   page: modes            # optional: open on Global Modes (or "schedule": Global Schedule)
+ *   page: modes            # optional start page: overview, modes, schedule, windows, diagnostics
+ *
+ * 0.6.6 (Phase 4.6.4 addendum): Overview · Global Modes · Global Schedule ·
+ * Windows · Diagnostics. Global Schedule (when) and Global Modes (which preset)
+ * are the only configuration of the normal routine; window settings define the
+ * window itself, its presets and its protections, and show (read only) which
+ * presets Global Modes gives it, with links. Old per-place settings stay
+ * active until the reviewed migration (banner → "Review migration").
  *
  * 0.6.4 (Global Curtain Modes): Curtains → Global Modes. Mode cards (Morning,
  * Daytime, Evening, Night, Sleep, Sun Protection; Window Lamp, Glare and
@@ -37,7 +44,7 @@
  * times are 24-hour HH:mm in Home Assistant's time zone, also the time fields.
  */
 
-const VERSION = "0.6.5";
+const VERSION = "0.6.6";
 const CARD = "smart-occupancy-curtains-card";
 const WS = "smart_occupancy/curtains";
 
@@ -148,6 +155,10 @@ const SRC_TAG = { global: "G", room: "R", window: "W", cover: "C", mixed: "M" };
 const SRC_TONE = { global: "info", room: "warn", window: "warn", cover: "warn", mixed: "muted" };
 const SRC_WORD = { global: "Global Mode", room: "Room override", window: "Window override", cover: "Cover override", mixed: "Mixed" };
 const MODE_STATUS_TONE = { automatic: "ok", observing: "info", off: "muted" };
+const PAGES = ["overview", "modes", "schedule", "windows", "diagnostics"];
+// The condition a window is in -> the Global Modes card that sets its preset (0.6.6 links).
+const MODE_OF = { morning: "morning", day: "day", solar_heating: "day", evening_privacy: "evening_privacy", night: "night", sleep: "sleep",
+  sun: "sun", glare: "glare", heat: "heat", lamp: "lamp" };
 // Global Schedule (0.6.5)
 const SCH_ICON = { morning: "mdi:weather-sunset-up", day: "mdi:white-balance-sunny", evening: "mdi:weather-sunset-down", night: "mdi:weather-night" };
 const SCH_EXPLAIN = {
@@ -313,7 +324,8 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     const typing = active && active.tagName === "INPUT" && ["text", "number"].includes(active.type) ? active.value : null;
     const w = this._view && this._win(this._view);
     const name = this._pageName();
-    const page = w ? this._windowView(w) : name === "modes" ? this._modesPage() : name === "schedule" ? this._schedulePage() : this._overview();
+    const page = w ? this._windowView(w) : name === "modes" ? this._modesPage() : name === "schedule" ? this._schedulePage()
+      : name === "windows" ? this._windowsPage() : name === "diagnostics" ? this._diagPage() : this._overview();
     this.shadowRoot.innerHTML = `${STYLE}<ha-card>${page}</ha-card>`;
     if (focusSel) {
       const el = this.shadowRoot.querySelector(`${active.tagName.toLowerCase()}${focusSel}`);
@@ -328,22 +340,15 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     const rooms = m.rooms.map((r) => ({ ...r, windows: r.windows.filter((id) => ids.has(id)) })).filter((r) => r.windows.length);
     const props = this._config.area ? m.proposals.filter((p) => p.area_id === this._config.area) : m.proposals;
     const ui = this._ui;
+    const h = m.schedule && m.schedule.house;
     let body = `<div class="header"><ha-icon icon="mdi:curtains"></ha-icon><div class="titles">
         <div class="title">${esc(this._config.title || "Curtains")}</div>
-        <div class="sub">${windows.length} window${windows.length === 1 ? "" : "s"} · ${windows.filter((w) => w.mode === "automatic").length} automatic</div></div>
-        ${this._canEdit ? `<button class="iconbtn" data-action="settings" aria-label="Curtain settings" title="Curtain settings" aria-pressed="${!!ui.settings}"><ha-icon icon="mdi:cog-outline"></ha-icon></button>` : ""}</div>
+        <div class="sub">${windows.length} window${windows.length === 1 ? "" : "s"} · ${windows.filter((w) => w.mode === "automatic").length} automatic${h ? ` · ${esc(h.word)} now` : ""}</div></div></div>
       ${this._pageTabs()}
-      <div class="pad">${this._reviewHtml()}
-      <div class="note">Windows in Automatic move on their own and explain every decision. Observing windows only say what they would do; every window can still get a preset you apply and confirm.</div>`;
-    if (this._canEdit) {
-      body += `<div class="actions"><button class="btn" data-action="add-window" ${ui.adding ? "disabled" : ""}><ha-icon icon="mdi:plus"></ha-icon>Add window</button>
-        ${props.length ? `<button class="btn ghost" data-action="suggestions" aria-expanded="${!!ui.suggestions}">Suggestions (${props.length})</button>` : ""}</div>`;
-    }
-    if (ui.settings) body += this._settingsHtml();
-    if (ui.suggestions && !ui.adding) body += this._proposalsHtml(props);
-    if (ui.adding) body += this._addFormHtml();
-    if (!windows.length && !ui.adding) {
-      body += `<div class="muted">No windows yet.${this._canEdit ? " Add one, or start from a suggestion: covers that seem to belong together." : ""}</div>`;
+      <div class="pad">${this._reviewHtml()}${this._migrationHtml()}
+      <div class="note">Every window follows the <button class="link" data-action="page" data-page="schedule">Global Schedule</button> and uses its presets from <button class="link" data-action="page" data-page="modes">Global Modes</button>; sleep, the window lamp, the sun and manual moves can take over for a while. Observing windows only say what they would do.</div>`;
+    if (!windows.length) {
+      body += `<div class="muted">No windows yet.${this._canEdit ? ` <button class="link" data-action="page" data-page="windows">Add one on the Windows page</button>.` : ""}</div>`;
     }
     body += `<div class="rooms">${rooms.map((room) => `<section class="room" aria-label="${esc(room.name)}"><div class="stitle">${esc(room.name)}</div>
       ${room.windows.map((id) => this._windowCard(this._win(id))).join("")}</section>`).join("")}</div>`;
@@ -472,6 +477,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       ? `<button class="btn small" data-action="resume" data-window="${esc(w.window_id)}"><ha-icon icon="mdi:play-circle-outline"></ha-icon>Resume automatic curtains</button>` : "";
     return `<div class="auto ${w.mode}"><ha-icon icon="${COND_ICON[d.condition] || "mdi:robot-outline"}"></ha-icon><div class="amain">
         <div class="ahead"><b>${esc(d.condition_word)}</b> · ${what}${w.mode === "observing" ? ` <span class="pill info">Observing</span>` : ""}</div>
+        <div class="sub managed">Managed in ${MODE_OF[d.condition] ? `<button class="link" data-action="goto-mode" data-mode="${MODE_OF[d.condition]}">Global Modes → ${esc(this._modeWord(MODE_OF[d.condition]))}</button> and ` : ""}<button class="link" data-action="page" data-page="schedule">Global Schedule</button></div>
         <div class="atext">${esc(d.text)}</div>${extra}
         <div class="chips">${chips.join("")}</div>
         ${full && d.evidence && d.evidence.length ? `<div class="sub">${d.evidence.map(esc).join(" · ")}</div>` : ""}
@@ -768,7 +774,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       <div class="chks col">${flag("sleep_protection", "Sleep mode", "Stays closed while sleep is on (see Sleep mode below)")}
         ${flag("privacy", "Evening privacy", "Closes when it gets dark in the evening")}
         ${flag("solar_protection", "Sun protection", "Shades when the sun is in front of the window and the light is strong")}</div>
-      ${this._windowModesHtml(w)}
+      ${this._windowPresetsUsedHtml(w)}
       <div class="hint"><b>Waiting for daylight</b> and a <b>manual override</b> never move anything: the covers stay where they are. <b>Useful solar heating</b> keeps the Morning / Daytime preset. A mode without any assignment leaves the covers where they are. Lighting moods are never used for curtains.</div>
       ${this._statusHtml(`w-${w.window_id}`)}
       ${this._rulesHtml(w, (g) => !ENV_GROUPS.has(g))}`;
@@ -789,12 +795,12 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     const scope = this._ui.scope && (this._ui.scope !== "room" || w.area_id) ? this._ui.scope : "window";
     const segs = [["window", "This window"], ...(w.area_id ? [["room", `Room ${w.area_name || ""}`]] : []), ["global", "All windows"]];
     const lists = Object.entries(m.entities).map(([k, items]) => `<datalist id="dl-${k}">${items.map((i) => `<option value="${esc(i.entity_id)}">${esc(i.name)}</option>`).join("")}</datalist>`).join("");
-    const groups = m.rules.groups.filter(([g]) => only(g)).map(([g, label, desc]) => {
+    const groups = m.rules.groups.filter(([g]) => only(g) && g !== "schedule").map(([g, label, desc]) => {
       const fields = m.rules.schema.filter((r) => r.group === g);
       let body = fields.map((rule) => this._ruleField(w, rule, scope)).join("");
       if (g === "sleep" && scope === "window") body = `${this._flagSetRow(w, scope, "lamp_bypass", "sleep", "Sleep wins over the window lamp")}${this._flagSetRow(w, scope, "manual_bypass", "sleep", "Sleep ends a manual hold that began before it")}${body}`;
       if (g === "lamp" && scope === "window") {
-        body += `<div class="frow"><label for="lamp-preset">Window Lamp preset</label><div class="fval">${this._ovSelect(w, "lamp", "lamp-preset")}<span class="sub">${esc(w.effective.lamp.text)}</span></div></div>`;
+        body += `<div class="frow"><label>Window Lamp preset</label><div class="fval"><span>${esc(w.effective.lamp.text)}</span><button class="link" data-action="goto-mode" data-mode="lamp">Set in Global Modes → Window Lamp</button></div></div>`;
       }
       if (g === "lamp" && scope !== "window") body = `<div class="hint">The lamp and its preset are chosen per window.</div>${body}`;
       return `<details class="rgroup" ${this._ui.open?.[g] ? "open" : ""} data-group="${g}"><summary>${esc(label)}</summary><div class="hint">${esc(desc)}</div>${body}</details>`;
@@ -995,12 +1001,12 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
   }
 
   // ------------------------------------------------------- Global Modes (0.6.4)
-  _pageName() { return this._page || (["modes", "schedule"].includes(this._config.page) ? this._config.page : "windows"); }
+  _pageName() { return this._page || (PAGES.includes(this._config.page) ? this._config.page : "overview"); }
 
   _pageTabs() {
     const on = this._pageName();
     const tab = (k, label, icon) => `<button class="seg ${on === k ? "on" : ""}" aria-pressed="${on === k}" data-action="page" data-page="${k}"><ha-icon icon="${icon}"></ha-icon>${label}</button>`;
-    return `<div class="pagetabs"><div class="segs" role="group" aria-label="Curtains">${tab("windows", "Windows", "mdi:window-closed-variant")}${tab("modes", "Global Modes", "mdi:view-grid-outline")}${tab("schedule", "Global Schedule", "mdi:calendar-clock")}</div></div>`;
+    return `<div class="pagetabs"><div class="segs" role="group" aria-label="Curtains">${tab("overview", "Overview", "mdi:view-dashboard-outline")}${tab("modes", "Global Modes", "mdi:view-grid-outline")}${tab("schedule", "Global Schedule", "mdi:calendar-clock")}${tab("windows", "Windows", "mdi:window-closed-variant")}${tab("diagnostics", "Diagnostics", "mdi:stethoscope")}</div></div>`;
   }
 
   _gm() {
@@ -1154,10 +1160,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       ${this._pageTabs()}<div class="pad">${this._reviewHtml()}`;
     body += `<div class="note">Which preset each window or cover uses when the automatic controller selects a mode for it. Each window still decides its own mode; a window without an assignment keeps its position. Selecting and editing never move anything.</div>`;
     body += `<div class="segs" role="group" aria-label="View">${[["modes", "Modes"], ["matrix", "All windows"]].map(([k, l]) => `<button class="seg ${gm.view === k ? "on" : ""}" aria-pressed="${gm.view === k}" data-action="gm-view" data-view="${k}">${l}</button>`).join("")}</div>`;
-    if (mm.overrides && !gm.ops.length && this._canEdit) {
-      body += `<div class="issue warn"><ha-icon icon="mdi:layers-outline"></ha-icon><div class="imain">${mm.overrides} setting${mm.overrides === 1 ? " is" : "s are"} made in window settings (window or cover overrides, also the mappings from 0.6.3). They win over Global Modes and are shown under each mode.
-        <div><button class="link" data-action="gm-adopt-all">Review moving them to Global Modes…</button></div></div></div>`;
-    }
+    body += this._migrationHtml();
     if (gm.ops.length) {
       body += `<div class="draftbar" role="status"><span><b>${gm.ops.length} unsaved change${gm.ops.length === 1 ? "" : "s"}</b> <span class="sub">${gm.pending && gm.pending.needs_confirm ? "· would move an Automatic window: reviewed before saving" : "· nothing moves until you save"}</span></span>
         <div class="actions"><button class="btn small" data-action="gm-review" ${gm.busy ? "disabled" : ""}>Review & save</button><button class="btn small ghost" data-action="gm-discard">Discard</button></div></div>`;
@@ -1203,7 +1206,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       if (st.hold) pills.push(`<span class="pill warn">Manual hold</span>`);
       if (st.deferred) pills.push(`<span class="pill warn">Waits for next condition</span>`);
       const hidden = r.hidden.map((h) => `<div class="why warn"><ha-icon icon="mdi:layers-outline"></ha-icon> ${esc(h.word)}${h.cover ? ` (${esc(h.cover)})` : ""}: <b>${esc(h.label)}</b> hides this setting.
-        ${can ? `<button class="link" data-action="gm-use-global" data-level="${esc(h.level)}" data-window="${esc(r.window_id)}" data-layer="${esc(h.layer_id || "")}">Use Global Setting</button>` : ""}</div>`).join("");
+        <span class="sub">(from an earlier version; the migration resolves it)</span></div>`).join("");
       const id = `gm-${esc(r.window_id)}-${esc(r.layer_id || "w")}`;
       return `<div class="arow ${r.missing || r.problems.length ? "bad" : ""}">
         <div class="aname"><b>${esc(r.name)}</b><span class="sub">${esc(r.room)} · ${esc(r.type_word)}</span><span class="apills">${pills.join("")}</span></div>
@@ -1224,10 +1227,9 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     const err = gm.view === "modes" && gm.error && gm.error.op && !Array.isArray(gm.error.op) && gm.error.op.op === "assign"
       ? `<div class="issue bad" role="alert"><ha-icon icon="mdi:close-octagon-outline"></ha-icon><div class="imain">${esc(gm.error.message)}
           <div class="actions">${gm.error.code === "overlap" ? `<button class="btn small" data-action="gm-replace">Replace the existing assignment</button>` : ""}<button class="btn small ghost" data-action="gm-error-close">Cancel</button></div></div></div>` : "";
-    const others = m.others.length ? `<div class="stitle small">Also set for ${esc(m.word)} in window settings (${m.others.length})</div>
-      ${m.others.map((o) => `<div class="prow"><div class="pmain"><b>${esc(o.name)}</b><span class="sub">${esc(o.room)}</span></div><span class="pill warn">${esc(o.word)}: ${esc(o.label)}</span>
-        ${can ? `<div class="why"><button class="link" data-action="gm-use-global" data-level="${esc(o.level)}" data-window="${esc(o.window_id || "")}" data-layer="${esc(o.layer_id || "")}" data-area="${esc(o.area_id || "")}">Use Global Setting</button></div>` : ""}</div>`).join("")}
-      ${can && m.others.some((o) => o.window_id) ? `<div class="actions"><button class="btn small ghost" data-action="gm-adopt-mode">Move these to Global Modes…</button><span class="sub">The same preset becomes the Global ${esc(m.word)} assignment where there is none; you review it before saving.</span></div>` : ""}` : "";
+    const others = m.others.length ? `<div class="stitle small">Still set outside Global Modes (from an earlier version, ${m.others.length})</div>
+      ${m.others.map((o) => `<div class="prow"><div class="pmain"><b>${esc(o.name)}</b><span class="sub">${esc(o.room)}</span></div><span class="pill warn">${esc(o.word)}: ${esc(o.label)}</span></div>`).join("")}
+      <div class="hint">Active until the migration moves them into Global Modes (Review migration above).</div>` : "";
     return `<section class="meditor" aria-label="${esc(m.word)} assignments">
       <div class="mhead"><ha-icon icon="${m.icon}"></ha-icon><div><b>${esc(m.word)}</b><div class="sub">${esc(m.hint)}</div></div></div>
       ${m.warnings.slice(0, 3).map((t) => `<div class="issue warn"><ha-icon icon="mdi:alert-outline"></ha-icon><div class="imain">${esc(t)}</div></div>`).join("")}
@@ -1256,7 +1258,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       const tag = c.source ? `<span class="srctag ${SRC_TONE[c.source] || "muted"}" title="${esc(SRC_WORD[c.source] || c.source)}">${SRC_TAG[c.source] || "?"}</span>` : "";
       const tone = c.state === "nothing" || c.state === "inherit" ? "muted" : c.state === "no_action" ? "na" : c.state === "missing" ? "bad" : "";
       return `<td><button class="mxcell ${tone} ${on ? "on" : ""} ${row.kind === "cover" && c.inherited ? "inh" : ""}" data-action="gm-cell" data-kind="${row.kind}" data-window="${esc(row.window_id || "")}" data-layer="${esc(row.layer_id || "")}" data-area="${esc(row.area_id || "")}" data-mode="${m.key}"
-        title="${esc(c.text || `${c.label}${c.source_word ? ` — ${c.source_word}` : ""}`)}" ${this._canEdit && (row.kind !== "room" || row.area_id) ? "" : "disabled"}>${esc(c.label)}${tag}</button></td>`;
+        title="${esc(c.text || `${c.label}${c.source_word ? ` — ${c.source_word}` : ""}`)}" ${this._canEdit && row.kind !== "room" ? "" : "disabled"}>${esc(c.label)}${tag}</button></td>`;
     };
     const rows = mm.matrix.map((row) => {
       if (row.kind === "room") return `<tr class="mxroom"><th scope="row">${esc(row.name)}${row.area_id ? `<span class="sub"> · room</span>` : ""}</th>${modes.map((m) => cell(row, m)).join("")}</tr>`;
@@ -1266,7 +1268,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     return `${this._cellEditor(mm)}
       <div class="tscroll mxwrap"><table class="mx"><thead><tr><th scope="col">Window / Cover</th>${modes.map((m) => `<th scope="col"><ha-icon icon="${m.icon}"></ha-icon><br>${esc(m.word)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>
       <div class="actions"><button class="link" data-action="gm-adv-cols">${gm.advCols ? "Hide" : "Show"} Window Lamp, Glare and Excessive Heat</button></div>
-      <div class="hint"><span class="srctag info">G</span> Global Modes · <span class="srctag warn">R</span> room · <span class="srctag warn">W</span> window · <span class="srctag warn">C</span> cover override. “—” = no assignment (keeps its position); cover rows show the window's target unless the cover has its own. Rooms set a preset every window in them has, or No action.</div>`;
+      <div class="hint"><span class="srctag info">G</span> Global Modes${this._model.centralized ? "" : ` · <span class="srctag warn">R</span> <span class="srctag warn">W</span> <span class="srctag warn">C</span> old room / window / cover overrides (until the migration)`}. “—” = no assignment (keeps its position); cover rows show the window's target unless the cover is assigned on its own.</div>`;
   }
 
   _cellEditor(mm) {
@@ -1285,13 +1287,13 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       const lvl = row.kind === "cover" ? "cover" : "window";
       opts = `<optgroup label="Global ${esc(mode.word)}"><option value="g:" ${!cell.global ? "selected" : ""}>Not assigned</option>
           ${row.options.map((o) => `<option value="g:${esc(o.preset_id)}" ${cell.global === o.preset_id ? "selected" : ""}>${esc(o.name)} (${esc(o.detail)})</option>`).join("")}</optgroup>
-        <optgroup label="${lvl === "cover" ? "Cover" : "Window"} override"><option value="o:no_action" ${cell.override === "no_action" ? "selected" : ""}>No action (explicit override)</option>
-          ${cell.override ? `<option value="o:">Use Global Setting (clear the override)</option>` : ""}</optgroup>`;
+        `;
+      void lvl;
     }
     const name = row.kind === "cover" ? `${row.window_name} — ${row.name}` : row.name;
     return `<div class="cellbox" role="group" aria-label="${esc(name)}, ${esc(mode.word)}"><div><b>${esc(name)}</b> · ${esc(mode.word)}</div>
       <div class="sub">Now: ${esc(cell.text || `${cell.label}${cell.source_word ? ` — ${cell.source_word}` : ""}`)}</div>
-      ${cell.override && cell.override !== "no_action" ? `<div class="sub warn">A ${row.kind} override with a preset is set in window settings; it wins over Global Modes.</div>` : ""}
+      ${cell.override ? `<div class="sub warn">An old ${row.kind} override (from an earlier version) still decides here until the migration.</div>` : ""}
       <div class="fval"><select data-control="gm-cell-value" aria-label="Setting">${opts}</select><button class="btn small ghost" data-action="gm-cell-close">Close</button></div></div>`;
   }
 
@@ -1314,54 +1316,159 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       ${log.length ? log.map((x) => `<div class="logline"><time class="ltime" datetime="${esc(x.at)}" title="${esc(fullTime(x.at))}">${fmtTime(x.at)}</time> — ${esc(x.summary)}</div>`).join("") : `<div class="muted">Nothing yet.</div>`}</details>`;
   }
 
-  // Window settings: this window's overrides per mode, with the effective preset and its source.
-  _ovSelect(w, mode, id) {
-    const v = w.conditions[mode];
-    return `<select id="${id}" data-control="cond" data-cond="${mode}" ${this._ro}>
-      <option value="" ${!v ? "selected" : ""}>Use Global Setting</option><option value="no_action" ${v === "no_action" ? "selected" : ""}>No action</option>
-      ${w.presets.map((p) => `<option value="${esc(p.preset_id)}" ${v === p.preset_id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`;
-  }
-
-  _windowModesHtml(w) {
-    const m = this._model;
-    const words = Object.fromEntries((m.global_modes.modes || []).map((x) => [x.key, x]));
-    const row = (mode) => {
-      const e = w.effective[mode];
-      const info = words[mode] || { word: mode, icon: "mdi:help", hint: "" };
-      return `<div class="frow"><label for="ov-${mode}"><ha-icon icon="${info.icon}"></ha-icon> ${esc(info.word)}<br><span class="sub">${esc(COND_HINT[mode] || info.hint || "")}</span></label>
-        <div class="fval">${this._ovSelect(w, mode, `ov-${mode}`)}<span class="sub ${e.problems.length ? "bad" : ""}">${esc(e.text)}</span></div></div>`;
-    };
-    const common = m.global_modes.common || [];
-    const adv = m.global_modes.advanced || [];
-    const covers = w.layered ? `<details class="dladv" data-group="ov-covers" ${this._ui.open?.["ov-covers"] ? "open" : ""}><summary>Single covers (cover overrides)</summary>
-      <div class="hint">A cover override uses that cover's own presets (Covers tab) and changes only that cover.</div>
-      ${w.layers.map((l) => `<div class="stitle small"><ha-icon icon="${KIND_ICON[l.kind] || KIND_ICON.custom}"></ha-icon> ${esc(l.name)}</div><div class="ctable">${[...common, ...adv].map((mode) => {
-        const v = (w.cover_modes[l.layer_id] || {})[mode];
-        const t = w.effective[mode].layers.find((x) => x.layer_id === l.layer_id) || {};
-        const now = t.state === "preset" ? `${t.preset_name || "—"}${t.position != null ? ` (${t.position} %)` : " (unchanged)"} — ${t.source_word}` : t.state === "no_action" ? `No action — ${t.source_word}` : "No preset assigned";
-        return `<div class="frow"><label for="cov-${esc(l.layer_id)}-${mode}">${esc((words[mode] || {}).word || mode)}</label><div class="fval">
-          <select id="cov-${esc(l.layer_id)}-${mode}" data-control="cov" data-mode="${mode}" data-layer="${esc(l.layer_id)}" ${this._ro}><option value="" ${!v ? "selected" : ""}>Use the window's setting</option>
-            <option value="no_action" ${v === "no_action" ? "selected" : ""}>No action</option>${l.presets.map((p) => `<option value="${esc(p.preset_id)}" ${v === p.preset_id ? "selected" : ""}>${esc(p.name)} (${p.position} %)</option>`).join("")}</select>
-          <span class="sub">${esc(now)}</span></div></div>`;
-      }).join("")}</div>`).join("")}</details>` : "";
-    const ov = w.overrides.length;
-    return `<div class="stitle small">Presets per mode</div>
-      <div class="hint">“Use Global Setting” follows Curtains → Global Modes. A preset or No action here is a window override: it wins over Global Modes for this window only.</div>
-      ${ov && this._canEdit ? `<div class="issue warn"><ha-icon icon="mdi:layers-outline"></ha-icon><div class="imain">${ov} override${ov === 1 ? "" : "s"} set for this window. <button class="link" data-action="adopt-window">Move them to Global Modes…</button></div></div>` : ""}
-      <div class="ctable">${common.map(row).join("")}</div>
-      <details class="dladv" data-group="ov-adv" ${this._ui.open?.["ov-adv"] ? "open" : ""}><summary>Advanced: ${adv.map((k) => esc((words[k] || {}).word || k)).join(", ")}</summary><div class="ctable">${adv.map(row).join("")}</div></details>
-      ${covers}${this._statusHtml(`ov-${w.window_id}`)}`;
-  }
-
   // Covers tab: the presets of one cover of a layered window (used when it is assigned on its own).
   _coverPresetsHtml(w, l) {
     const ro = this._ro;
     return `<details class="dladv" data-group="cp-${esc(l.layer_id)}" ${this._ui.open?.[`cp-${l.layer_id}`] ? "open" : ""}><summary>Presets of this cover (${l.presets.length})</summary>
-      <div class="hint">Used when this cover is assigned on its own (Global Modes or a cover override); assigning it never moves the other covers of the window. Changing a position here changes every assignment that uses the preset.</div>
+      <div class="hint">Used when this cover is assigned on its own in Global Modes; that never moves the other covers of the window. Changing a position here changes every assignment that uses the preset.</div>
       ${l.presets.map((p) => `<div class="cprow"><input type="text" maxlength="60" value="${esc(p.name)}" aria-label="Preset name" data-control="cp-name" data-layer="${esc(l.layer_id)}" data-preset="${esc(p.preset_id)}" ${ro}>
         <input type="number" class="num" min="0" max="100" step="1" value="${esc(p.position)}" aria-label="${esc(p.name)} position in %" data-control="cp-pos" data-layer="${esc(l.layer_id)}" data-preset="${esc(p.preset_id)}" ${ro}> %
         ${this._canEdit ? `<button class="link" data-action="cp-del" data-layer="${esc(l.layer_id)}" data-preset="${esc(p.preset_id)}">Delete</button>` : ""}</div>`).join("")}
       ${this._canEdit && l.presets.length < 12 ? `<button class="btn small ghost" data-action="cp-add" data-layer="${esc(l.layer_id)}"><ha-icon icon="mdi:plus"></ha-icon>Add preset</button>` : ""}</details>`;
+  }
+
+  // ---------------------------------------------------------- 0.6.6 pages
+  _modeWord(key) {
+    const mm = this._model.global_modes;
+    const m = mm && mm.modes.find((x) => x.key === key);
+    return m ? m.word : key;
+  }
+
+  // Window settings: which preset this window gets in each mode — read only, managed in Global Modes.
+  _windowPresetsUsedHtml(w) {
+    const mm = this._model.global_modes;
+    const row = (m) => `<div class="prow"><div class="pmain"><ha-icon icon="${m.icon}"></ha-icon><b>${esc(m.word)}</b></div>
+      <button class="link" data-action="goto-mode" data-mode="${m.key}">Edit</button><div class="why">${esc(w.effective[m.key].text)}</div></div>`;
+    return `<div class="stitle small">Presets per mode <span class="sub">— managed in Global Modes</span></div>
+      <div class="hint">When each mode happens is set on <button class="link" data-action="page" data-page="schedule">Global Schedule</button>; which of this window's presets it uses is set on <button class="link" data-action="page" data-page="modes">Global Modes</button>. This window's presets are edited in its Presets and Covers tabs.</div>
+      ${mm.modes.filter((m) => !m.advanced).map(row).join("")}
+      <details class="dladv" data-group="pu-adv" ${this._ui.open?.["pu-adv"] ? "open" : ""}><summary>Window Lamp, Glare, Excessive Heat</summary>${mm.modes.filter((m) => m.advanced).map(row).join("")}</details>`;
+  }
+
+  _migrationHtml() {
+    const mig = this._model.migration;
+    if (!mig || !mig.pending) return "";
+    return `<div class="issue warn" role="status"><ha-icon icon="mdi:swap-horizontal-bold"></ha-icon><div class="imain"><b>Settings from an earlier version are still active</b><br>${esc(mig.text)}. Until then every window behaves exactly as before.
+      ${this._canEdit ? `<div class="actions"><button class="btn small" data-action="mig-open">Review migration</button>${mig.required ? `<span class="sub">${mig.required} need${mig.required === 1 ? "s" : ""} your choice</span>` : ""}</div>` : ""}</div></div>${this._migrationDialog()}`;
+  }
+
+  async _migReview() {
+    const g = this._ui.mig;
+    if (!g) return;
+    g.busy = true;
+    this._render();
+    try {
+      g.result = await this._ws({ type: `${WS}/migration/change`, choices: g.choices, dry_run: true });
+      g.error = null;
+    } catch (err) {
+      g.error = err?.message || String(err);
+    }
+    g.busy = false;
+    this._render();
+  }
+
+  async _migApply() {
+    const g = this._ui.mig;
+    if (!g || !g.result || g.busy) return;
+    if (g.result.missing.length || (g.result.needs_confirm && !g.policy)) return;
+    g.busy = true;
+    this._render();
+    try {
+      await this._ws({ type: `${WS}/migration/change`, choices: g.choices, confirm: !!g.result.needs_confirm, policy: g.policy || "now" });
+      this._ui.mig = null;
+    } catch (err) {
+      g.busy = false;
+      g.error = err?.message || String(err);
+    }
+    this._scheduleFetch();
+    this._render();
+  }
+
+  _migrationDialog() {
+    const g = this._ui.mig;
+    if (!g) return "";
+    if (!g.result) return `<div class="confirm ask" role="dialog" aria-label="Migration"><div class="muted">${g.error ? `<span class="bad">${esc(g.error)}</span>` : "Working out the migration…"}</div>
+      <div class="actions"><button class="btn ghost" data-action="mig-close">Close</button></div></div>`;
+    const r = g.result;
+    const words = r.words || {};
+    const groups = [["conflict", "Hidden Global Modes assignments"], ["inexact", "Cannot be kept exactly"], ["schedule", "Room and window schedules"],
+      ["morning", "Windows without a Morning preset"], ["mapping", "Moved to Global Modes unchanged"]];
+    const item = (x) => `<div class="prow"><div class="pmain"><b>${esc(x.title)}</b>${x.required ? `<span class="pill warn">choice needed</span>` : ""}</div>
+      <div class="why">${esc(x.detail)}</div>
+      ${x.choices.length ? `<div class="why chks col" role="radiogroup" aria-label="${esc(x.title)}">${x.choices.map((c) => `<label class="chk"><input type="radio" name="mig-${esc(x.id)}" value="${c}" data-control="mig-choice" data-id="${esc(x.id)}" ${(g.choices[x.id] || x.default) === c ? "checked" : ""}>${esc(words[c] || c)}</label>`).join("")}</div>` : ""}</div>`;
+    const sections = groups.map(([k, title]) => {
+      const list = r.items.filter((x) => x.kind === k);
+      if (!list.length) return "";
+      const body = list.map(item).join("");
+      return k === "mapping" ? `<details class="dladv"><summary>${esc(title)} (${list.length})</summary>${body}</details>` : `<div class="stitle small">${esc(title)} (${list.length})</div>${body}`;
+    }).join("");
+    const impact = r.impact.map((e) => `<div class="prow"><div class="pmain"><b>${esc(e.name)}</b><span class="sub">${esc(e.room)} · ${esc(e.mode)}</span></div>
+      <span class="pill ${e.moves ? "warn" : "muted"}">${e.moves ? `Would move ${e.moves}` : "No movement"}</span><div class="why">${e.changes.map((c) => `${esc(c.before)} → <b>${esc(c.after)}</b>`).join("<br>")}</div></div>`).join("");
+    const pol = (k, label, hint) => `<label class="chk ptoggle"><input type="radio" name="mig-policy" value="${k}" data-control="mig-policy" ${g.policy === k ? "checked" : ""}><span><b>${label}</b><br><span class="sub">${hint}</span></span></label>`;
+    const blocked = r.missing.length || (r.needs_confirm && !g.policy) || g.busy;
+    return `<div class="confirm ask" role="dialog" aria-label="Migration">
+      <div class="chead">Move everything to Global Schedule and Global Modes</div>
+      <div class="sub">Each old window, cover or room setting becomes a Global Modes assignment with exactly the same positions (a cover preset is added where one is needed). Afterwards the old settings are removed and only Global Schedule and Global Modes configure the routine.</div>
+      ${sections}
+      ${r.missing.length ? `<div class="note warn">${r.missing.length} item${r.missing.length === 1 ? " needs" : "s need"} a choice before the migration can be applied.</div>` : ""}
+      ${r.changes.length ? `<details class="dladv"><summary>What will be saved (${r.changes.length})</summary><ul class="clines">${r.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul></details>` : ""}
+      ${!r.missing.length ? (impact ? `<div class="stitle small">Windows that would act differently now</div>${impact}` : `<div class="note">No window changes what it does now.</div>`) : ""}
+      ${r.needs_confirm ? `<div class="chks col" role="radiogroup" aria-label="When to apply">${pol("now", "Apply now", "Through every normal safety check.")}${pol("next_change", "At the next change of condition", "They keep their position until their condition changes.")}</div>` : ""}
+      ${g.error ? `<div class="bad" role="alert">${esc(g.error)}</div>` : ""}
+      <div class="actions"><button class="btn primary" data-action="mig-apply" ${blocked ? "disabled" : ""}>Apply migration</button><button class="btn ghost" data-action="mig-close" ${g.busy ? "disabled" : ""}>Cancel</button></div></div>`;
+  }
+
+  // Windows: configure the physical windows (adding, the presets and protections are in each window's settings).
+  _windowsPage() {
+    const m = this._model;
+    const ui = this._ui;
+    const windows = this._windows();
+    const props = this._config.area ? m.proposals.filter((p) => p.area_id === this._config.area) : m.proposals;
+    let body = `<div class="header"><ha-icon icon="mdi:window-closed-variant"></ha-icon><div class="titles"><div class="title">${esc(this._config.title || "Curtains")} · Windows</div>
+        <div class="sub">Windows, their covers, presets and protections</div></div>
+        ${this._canEdit ? `<button class="iconbtn" data-action="settings" aria-label="Curtain settings" title="Curtain settings" aria-pressed="${!!ui.settings}"><ha-icon icon="mdi:cog-outline"></ha-icon></button>` : ""}</div>
+      ${this._pageTabs()}<div class="pad">${this._reviewHtml()}
+      <div class="hint">A window's settings define its covers, its adjustable presets (also for single covers), its direction and sun protection, sleep protection, the window lamp, manual-move behaviour and its mode (Off / Observing / Automatic). When things happen and which preset is used are set on Global Schedule and Global Modes.</div>`;
+    if (this._canEdit) {
+      body += `<div class="actions"><button class="btn" data-action="add-window" ${ui.adding ? "disabled" : ""}><ha-icon icon="mdi:plus"></ha-icon>Add window</button>
+        ${props.length ? `<button class="btn ghost" data-action="suggestions" aria-expanded="${!!ui.suggestions}">Suggestions (${props.length})</button>` : ""}</div>`;
+    }
+    if (ui.settings) body += this._settingsHtml();
+    if (ui.suggestions && !ui.adding) body += this._proposalsHtml(props);
+    if (ui.adding) body += this._addFormHtml();
+    if (!windows.length && !ui.adding) body += `<div class="muted">No windows yet.</div>`;
+    body += `<div class="wlist">${windows.map((w) => `<button class="wrow" data-action="open-window" data-id="${esc(w.window_id)}">
+        <span class="wmain"><b>${esc(w.name)}</b><span class="sub">${esc(w.area_name || "No room")} · ${esc(w.compass || "no direction")} · ${w.layers.length} cover${w.layers.length === 1 ? "" : "s"} · ${w.presets.length} preset${w.presets.length === 1 ? "" : "s"}</span></span>
+        <span class="pill ${MODE_TONE[w.mode]}">${esc(w.mode_word)}</span>${w.problems.some((p) => p.severity === "warning") ? `<ha-icon icon="mdi:alert-outline" class="warn"></ha-icon>` : ""}<ha-icon icon="mdi:chevron-right"></ha-icon></button>`).join("")}</div>`;
+    return `${body}</div>`;
+  }
+
+  // Diagnostics: why windows do what they do, overrides in force, failures and conflicts, for the whole house.
+  _diagPage() {
+    const m = this._model;
+    const windows = this._windows();
+    const log = (m.global_modes && m.global_modes.log) || [];
+    const failures = windows.filter((w) => w.last && ["failed", "partial", "timeout"].includes(w.last.status));
+    const holds = windows.filter((w) => w.auto && w.auto.hold);
+    const blocked = windows.filter((w) => w.auto && w.auto.status && w.auto.status.action === "blocked");
+    const conflicts = windows.flatMap((w) => w.layers.flatMap((l) => l.conflicts.filter((c) => c.enabled && !(w.allowed_automations || []).includes(c.automation)).map((c) => ({ w, c }))));
+    const problems = windows.flatMap((w) => w.problems.filter((p) => p.severity === "warning").map((p) => ({ w, p })));
+    const line = (w, text, tone = "muted") => `<div class="prow"><div class="pmain"><button class="link" data-action="open-window" data-id="${esc(w.window_id)}">${esc(w.name)}</button></div><span class="pill ${tone}">${esc(w.mode_word)}</span><div class="why">${esc(text)}</div></div>`;
+    return `<div class="header"><ha-icon icon="mdi:stethoscope"></ha-icon><div class="titles"><div class="title">${esc(this._config.title || "Curtains")} · Diagnostics</div>
+        <div class="sub">${esc(m.migration ? m.migration.text : "")}</div></div></div>
+      ${this._pageTabs()}<div class="pad">${this._migrationHtml()}
+      <div class="stitle small">Now</div>${windows.map((w) => {
+        const d = w.auto && w.auto.decision;
+        return line(w, w.mode === "off" ? "Off: not evaluated" : d ? `${d.condition_word}${d.preset_name ? ` → ${d.preset_name} (${d.source_word})` : ""}: ${d.text}` : "Evaluating…", MODE_TONE[w.mode]);
+      }).join("") || `<div class="muted">No windows.</div>`}
+      <div class="stitle small">Manual holds (${holds.length})</div>${holds.map((w) => line(w, `${w.auto.hold.policy_word} · since ${fmtTime(w.auto.hold.created)}`, "warn")).join("") || `<div class="muted">None.</div>`}
+      <div class="stitle small">Prevented now (${blocked.length})</div>${blocked.map((w) => line(w, w.auto.status.text, "warn")).join("") || `<div class="muted">None.</div>`}
+      <div class="stitle small">Failed movements (${failures.length})</div>${failures.map((w) => line(w, w.last.explanation, "bad")).join("") || `<div class="muted">None.</div>`}
+      <div class="stitle small">Competing automations (${conflicts.length})</div>${conflicts.map(({ w, c }) => line(w, `${c.name || c.automation}: ${c.detail}`, "warn")).join("") || `<div class="muted">None.</div>`}
+      <div class="stitle small">Problems (${problems.length})</div>${problems.map(({ w, p }) => line(w, p.text, "warn")).join("") || `<div class="muted">None.</div>`}
+      <details class="dladv" open><summary>Recent automatic decisions (${log.length})</summary>
+        ${log.map((x) => `<div class="logline"><time class="ltime" datetime="${esc(x.at)}" title="${esc(fullTime(x.at))}">${fmtTime(x.at)}</time> — <b>${esc(x.window)}</b>: ${esc(x.summary)}</div>`).join("") || `<div class="muted">Nothing yet.</div>`}</details>
+      <div class="hint">Each window's own Diagnostics tab has its full decision log, evidence, precedence and the competing automations you can allow.</div></div>`;
   }
 
   // ---------------------------------------------------- Global Schedule (0.6.5)
@@ -1482,7 +1589,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     let body = `<div class="header"><ha-icon icon="mdi:calendar-clock"></ha-icon><div class="titles">
         <div class="title">${esc(this._config.title || "Curtains")} · Global Schedule</div>
         <div class="sub">${esc(m.implementation)} · ${esc(m.time_zone || "")}</div></div></div>
-      ${this._pageTabs()}<div class="pad">${this._reviewHtml()}`;
+      ${this._pageTabs()}<div class="pad">${this._reviewHtml()}${this._migrationHtml()}`;
     body += `<div class="schstatus"><ha-icon icon="${SCH_ICON[h.phase]}"></ha-icon><div class="amain">
         <div><span class="sub">Household phase now</span><br><b class="big">${esc(h.word)}</b>${h.since ? ` <span class="sub">since ${fmtTime(h.since)}</span>` : ""}</div>
         <div class="sub">${esc(h.reason)}</div>
@@ -1533,12 +1640,11 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       ${days.map((d, i) => `<tr><th scope="row">${esc(d)}<span class="sub"> ${free.includes(i) ? "free" : "normal"}</span></th>${ph.map(([k, l]) => `<td><input type="text" class="time" inputmode="numeric" maxlength="8" placeholder="${esc(prof(i, k))}" aria-label="${esc(d)} ${esc(l)} (blank = ${esc(prof(i, k))})"
         value="${esc((plan[String(i)] || {})[k] || "")}" data-control="sch-dayplan" data-day="${i}" data-phase="${k}" ${this._ro}></td>`).join("")}</tr>`).join("")}</tbody></table></div>
       <div class="hint">Blank = the normal / free-day time shown in grey. “Night” on Friday is the Night that starts on Friday evening (00:30 there = Saturday 00:30). “Morning” on Saturday is Saturday's earliest Morning and ends Friday's night. All times 24-hour HH:mm.</div>`;
-    const ov = m.overrides.length ? m.overrides.map((o) => `<div class="prow"><div class="pmain"><b>${esc(o.name)}</b><span class="sub">${o.scope === "room" ? "Room" : "Window"} schedule</span></div>
-        ${this._canEdit ? `<button class="btn small ghost" data-action="sch-use-global" data-scope="${o.scope}" data-area="${esc(o.area_id || "")}" data-window="${esc(o.window_id || "")}" data-keys="${esc(o.keys.map((k) => k.key).join(","))}">Use Global Schedule</button>` : ""}
-        <div class="why">${o.keys.map((k) => `${esc(k.label)}: <b>${esc(k.value)}</b>`).join(" · ")}</div></div>`).join("")
-      : `<div class="muted">No room or window has its own schedule: every window follows this page.</div>`;
+    const ov = m.overrides.filter((o) => o.keys.some((k) => !["sleep_end", "sleep_require_daylight"].includes(k.key)));
+    const old = ov.length ? `<div class="stitle small">Old room and window schedules (until the migration)</div>${ov.map((o) => `<div class="prow"><div class="pmain"><b>${esc(o.name)}</b><span class="sub">${o.scope === "room" ? "Room" : "Window"}</span></div>
+        <div class="why">${o.keys.map((k) => `${esc(k.label)}: <b>${esc(k.value)}</b>`).join(" · ")}</div></div>`).join("")}` : "";
     return `<div class="stitle small">Per-day times</div>${table}
-      <div class="stitle small">Room and window schedules</div><div class="hint">Set in a window's settings → Automatic → Settings for: Room / This window → Schedule. The most specific value wins; changes there are previewed too.</div>${ov}`;
+      <div class="hint">This page is the only schedule: every room and window follows it. Windows still differ through their presets in Global Modes and their own protections (sleep, lamp, sun, manual moves).</div>${old}`;
   }
 
   // ------------------------------------------------------------------ events
@@ -1715,6 +1821,8 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       case "gm-add-preset": this._gm().add = { ...(this._gm().add || {}), preset: el.value || null }; this._render(); return;
       case "gm-cell-value": this._gmCellValue(el.value); return;
       case "gm-policy": if (this._ui.review) { this._ui.review.policy = el.value; this._render(); } return;
+      case "mig-choice": if (this._ui.mig) { this._ui.mig.choices[el.dataset.id] = el.value; this._migReview(); } return;
+      case "mig-policy": if (this._ui.mig) { this._ui.mig.policy = el.value; this._render(); } return;
       case "sch-time": {
         const v = parseHHMM(el.value);
         if (v === null) { this._sch().error = `Use 24-hour time HH:mm (00:00–23:59), e.g. 07:00 or 23:55 — not “${el.value}”`; el.setAttribute("aria-invalid", "true"); this._requestRender(); return; }
@@ -1779,8 +1887,6 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     else if (ctl === "w-area") this._update(w, { area_id: el.value || null });
     else if (ctl === "w-bearing") this._update(w, el.value === "" ? { direction: w.direction, bearing: null } : { bearing: Number(el.value) });
     else if (ctl === "w-flag") this._update(w, { [el.dataset.flag]: el.checked });
-    else if (ctl === "cond") this._quickChange([{ op: "set", level: "window", mode: el.dataset.cond, window_id: w.window_id, value: el.value || null }], `ov-${w.window_id}`);
-    else if (ctl === "cov") this._quickChange([{ op: "set", level: "cover", mode: el.dataset.mode, window_id: w.window_id, layer_id: el.dataset.layer, value: el.value || null }], `ov-${w.window_id}`);
     else if (ctl === "cp-name" || ctl === "cp-pos") {
       const msg = { type: `${WS}/cover_preset/save`, window_id: w.window_id, layer_id: el.dataset.layer, preset_id: el.dataset.preset };
       if (ctl === "cp-name") { if (!el.value.trim()) return; msg.name = el.value.trim(); } else { if (el.value === "" || Number.isNaN(Number(el.value))) return; msg.position = Number(el.value); }
@@ -1834,7 +1940,11 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
         this._save("env-use", { type: `${WS}/auto/settings`, scope: "global", values: { [el.dataset.key]: el.dataset.entity } }, "Used for all windows");
         return;
       case "enable-confirm": this._enableConfirmed(); return;
-      case "page": this._page = el.dataset.page; this._view = null; this._render(); return;
+      case "page": this._page = el.dataset.page; this._view = null; this._ui.mig = null; this._render(); return;
+      case "goto-mode": this._page = "modes"; this._view = null; Object.assign(this._gm(), { mode: el.dataset.mode, view: "modes" }); this._render(); return;
+      case "mig-open": this._ui.mig = { choices: {}, result: null, policy: null }; this._migReview(); return;
+      case "mig-close": this._ui.mig = null; this._render(); return;
+      case "mig-apply": this._migApply(); return;
       case "gm-mode": this._gm().mode = el.dataset.mode; this._gm().add = null; this._gm().error = null; this._render(); return;
       case "gm-view": this._gm().view = el.dataset.view; this._gm().cell = null; this._render(); return;
       case "gm-adv-cols": this._gm().advCols = !this._gm().advCols; this._render(); return;
@@ -1842,25 +1952,12 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       case "gm-add": this._gmAdd(false); return;
       case "gm-replace": this._gmAdd(true); return;
       case "gm-error-close": this._gm().error = null; this._render(); return;
-      case "gm-use-global": this._gmEdit({ op: "set", level: el.dataset.level, mode: el.dataset.mode || this._gm().mode, window_id: el.dataset.window, layer_id: el.dataset.layer || null, area_id: el.dataset.area || null, value: null }); return;
-      case "gm-adopt-mode": {
-        const mode = this._gmModel().modes.find((m) => m.key === this._gm().mode);
-        const ids = [...new Set(mode.others.filter((o) => o.window_id).map((o) => o.window_id))];
-        if (ids.length) this._gmEdit(ids.map((id) => ({ op: "adopt", window_id: id, modes: [mode.key] })));
-        return;
-      }
-      case "gm-adopt-all": {
-        const ids = [...new Set(this._model.windows.filter((x) => x.overrides.length).map((x) => x.window_id))];
-        if (ids.length) this._gmEdit(ids.map((id) => ({ op: "adopt", window_id: id })));
-        return;
-      }
       case "gm-cell": this._gm().cell = { kind: el.dataset.kind, window_id: el.dataset.window || null, layer_id: el.dataset.layer || null, area_id: el.dataset.area || null, mode: el.dataset.mode }; this._render(); return;
       case "gm-cell-close": this._gm().cell = null; this._render(); return;
       case "gm-discard": Object.assign(this._gm(), { ops: [], draft: null, error: null, cell: null }); this._render(); return;
       case "gm-review": this._openReview(this._gm().ops, "global"); return;
       case "review-cancel": this._ui.review = null; this._render(); return;
       case "review-save": this._saveReview(); return;
-      case "adopt-window": if (w) this._openReview([{ op: "adopt", window_id: w.window_id }], `ov-${w.window_id}`); return;
       case "sch-open": { const s = this._sch(); s.open = s.open === el.dataset.phase ? null : el.dataset.phase; this._render(); return; }
       case "sch-day": {
         const cur = new Set(this._schVal(el.dataset.key) || []);
@@ -1871,12 +1968,6 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       }
       case "sch-discard": Object.assign(this._sch(), { values: {}, error: null }); this._render(); return;
       case "sch-review": this._openReviewMsg({ type: `${WS}/schedule/change`, scope: "global", values: { ...this._sch().values } }, "schedule"); return;
-      case "sch-use-global": {
-        const msg = { type: `${WS}/schedule/change`, scope: el.dataset.scope, values: Object.fromEntries(el.dataset.keys.split(",").map((k) => [k, null])) };
-        if (el.dataset.scope === "room") msg.area_id = el.dataset.area; else msg.window_id = el.dataset.window;
-        this._openReviewMsg(msg, "sch-ov");
-        return;
-      }
       default: break;
     }
     if (!w) return;
@@ -2259,6 +2350,18 @@ const STYLE = `<style>
     .schhead { grid-template-columns: auto minmax(0, 1fr) auto auto; }
     .schhead .schrule { grid-column: 2 / -1; grid-row: 2; }
     .trcmp { grid-template-columns: 1fr; }
+  }
+  /* 0.6.6 */
+  .pagetabs .segs { flex-wrap: wrap; }
+  .wlist { display: grid; gap: 6px; }
+  .wrow { display: flex; gap: 8px; align-items: center; width: 100%; padding: 10px 12px; border: 1px solid var(--divider-color); border-radius: 12px; background: none; text-align: left; min-height: 48px; }
+  .wrow:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+  .wrow .wmain { flex: 1; min-width: 0; display: grid; gap: 2px; overflow-wrap: anywhere; }
+  .wrow ha-icon { --mdc-icon-size: 20px; color: var(--secondary-text-color); }
+  .wrow ha-icon.warn { color: var(--warning-color, #ff9800); }
+  .managed .link { padding: 0 2px; min-height: 24px; font-size: 1em; }
+  @container (max-width: 560px) {
+    .pagetabs .seg { flex: 1 1 30%; padding: 6px 6px; font-size: 0.9em; }
   }
   @container (max-width: 520px) {
     .tabs { flex-wrap: nowrap; padding: 0 4px; }

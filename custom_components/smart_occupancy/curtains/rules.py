@@ -24,7 +24,7 @@ Times are always 24-hour ``HH:mm`` (00:00-23:59).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import re
 from typing import Any
@@ -239,6 +239,11 @@ RULES: tuple[Rule, ...] = (
     Rule("glare_indoor_lux", "int", 0, "thermal", "Glare also needs indoor light from",
          "Uses the indoor light sensor; 0 = not used", 0, 100000, "lx"),
 )
+# 0.6.6 (Phase 4.6.4 addendum): the household schedule is configured only on the Global Schedule page. Values a
+# room or window stored before are still loaded (``legacy``) and honoured until the reviewed migration
+# (``migration.py``) moves or removes them; nothing new can be set there.
+RULES = tuple(replace(r, scopes=(GLOBAL,)) if r.group == "schedule" else r for r in RULES)
+SCHEDULE_KEYS: frozenset[str] = frozenset(r.key for r in RULES if r.group == "schedule")
 BY_KEY: dict[str, Rule] = {r.key: r for r in RULES}
 
 
@@ -254,12 +259,20 @@ def _bad(rule: Rule, text: str) -> CurtainConfigError:
     return CurtainConfigError(f"invalid_{rule.key}", f"{rule.label}: {text}")
 
 
-def validate(key: str, value: Any, scope: str) -> Any:
-    """A stored value for ``key``; ``None`` removes the setting at that scope (it is inherited again)."""
+def validate(key: str, value: Any, scope: str, *, legacy: bool = False) -> Any:
+    """A stored value for ``key``; ``None`` removes the setting at that scope (it is inherited again).
+
+    ``legacy``: loading stored data, where a room or window may still hold a schedule value of 0.6.5 or
+    earlier (kept until the migration removes it)."""
     rule = BY_KEY.get(key)
     if rule is None:
         raise CurtainConfigError("unknown_setting", f"Unknown setting {key}")
-    if scope not in rule.scopes:
+    if value is None and key in SCHEDULE_KEYS:
+        return None          # removing an old room / window schedule value is always allowed
+    if scope not in rule.scopes and not (legacy and key in SCHEDULE_KEYS and key != "day_overrides"):
+        if key in SCHEDULE_KEYS:
+            raise CurtainConfigError("wrong_scope", f"{rule.label} is set for the whole house on Curtains → Global "
+                                     "Schedule")
         raise CurtainConfigError("wrong_scope", f"{rule.label} can only be set for a window")
     if value is None:
         return None
@@ -336,14 +349,14 @@ def _dayplan(rule: Rule, value: Any) -> tuple[tuple[int, tuple[tuple[str, str], 
     return tuple(sorted(out))
 
 
-def load(raw: Any, scope: str) -> dict[str, Any]:
+def load(raw: Any, scope: str, *, legacy: bool = False) -> dict[str, Any]:
     """Stored overrides; anything unknown or invalid is dropped (it is inherited instead, never guessed)."""
     out: dict[str, Any] = {}
     if not isinstance(raw, Mapping):
         return out
     for key, value in raw.items():
         try:
-            clean = validate(key, value, scope)
+            clean = validate(key, value, scope, legacy=legacy)
         except CurtainConfigError:
             continue
         if clean is not None:
@@ -356,13 +369,15 @@ def dump(values: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def resolve(global_values: Mapping[str, Any], room_values: Mapping[str, Any] | None,
-            window_values: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
-    """Effective settings of a window and where each one comes from (window, room, global or default)."""
+            window_values: Mapping[str, Any], *, legacy: bool = False) -> tuple[dict[str, Any], dict[str, str]]:
+    """Effective settings of a window and where each one comes from (window, room, global or default).
+
+    ``legacy``: an old room / window schedule value still counts (only before the migration was applied)."""
     values: dict[str, Any] = {}
     sources: dict[str, str] = {}
     for rule in RULES:
         for scope, layer in ((WINDOW, window_values), (ROOM, room_values or {}), (GLOBAL, global_values)):
-            if scope in rule.scopes and rule.key in layer:
+            if (scope in rule.scopes or (legacy and rule.key in SCHEDULE_KEYS)) and rule.key in layer:
                 values[rule.key], sources[rule.key] = layer[rule.key], scope
                 break
         else:

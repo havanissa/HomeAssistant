@@ -131,7 +131,18 @@ def test_curtains_card_never_moves_a_cover_itself() -> None:
         "modes/change", "cover_preset/save", "cover_preset/delete",
         # 0.6.5: the Global Schedule (validated drafts and reviewed saves, also for room / window schedules)
         "schedule/change",
+        # 0.6.6: the reviewed migration to Global Schedule / Global Modes
+        "migration/change",
     }, commands
+    # 0.6.6: no mode-preset or schedule editor inside a window: read-only summaries with links to the global pages.
+    for gone in ('data-control="cond"', 'data-control="cov"', '"adopt"', "_windowModesHtml", "sch-use-global",
+                 "gm-use-global"):
+        assert gone not in source, gone
+    assert 'g !== "schedule"' in source and "managed in Global Modes" in source
+    for page in ("Overview", "Global Modes", "Global Schedule", "Windows", "Diagnostics"):
+        assert f'"{page}"' in source
+    apply = source.split("async _migApply() {", 1)[1].split("\n  }\n", 1)[0]
+    assert "if (g.result.missing.length || (g.result.needs_confirm && !g.policy)) return;" in apply
     # Opening a schedule row, typing a time or toggling a day only changes the draft: no websocket call.
     for action in ('case "sch-open":', 'case "sch-day":', 'case "sch-time":', 'case "sch-dayplan":'):
         branch = source.split(action, 1)[1].split("return;\n      }", 1)[0] if action != 'case "sch-open":' else \

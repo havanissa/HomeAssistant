@@ -117,8 +117,16 @@ def test_whole_window_and_single_cover_targets() -> None:
 
 
 def test_inherit_no_action_and_the_four_levels() -> None:
+    """The four levels of 0.6.4 still decide for a store that is not migrated yet (unchanged behaviour); once
+    centralized (0.6.6) only Global Modes counts, so no old override can hide a Global Modes assignment."""
     w = stova_window()
-    base = config(w, modes=assign(morning=[("w_stova", None, "p_half_shade")]))
+    base = config(w, modes=assign(morning=[("w_stova", None, "p_half_shade")]), centralized=False)
+    stale = replace(w, conditions={**w.conditions, "morning": "p_full_shade"},
+                    cover_modes={"l_sheer": {"morning": "c_closed"}})
+    central = replace(base, centralized=True, room_modes={"stova": {"morning": NO_ACTION}}).with_window(stale)
+    assert (modes.effective(central, stale, "morning").source,
+            modes.effective(central, stale, "morning").preset_id) == ("global", "p_half_shade")
+    assert modes.hidden_by(central, stale, "morning", None) == []
 
     def eff(cfg: CurtainConfig, window: Window = w):
         return modes.effective(cfg, window, "morning")
@@ -149,7 +157,7 @@ def test_inherit_no_action_and_the_four_levels() -> None:
 def test_glare_and_heat_fall_back_to_sun_protection_per_cover() -> None:
     w = stova_window()
     cfg = config(w, modes=assign(sun=[("w_stova", None, "p_full_shade")], glare=[("w_stova", "l_sheer", "c_half")],
-                                 morning=[("w_stova", None, "p_half_shade")]))
+                                 morning=[("w_stova", None, "p_half_shade")]), centralized=False)
     heat = modes.effective(cfg, w, "heat")
     assert heat.preset_id == "p_full_shade" and heat.fallback                  # nothing for heat: Sun Protection
     glare = modes.effective(cfg, w, "glare")
@@ -200,10 +208,15 @@ def test_arbitration_sleep_night_lamp_and_manual_hold_with_global_modes() -> Non
 
 
 def test_morning_nothing_versus_no_action_and_no_fallback() -> None:
-    """Nothing for Morning: the day starts directly (as in 0.6.2). An explicit No action keeps Morning as a
-    phase that leaves the covers where they are; it never hands over to Daytime early."""
+    """0.6.6: the Global Schedule decides when Morning is: a window without a Morning preset keeps its position
+    during Morning (it is excluded from that mode). Before the migration (0.6.2-0.6.5) nothing for Morning started
+    the Daytime preset directly, and an explicit No action kept Morning as a phase that changes nothing."""
     w = stova_window()
-    cfg = config(w, modes=assign(day=[("w_stova", None, "p_open")]))
+    central = config(w, modes=assign(day=[("w_stova", None, "p_open")]))
+    d = _decide(central, w, _ev("2026-11-19T09:00"))
+    assert d.condition == "morning" and d.preset_id is None
+    assert d.text.endswith("No preset is set for Morning: the covers are kept as they are")
+    cfg = replace(central, centralized=False)
     assert _decide(cfg, w, _ev("2026-11-19T09:00")).condition == "day"
     no = replace(w, conditions={**w.conditions, "morning": NO_ACTION})
     d = _decide(cfg.with_window(no), no, _ev("2026-11-19T09:00"))
@@ -221,7 +234,7 @@ def test_migrated_0_6_3_mappings_decide_exactly_as_before() -> None:
     w = stova_window()
     legacy = {**default_conditions(w.presets), "night": None, "glare": None}
     migrated = Window.from_dict({**w.as_dict(), "conditions": legacy})
-    cfg = config(migrated)
+    cfg = config(migrated, centralized=False)
     for condition in ("morning", "day", "sun", "evening_privacy", "night", "sleep", "lamp", "glare", "heat"):
         old = logic.preset_for(logic.Flags(False, False, False, legacy), condition, None)
         new = modes.effective(cfg, migrated, condition)
@@ -470,11 +483,11 @@ async def test_observing_and_editing_never_move_anything(hass, pilot, house, cov
     assert covers.calls == [] and not [c for c in service_calls if c.domain == "cover"]
 
 
-async def test_migration_from_0_6_3_keeps_windows_as_they_were_and_can_adopt(hass, pilot, house, covers, admin_ws,
+async def test_upgrade_from_0_6_3_keeps_windows_as_they_were_until_migrated(hass, pilot, house, covers, admin_ws,
                                                                             freezer, faroe, hass_storage) -> None:
-    """A 0.6.3 store (minor 3): every window keeps its mode (none is enabled) and its mapping, now shown as
-    window overrides; Automatic windows decide and move exactly as before; adopting moves the overrides to
-    Global Modes after a review, with the same effect and without moving anything."""
+    """A 0.6.3 store (minor 3): every window keeps its mode (none is enabled) and its mapping, which stays active
+    (shown as window overrides) until the reviewed migration; Automatic windows decide and move exactly as
+    before; the migration moves them to Global Modes with the same effect and without moving anything."""
     stova_dict = stova_window(mode="automatic", privacy=True, area_id=house.stova).as_dict()
     for key in ("cover_modes",):
         stova_dict.pop(key)
@@ -509,21 +522,20 @@ async def test_migration_from_0_6_3_keeps_windows_as_they_were_and_can_adopt(has
     assert (d["condition"], d["preset_id"], d["source"]) == ("day", "p_open", "window")   # as 0.6.3 decided
     assert covers.services() == [("set_cover_position", STOVA_SHEER, 100)]
     assert r.auto("w_kamar")["status"]["action"] in ("would_move", "at_target")           # Observing stays
-    # Adopt: reviewed first; the effective presets stay the same, so nothing would move.
-    preview = await r.api.ok("modes/change", ops=ops({"op": "adopt", "window_id": "w_stova"},
-                                                     {"op": "adopt", "window_id": "w_kamar"}), dry_run=True)
-    assert not preview["needs_confirm"] and all(not c["targets_change"] for e in preview["impact"]
-                                                for c in e["changes"])
-    assert preview["changes"] == ["Stova Suður: 7 overrides moved to Global Modes",
-                                  "Kamar Erva: 2 overrides moved to Global Modes"]
-    await r.api.ok("modes/change", ops=ops({"op": "adopt", "window_id": "w_stova"},
-                                           {"op": "adopt", "window_id": "w_kamar"}))
+    # The migration: reviewed first; the effective presets stay the same, so nothing would move.
+    assert model["migration"]["pending"] and model["migration"]["required"] == 0
+    preview = await r.api.ok("migration/change", dry_run=True)
+    assert not preview["needs_confirm"] and preview["impact"] == [] and not preview["missing"]
+    assert "Daytime: Stova Suður → Sheer 100 %, Blackout 100 % (Global Modes)" in preview["changes"]
+    kinds = {x["id"]: x["kind"] for x in preview["items"]}
+    assert kinds["morning:w_kamar"] == "morning"   # Kamar had no Morning preset: keeps its Daytime preset
+    await r.api.ok("migration/change")
     await r.walk(5)
     cfg = r.mgr.config
-    assert all(v is None for w in cfg.windows.values() for v in w.conditions.values())
+    assert cfg.centralized and all(v is None for w in cfg.windows.values() for v in w.conditions.values())
     assert cfg.assignment("day", "w_stova", None).preset_id == "p_open"
     assert cfg.assignment("night", "w_kamar", None).preset_id == "p_closed"
-    assert "morning" not in {m for m, items in cfg.modes.items() if any(x.window_id == "w_kamar" for x in items)}
+    assert cfg.assignment("morning", "w_kamar", None).preset_id == "p_open"   # as before: Daytime from daylight
     assert len(covers.calls) == 1 and r.auto("w_stova")["decision"]["source"] == "global"
 
 
@@ -575,9 +587,7 @@ async def test_missing_presets_renames_and_replaced_covers(hass, pilot, house, c
     await hass.async_block_till_done()
     model = await api.ok("model")
     assert any(f"{STOVA_BLACKOUT} does not exist" in t for t in mode_of(model, "morning")["warnings"])
-    # Deleting presets removes the assignments that used them (and cover overrides inherit again).
-    await api.ok("modes/change", ops=ops({"op": "set", "level": "cover", "mode": "night", "window_id": "w_stova",
-                                          "layer_id": "l_sheer", "value": "c_half"}))
+    # Deleting presets removes the assignments that used them.
     await api.ok("preset/delete", window_id="w_stova", preset_id="p_half_shade")
     await api.ok("cover_preset/delete", window_id="w_stova", layer_id="l_sheer", preset_id="c_half")
     cfg = r.mgr.config
@@ -614,8 +624,8 @@ async def test_cover_presets_are_adjustable_and_validated(hass, pilot, house, co
     assert covers.calls == []
 
 
-async def test_room_overrides_matrix_and_restart_persistence(hass, pilot, house, covers, admin_ws, freezer, faroe,
-                                                             hass_storage) -> None:
+async def test_matrix_and_restart_persistence(hass, pilot, house, covers, admin_ws, freezer, faroe,
+                                             hass_storage) -> None:
     set_cover(hass, STOVA_SHEER, 100)
     set_cover(hass, STOVA_BLACKOUT, 100)
     entry, r = await begin(hass, pilot, freezer, covers, admin_ws, "2026-11-19T13:00:00+00:00", lux=3000,
@@ -623,27 +633,21 @@ async def test_room_overrides_matrix_and_restart_persistence(hass, pilot, house,
     api = r.api
     s = await stova(api, house)
     sheer = r.mgr.config.windows[s].layers[0].layer_id
-    change = ops({"op": "set", "level": "room", "mode": "night", "area_id": house.stova, "value": NO_ACTION},
-                 {"op": "set", "level": "cover", "mode": "sleep", "window_id": s, "layer_id": sheer, "value": "c_open"},
-                 {"op": "set", "level": "window", "mode": "lamp", "window_id": s, "value": NO_ACTION})
-    await api.ok("modes/change", ops=change)
-    err = await api.error("modes/change", ops=ops({"op": "set", "level": "room", "mode": "night",
-                                                   "area_id": house.stova, "value": "p_nope"}))
-    assert err["code"] == "unknown_preset"
+    await api.ok("modes/change", ops=ops(a("sleep", s, "c_open", sheer, replace=True)))
+    # 0.6.6: no room, window or cover overrides: refused, with a pointer to Global Modes.
+    for op in ({"op": "set", "level": "room", "mode": "night", "area_id": house.stova, "value": NO_ACTION},
+               {"op": "set", "level": "cover", "mode": "sleep", "window_id": s, "layer_id": sheer, "value": "c_open"},
+               {"op": "set", "level": "window", "mode": "lamp", "window_id": s, "value": NO_ACTION},
+               {"op": "adopt", "window_id": s}):
+        assert (await api.error("modes/change", ops=ops(op)))["code"] == "managed_globally"
     model = await api.ok("model")
-    rows = {(x["kind"], x.get("window_id"), x.get("layer_id"), x.get("area_id")): x for x in model["global_modes"]["matrix"]}
-    room = rows[("room", None, None, house.stova)]
-    assert room["cells"]["night"]["label"] == "No action" and room["cells"]["morning"]["label"] == "Inherit"
-    assert {o["preset_id"] for o in room["options"]} >= {"p_open", "p_blackout"}
-    window_row = rows[("window", s, None, None)]
-    assert (window_row["cells"]["night"]["state"], window_row["cells"]["night"]["source"]) == ("no_action", "room")
+    rows = {(x["kind"], x.get("window_id"), x.get("layer_id")): x for x in model["global_modes"]["matrix"]}
+    window_row = rows[("window", s, None)]
     assert (window_row["cells"]["day"]["label"], window_row["cells"]["day"]["source"]) == ("Fully open", "global")
     assert window_row["cells"]["sleep"]["label"] == "Per cover"
-    cover_row = rows[("cover", s, sheer, None)]
-    assert (cover_row["cells"]["sleep"]["label"], cover_row["cells"]["sleep"]["source"]) == ("Fully open", "cover")
+    cover_row = rows[("cover", s, sheer)]
+    assert (cover_row["cells"]["sleep"]["label"], cover_row["cells"]["sleep"]["source"]) == ("Fully open", "global")
     assert cover_row["cells"]["day"]["label"] == "100 %" and cover_row["cells"]["day"]["inherited"]
-    hidden = mode_of(model, "night")["rows"][0]["hidden"]
-    assert [(h["level"], h["label"]) for h in hidden] == [("room", "No action")]
     # Defer a change, then restart: configuration and the deferred application survive; nothing is replayed.
     await r.settle()
     await r.walk(11)
@@ -662,7 +666,7 @@ async def test_room_overrides_matrix_and_restart_persistence(hass, pilot, house,
     assert r.condition(s) == "day"
     assert covers.calls == [] and r.auto(s)["status"]["code"] == "deferred"
     saved = hass_storage["smart_occupancy.curtains"]
-    assert saved["minor_version"] == 4 and saved["data"]["room_modes"] == {house.stova: {"night": NO_ACTION}}
+    assert saved["data"]["centralized"] is True and saved["data"]["room_modes"] == {}
     assert saved["data"]["modes"]["day"] == [{"window_id": s, "layer_id": None, "preset_id": "p_full_shade"}]
 
 
@@ -671,7 +675,7 @@ async def test_occupancy_lighting_and_forecast_are_untouched(hass, pilot, house,
     """Global Modes only configure curtains: no light, switch or helper is touched and no lighting mood is read."""
     _e, r = await begin(hass, pilot, freezer, covers, admin_ws, "2026-11-19T13:00:00+00:00", lux=3000, elevation=5)
     s = await stova(r.api, house)
-    await r.api.ok("modes/change", ops=ops(a("day", s, "p_half_shade"), {"op": "adopt", "window_id": s}))
+    await r.api.ok("modes/change", ops=ops(a("day", s, "p_half_shade")))
     await r.walk(5)
     assert all(c.domain == "cover" for c in service_calls)
     source = (modes.__file__, logic.__file__)
