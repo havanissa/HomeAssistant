@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.6 — Centralized curtain configuration (Phase 4.6.4 addendum)
+
+### Changed
+
+- **Global Schedule and Global Modes are the only configuration of the normal routine.** Schedule settings are global only (`rules.py`: room / window scopes refused, `wrong_scope`); room, window and cover overrides of mode presets can no longer be created (`modes/change` `set` with a value and `adopt` refused, `window/update` `conditions` with a value refused: `managed_globally`).
+- `CurtainConfig.centralized`: once centralized only Global Modes is resolved (no hidden override can defeat a global assignment) and only the global schedule counts. A window without a Morning preset keeps its position during Morning (0.6.2–0.6.5: started its Daytime preset at the first daylight).
+- Card navigation: **Overview · Global Modes · Global Schedule · Windows · Diagnostics** (`page:` any of `overview`, `modes`, `schedule`, `windows`, `diagnostics`). Window settings: no per-mode preset editor and no schedule group; a read-only *Presets per mode — managed in Global Modes* list with *Edit* links; the window lamp shows its Global Modes preset with a link. Overview cards link to their current mode in Global Modes and to the Global Schedule.
+
+### Added
+
+- **Reviewed migration** (`curtains/migration.py`, `migration/change` with `choices`, `dry_run`, `confirm`, `policy`): old overrides and room / window schedules stay active until applied; exact conversion per cover (new cover presets where needed, verified before saving); choices for hidden Global Modes conflicts, windows without a Morning preset, Glare / Heat “No action”, and differing room / window schedule times (required); impact preview; removes the old settings only after success. A store with nothing to migrate is centralized at load.
+- **Windows** page (add window, suggestions, settings for every window, window list) and **Diagnostics** page (now, manual holds, prevented, failed movements, competing automations, problems, recent decisions).
+- Tests: `tests/test_curtains_central.py` (migration exactness, required choices, conflicts and preview, auto-centralize, no hidden overrides, global schedule + modes driving windows with different presets, excluded windows, one command per cover, restart persistence); existing tests rewritten for the centralized model.
+
+### Not changed
+
+- Window presets (whole-window and single-cover), covers, direction, obstructions, sun / glare / thermal / sleep / lamp / manual settings, Off / Observing / Automatic, the decision engine, safety gates and the executor. 24-hour times everywhere.
+
 ## 0.6.5 — Global Curtain Schedule (Phase 4.6.4)
 
 ### Added

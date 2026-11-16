@@ -887,7 +887,8 @@ class AutoCurtains:
     def flags_for(config: CurtainConfig, window: Window) -> Flags:
         """The window's switches and its Global Modes resolver (0.6.4) for one configuration."""
         return Flags(window.sleep_protection, window.privacy, window.solar_protection, window.conditions,
-                     targets=lambda condition, phase: effective(config, window, condition, phase))
+                     targets=lambda condition, phase: effective(config, window, condition, phase),
+                     morning_by_schedule=config.centralized)
 
     def flags(self, window: Window) -> Flags:
         return self.flags_for(self.mgr.config, window)

@@ -298,7 +298,8 @@ async def test_multi_cover_defaults_and_preset_library(hass, pilot, house, cover
         ("Fully open", 100, 100), ("Half shade", 50, 100), ("Full shade", 0, 100), ("Evening privacy", 0, 60),
         ("Full blackout", 100, 0)]
     assert set(w["conditions"].values()) == {None}   # 0.6.4: no mapping until one is assigned
-    await api.ok("window/update", window_id=wid, conditions={"night": "p_blackout", "sleep": "p_blackout"})
+    await api.ok("modes/change", ops=[{"op": "assign", "mode": m, "window_id": wid, "preset_id": "p_blackout"}
+                                      for m in ("night", "sleep")])
 
     # A new custom preset with two independent positions, one cover left unchanged in another.
     tv = (await api.ok("preset/save", window_id=wid, name="TV", positions={sheer: 20, blackout: 70}))["preset_id"]
@@ -323,21 +324,26 @@ async def test_multi_cover_defaults_and_preset_library(hass, pilot, house, cover
     await api.ok("preset/select", window_id=wid, preset_id="p_blackout")
     await api.ok("preset/delete", window_id=wid, preset_id="p_blackout")
     w = await window(api, wid)
-    assert w["selected_preset"] is None and w["conditions"]["night"] is None and w["conditions"]["sleep"] is None
+    assert w["selected_preset"] is None and w["effective"]["night"]["state"] == "nothing"
+    assert w["effective"]["sleep"]["state"] == "nothing"   # the Global Modes assignments that used it are gone
     assert "Full blackout" not in [p["name"] for p in w["presets"]]
     await api.ok("preset/delete", window_id=wid, preset_id=keep["preset_id"])
     assert covers.calls == []
 
 
 async def test_condition_mapping_is_per_window_and_never_runs(hass, pilot, house, covers, hass_ws_client) -> None:
+    """0.6.6: mode presets are assigned only in Global Modes (still per window); window settings cannot set them."""
     _e, mgr, api = await start(hass, pilot, hass_ws_client)
     stova = await make_stova(api, house)
     kamar = (await api.ok("window/create", name="Kamar", layers=[{"entity_id": KAMAR}]))["window_id"]
-    await api.ok("window/update", window_id=stova, conditions={"morning": "p_open", "manual_override": "p_full_shade"})
-    assert (await window(api, stova))["conditions"]["morning"] == "p_open"
-    assert (await window(api, kamar))["conditions"]["morning"] is None
-    err = await api.error("window/update", window_id=kamar, conditions={"morning": "p_half_shade"})
+    await api.ok("modes/change", ops=[{"op": "assign", "mode": "morning", "window_id": stova, "preset_id": "p_open"}])
+    assert (await window(api, stova))["effective"]["morning"]["preset_id"] == "p_open"
+    assert (await window(api, kamar))["effective"]["morning"]["state"] == "nothing"
+    err = await api.error("modes/change", ops=[{"op": "assign", "mode": "morning", "window_id": kamar,
+                                                "preset_id": "p_half_shade"}])
     assert err["code"] == "unknown_preset"  # a preset of another window
+    err = await api.error("window/update", window_id=stova, conditions={"morning": "p_full_shade"})
+    assert err["code"] == "managed_globally"
     assert (await api.error("window/update", window_id=kamar, conditions={"lunch": None}))["code"] == \
         "invalid_condition"
     set_moods(hass, "Kvøld", "Auto", "Kvøld")  # a lighting mood change is not a curtain condition

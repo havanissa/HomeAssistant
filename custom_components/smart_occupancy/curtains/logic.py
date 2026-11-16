@@ -191,6 +191,9 @@ class Flags:
     solar_protection: bool
     conditions: Mapping[str, str | None]
     targets: Callable[[str, str | None], Effective] | None = None
+    # 0.6.6: the Global Schedule decides when Morning is (centralized configuration): a window without a Morning
+    # preset keeps its position during Morning instead of starting its Daytime early (0.6.2-0.6.5 behaviour).
+    morning_by_schedule: bool = False
 
     def lookup(self, condition: str, phase: str | None = None) -> Effective:
         if self.targets is not None:
@@ -484,7 +487,8 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
         else:
             # Morning is a phase of its own when anything is set for it (a preset, or an explicit No action
             # that keeps the covers during the morning); with nothing at all the day starts directly (0.6.2).
-            morning_used = values["morning_enabled"] and flags.lookup("morning").state != "nothing" and not (
+            morning_used = values["morning_enabled"] and (
+                flags.morning_by_schedule or flags.lookup("morning").state != "nothing") and not (
                 flags.sleep_protection and values["sleep_end"] == "resume")
             since = morning_since if morning_since is not None and morning_since.date() == now.date() else None
             # A morning starts before noon, not before the day's Morning time (0.6.5), and only once: a finished

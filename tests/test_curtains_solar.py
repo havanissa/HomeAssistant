@@ -542,7 +542,8 @@ async def test_south_window_temperature_aware_sun_with_layered_covers(hass, pilo
     await r.walk(11)
     d = r.auto(s)["decision"]
     assert (d["condition"], d["preset_id"]) == ("heat", "p_full_shade") and len(covers.calls) == 1
-    await r.api.ok("window/update", window_id=s, conditions={"heat": "p_evening_privacy"})
+    await r.api.ok("modes/change", ops=[{"op": "assign", "mode": "heat", "window_id": s,
+                                         "preset_id": "p_evening_privacy"}], confirm=True, policy="now")
     await r.walk(1)
     assert (r.pos(STOVA_SHEER), r.pos(STOVA_BLACKOUT)) == (0, 60) and len(covers.calls) == 2
     # Hysteresis: 24.7 °C is still too warm (until below 24.5 °C); then Direct sunlight again.
@@ -565,7 +566,8 @@ async def test_south_window_temperature_aware_sun_with_layered_covers(hass, pilo
     await r.walk(1)
     d = r.auto(s)["decision"]
     assert d["condition"] == "glare" and "glare protection wins" in d["text"] and r.pos(STOVA_SHEER) == 0
-    await r.api.ok("window/update", window_id=s, conditions={"glare": "p_half_shade"})
+    await r.api.ok("modes/change", ops=[{"op": "assign", "mode": "glare", "window_id": s,
+                                         "preset_id": "p_half_shade"}], confirm=True, policy="now")
     await r.walk(1)
     assert r.pos(STOVA_SHEER) == 50
     keys = [x["key"] for x in r.auto(s)["precedence"]]
@@ -739,8 +741,10 @@ async def test_restart_keeps_settings_temperature_band_and_stuck_detection(hass,
                                                                           freezer, faroe) -> None:
     entry, r, s = await solar_begin(hass, pilot, freezer, covers, admin_ws, house, lux=25000, room=23.8,
                                     thermal_enabled=True, glare_sensitive=True, glare_when="occupied")
-    await r.api.ok("window/update", window_id=s, solar={"max_elevation": 45},
-                   conditions={"glare": "p_half_shade", "heat": "p_evening_privacy"})
+    await r.api.ok("window/update", window_id=s, solar={"max_elevation": 45})
+    await r.api.ok("modes/change", ops=[{"op": "assign", "mode": "glare", "window_id": s, "preset_id": "p_half_shade"},
+                                        {"op": "assign", "mode": "heat", "window_id": s,
+                                         "preset_id": "p_evening_privacy"}])
     await enable(r.api, s)
     await hass.async_block_till_done()
     assert r.condition(s) == "sun" and r.mgr.auto.runtimes[s].thermal == "warm"
@@ -753,8 +757,8 @@ async def test_restart_keeps_settings_temperature_band_and_stuck_detection(hass,
     mgr = entry.runtime_data.curtains
     r.mgr = mgr
     w = mgr.config.windows[s]
-    assert w.solar.max_elevation == 45.0 and w.conditions["glare"] == "p_half_shade"
-    assert w.conditions["heat"] == "p_evening_privacy"
+    assert w.solar.max_elevation == 45.0 and mgr.config.assignment("glare", s, None).preset_id == "p_half_shade"
+    assert mgr.config.assignment("heat", s, None).preset_id == "p_evening_privacy"
     v, _ = mgr.config.rules_for(w)
     assert v["thermal_enabled"] and v["glare_sensitive"] and v["glare_when"] == "occupied"
     assert v["room_temp_entity"] == ROOM_T and mgr.auto.runtimes[s].thermal == "warm"

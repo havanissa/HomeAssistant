@@ -125,9 +125,17 @@ def layer_name(layer: CoverLayer) -> str:
 
 
 # ------------------------------------------------------------------ one cover
-def resolve_layer(config: CurtainConfig, window: Window, layer: CoverLayer, mode: str) -> LayerTarget:
-    """The first level that says anything about this cover in this mode (see the module docstring)."""
+def resolve_layer(config: CurtainConfig, window: Window, layer: CoverLayer, mode: str, *,
+                  legacy: bool | None = None) -> LayerTarget:
+    """The first level that says anything about this cover in this mode (see the module docstring).
+
+    0.6.6: once the configuration is centralized only Global Modes count. The room, window and cover levels
+    are read only for a store that has not been migrated yet (``legacy``), so its behaviour is unchanged."""
     lid = layer.layer_id
+    if legacy is None:
+        legacy = not config.centralized
+    if not legacy:
+        return _global_layer(config, window, layer, mode)
     value = window.cover_modes.get(lid, {}).get(mode) if window.layered else None
     if value == NO_ACTION:
         return LayerTarget(lid, "no_action", source="cover")
@@ -146,6 +154,11 @@ def resolve_layer(config: CurtainConfig, window: Window, layer: CoverLayer, mode
             if p is None:
                 return LayerTarget(lid, "missing", source=source, preset_id=value, library="window")
             return LayerTarget(lid, "preset", p.positions.get(lid), source, p.preset_id, p.name, "window")
+    return _global_layer(config, window, layer, mode)
+
+
+def _global_layer(config: CurtainConfig, window: Window, layer: CoverLayer, mode: str) -> LayerTarget:
+    lid = layer.layer_id
     items = config.modes.get(mode, ())
     a = next((x for x in items if x.window_id == window.window_id and x.layer_id == lid and window.layered), None)
     if a is not None:
@@ -163,7 +176,8 @@ def resolve_layer(config: CurtainConfig, window: Window, layer: CoverLayer, mode
 
 
 # ----------------------------------------------------------------- one window
-def effective(config: CurtainConfig, window: Window, condition: str, phase: str | None = None) -> Effective:
+def effective(config: CurtainConfig, window: Window, condition: str, phase: str | None = None, *,
+              legacy: bool | None = None) -> Effective:
     """The effective target of a window for a decided condition (``phase`` for Useful solar heating)."""
     if condition in ("waiting", "manual_override"):
         return Effective(condition, "nothing")
@@ -172,9 +186,9 @@ def effective(config: CurtainConfig, window: Window, condition: str, phase: str 
         return Effective(condition, "nothing")
     targets: list[LayerTarget] = []
     for layer in window.layers:
-        t = resolve_layer(config, window, layer, mode)
+        t = resolve_layer(config, window, layer, mode, legacy=legacy)
         if t.state == "nothing" and mode in SUN_FALLBACK:
-            sun = resolve_layer(config, window, layer, "sun")
+            sun = resolve_layer(config, window, layer, "sun", legacy=legacy)
             if sun.state != "nothing":
                 t = LayerTarget(sun.layer_id, sun.state, sun.position, sun.source, sun.preset_id, sun.preset_name,
                                 sun.library, True)
