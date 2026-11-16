@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.5 — Global Curtain Schedule (Phase 4.6.4)
+
+### Added
+
+- **Curtains → Global Schedule** (`page: schedule`): household phase now (since, reason, what it waits for), next transition, today's 24-hour timeline, four phase rows (rule and time; click to edit), free days, late evenings, **Advanced** per-day times and the list of room / window schedules with *Use Global Schedule*, upcoming transitions and recent household phases. Draft + **Review & save**.
+- `curtains/schedule.py`: the one schedule evaluation used by every window (`logic.decide`) and the household view. Morning earliest time (normal / free days, Morning on/off), Daytime rules (`duration`, `until_time`, new `not_before`), Evening rules (`time`, `event` with `sunset` or measured `dusk`, `first`, `last`; latched until Night), Night per evening with explicit late evenings (`before_free` or chosen `late_days`), per-day times (`day_overrides`: morning / day / evening / night per weekday), next transitions and the timeline.
+- `schedule/change` (`schedule_page.py`): validated drafts and reviewed saves for all windows, a room or a window (`null` = use the less specific value); previous / proposed next transitions; per-window impact; `confirm` + policy `now` / `next_change` (reusing the Global Modes defer); admin only. Schedule settings changed in window settings are previewed the same way.
+- Decision log: *“Morning is eligible, but daylight has not been confirmed. Holding current positions.”*, *“… Sleep Mode is on …”*, *“Evening started because dusk was confirmed (12 lx) before 18:00.”*; household log *“Night started according to the normal evening / late evening / Friday schedule.”*. Window model `auto.schedule` (Evening latch, note, next transitions).
+- Tests: `tests/test_curtains_schedule.py` (21 tests: every activation rule, Morning in daylight / 0 lx / asleep / after sleep, Daytime rules, Evening time / sunset / dusk / first / last, passing clouds, Night normal / late / Fri–Sat / Sun→Mon / midnight / custom days / per-day times, DST in three zones, inheritance, unavailable sensors, sun and lamp precedence, manual holds, windows without assignment, layered presets, restart in the night, preview and next-transition application, 0.6.4 upgrade, the 11-12 early-morning failure with a 07:00 Morning, no effect on occupancy / lighting / forecasts).
+
+### Changed
+
+- Schedule settings keep their keys and values (`night_end_*` = earliest Morning, `night_start_*` = normal / late evenings, `morning_mode`, `morning_minutes`, `day_from_*`, `free_days`); labels say what they are in the phase model.
+- Morning no longer begins before the day's Morning time even when Night is off (before, only the night kept it from starting earlier).
+- Time fields accept up to 8 characters so a typed “7:45 PM” is refused instead of being cut to 07:45.
+
+### Not changed
+
+- With the defaults (Evening rule *0.6.4 behaviour*, late evenings *before a free day*, no per-day times) every window decides exactly as in 0.6.4 (the equality test against the frozen 0.6.2 logic still passes). Global Modes, presets, Off / Observing / Automatic, manual holds, safety gates, the executor, occupancy, lighting, forecasts and heating. No store migration is needed (new keys have defaults).
+
 ## 0.6.4 — Global Curtain Modes (Phase 4.6.3)
 
 ### Added

@@ -96,8 +96,9 @@ from .logic import (
     decide,
     precedence,
 )
+from . import schedule
 from .modes import effective
-from .rules import consistency
+from .rules import consistency, dump as dump_rules, resolve as resolve_rules
 from .solar import exposure, window_angle_from_sun_angle
 
 if TYPE_CHECKING:
@@ -161,6 +162,7 @@ class WindowRuntime:
     hold: dict[str, Any] | None = None
     active_since: dict[str, datetime] = field(default_factory=dict)
     morning_since: datetime | None = None
+    evening: dict[str, Any] | None = None    # 0.6.5: the Evening started today ({"at": datetime, "reason"})
     sleep_ended: datetime | None = None
     last_sleep: str | None = None
     last_base: str | None = None
@@ -179,6 +181,8 @@ class WindowRuntime:
         hold = dict(self.hold, created=_iso(self.hold["created"])) if self.hold else None
         return {"hold": hold, "active_since": {k: _iso(v) for k, v in self.active_since.items()},
                 "morning_since": _iso(self.morning_since), "sleep_ended": _iso(self.sleep_ended),
+                "evening": {"at": _iso(self.evening["at"]), "reason": self.evening.get("reason")}
+                if self.evening else None,
                 "last_sleep": self.last_sleep, "last_base": self.last_base, "last_phase": self.last_phase,
                 "thermal": self.thermal, "applied": self.applied,
                 "moves": self.moves, "last_move_at": _iso(self.last_move_at),
@@ -195,6 +199,9 @@ class WindowRuntime:
             rt.hold = {**hold, "created": created}
         rt.active_since = {k: d for k, v in (data.get("active_since") or {}).items() if (d := _dt(v))}
         rt.morning_since = _dt(data.get("morning_since"))
+        eve = data.get("evening")
+        if isinstance(eve, Mapping) and (when := _dt(eve.get("at"))):
+            rt.evening = {"at": dt_util.as_local(when), "reason": str(eve.get("reason") or "")}
         rt.sleep_ended = _dt(data.get("sleep_ended"))
         rt.last_sleep = data.get("last_sleep") if data.get("last_sleep") in ("on", "off") else None
         rt.last_base = data.get("last_base") if isinstance(data.get("last_base"), str) else None
@@ -215,6 +222,11 @@ class WindowRuntime:
         return rt
 
 
+def _new_house() -> dict[str, Any]:
+    return {"daylight": Hysteresis(), "fallback": None, "morning_since": None, "evening": None, "key": None,
+            "log": [], "timer": None, "deadlines": [], "result": None}
+
+
 class AutoCurtains:
     def __init__(self, manager: CurtainManager, occupancy: Any | None = None) -> None:
         self.mgr = manager
@@ -229,6 +241,7 @@ class AutoCurtains:
         self._tracking: CALLBACK_TYPE | None = None
         self._occupancy_unsubs: list[CALLBACK_TYPE] = []
         self._settle_timer: CALLBACK_TYPE | None = None
+        self.house: dict[str, Any] = _new_house()
 
     # ------------------------------------------------------------ storage
     def restore(self, data: Any) -> None:
@@ -283,6 +296,9 @@ class AutoCurtains:
             if rt.timer:
                 rt.timer()
                 rt.timer = None
+        if self.house.get("timer"):
+            self.house["timer"]()
+            self.house["timer"] = None
         self.started_at = None
 
     @property
@@ -319,6 +335,9 @@ class AutoCurtains:
                 self._temp_history(values["room_temp_entity"])
             if window.area_id:
                 areas.add(window.area_id)
+        if house_lux := self.house_values()["lux_entity"]:
+            ids.add(house_lux)
+            self._history(house_lux)
         if ids:
             self._tracking = async_track_state_change_event(self.hass, sorted(ids), self._on_input)
         for unsub in self._occupancy_unsubs:
@@ -380,6 +399,8 @@ class AutoCurtains:
             values, _ = self.mgr.config.rules_for(window)
             if entity_id in (values["sleep_entity"], values["lamp_entity"], *(values[k] for k in ENV_KEYS)):
                 self.evaluate(window.window_id)
+        if entity_id == self.house_values()["lux_entity"]:
+            self.evaluate_house()
 
     @callback
     def _on_occupancy(self, area_id: str) -> None:
@@ -404,6 +425,131 @@ class AutoCurtains:
     def evaluate_all(self) -> None:
         for window_id in list(self.mgr.config.windows):
             self.evaluate(window_id)
+        self.evaluate_house()
+
+    # ----------------------------------------------------------- household (0.6.5)
+    def house_values(self, config: CurtainConfig | None = None) -> dict[str, Any]:
+        config = config or self.mgr.config
+        return resolve_rules(config.defaults, None, {})[0]
+
+    def sun_events(self) -> dict[str, datetime | None]:
+        """Today's / the next sunset and dusk from sun.sun (predictions for display only)."""
+        state = self.hass.states.get("sun.sun")
+        out: dict[str, datetime | None] = {"sunset": None, "dusk": None}
+        if state is not None:
+            for key, attr in (("sunset", "next_setting"), ("dusk", "next_dusk")):
+                when = _dt(state.attributes.get(attr))
+                out[key] = dt_util.as_local(when) if when else None
+        return out
+
+    def house_evidence(self, values: Mapping[str, Any], now: datetime,
+                       house: dict[str, Any] | None = None) -> schedule.HouseEvidence:
+        utc = dt_util.utcnow()
+        sun = self.mgr.sun()
+        ev = schedule.HouseEvidence(now=now, elevation=sun.elevation, sun_events=self.sun_events())
+        house = self.house if house is None else house
+        entity = values["lux_entity"]
+        if entity:
+            history = self._history(entity)
+            reading = judge_lux(entity, self.hass.states.get(entity), now=utc, since=self.since_of(entity),
+                                elevation=sun.elevation, stale_minutes=values["lux_stale"],
+                                stuck_minutes=values["lux_stuck"], dark_lux=values["dusk_lux"])
+            ev.lux_status, ev.lux = reading.status, reading.value
+            if reading.status == "ok":
+                stable = timedelta(minutes=values["daylight_stable"])
+                ev.daylight, deadline = house["daylight"].evaluate(
+                    history, utc, lambda v: v >= values["daylight_lux"], stable, lambda v: v <= values["dusk_lux"],
+                    stable)
+                ev.dusk_measured = ev.daylight is False
+                if deadline:
+                    house["deadlines"].append(deadline)
+            else:
+                house["daylight"].reset()
+        elif sun.elevation is not None:
+            if sun.elevation >= values["fallback_elevation"]:
+                house["fallback"] = True
+            elif sun.elevation <= values["dusk_elevation"]:
+                house["fallback"] = False
+            ev.fallback_daylight = house.get("fallback")
+        return ev
+
+    @callback
+    def evaluate_house(self) -> None:
+        """The household phase (a scheduling reference shown on the Global Schedule page; it commands nothing)."""
+        if not self.running:
+            return
+        house = self.house
+        house["deadlines"] = []
+        values = self.house_values()
+        now = dt_util.now()
+        ev = self.house_evidence(values, now)
+        result = schedule.household(values, ev, house)
+        key = (result["phase"], result["waiting"] is None)
+        if key != house.get("key"):
+            if house.get("key") is not None:
+                text = f"{result['reason']}." if result["waiting"] is None else \
+                    f"{result['reason']}, but {result['waiting']}."
+                house["log"] = [{"at": _iso(dt_util.utcnow()), "phase": result["phase"], "text": text},
+                                *house.get("log", [])][:LOG_LENGTH]
+            house["key"] = key
+            self.mgr.save_state()
+            self.mgr.notify()
+        house["result"] = result
+        nexts = schedule.upcoming(now, values, ev.sun_events, house, days=1)
+        times = [dt_util.as_utc(datetime.fromisoformat(n["at"])) for n in nexts[:2]]
+        times += [dt_util.as_utc(d) for d in house["deadlines"] if d]
+        if result.get("until"):
+            times.append(dt_util.as_utc(result["until"]))
+        utc = dt_util.utcnow()
+        when = min((t for t in times if t > utc), default=utc + timedelta(seconds=RECHECK_SECONDS))
+        when = min(when, utc + timedelta(seconds=RECHECK_SECONDS))
+        if house.get("timer"):
+            house["timer"]()
+        house["timer"] = async_track_point_in_utc_time(
+            self.hass, callback(lambda _now: self._house_timer()), when + timedelta(milliseconds=50))
+
+    @callback
+    def _house_timer(self) -> None:
+        self.house["timer"] = None
+        self.evaluate_house()
+
+    def export_house(self) -> dict[str, Any]:
+        h = self.house
+        return {"morning_since": _iso(h.get("morning_since")),
+                "evening": {"at": _iso(h["evening"]["at"]), "reason": h["evening"].get("reason")}
+                if h.get("evening") else None,
+                "key": list(h["key"]) if h.get("key") else None, "log": h.get("log", [])}
+
+    def restore_house(self, data: Any) -> None:
+        data = data if isinstance(data, Mapping) else {}
+        self.house = _new_house()
+        self.house["morning_since"] = dt_util.as_local(d) if (d := _dt(data.get("morning_since"))) else None
+        eve = data.get("evening")
+        if isinstance(eve, Mapping) and (d := _dt(eve.get("at"))):
+            self.house["evening"] = {"at": dt_util.as_local(d), "reason": str(eve.get("reason") or "")}
+        if isinstance(data.get("key"), list) and len(data["key"]) == 2:
+            self.house["key"] = tuple(data["key"])
+        self.house["log"] = [x for x in data.get("log") or () if isinstance(x, Mapping)][:LOG_LENGTH]
+
+    def house_model(self, config: CurtainConfig | None = None) -> dict[str, Any]:
+        """The Global Schedule status: phase now, why, what it waits for, the next transitions, today's bar."""
+        values = self.house_values(config)
+        now = dt_util.now()
+        events = self.sun_events()
+        result = self.house.get("result") if config is None else None
+        if result is None:   # a draft: worked out on a copy, the household state is not touched
+            copy_ = copy.deepcopy({k: v for k, v in self.house.items() if k != "timer"})
+            copy_["deadlines"] = []
+            result = schedule.household(values, self.house_evidence(values, now, copy_), copy_)
+        return {
+            "phase": result["phase"], "word": schedule.PHASE_WORDS[result["phase"]],
+            "since": _iso(result.get("since")), "until": _iso(result.get("until")), "reason": result["reason"],
+            "waiting": result.get("waiting"),
+            "next": schedule.upcoming(now, values, events, self.house),
+            "timeline": schedule.timeline(now.date(), values, now.tzinfo, events),
+            "log": self.house.get("log", []),
+            "sun_events": {k: _iso(v) for k, v in events.items()},
+        }
 
     # ------------------------------------------------------- manual events
     @callback
@@ -711,15 +857,17 @@ class AutoCurtains:
         ev = self._evidence(window, rt, values, now)
         flags = self.flags(window)
         decision = decide(flags, values, ev, hold=rt.hold, active_since=rt.active_since,
-                          morning_since=rt.morning_since)
+                          morning_since=rt.morning_since, evening_since=rt.evening)
         if decision.hold_release and rt.hold is not None:
             self._log(window, rt, "released", f"Manual hold released: {decision.hold_release}")
             rt.hold = None
             rt.applied = None
             decision = decide(flags, values, ev, hold=None, active_since=rt.active_since,
-                              morning_since=rt.morning_since)
+                              morning_since=rt.morning_since, evening_since=rt.evening)
         if decision.morning_start is not None:
             rt.morning_since = decision.morning_start
+        if decision.evening_start is not None:
+            rt.evening = dict(decision.evening_start)
         utc = dt_util.utcnow()
         for cond in PROTECTIVE:
             if decision.base == cond:
@@ -758,10 +906,10 @@ class AutoCurtains:
         ev = self._evidence(window, rt, values, now, dry=True)
         flags = self.flags_for(config or self.mgr.config, window)
         decision = decide(flags, values, ev, hold=rt.hold, active_since=rt.active_since,
-                          morning_since=rt.morning_since)
+                          morning_since=rt.morning_since, evening_since=rt.evening)
         if decision.hold_release and rt.hold is not None:
             decision = decide(flags, values, ev, hold=None, active_since=rt.active_since,
-                              morning_since=rt.morning_since)
+                              morning_since=rt.morning_since, evening_since=rt.evening)
         return decision
 
     def _schedule(self, window_id: str, rt: WindowRuntime, when: datetime | None) -> None:
@@ -979,7 +1127,11 @@ class AutoCurtains:
             "last_move_at": _iso(rt.last_move_at),
             "log": rt.log,
             "precedence": precedence(values),
-            "values": {k: (list(v) if isinstance(v, tuple) else v) for k, v in values.items()},
+            "values": dump_rules(values),
+            "schedule": {"evening": {"at": _iso(rt.evening["at"]), "reason": rt.evening.get("reason")}
+                         if rt.evening else None, "note": decision.note if decision else None,
+                         "next": schedule.upcoming(dt_util.now(), values, self.sun_events(),
+                                                   {"morning_since": rt.morning_since})[:3]},
             "sources": sources,
             "warnings": consistency(values),
         }
@@ -1033,6 +1185,8 @@ def summary(window: Window, decision: Decision | None, action: str, text: str, p
         lead = f"Lamp override active. {base} is configured to bypass lamp control. "
     if decision.condition == "manual_override":
         return f"{lead}Manual hold. {window.name} keeps its position."
+    if decision.note and decision.condition in ("waiting", "sleep") and decision.note.startswith("Morning"):
+        return f"{lead}{window.name}: {decision.note}"
     if decision.condition == "waiting":
         return f"{lead}Waiting for daylight. {window.name} keeps its position."
     target = decision.target
@@ -1040,6 +1194,8 @@ def summary(window: Window, decision: Decision | None, action: str, text: str, p
         if target.state == "no_action":
             return f"{lead}{word}. {window.name} is set to No action ({target.source_word}); leaving positions unchanged."
         return f"{lead}{word}. {window.name} has no assignment; leaving positions unchanged."
+    if decision.note and decision.note.startswith("Evening started"):
+        lead += f"{decision.note} "
     unassigned = target.unassigned()
     tail = f" {', '.join(unassigned)} unchanged (no assignment)." if unassigned else ""
     verb = {"would_move": " would go", "blocked": " (prevented)", "failed": " (failed)"}.get(action, "")

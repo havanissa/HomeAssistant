@@ -43,7 +43,7 @@ _TIME = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 @dataclass(frozen=True, slots=True)
 class Rule:
     key: str
-    kind: str                       # bool, int, float, time, choice, entity, days, set
+    kind: str                       # bool, int, float, time, choice, entity, days, set, dayplan
     default: Any
     group: str
     label: str
@@ -69,6 +69,9 @@ class Rule:
 
 
 def _jsonable(value: Any) -> Any:
+    if isinstance(value, tuple) and value and all(isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], tuple)
+                                                  for x in value):
+        return {str(d): dict(t) for d, t in value}   # a day plan
     return list(value) if isinstance(value, (tuple, frozenset, set)) else value
 
 
@@ -76,7 +79,8 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
     ("sleep", "Sleep mode", "Keeps sleep-protected windows closed while someone sleeps and decides what happens after."),
     ("lamp", "Window lamp", "A lamp in the window holds its own preset while it is on."),
     ("daylight", "Daylight", "Measured outdoor light decides when a window may open; the clock never does."),
-    ("schedule", "Night and morning", "The household night, the soft morning and when the day position starts."),
+    ("schedule", "Schedule", "When Morning, Daytime, Evening and Night begin. A phase only makes a mode eligible: "
+     "sleep, missing daylight and every other protection still apply."),
     ("sun", "Strong sunshine", "Sun protection needs the sun in front of the window and measured strong light."),
     ("manual", "Manual changes", "How long a manual move is kept before automatic control takes over again."),
     ("movement", "Movement safety", "Limits that keep covers from moving too often."),
@@ -121,18 +125,44 @@ RULES: tuple[Rule, ...] = (
     Rule("fallback_elevation", "float", 3.0, "daylight", "Sun clearly up at", "Only used by the fallback", -6, 30,
          "°"),
     # ------------------------------------------------------------- schedule
+    # 0.6.5 (Global Curtain Schedule): the keys of 0.6.2 are kept (stored values carry over); their labels
+    # now say what they are in the phase model Morning → Daytime → Evening → Night. ``night_end_*`` is the
+    # earliest Morning of that day, which is also when the night before it ends.
+    Rule("free_days", "days", (5, 6), "schedule", "Free days",
+         "Their Morning, Daytime and Evening use the free-day times (Mon–Sun)"),
+    Rule("morning_enabled", "bool", True, "schedule", "Morning phase",
+         "Off: the day starts directly with Daytime once there is daylight"),
+    Rule("night_end_workday", "time", "06:30", "schedule", "Morning from (normal days)",
+         "The earliest Morning; Night ends here. Opening still needs confirmed daylight and no sleep"),
+    Rule("night_end_free", "time", "08:00", "schedule", "Morning from (free days)"),
+    Rule("morning_mode", "choice", "duration", "schedule", "Daytime begins",
+         choices=(("duration", "A number of minutes after Morning begins"), ("until_time", "At a time of day"),
+                  ("not_before", "At a time of day, but not before Morning has lasted its minutes"))),
+    Rule("morning_minutes", "int", 120, "schedule", "Morning lasts", low=0, high=720, unit="min"),
+    Rule("day_from_workday", "time", "10:00", "schedule", "Daytime at (normal days)",
+         "For “at a time of day”"),
+    Rule("day_from_free", "time", "11:00", "schedule", "Daytime at (free days)"),
+    Rule("evening_rule", "choice", "legacy", "schedule", "Evening begins",
+         "A started Evening lasts until Night (except the 0.6.4 behaviour)",
+         choices=(("legacy", "When it is dark after 12:00 (0.6.4 behaviour, not kept)"),
+                  ("time", "At a time"), ("event", "At sunset or dusk"),
+                  ("first", "At a time or at sunset / dusk, whichever comes first"),
+                  ("last", "At a time or at sunset / dusk, whichever comes last")), confirm=True),
+    Rule("evening_event", "choice", "dusk", "schedule", "Sunset or dusk",
+         choices=(("dusk", "Measured dusk (outdoor light; the sun below the dark elevation without a sensor)"),
+                  ("sunset", "Sunset (the sun below the horizon)"))),
+    Rule("evening_time_workday", "time", "18:00", "schedule", "Evening at (normal days)", "12:00–23:59"),
+    Rule("evening_time_free", "time", "18:00", "schedule", "Evening at (free days)"),
     Rule("night_enabled", "bool", True, "schedule", "Night", "Closes for the household night"),
-    Rule("night_start_workday", "time", "22:30", "schedule", "Night starts (before a workday)"),
-    Rule("night_end_workday", "time", "06:30", "schedule", "Night ends (workday)",
-         "The earliest morning; opening still needs daylight"),
-    Rule("night_start_free", "time", "23:30", "schedule", "Night starts (before a free day)"),
-    Rule("night_end_free", "time", "08:00", "schedule", "Night ends (free day)"),
-    Rule("free_days", "days", (5, 6), "schedule", "Free days", "Weekend days"),
-    Rule("morning_mode", "choice", "duration", "schedule", "Morning lasts",
-         choices=(("duration", "A number of minutes"), ("until_time", "Until a time of day"))),
-    Rule("morning_minutes", "int", 120, "schedule", "Morning length", low=0, high=720, unit="min"),
-    Rule("day_from_workday", "time", "10:00", "schedule", "Day from (workday)", "When the morning lasts until a time"),
-    Rule("day_from_free", "time", "11:00", "schedule", "Day from (free day)"),
+    Rule("night_start_workday", "time", "22:30", "schedule", "Night from (normal evenings)",
+         "A time after midnight belongs to the evening before"),
+    Rule("night_start_free", "time", "23:30", "schedule", "Night from (late evenings)"),
+    Rule("late_evenings", "choice", "before_free", "schedule", "Late evenings",
+         choices=(("before_free", "Evenings before a free day"), ("custom", "Chosen evenings"))),
+    Rule("late_days", "days", (4, 5), "schedule", "Chosen late evenings",
+         "For “chosen evenings”: the evening of these days (e.g. Fri, Sat)"),
+    Rule("day_overrides", "dayplan", (), "schedule", "Per-day times",
+         "Optional times for single weekdays (Global Schedule → Advanced)", scopes=(GLOBAL,)),
     # ------------------------------------------------------------------ sun
     Rule("sun_lux", "int", 12000, "sun", "Strong sunshine from", low=100, high=200000, unit="lx"),
     Rule("sun_release_lux", "int", 8000, "sun", "Released below", low=0, high=200000, unit="lx"),
@@ -269,7 +299,41 @@ def validate(key: str, value: Any, scope: str) -> Any:
         if not isinstance(value, (list, tuple)) or any(v not in allowed for v in value):
             raise _bad(rule, "is not one of the choices")
         return tuple(c for c, _ in rule.choices if c in value)
+    if kind == "dayplan":
+        return _dayplan(rule, value)
     raise _bad(rule, "unsupported")  # pragma: no cover
+
+
+DAYPLAN_KEYS = ("morning", "day", "evening", "night")
+
+
+def _dayplan(rule: Rule, value: Any) -> tuple[tuple[int, tuple[tuple[str, str], ...]], ...]:
+    """Per-weekday times: {weekday 0-6: {morning|day|evening|night: "HH:mm"}}. "night" is the Night start on the
+    evening of that weekday; "morning" is that day's earliest Morning (and the end of the night before)."""
+    if isinstance(value, (list, tuple)):
+        value = {str(d): dict(t) for d, t in value}
+    if not isinstance(value, Mapping):
+        raise _bad(rule, "must be times per weekday")
+    out = []
+    for day, times in value.items():
+        try:
+            weekday = int(day)
+        except (TypeError, ValueError) as err:
+            raise _bad(rule, "unknown weekday") from err
+        if isinstance(day, bool) or weekday not in range(7) or not isinstance(times, Mapping):
+            raise _bad(rule, "unknown weekday")
+        clean = []
+        for key, text in times.items():
+            if key not in DAYPLAN_KEYS:
+                raise _bad(rule, f"unknown phase {key}")
+            if text in (None, ""):
+                continue
+            if not isinstance(text, str) or not _TIME.match(text.strip()):
+                raise _bad(rule, "times must be like 07:00 or 23:55")
+            clean.append((key, text.strip()))
+        if clean:
+            out.append((weekday, tuple(sorted(clean))))
+    return tuple(sorted(out))
 
 
 def load(raw: Any, scope: str) -> dict[str, Any]:
@@ -319,4 +383,9 @@ def consistency(values: Mapping[str, Any]) -> list[str]:
         problems.append("The dark elevation must not be above the daylight elevation")
     if values["max_temp"] <= values["preferred_temp"] + values["comfort_band"]:
         problems.append("“Maximum acceptable” must be above the comfortable range")
+    if values["evening_rule"] != "legacy":
+        for key in ("evening_time_workday", "evening_time_free"):
+            if values[key] < "12:00":
+                problems.append("Evening times must be 12:00–23:59")
+                break
     return problems

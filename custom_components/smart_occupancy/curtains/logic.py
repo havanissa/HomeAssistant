@@ -66,11 +66,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
+from . import schedule
 from .config import CONDITION_WORDS, MODE_WORDS, SUN_FALLBACK
 from .modes import NOTHING, Effective, mapping_effective
+# 0.6.5: the schedule lives in schedule.py (one evaluation for windows and the household); these names stay here.
+from .schedule import at as _at, day_from, is_free, night_bounds, night_now  # noqa: F401
 
 PROTECTIVE = ("sleep", "night", "evening_privacy")
 SUN_BASES = frozenset({"sun", "glare", "heat", "solar_heating"})   # the sun is in front and shining
@@ -137,50 +140,6 @@ class Hysteresis:
 
     def reset(self) -> None:
         self.state = None
-
-
-# ------------------------------------------------------------------ schedule
-def _at(day: date, hhmm: str, tz) -> datetime:
-    hours, minutes = (int(x) for x in hhmm.split(":"))
-    return datetime(day.year, day.month, day.day, hours, minutes, tzinfo=tz)
-
-
-def is_free(day: date, values: Mapping[str, Any]) -> bool:
-    return day.weekday() in values["free_days"]
-
-
-def night_bounds(evening: date, values: Mapping[str, Any], tz) -> tuple[datetime, datetime]:
-    """The night that begins on the evening of ``evening``: the times of the morning after decide
-    (a night before a free day starts and ends at the free-day times)."""
-    morning = evening + timedelta(days=1)
-    free = is_free(morning, values)
-    start_t = values["night_start_free" if free else "night_start_workday"]
-    end_t = values["night_end_free" if free else "night_end_workday"]
-    start = _at(evening, start_t, tz) if start_t >= "12:00" else _at(morning, start_t, tz)
-    end = _at(morning, end_t, tz)
-    return start, max(start, end)
-
-
-def night_now(now: datetime, values: Mapping[str, Any]) -> tuple[bool, datetime | None, datetime | None]:
-    """(inside the night, when that changes next, when the current or last night ended / ends)."""
-    if not values["night_enabled"]:
-        return False, None, None
-    tz = now.tzinfo
-    today = now.date()
-    for evening in (today - timedelta(days=1), today):
-        start, end = night_bounds(evening, values, tz)
-        if start <= now < end:
-            return True, end, end
-    starts = [s for d in (today - timedelta(days=1), today, today + timedelta(days=1))
-              if (s := night_bounds(d, values, tz)[0]) > now]
-    last_end = max((e for d in (today - timedelta(days=1), today) if (e := night_bounds(d, values, tz)[1]) <= now),
-                   default=None)
-    return False, min(starts) if starts else None, last_end
-
-
-def day_from(now: datetime, values: Mapping[str, Any]) -> datetime:
-    return _at(now.date(), values["day_from_free" if is_free(now.date(), values) else "day_from_workday"],
-               now.tzinfo)
 
 
 # ----------------------------------------------------------------- evidence
@@ -254,6 +213,8 @@ class Decision:
     direct_sun: dict[str, Any] = field(default_factory=dict)
     thermal: dict[str, Any] = field(default_factory=dict)
     sun_hold: bool = False            # kept in its sun position: the weather evidence was lost
+    evening_start: dict[str, Any] | None = None   # 0.6.5: an Evening that started now ({"at", "reason"})
+    note: str | None = None           # 0.6.5: the schedule's explanation for the decision log
     target: Effective = NOTHING       # 0.6.4: what the condition sends, per cover, and where it comes from
     lamp_bypassed: bool = False       # the lamp is on, but the base condition is set to win over it
 
@@ -270,7 +231,7 @@ class Decision:
                 "text": self.text, "evidence": self.evidence, "hold_release": self.hold_release,
                 "next_check": self.next_check.isoformat(timespec="seconds") if self.next_check else None,
                 "opening_blocked": self.opening_blocked, "phase": self.phase, "direct_sun": self.direct_sun,
-                "thermal": self.thermal, "lamp_bypassed": self.lamp_bypassed}
+                "thermal": self.thermal, "lamp_bypassed": self.lamp_bypassed, "note": self.note}
 
 
 def precedence(values: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -418,7 +379,8 @@ def _hold_release(hold: Mapping[str, Any], base: str, phase: str, values: Mappin
 
 
 def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mapping[str, Any] | None,
-           active_since: Mapping[str, datetime], morning_since: datetime | None) -> Decision:
+           active_since: Mapping[str, datetime], morning_since: datetime | None,
+           evening_since: Mapping[str, Any] | None = None) -> Decision:
     """The condition, preset and explanation for one window now."""
     now = ev.now
     notes: list[str] = []
@@ -451,17 +413,28 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
     day_cond = "day"
     sun_hold = False
     evening = now.hour >= 12
-    dark = ev.dusk_measured or (ev.elevation is not None and ev.elevation <= values["dusk_elevation"])
+    note = None
+    evening_start = None
     sleep_on = flags.sleep_protection and ev.sleep == "on"
+    eve = schedule.EveningState(False)
+    if not sleep_on and not night and flags.privacy:
+        eve = schedule.evening(now, values, ev, evening_since)
+        if eve.deadline:
+            deadlines.append(eve.deadline)
     if sleep_on:
         base, text = "sleep", "Sleep mode is on"
+        if not night and not evening and now >= schedule.morning_from(now, values):
+            note = "Morning is eligible, but Sleep Mode is on. Holding current positions."
     elif night:
         base, text = "night", f"Night protection active until {_fmt(night_change)}"
-    elif flags.privacy and dark and evening:
-        base = "evening_privacy"
-        text = "Dark outside in the evening" + (f" ({ev.lux:.0f} lx)" if ev.lux_status == "ok" else
-                                                f" (sun at {ev.elevation:.1f}°)" if ev.elevation is not None else "")
+    elif eve.active:
+        base, text = "evening_privacy", eve.text
+        evening_start = eve.start
+        if eve.start:
+            note = f"Evening started because {eve.start['reason']}."
     else:
+        if eve.waiting:
+            notes.append(eve.waiting)
         if ev.lux_status != "none":
             daylight_ok = ev.lux_status == "ok" and ev.daylight is True and ev.elevation is not None \
                 and ev.elevation >= values["daylight_elevation"]
@@ -488,6 +461,10 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
                 opening_blocked = "there is no outdoor light sensor and no fallback is allowed"
         if opening_blocked:
             base = "waiting"
+            if not evening and values["morning_enabled"] and now >= schedule.morning_from(now, values):
+                note = ("Morning is eligible, but daylight has not been confirmed. Holding current positions."
+                        if not (flags.sleep_protection and ev.sleep == "unknown") else
+                        "Morning is eligible, but the sleep source is unavailable. Holding current positions.")
             woke = flags.sleep_protection and ev.sleep == "off" and ev.sleep_ended is not None \
                 and ev.sleep_ended.date() == now.date()
             sun_note = ("Sun protection not activated because direct sunshine cannot be confirmed. "
@@ -507,17 +484,16 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
         else:
             # Morning is a phase of its own when anything is set for it (a preset, or an explicit No action
             # that keeps the covers during the morning); with nothing at all the day starts directly (0.6.2).
-            morning_used = flags.lookup("morning").state != "nothing" and not (
+            morning_used = values["morning_enabled"] and flags.lookup("morning").state != "nothing" and not (
                 flags.sleep_protection and values["sleep_end"] == "resume")
             since = morning_since if morning_since is not None and morning_since.date() == now.date() else None
-            if since is None and morning_used and not evening:  # a morning starts before noon
+            # A morning starts before noon, not before the day's Morning time (0.6.5), and only once: a finished
+            # Morning is never started again that day.
+            if since is None and morning_used and not evening and now >= schedule.morning_from(now, values):
                 since = morning_start = now
             in_morning = False
             if morning_used and since is not None:
-                if values["morning_mode"] == "until_time":
-                    end = day_from(now, values)
-                else:
-                    end = since + timedelta(minutes=values["morning_minutes"])
+                end = schedule.morning_end(since, now, values)
                 if now < end:
                     in_morning = True
                     deadlines.append(end)
@@ -543,7 +519,8 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
     phase = (day_cond if base == "solar_heating" else base) if base not in PHASE_EXEMPT else base
     extras = {"phase": phase, "direct_sun": direct_sun(flags, values, ev) if flags.solar_protection else
               {"status": "off", "text": "Sun protection is off for this window"},
-              "thermal": thermal_view(values, ev), "sun_hold": sun_hold}
+              "thermal": thermal_view(values, ev), "sun_hold": sun_hold, "evening_start": evening_start,
+              "note": note}
 
     # ---- manual hold
     hold_release = None

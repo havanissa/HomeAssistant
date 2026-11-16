@@ -57,7 +57,7 @@ STORE_VERSION = 1
 # 0.6.2: automatic rule settings (defaults, rooms, window auto); 0.6.3: environment / thermal settings, the
 # Glare and Excess heat mappings and the overhang limit. Older data loads as it is (new keys are defaults).
 # 0.6.4: Global Modes (modes, room_modes), cover presets per layer, cover overrides and explicit No action.
-STORE_MINOR_VERSION = 4
+STORE_MINOR_VERSION = 4   # 0.6.5 adds settings keys only (defaults reproduce 0.6.4; nothing to migrate)
 STATE_STORE_KEY = "smart_occupancy.curtains_state"
 STATE_STORE_VERSION = 1
 SIGNAL_CURTAINS_UPDATED = "smart_occupancy_curtains_updated"
@@ -115,6 +115,7 @@ class CurtainManager:
                         if isinstance(a, (int, float)) and isinstance(b, (int, float))]
         self.auto.restore(state.get("auto"))
         self.auto.restore_sensors(state.get("sensors"))
+        self.auto.restore_house(state.get("house"))
         # An operation that was running when Home Assistant stopped is not resumed and never re-sent. Its
         # covers may still be travelling and report the rest of that movement: those reports are ours, not
         # a manual change.
@@ -149,7 +150,7 @@ class CurtainManager:
         self._state_dirty = False
         return {"last": self.last, "history": self.history, "manual": self.manual,
                 "samples": [list(s) for s in self.samples], "auto": self.auto.export(),
-                "sensors": self.auto.export_sensors()}
+                "sensors": self.auto.export_sensors(), "house": self.auto.export_house()}
 
     def save_state(self) -> None:
         self._save_state()

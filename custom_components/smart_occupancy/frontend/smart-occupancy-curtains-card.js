@@ -1,10 +1,10 @@
 /*
- * Smart Occupancy curtains card (served by the smart_occupancy integration, 0.6.4).
+ * Smart Occupancy curtains card (served by the smart_occupancy integration, 0.6.5).
  *
  *   type: custom:smart-occupancy-curtains-card
  *   title: Curtains        # optional
  *   area: stova            # optional: only the windows of one room
- *   page: modes            # optional: open on Global Modes instead of Windows
+ *   page: modes            # optional: open on Global Modes (or "schedule": Global Schedule)
  *
  * 0.6.4 (Global Curtain Modes): Curtains → Global Modes. Mode cards (Morning,
  * Daytime, Evening, Night, Sleep, Sun Protection; Window Lamp, Glare and
@@ -37,7 +37,7 @@
  * times are 24-hour HH:mm in Home Assistant's time zone, also the time fields.
  */
 
-const VERSION = "0.6.4";
+const VERSION = "0.6.5";
 const CARD = "smart-occupancy-curtains-card";
 const WS = "smart_occupancy/curtains";
 
@@ -148,6 +148,20 @@ const SRC_TAG = { global: "G", room: "R", window: "W", cover: "C", mixed: "M" };
 const SRC_TONE = { global: "info", room: "warn", window: "warn", cover: "warn", mixed: "muted" };
 const SRC_WORD = { global: "Global Mode", room: "Room override", window: "Window override", cover: "Cover override", mixed: "Mixed" };
 const MODE_STATUS_TONE = { automatic: "ok", observing: "info", off: "muted" };
+// Global Schedule (0.6.5)
+const SCH_ICON = { morning: "mdi:weather-sunset-up", day: "mdi:white-balance-sunny", evening: "mdi:weather-sunset-down", night: "mdi:weather-night" };
+const SCH_EXPLAIN = {
+  duration: "Each window's Morning lasts this many minutes from when it actually began (daylight, after sleep).",
+  until_time: "Daytime begins at the time of day. A Morning that could not begin before it (dark, asleep) is skipped, never started late.",
+  not_before: "Daytime begins at the time of day, but only once Morning has lasted its minutes.",
+  legacy: "As 0.6.4: Evening privacy while it is dark after 12:00; it ends again if it gets lighter.",
+  time: "Evening begins at the configured time, whatever the light.",
+  event: "Evening begins at sunset or measured dusk (see below); it waits when neither can be determined.",
+  first: "Whichever comes first: e.g. dusk at 16:35 in winter, 18:00 in summer.",
+  last: "Whichever comes last: e.g. 18:00 in winter, dusk in summer. Without sun or light data the time is used.",
+  dusk: "Outdoor light below the dark level for the stable period; without a working sensor the sun below the dark elevation.",
+  sunset: "The sun's upper edge below the horizon (from sun.sun).",
+};
 const ENTITY_LIST = { sleep_entity: "sleep", lux_entity: "lux", lamp_entity: "light" };
 const num1 = (v) => (v == null ? "—" : `${Math.round(v * 10) / 10}`);
 
@@ -298,7 +312,8 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     const focusSel = active && active.dataset ? Object.entries(active.dataset).map(([k, v]) => `[data-${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}="${CSS.escape(v)}"]`).join("") : "";
     const typing = active && active.tagName === "INPUT" && ["text", "number"].includes(active.type) ? active.value : null;
     const w = this._view && this._win(this._view);
-    const page = w ? this._windowView(w) : this._pageName() === "modes" ? this._modesPage() : this._overview();
+    const name = this._pageName();
+    const page = w ? this._windowView(w) : name === "modes" ? this._modesPage() : name === "schedule" ? this._schedulePage() : this._overview();
     this.shadowRoot.innerHTML = `${STYLE}<ha-card>${page}</ha-card>`;
     if (focusSel) {
       const el = this.shadowRoot.querySelector(`${active.tagName.toLowerCase()}${focusSel}`);
@@ -808,11 +823,12 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       case "int": case "float":
         input = `<input type="number" class="num" min="${rule.low}" max="${rule.high}" step="${rule.step || (rule.kind === "float" ? 0.5 : 1)}" value="${esc(value ?? "")}" ${attrs}>${rule.unit ? ` ${esc(rule.unit)}` : ""}`; break;
       // 24-hour time as text: a native time field shows AM/PM in some browser locales.
-      case "time": input = `<input type="text" class="time" inputmode="numeric" maxlength="5" autocomplete="off" spellcheck="false" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" placeholder="HH:mm" aria-describedby="${id}-fmt" value="${esc(value || "")}" ${attrs}><span class="sub" id="${id}-fmt">24-hour, HH:mm</span>`; break;
+      case "time": input = `<input type="text" class="time" inputmode="numeric" maxlength="8" autocomplete="off" spellcheck="false" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" placeholder="HH:mm" aria-describedby="${id}-fmt" value="${esc(value || "")}" ${attrs}><span class="sub" id="${id}-fmt">24-hour, HH:mm</span>`; break;
       case "choice": input = `<select ${attrs}>${rule.choices.map(([c, l]) => `<option value="${c}" ${c === value ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`; break;
       case "entity": input = `<input type="text" list="dl-${rule.entity_list || ENTITY_LIST[rule.key] || "sleep"}" value="${esc(value || "")}" placeholder="none" ${attrs}>`; break;
       case "days": input = `<div class="segs days">${this._model.rules.weekdays.map((d, i) => `<button class="seg ${(value || []).includes(i) ? "on" : ""}" aria-pressed="${(value || []).includes(i)}" data-action="rule-day" data-key="${rule.key}" data-day="${i}" ${ro}>${d}</button>`).join("")}</div>`; break;
       case "set": input = `<div class="chks">${rule.choices.map(([c, l]) => `<label class="chk"><input type="checkbox" data-control="rule-set" data-key="${rule.key}" data-choice="${c}" ${(value || []).includes(c) ? "checked" : ""} ${ro}>${esc(l)}</label>`).join("")}</div>`; break;
+      case "dayplan": input = `<span class="sub">Set on Curtains → Global Schedule → Advanced</span>`; break;
       default: input = esc(value);
     }
     const own = source === scope;
@@ -979,12 +995,12 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
   }
 
   // ------------------------------------------------------- Global Modes (0.6.4)
-  _pageName() { return this._page || (this._config.page === "modes" ? "modes" : "windows"); }
+  _pageName() { return this._page || (["modes", "schedule"].includes(this._config.page) ? this._config.page : "windows"); }
 
   _pageTabs() {
     const on = this._pageName();
     const tab = (k, label, icon) => `<button class="seg ${on === k ? "on" : ""}" aria-pressed="${on === k}" data-action="page" data-page="${k}"><ha-icon icon="${icon}"></ha-icon>${label}</button>`;
-    return `<div class="pagetabs"><div class="segs" role="group" aria-label="Curtains">${tab("windows", "Windows", "mdi:window-closed-variant")}${tab("modes", "Global Modes", "mdi:view-grid-outline")}</div></div>`;
+    return `<div class="pagetabs"><div class="segs" role="group" aria-label="Curtains">${tab("windows", "Windows", "mdi:window-closed-variant")}${tab("modes", "Global Modes", "mdi:view-grid-outline")}${tab("schedule", "Global Schedule", "mdi:calendar-clock")}</div></div>`;
   }
 
   _gm() {
@@ -1029,15 +1045,21 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
   // A change made outside the Global Modes draft (Window settings): saved at once unless it would move an
   // Automatic window now (or it is a migration), which is reviewed and confirmed first.
   async _quickChange(ops, key, forceReview = false) {
+    return this._quickMsg({ type: `${WS}/modes/change`, ops }, key, forceReview);
+  }
+
+  // A reviewed change (Global Modes ops, or schedule settings, 0.6.5): saved at once unless it would move an
+  // Automatic window now (or a review is asked for), which is shown and confirmed first.
+  async _quickMsg(base, key, forceReview = false) {
     this._status[key] = { busy: true };
     this._requestRender();
     try {
-      const res = await this._ws({ type: `${WS}/modes/change`, ops, dry_run: true });
+      const res = await this._ws({ ...base, dry_run: true });
       delete this._status[key];
       if (res.needs_confirm || forceReview) {
-        this._ui.review = { ops, result: res, key, policy: null };
+        this._ui.review = { base, result: res, key, policy: null };
       } else {
-        await this._ws({ type: `${WS}/modes/change`, ops });
+        await this._ws(base);
         this._status[key] = { ok: "Saved" };
         setTimeout(() => { if (this._status[key]?.ok) { delete this._status[key]; this._requestRender(); } }, 2000);
       }
@@ -1050,10 +1072,14 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
 
   async _openReview(ops, key) {
     if (!ops || !ops.length) return;
-    this._ui.review = { ops, key, result: null, policy: null };
+    await this._openReviewMsg({ type: `${WS}/modes/change`, ops }, key);
+  }
+
+  async _openReviewMsg(base, key) {
+    this._ui.review = { base, key, result: null, policy: null };
     this._render();
     try {
-      const res = await this._ws({ type: `${WS}/modes/change`, ops, dry_run: true });
+      const res = await this._ws({ ...base, dry_run: true });
       if (this._ui.review) this._ui.review.result = res;
     } catch (err) {
       if (this._ui.review) this._ui.review.error = err?.message || String(err);
@@ -1068,9 +1094,10 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     r.sending = true;
     this._render();
     try {
-      await this._ws({ type: `${WS}/modes/change`, ops: r.ops, confirm: !!r.result.needs_confirm, policy: r.policy || "now" });
+      await this._ws({ ...r.base, confirm: !!r.result.needs_confirm, policy: r.policy || "now" });
       this._ui.review = null;
       if (r.key === "global") Object.assign(this._gm(), { ops: [], draft: null, pending: null, error: null, cell: null });
+      else if (r.key === "schedule") Object.assign(this._sch(), { values: {}, error: null });
       else { this._status[r.key] = { ok: "Saved" }; setTimeout(() => { delete this._status[r.key]; this._requestRender(); }, 2000); }
     } catch (err) {
       r.sending = false;
@@ -1106,6 +1133,8 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     return `<div class="confirm ask" role="dialog" aria-label="Review changes">
       <div class="chead">Review ${res.changes.length} change${res.changes.length === 1 ? "" : "s"}</div>
       <ul class="clines">${res.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>
+      ${res.transitions ? `<div class="stitle small">Next transitions</div><div class="trcmp">
+        <div><div class="sub">Now</div>${this._transList(res.transitions.before)}</div><div><div class="sub">Proposed</div>${this._transList(res.transitions.after)}</div></div>` : ""}
       <div class="stitle small">${res.impact.length ? `Affected windows (${res.impact.length})` : "No window's effective preset changes"}</div>${rows}
       ${needs ? `<div class="stitle small">Automatic windows whose current position would change</div>
         <div class="chks col" role="radiogroup" aria-label="When to apply">${pol("now", "Apply now", "The automatic controller moves them now, after all its normal safety checks (manual holds, movement limits, competing automations).")}
@@ -1335,6 +1364,183 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       ${this._canEdit && l.presets.length < 12 ? `<button class="btn small ghost" data-action="cp-add" data-layer="${esc(l.layer_id)}"><ha-icon icon="mdi:plus"></ha-icon>Add preset</button>` : ""}</details>`;
   }
 
+  // ---------------------------------------------------- Global Schedule (0.6.5)
+  _sch() {
+    if (!this._ui.sch) this._ui.sch = { open: null, values: {}, error: null };
+    return this._ui.sch;
+  }
+
+  _schVal(key) {
+    const d = this._sch().values;
+    return key in d ? d[key] : this._model.schedule.values[key];
+  }
+
+  _rule(key) { return this._model.rules.schema.find((r) => r.key === key); }
+
+  _schSet(key, value) {
+    const s = this._sch();
+    s.error = null;
+    if (JSON.stringify(value) === JSON.stringify(this._model.schedule.values[key])) delete s.values[key];
+    else s.values[key] = value;
+    this._render();
+  }
+
+  _transList(list) {
+    if (!list || !list.length) return `<div class="muted">None scheduled</div>`;
+    return list.slice(0, 5).map((t) => `<div class="trow"><ha-icon icon="${SCH_ICON[t.phase]}"></ha-icon><time datetime="${esc(t.at)}">${t.approx ? "≈ " : ""}${fmtTime(t.at)}</time> <b>${esc(t.word)}</b><span class="sub">${esc(t.reason)}</span></div>`).join("");
+  }
+
+  _schTime(key, label) {
+    const id = `sch-${key}`;
+    const draft = key in this._sch().values;
+    return `<div class="frow"><label for="${id}">${esc(label)}</label><div class="fval"><input id="${id}" type="text" class="time ${draft ? "draft" : ""}" inputmode="numeric" maxlength="8" autocomplete="off" spellcheck="false"
+      pattern="([01][0-9]|2[0-3]):[0-5][0-9]" placeholder="HH:mm" aria-describedby="${id}-fmt" value="${esc(this._schVal(key) || "")}" data-control="sch-time" data-key="${key}" ${this._ro}>
+      <span class="sub" id="${id}-fmt">24-hour, HH:mm</span>${this._schSource(key)}</div></div>`;
+  }
+
+  _schSource(key) {
+    const src = this._model.schedule.sources[key];
+    return key in this._sch().values ? `<span class="pill warn">unsaved</span>` : src === "default" ? `<span class="sub">default</span>` : "";
+  }
+
+  _schChoice(key, explain = {}) {
+    const rule = this._rule(key);
+    const v = this._schVal(key);
+    return `<div class="chks col" role="radiogroup" aria-label="${esc(rule.label)}">${rule.choices.map(([c, l]) => `<label class="chk ptoggle"><input type="radio" name="sch-${key}" value="${c}" data-control="sch-choice" data-key="${key}" ${v === c ? "checked" : ""} ${this._ro}>
+      <span><b>${esc(l)}</b>${explain[c] ? `<br><span class="sub">${esc(explain[c])}</span>` : ""}</span></label>`).join("")}</div>`;
+  }
+
+  _schBool(key, label, hint) {
+    return `<label class="chk ptoggle"><input type="checkbox" data-control="sch-bool" data-key="${key}" ${this._schVal(key) ? "checked" : ""} ${this._ro}><span><b>${esc(label)}</b>${hint ? `<br><span class="sub">${esc(hint)}</span>` : ""}</span></label>`;
+  }
+
+  _schDays(key, label) {
+    const v = this._schVal(key) || [];
+    return `<div class="frow"><label>${esc(label)}</label><div class="fval"><div class="segs days" role="group" aria-label="${esc(label)}">${this._model.rules.weekdays.map((d, i) => `<button class="seg ${v.includes(i) ? "on" : ""}" aria-pressed="${v.includes(i)}" data-action="sch-day" data-key="${key}" data-day="${i}" ${this._ro}>${d}</button>`).join("")}</div>${this._schSource(key)}</div></div>`;
+  }
+
+  _schSummary(phase) {
+    const v = (k) => this._schVal(k);
+    const freeDiff = (a, b) => (v(a) !== v(b) ? ` · free days ${v(b)}` : "");
+    if (phase === "morning") return v("morning_enabled") ? { rule: `From ${v("night_end_workday")}${freeDiff("night_end_workday", "night_end_free")} · needs confirmed daylight, nobody asleep`, time: v("night_end_workday") } : { rule: "Off: Daytime starts directly when there is daylight", time: "—" };
+    if (phase === "day") {
+      const m = v("morning_mode");
+      if (m === "duration") return { rule: `${v("morning_minutes")} min after Morning begins`, time: `+${v("morning_minutes")} min` };
+      return { rule: `At ${v("day_from_workday")}${freeDiff("day_from_workday", "day_from_free")}${m === "not_before" ? `, not before Morning has lasted ${v("morning_minutes")} min` : ""}`, time: v("day_from_workday") };
+    }
+    if (phase === "evening") {
+      const r = v("evening_rule");
+      const ev = v("evening_event") === "sunset" ? "sunset" : "dusk";
+      const t = `${v("evening_time_workday")}${freeDiff("evening_time_workday", "evening_time_free")}`;
+      const rule = { legacy: "When it is dark after 12:00 (0.6.4 behaviour, not kept)", time: `At ${t}`, event: `At ${ev}`, first: `${t} or ${ev}, whichever comes first`, last: `${t} or ${ev}, whichever comes last` }[r];
+      return { rule, time: r === "legacy" || r === "event" ? ev : v("evening_time_workday") };
+    }
+    if (!v("night_enabled")) return { rule: "Off", time: "—" };
+    const late = v("late_evenings") === "custom" ? (v("late_days") || []).map((d) => this._model.rules.weekdays[d]).join(", ") || "none" : "evenings before a free day";
+    return { rule: `${v("night_start_workday")} · late evenings (${late}) ${v("night_start_free")}`, time: v("night_start_workday") };
+  }
+
+  _schEditor(phase) {
+    const sleepHint = "Sleep settings apply to windows with sleep protection on.";
+    if (phase === "morning") return `${this._schBool("morning_enabled", "Morning phase", "Off: the day starts directly with Daytime once there is daylight")}
+      ${this._schTime("night_end_workday", "Earliest Morning (normal days)")}${this._schTime("night_end_free", "Earliest Morning (free days)")}
+      <div class="note">Morning makes the Morning preset <b>eligible</b> from this time. It is applied only once confirmed daylight is measured and nobody sleeps in a sleep-protected room; in the dark, with a missing sensor or while asleep the covers keep their position. Night ends at this time too.</div>
+      <div class="stitle small">After sleep</div><div class="hint">${sleepHint}</div>${this._schChoice("sleep_end")}
+      ${this._schBool("sleep_require_daylight", "Opening after sleep needs daylight", "Off: when sleep ends after the Morning time, Morning starts at once, also in the dark")}`;
+    if (phase === "day") return `${this._schChoice("morning_mode", SCH_EXPLAIN)}
+      <div class="frow"><label for="sch-mm">Morning lasts</label><div class="fval"><input id="sch-mm" type="number" class="num" min="0" max="720" value="${esc(this._schVal("morning_minutes"))}" data-control="sch-num" data-key="morning_minutes" ${this._ro}> min${this._schSource("morning_minutes")}</div></div>
+      ${this._schTime("day_from_workday", "Daytime at (normal days)")}${this._schTime("day_from_free", "Daytime at (free days)")}
+      <div class="hint">A window whose Morning could not start (dark, asleep) is not opened by Daytime either: opening always needs daylight. A finished Morning never starts again that day. Sun Protection, Glare and Excessive Heat still win over Daytime.</div>`;
+    if (phase === "evening") return `${this._schChoice("evening_rule", SCH_EXPLAIN)}
+      <div class="stitle small">Solar event</div>${this._schChoice("evening_event", SCH_EXPLAIN)}
+      ${this._schTime("evening_time_workday", "Evening at (normal days)")}${this._schTime("evening_time_free", "Evening at (free days)")}
+      <div class="hint">Evening applies the Evening preset to windows with evening privacy on. Once started it lasts until Night: a passing cloud does not end it. Dusk needs the outdoor light below the dark level for its stable period (or the sun below the dark elevation without a sensor). When neither is available, a time rule still starts Evening at its time; otherwise the reason it waits is shown.</div>`;
+    return `${this._schBool("night_enabled", "Night", "Closes for the household night; works without any light sensor")}
+      ${this._schTime("night_start_workday", "Night from (normal evenings)")}${this._schTime("night_start_free", "Night from (late evenings)")}
+      <div class="frow"><label>Late evenings</label><div class="fval">${this._schChoice("late_evenings")}</div></div>
+      ${this._schVal("late_evenings") === "custom" ? this._schDays("late_days", "Late evenings on") : ""}
+      <div class="note">Night belongs to the <b>evening</b> it starts on: Friday 23:55 is Friday evening. A time after midnight (e.g. 00:30) still belongs to the evening before. Night ends at the next day's Morning time (that day's own profile).</div>`;
+  }
+
+  _timelineHtml(h) {
+    const segs = h.timeline || [];
+    const p = timeParts(new Date());
+    const nowMin = Number(p.hour) * 60 + Number(p.minute);
+    return `<div class="tl" role="img" aria-label="Today: ${segs.map((s) => `${s.word} ${String(Math.floor(s.from / 60)).padStart(2, "0")}:${String(s.from % 60).padStart(2, "0")}`).join(", ")}">
+      ${segs.map((s) => `<i class="tlseg ph-${s.phase}" style="left:${(s.from / 14.4).toFixed(2)}%;width:${((s.to - s.from) / 14.4).toFixed(2)}%" title="${esc(s.word)}"></i>`).join("")}
+      <i class="tlnow" style="left:${(nowMin / 14.4).toFixed(2)}%"></i></div>
+      <div class="tlaxis" aria-hidden="true"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+      <div class="tllegend">${["night", "morning", "day", "evening"].map((k) => `<span><i class="ph-${k}"></i>${esc({ night: "Night", morning: "Morning", day: "Daytime", evening: "Evening" }[k])}</span>`).join("")}<span class="sub">≈ Morning and Evening may wait for daylight or dusk</span></div>`;
+  }
+
+  _schedulePage() {
+    const m = this._model.schedule;
+    const sch = this._sch();
+    const h = m.house;
+    const next = h.next[0];
+    const draft = Object.keys(sch.values).length;
+    let body = `<div class="header"><ha-icon icon="mdi:calendar-clock"></ha-icon><div class="titles">
+        <div class="title">${esc(this._config.title || "Curtains")} · Global Schedule</div>
+        <div class="sub">${esc(m.implementation)} · ${esc(m.time_zone || "")}</div></div></div>
+      ${this._pageTabs()}<div class="pad">${this._reviewHtml()}`;
+    body += `<div class="schstatus"><ha-icon icon="${SCH_ICON[h.phase]}"></ha-icon><div class="amain">
+        <div><span class="sub">Household phase now</span><br><b class="big">${esc(h.word)}</b>${h.since ? ` <span class="sub">since ${fmtTime(h.since)}</span>` : ""}</div>
+        <div class="sub">${esc(h.reason)}</div>
+        ${h.waiting ? `<div class="warn">Waiting: ${esc(h.waiting)}</div>` : ""}
+        ${next ? `<div>Next: <b>${esc(next.word)}</b> ${next.approx ? "≈ " : ""}<time datetime="${esc(next.at)}">${fmtTime(next.at)}</time> <span class="sub">— ${esc(next.reason)}</span></div>` : ""}
+        <div class="chips"><span class="chip small"><ha-icon icon="mdi:brightness-6"></ha-icon>${m.lux_entity ? `Opening needs daylight from ${esc(m.lux_entity)}` : "No outdoor light sensor"}</span>
+          <span class="chip small"><ha-icon icon="mdi:sleep"></ha-icon>Sleep keeps sleep-protected rooms closed</span></div></div></div>
+      <div class="hint">A phase is a reference for every window, not a command: each window still decides on its own (sleep, daylight, sun, lamp, manual holds) and uses its own presets from Global Modes; a window without an assignment keeps its position.</div>`;
+    body += m.warnings.map((t) => `<div class="issue warn"><ha-icon icon="mdi:alert-outline"></ha-icon><div class="imain">${esc(t)}</div></div>`).join("");
+    body += this._timelineHtml(h);
+    if (draft) {
+      body += `<div class="draftbar" role="status"><span><b>${draft} unsaved change${draft === 1 ? "" : "s"}</b> <span class="sub">· nothing changes until you review and save</span></span>
+        <div class="actions"><button class="btn small" data-action="sch-review">Review & save</button><button class="btn small ghost" data-action="sch-discard">Discard</button></div></div>`;
+    }
+    if (sch.error) body += `<div class="issue bad" role="alert"><ha-icon icon="mdi:close-octagon-outline"></ha-icon><div class="imain">${esc(sch.error)}</div></div>`;
+    body += `<div class="schrows">${["morning", "day", "evening", "night"].map((ph) => {
+      const sum = this._schSummary(ph);
+      const open = sch.open === ph;
+      return `<div class="schrow ${open ? "open" : ""} ${h.phase === ph ? "now" : ""}"><button class="schhead" data-action="sch-open" data-phase="${ph}" aria-expanded="${open}">
+          <ha-icon icon="${SCH_ICON[ph]}"></ha-icon><span class="schname">${esc({ morning: "Morning", day: "Daytime", evening: "Evening", night: "Night" }[ph])}${h.phase === ph ? ` <span class="pill ok">now</span>` : ""}</span>
+          <span class="schrule">${esc(sum.rule)}</span><span class="schtime">${esc(sum.time)}</span><ha-icon icon="mdi:chevron-${open ? "up" : "down"}"></ha-icon></button>
+        ${open ? `<div class="schbody">${this._schEditor(ph)}</div>` : ""}</div>`;
+    }).join("")}</div>`;
+    body += `<div class="section"><div class="stitle small">Days</div>${this._schDays("free_days", "Free days")}
+      <div class="hint">A free day uses the free-day Morning, Daytime and Evening times. Its night before follows the late evening schedule only when “Late evenings” is “Evenings before a free day”.</div></div>`;
+    body += `<details class="dladv" data-group="sch-adv" ${this._ui.open?.["sch-adv"] ? "open" : ""}><summary>Advanced: per-day times, room and window schedules</summary>${this._schAdvanced()}</details>`;
+    body += `<details class="dladv" data-group="sch-log" ${this._ui.open?.["sch-log"] ? "open" : ""}><summary>Upcoming transitions and recent phases</summary>
+      <div class="stitle small">Upcoming</div>${this._transList(h.next)}
+      <div class="stitle small">Recent</div>${(h.log || []).length ? h.log.map((x) => `<div class="logline"><time class="ltime" datetime="${esc(x.at)}" title="${esc(fullTime(x.at))}">${fmtTime(x.at)}</time> — ${esc(x.text)}</div>`).join("") : `<div class="muted">Nothing yet.</div>`}</details>`;
+    return `${body}</div>`;
+  }
+
+  _schAdvanced() {
+    const m = this._model.schedule;
+    const plan = this._schVal("day_overrides") || {};
+    const days = this._model.rules.weekdays;
+    const free = this._schVal("free_days") || [];
+    const ph = [["morning", "Morning"], ["day", "Daytime"], ["evening", "Evening"], ["night", "Night (that evening)"]];
+    const prof = (i, key) => {
+      const isFree = free.includes(i);
+      if (key === "morning") return this._schVal(isFree ? "night_end_free" : "night_end_workday");
+      if (key === "day") return this._schVal(isFree ? "day_from_free" : "day_from_workday");
+      if (key === "evening") return this._schVal(isFree ? "evening_time_free" : "evening_time_workday");
+      const late = this._schVal("late_evenings") === "custom" ? (this._schVal("late_days") || []).includes(i) : free.includes((i + 1) % 7);
+      return this._schVal(late ? "night_start_free" : "night_start_workday");
+    };
+    const table = `<div class="tscroll"><table class="fct schplan"><thead><tr><th>Day</th>${ph.map(([, l]) => `<th>${esc(l)}</th>`).join("")}</tr></thead><tbody>
+      ${days.map((d, i) => `<tr><th scope="row">${esc(d)}<span class="sub"> ${free.includes(i) ? "free" : "normal"}</span></th>${ph.map(([k, l]) => `<td><input type="text" class="time" inputmode="numeric" maxlength="8" placeholder="${esc(prof(i, k))}" aria-label="${esc(d)} ${esc(l)} (blank = ${esc(prof(i, k))})"
+        value="${esc((plan[String(i)] || {})[k] || "")}" data-control="sch-dayplan" data-day="${i}" data-phase="${k}" ${this._ro}></td>`).join("")}</tr>`).join("")}</tbody></table></div>
+      <div class="hint">Blank = the normal / free-day time shown in grey. “Night” on Friday is the Night that starts on Friday evening (00:30 there = Saturday 00:30). “Morning” on Saturday is Saturday's earliest Morning and ends Friday's night. All times 24-hour HH:mm.</div>`;
+    const ov = m.overrides.length ? m.overrides.map((o) => `<div class="prow"><div class="pmain"><b>${esc(o.name)}</b><span class="sub">${o.scope === "room" ? "Room" : "Window"} schedule</span></div>
+        ${this._canEdit ? `<button class="btn small ghost" data-action="sch-use-global" data-scope="${o.scope}" data-area="${esc(o.area_id || "")}" data-window="${esc(o.window_id || "")}" data-keys="${esc(o.keys.map((k) => k.key).join(","))}">Use Global Schedule</button>` : ""}
+        <div class="why">${o.keys.map((k) => `${esc(k.label)}: <b>${esc(k.value)}</b>`).join(" · ")}</div></div>`).join("")
+      : `<div class="muted">No room or window has its own schedule: every window follows this page.</div>`;
+    return `<div class="stitle small">Per-day times</div>${table}
+      <div class="stitle small">Room and window schedules</div><div class="hint">Set in a window's settings → Automatic → Settings for: Room / This window → Schedule. The most specific value wins; changes there are previewed too.</div>${ov}`;
+  }
+
   // ------------------------------------------------------------------ events
   _update(w, fields) {
     return this._save(`w-${w.window_id}`, { type: `${WS}/window/update`, window_id: w.window_id, ...fields });
@@ -1381,6 +1587,11 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
   }
 
   _saveRule(w, key, value) {
+    const rule = this._model.rules.schema.find((x) => x.key === key);
+    // 0.6.5: schedule settings (also room / window ones) are previewed like the Global Schedule page.
+    if (rule && (rule.group === "schedule" || ["sleep_end", "sleep_require_daylight"].includes(key))) {
+      return this._quickMsg(this._ruleMsg(w, `${WS}/schedule/change`, key, value), "rules");
+    }
     return this._save("rules", this._ruleMsg(w, `${WS}/auto/settings`, key, value));
   }
 
@@ -1504,6 +1715,28 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       case "gm-add-preset": this._gm().add = { ...(this._gm().add || {}), preset: el.value || null }; this._render(); return;
       case "gm-cell-value": this._gmCellValue(el.value); return;
       case "gm-policy": if (this._ui.review) { this._ui.review.policy = el.value; this._render(); } return;
+      case "sch-time": {
+        const v = parseHHMM(el.value);
+        if (v === null) { this._sch().error = `Use 24-hour time HH:mm (00:00–23:59), e.g. 07:00 or 23:55 — not “${el.value}”`; el.setAttribute("aria-invalid", "true"); this._requestRender(); return; }
+        el.value = v;
+        this._schSet(el.dataset.key, v);
+        return;
+      }
+      case "sch-choice": this._schSet(el.dataset.key, el.value); return;
+      case "sch-bool": this._schSet(el.dataset.key, el.checked); return;
+      case "sch-num": { const v = Number(el.value); if (el.value === "" || Number.isNaN(v)) return; this._schSet(el.dataset.key, Math.round(v)); return; }
+      case "sch-dayplan": {
+        const text = el.value.trim();
+        const v = text === "" ? "" : parseHHMM(text);
+        if (v === null) { this._sch().error = `Use 24-hour time HH:mm, e.g. 23:55 — not “${el.value}”`; el.setAttribute("aria-invalid", "true"); this._requestRender(); return; }
+        if (v) el.value = v;
+        const plan = JSON.parse(JSON.stringify(this._schVal("day_overrides") || {}));
+        const day = plan[el.dataset.day] || {};
+        if (v) day[el.dataset.phase] = v; else delete day[el.dataset.phase];
+        if (Object.keys(day).length) plan[el.dataset.day] = day; else delete plan[el.dataset.day];
+        this._schSet("day_overrides", plan);
+        return;
+      }
       default: break;
     }
     if (!w) return;
@@ -1526,6 +1759,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
         el.value = v;
       } else v = el.value;
       const rule = this._model.rules.schema.find((x) => x.key === el.dataset.key);
+      if (rule && rule.group === "schedule") { this._saveRule(w, el.dataset.key, v); return; }
       // A new automatic feature is switched on only after its predicted result has been shown.
       if (rule && rule.confirm && (rule.kind === "bool" ? v === true : v !== rule.default)) {
         this._openSim(w, el.dataset.key, v);
@@ -1627,6 +1861,22 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       case "review-cancel": this._ui.review = null; this._render(); return;
       case "review-save": this._saveReview(); return;
       case "adopt-window": if (w) this._openReview([{ op: "adopt", window_id: w.window_id }], `ov-${w.window_id}`); return;
+      case "sch-open": { const s = this._sch(); s.open = s.open === el.dataset.phase ? null : el.dataset.phase; this._render(); return; }
+      case "sch-day": {
+        const cur = new Set(this._schVal(el.dataset.key) || []);
+        const d = Number(el.dataset.day);
+        if (cur.has(d)) cur.delete(d); else cur.add(d);
+        this._schSet(el.dataset.key, [...cur].sort());
+        return;
+      }
+      case "sch-discard": Object.assign(this._sch(), { values: {}, error: null }); this._render(); return;
+      case "sch-review": this._openReviewMsg({ type: `${WS}/schedule/change`, scope: "global", values: { ...this._sch().values } }, "schedule"); return;
+      case "sch-use-global": {
+        const msg = { type: `${WS}/schedule/change`, scope: el.dataset.scope, values: Object.fromEntries(el.dataset.keys.split(",").map((k) => [k, null])) };
+        if (el.dataset.scope === "room") msg.area_id = el.dataset.area; else msg.window_id = el.dataset.window;
+        this._openReviewMsg(msg, "sch-ov");
+        return;
+      }
       default: break;
     }
     if (!w) return;
@@ -1975,6 +2225,40 @@ const STYLE = `<style>
     .pagetabs { padding: 0 12px 6px; }
     .pagetabs .segs { width: 100%; }
     .pagetabs .seg { flex: 1 1 0; }
+  }
+  /* Global Schedule (0.6.5) */
+  .schstatus { display: flex; gap: 12px; align-items: flex-start; padding: 12px; border-radius: 12px; border: 1px solid var(--primary-color); background: var(--secondary-background-color); }
+  .schstatus > ha-icon { --mdc-icon-size: 34px; color: var(--primary-color); flex: none; }
+  .schstatus .amain { display: grid; gap: 4px; min-width: 0; flex: 1; overflow-wrap: anywhere; }
+  .big { font-size: 1.3em; font-weight: 500; }
+  .tl { position: relative; height: 18px; border-radius: 9px; overflow: hidden; background: var(--divider-color); }
+  .tlseg { position: absolute; top: 0; bottom: 0; }
+  .ph-night { background: #3f51b5; } .ph-morning { background: #ffb74d; } .ph-day { background: #fdd835; } .ph-evening { background: #8e6cbf; }
+  .tlnow { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--primary-text-color); }
+  .tlaxis { display: flex; justify-content: space-between; font-size: 0.75em; color: var(--secondary-text-color); font-variant-numeric: tabular-nums; }
+  .tllegend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 0.8em; align-items: center; }
+  .tllegend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .schrows { display: grid; gap: 6px; }
+  .schrow { border: 1px solid var(--divider-color); border-radius: 12px; min-width: 0; }
+  .schrow.open { border-color: var(--primary-color); }
+  .schrow.now { box-shadow: inset 4px 0 0 var(--success-color, #43a047); }
+  .schhead { width: 100%; display: grid; grid-template-columns: auto 8em minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 10px 12px; border: none; background: none; text-align: left; min-height: 48px; }
+  .schhead:focus-visible { outline: 2px solid var(--primary-color); outline-offset: -2px; border-radius: 12px; }
+  .schhead > ha-icon:first-child { --mdc-icon-size: 24px; color: var(--state-icon-color, var(--secondary-text-color)); }
+  .schname { font-weight: 500; }
+  .schrule { color: var(--secondary-text-color); font-size: 0.9em; overflow-wrap: anywhere; }
+  .schtime { font-variant-numeric: tabular-nums; font-weight: 500; }
+  .schbody { display: grid; gap: 8px; padding: 0 12px 12px; }
+  input.time.draft { border-color: var(--warning-color, #ff9800); }
+  .trow { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid var(--divider-color); }
+  .trow ha-icon { --mdc-icon-size: 16px; }
+  .trow time { font-variant-numeric: tabular-nums; font-weight: 500; }
+  .trcmp { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  table.schplan input.time { width: 5.2em; min-width: 5.2em; }
+  @container (max-width: 560px) {
+    .schhead { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+    .schhead .schrule { grid-column: 2 / -1; grid-row: 2; }
+    .trcmp { grid-template-columns: 1fr; }
   }
   @container (max-width: 520px) {
     .tabs { flex-wrap: nowrap; padding: 0 4px; }
