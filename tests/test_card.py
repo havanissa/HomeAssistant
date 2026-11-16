@@ -129,7 +129,15 @@ def test_curtains_card_never_moves_a_cover_itself() -> None:
         "auto/simulate",
         # 0.6.4: Global Curtain Modes (validated drafts, reviewed saves) and the presets of single covers
         "modes/change", "cover_preset/save", "cover_preset/delete",
+        # 0.6.5: the Global Schedule (validated drafts and reviewed saves, also for room / window schedules)
+        "schedule/change",
     }, commands
+    # Opening a schedule row, typing a time or toggling a day only changes the draft: no websocket call.
+    for action in ('case "sch-open":', 'case "sch-day":', 'case "sch-time":', 'case "sch-dayplan":'):
+        branch = source.split(action, 1)[1].split("return;\n      }", 1)[0] if action != 'case "sch-open":' else \
+            source.split(action, 1)[1].split("\n", 1)[0]
+        assert "_ws(" not in branch and "_save(" not in branch and "_quickMsg" not in branch, action
+    assert '"Global Schedule"' in source and "24-hour, HH:mm" in source and 'type="time"' not in source
     # Selecting a mode card only changes the view: no websocket call at all.
     select = source.split('case "gm-mode":', 1)[1].split("\n", 1)[0]
     assert "_ws(" not in select and "_gmEdit" not in select and "_save(" not in select

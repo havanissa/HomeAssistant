@@ -14,6 +14,10 @@ then follows at once. Automatic cannot be set through ``window/update``.
 ``global_modes.py``): the model carries every mode's assignments and each
 window's effective preset per mode with its source.
 
+0.6.5: the Global Curtain Schedule (``schedule/change`` in ``schedule_page.py``):
+the model's ``schedule`` holds the household phase, the next transitions and
+today's timeline.
+
 0.6.3: ``auto/simulate`` (read only) predicts what every affected window would
 decide with changed settings *before* they are saved, so a new automatic
 feature (temperature-aware sun, glare, weather evidence) is never switched on
@@ -284,6 +288,7 @@ def build_model(hass: HomeAssistant, mgr: CurtainManager, connection) -> dict[st
         "environment": environment_summary(hass, mgr),
         "time_zone": hass.config.time_zone,
         "global_modes": modes_model(hass, mgr, mgr.config),
+        "schedule": schedule_model(hass, mgr),
     }
 
 
@@ -997,10 +1002,11 @@ def _settings_change(hass: HomeAssistant, mgr: CurtainManager, msg: dict[str, An
 
 
 from .global_modes import MODE_HANDLERS, modes_model  # noqa: E402  (it uses the helpers above)
+from .schedule_page import SCHEDULE_HANDLERS, schedule_model  # noqa: E402
 
 CURTAIN_HANDLERS = (
     ws_model, ws_subscribe, ws_window_create, ws_window_update, ws_window_remove, ws_preset_save,
     ws_preset_duplicate, ws_preset_delete, ws_preset_select, ws_preview, ws_apply, ws_manual_clear, ws_settings,
     ws_rescan, ws_calibration_reset, ws_auto_preview, ws_auto_enable, ws_resume, ws_auto_settings,
-    ws_automation_allow, ws_auto_simulate, *MODE_HANDLERS,
+    ws_automation_allow, ws_auto_simulate, *MODE_HANDLERS, *SCHEDULE_HANDLERS,
 )

@@ -22,6 +22,8 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **0.6.4 (Phase 4.6.3)** adds **Global Curtain Modes**: Curtains → Global Modes shows Morning, Daytime, Evening, Night, Sleep and Sun Protection (Window Lamp, Glare and Excessive Heat under Advanced) and, for each, which preset every window or single cover uses when the automatic controller selects that mode for it. It is not a second scheduler: each window still decides its own mode, and all its safety rules apply. A mode without an assignment leaves the covers where they are (see [Global Curtain Modes](#global-curtain-modes-phase-463-064)).
 
+**0.6.5 (Phase 4.6.4)** adds the **Global Curtain Schedule**: Curtains → Global Schedule sets when Morning, Daytime, Evening and Night begin for the whole house (fixed times, sunset or measured dusk, “whichever comes first / last”, normal and free days, late evenings, per-day times), with the household phase now, the next transition and a daily timeline. A phase only makes a mode eligible: sleep, missing daylight and every other protection still apply, and each window still decides on its own (see [Global Curtain Schedule](#global-curtain-schedule-phase-464-065)).
+
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
@@ -1142,6 +1144,29 @@ Nothing is switched on and no mode changes: Off, Observing and Automatic windows
 ### Decision log
 
 Every entry names where its preset came from, in 24-hour time: *07:35 — Morning. Stova Suður → Half shade (Global Mode).*, *16:20 — Sun Protection. Køkur Suður has no assignment; leaving positions unchanged.*, *22:35 — Lamp override active. Night is configured to bypass lamp control. …*. Global Modes → *Recent automatic decisions* shows the latest entries of every window. Warnings cover missing presets, removed or unavailable covers, overrides that hide a global setting, competing automations and assigned windows that are Observing or Off.
+
+## Global Curtain Schedule (Phase 4.6.4, 0.6.5)
+
+Open the Smart Curtains card → **Global Schedule** (or add the card with `page: schedule`). The top shows the **household phase now** and why, what it waits for, the **next transition** (time and reason) and a 24-hour bar for today. Below, one row per phase; click a row to edit it. Edits are a draft until **Review & save**.
+
+| Phase | Rules | Default (as before 0.6.5) |
+| --- | --- | --- |
+| **Morning** | Earliest time (normal / free days); opening always needs confirmed daylight and no sleep; what happens after sleep | 06:30 / 08:00 |
+| **Daytime** | N minutes after Morning began · at a time · at a time but not before Morning has lasted N minutes | 120 minutes |
+| **Evening** | at a time · at sunset / measured dusk · time or dusk, whichever comes **first** · whichever comes **last** | 0.6.4 behaviour (dark after 12:00) |
+| **Night** | normal evenings / late evenings; late = evenings before a free day, or chosen evenings | 22:30 / 23:30 |
+
+**A phase only makes a mode eligible.** 07:00 never opens a curtain in the dark, while someone sleeps in a sleep-protected room, or when the light sensor is unavailable: the window keeps its position and the log says *“Morning is eligible, but daylight has not been confirmed. Holding current positions.”* Night and evening closing need no light sensor. Sleep, manual holds, the window lamp and Sun Protection / Glare / Excessive Heat keep their priority; when an override ends, a window returns to the **current** phase. A Morning that could not begin (dark, asleep) is not started late, and opening still needs daylight in Daytime. Each window applies its own preset for the phase from **Global Modes**; a window without an assignment keeps its position.
+
+**Evening** applies the Evening preset to windows with evening privacy on. Once it has started it lasts until Night, so a passing cloud does not end it. Dusk is the existing measured dusk (outdoor light below the dark level for its stable period, or the sun below the dark elevation without a working sensor). When neither light nor sun data is available, a time rule still starts Evening at its time; *at sunset / dusk* waits and says why. Until you choose another Evening rule, Evening keeps the 0.6.4 behaviour (dark after 12:00, not kept); the page says so.
+
+**Days, explicitly.** A free day (Mon–Sun, your choice) uses the free-day Morning, Daytime and Evening times. **Night belongs to the evening it starts on**: Friday 23:55 is Friday evening; a time after midnight (00:30) still belongs to the evening before. Night ends at the next day's Morning time. Example: *21:30 Sunday–Thursday, 23:55 Friday–Saturday* = Night 21:30 (normal evenings), 23:55 (late evenings = evenings before a free day, with Sat and Sun free). **Advanced → Per-day times** sets single times for single weekdays (e.g. a later Saturday Morning).
+
+**Rooms and windows.** The same settings can be set for a room or a single window (a window's settings → Automatic → Settings for: Room / This window → Schedule); the most specific value wins and its source is shown. The Global Schedule page lists every room and window schedule with **Use Global Schedule**.
+
+**Preview.** Before a change is saved, the review shows the changes, the next transitions now and proposed, and per affected window its current and predicted condition and preset, whether covers would move now, a manual hold, a block or competing automations. A change that moves an Automatic window needs a confirmation and **Apply now** (through every safety check) or **At the next change of condition** (e.g. the next scheduled transition). Opening a row, typing a time or previewing never moves a curtain, and nothing switches a window to Automatic.
+
+**Times** are 24-hour `HH:mm` everywhere (fields, timeline, transitions, logs, diagnostics), stored as wall-clock times and evaluated in Home Assistant's time zone, so daylight saving and restarts keep them. Text such as “7:45 PM” is refused. After a restart the current phase and the next transition are worked out again; past transitions are not replayed.
 
 ## Occupancy forecast (Phase 4, 0.5.0)
 
