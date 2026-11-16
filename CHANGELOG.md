@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.8 — Custom lux categories, Dumb Lights, radar distance zones and Priority Inputs (Phase 4.8)
+
+### Added
+
+- **Custom ambient categories** (`ambient.py`, `ambient_levels.py`): any number of categories (2 to the global maximum, default 12, limit 24) with stable ids, names and start values; global definitions with per-room definitions and *Use Global Levels*. `ambient/levels` previews every change (ranges, added / removed / renamed / moved categories, affected matrix cells per room, rooms that keep their own categories) and saves only with `confirm` once every removed category with values has a resolution (move to another category, or delete). New categories are *Not configured* everywhere. Templates are mapped onto a room's categories. The category tracker persists by id.
+- **Fixture Types** (`fixtures.py`; `fixture/set`, `fixture/remove`): Dumb Light — On/Off only, dimmable, tunable white, colour or a custom label, an optional Home Assistant label and a display name. A Dumb Light's capabilities are narrowed to on/off (never widened). `register_relay` explicitly adds a switch as a lighting output. On/off lights get On / Off matrix cells.
+- **Radar Distance Zones** (`radar.py`; zone `detection: "radar"`): radar presence + distance (entity state or attribute; m / cm / mm), band, entry and exit delays, hysteresis, optional maximum age, the zone fail-safe for an unavailable distance or presence. Device-registry discovery of the radar's distance sensor (`radar` in the zones model), `zone/radar_test` (test distance, nothing sent), live band in the card.
+- **Priority Inputs** (`priority.py`, `priority_runtime.py`, `priority_websocket.py`): per-room inputs (binary_sensor, input_boolean, explicit switch) with polarity, targets, brightness, appearance policy, debounce, release delay, unavailable policy and grace, manual-override authorization and release policy. Disabled until reviewed (`priority/preview`, then `priority/set` with `enabled` and `confirm`); global safety lock (`priority/lock`). An active claim is the winning rule in every plan (`arbitration.priority_item`), sent through the existing executor also in Observing rooms and Manual mood (gate `assert_priority_control_permitted`); release applies the current winning rule; multiple inputs per light (highest brightness wins); settle after restart; activation history.
+- Card: Settings → Lighting → category table and editor with server review, On/Off matrix cells, *Fixture Types*, *Priority Inputs*; Settings → Presence → Zones → radar detection with the band visualization and test distance; Overview lines for active Priority Inputs and radar zones and *Why each light is on, off or dimmed*.
+- Decision log entries for ambient category changes, radar zone activation and release, Priority Input activation, release and unavailable inputs.
+- Tests: `tests/test_phase48_pure.py` (12) and `tests/test_phase48_runtime.py` (21): categories (validation, boundaries, rename, add, reviewed removal and reassignment, room vs. global, Use Global Levels, templates, migration, contamination), Dumb Lights (relay services, on/off lights, mood appearance ignored, unrelated switches untouched), radar zones (units, boundaries, hysteresis, delays, invalid / stale / unavailable values, presence clear, vacancy gating, restart, rename, discovery, websocket), Priority Inputs (vacant and bright room, release to the current rule, Observing and Manual mood, lock, disabled input, manual changes, several inputs, inversion and bounce, unavailable policies, restart, Dumb Light targets, Supervisor, websocket review).
+
+### Changed
+
+- Lighting store 1.8 → 1.9: the 0.6.7 categories become definitions with ids `none` / `low` / `bright` (values kept); `fixtures`, `priority_inputs`, zone `detection` / `radar`, `priority_lock`. `thresholds` is still written for 0.6.7.
+- `ambient/set` `thresholds` set the boundaries of the room's current categories (any count).
+- The Room Supervisor verifies a Priority Input's own switch-off like the other removals.
+
+### Not changed
+
+- Rooms without the new features, sensor zones, existing relay outputs, mood profiles, manual override behaviour, the Room Supervisor's settings, shared spaces and possible occupancy lighting.
+
 ## 0.6.7 — Ambient light levels and multi-zone brightness rules (Phase 4.7)
 
 ### Added

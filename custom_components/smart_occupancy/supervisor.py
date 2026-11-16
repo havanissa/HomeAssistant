@@ -108,7 +108,7 @@ STATUS_WORDS = {
     "off": "Supervisor off",
 }
 # Removal commands that are verified like a rule's state: what Smart Occupancy switched on itself.
-_REMOVALS = frozenset({"preliminary_end", "zone_release"})
+_REMOVALS = frozenset({"preliminary_end", "zone_release", "priority_release"})
 _EXTERNAL_SOURCES = frozenset({"automation", "unattributed"})
 
 

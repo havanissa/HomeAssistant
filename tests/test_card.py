@@ -108,6 +108,10 @@ def test_lighting_cards_never_control_lights() -> None:
         "zone/set", "zone/remove", "space/set", "space/remove", "relay/set", "supervisor/set", "supervisor/room",
         # 0.6.7 ambient light levels and brightness rules (settings, previews and templates; never a light command)
         "ambient/set", "brightness/preview", "brightness/set", "brightness/remove", "brightness/template",
+        # 0.6.8 categories, fixture types, Priority Inputs (configuration, review, safety lock) and the radar test
+        # distance (evaluated only; never a light command)
+        "ambient/levels", "fixture/set", "fixture/remove", "priority/set", "priority/preview", "priority/remove",
+        "priority/lock", "zone/radar_test",
     }, commands
     assert source.count(f"type: `${{WS}}/profile/test`") == 1 and "confirm: true" in source
     test = source.split("_testProfile(profile, mood) {", 1)[1].split("\n  }\n", 1)[0]
@@ -379,7 +383,7 @@ def test_lighting_settings_ambient_levels_and_brightness_rules() -> None:
     ambient = source[source.index("  _ambientHtml(r, b) {"):source.index("  _brightnessRulesHtml(r, b) {")]
     for text in ("Ambient Light Levels", 'data-control="am-enabled"', "amblevel", 'aria-current="true"', "st.label",
                  "Measured indoors", "Natural light", "Confidence", "st.note", 'data-control="dl-add"',
-                 'data-action="dl-remove"', 'data-control="am-th"', "belongs to the brighter category",
+                 'data-action="dl-remove"', "this._levelsHtml(r, b)",
                  '"hysteresis"', '"stable_seconds"', '"fallback"', '"dead_band"', '"min_interval"', '"transition"',
                  "Global defaults (all rooms)", "fmtTime(st.since)"):
         assert text in ambient, text
@@ -395,3 +399,41 @@ def test_lighting_settings_ambient_levels_and_brightness_rules() -> None:
     # The Zones editor links to the matrix instead of repeating it.
     zones = source[source.index("  _zonesHtml(r) {"):source.index("  _spaceHtml(r) {")]
     assert zones.count('data-action="br-goto"') == 2 and "brightness matrix" in zones
+
+
+def test_phase48_category_fixture_priority_and_radar_editors() -> None:
+    """0.6.8: the category editor (server preview and review), Fixture Types, Priority Inputs and radar zones."""
+    source = LIGHTING_FILE.read_text(encoding="utf-8")
+    levels = source[source.index("  _levelsHtml(r, b) {"):source.index("  _lvPreview() {")]
+    for text in ("Categories", "belongs to the brighter category", 'data-action="lv-edit"', 'data-action="lv-inherit"',
+                 "Use Global Levels", 'data-control="lv-name"', 'data-control="lv-start"', 'data-action="lv-add"',
+                 'data-action="lv-remove"', 'data-control="lv-resolve"', "Move them to", "Delete them",
+                 "Not configured in every brightness matrix", "Keep their own categories", 'data-action="lv-save"',
+                 "Saving sends no command", "tscroll"):
+        assert text in levels, text
+    actions = source[source.index("  _onP48Action(a, el) {"):source.index("  _onP48Control(c, el) {")]
+    assert "_lvMsg(d, true)" in actions and "confirm: true" in actions and "callService" not in actions
+    assert "if (!confirm(" in actions  # deleting an input and the global lock ask first
+    fixtures = source[source.index("  _fixturesHtml(r) {"):source.index("  _priorityHtml(r) {")]
+    for text in ("Fixture Types", "Dumb Light — On/Off only", 'data-control="fx-kind"', 'data-control="fx-ha"',
+                 'data-control="fx-name"', 'data-control="fx-relay"', "never treated as lights"):
+        assert text in fixtures, text
+    priority = source[source.index("  _priorityHtml(r) {"):source.index("  _piMsg(d) {")]
+    for text in ("Priority Inputs", 'data-control="pi-entity"', 'sel("active_when"', "normally closed",
+                 'data-control="pi-target"', '"brightness_pct"', 'sel("appearance"', '"debounce"',
+                 '"release_delay"', 'sel("unavailable"', 'data-control="pi-override_manual"',
+                 'sel("release_manual"', 'data-action="pi-review"', 'data-action="pi-enable-confirm"',
+                 "Activation history", "fmtTime(h.at)", "is unavailable since", "safety lock"):
+        assert text in priority, text
+    zones = source[source.index("  _zoneFormHtml(r, d) {"):source.index("  _spaceHtml(r) {")]
+    for text in ('sel("detection"', "radar distance", 'data-control="zd-rsel"', 'data-key="presence"',
+                 'data-key="distance"', '"min_m"', '"max_m"', '"entry_delay"', '"exit_delay"', '"hysteresis"',
+                 'data-action="zn-rtest"', "same device", "nothing was sent"):
+        assert text in zones, text
+    band = source[source.index("  _radarBandHtml(cfg, status) {"):source.index("  _p48OverviewHtml(r) {")]
+    assert "radial band" in band and "cannot tell several people apart" in band and 'role="img"' in band
+    matrix = source[source.index("  _brPanelHtml(r, b, l, ro) {"):source.index("  async _brLoadPreview() {")]
+    assert 'l.onoff ? "On"' in matrix and 'data-value="100"' in matrix
+    overview = source[source.index("  _p48OverviewHtml(r) {"):source.index("  _onBrightnessAction(a, el) {")]
+    assert "Why each light is on, off or dimmed" in overview and "Priority Inputs" in overview
+

@@ -8,6 +8,13 @@ controlled target gets exactly one plan item, from the winning rule.
 
 Resolved policy, highest first:
 
+0. **Priority Inputs** (0.6.8, ``priority.py``) - an armed, active input
+   forces its lights On. Above every rule below and above Manual mood and the
+   room's Observing mode (an explicit, deliberately armed request, like an
+   Active wall switch), but never above unavailable devices, excluded lights,
+   group members, unacknowledged automation conflicts, or a manual change
+   (unless the input is authorized to override one made before it became
+   active).
 1. **Protection** - Manual mood (everything paused), unavailable devices,
    excluded lights, members controlled through their group, unacknowledged
    automation conflicts. Nothing below overrides these.
@@ -45,6 +52,7 @@ from homeassistant.util import dt as dt_util
 from .const import MANUAL_PAUSED_TEXT, LightAction
 from .daylight import GATE_CODES, DaylightGate
 from .planner import BLOCKED, CHANGE, SKIPPED, UNCHANGED, PlanItem, Target, build_command, matches
+from .priority import Appearance, PriorityClaim
 from .profiles import ResolvedSetting
 from .zones import ZoneAction, ZoneConfig, ZoneManual
 
@@ -53,6 +61,7 @@ RULE_OCCUPIED = "occupied"
 RULE_VACANT = "vacant"
 RULE_PRELIMINARY = "preliminary"
 RULE_BRIGHTNESS = "brightness"  # an enrolled light's Room occupied brightness rule (0.6.7)
+RULE_PRIORITY = "priority"      # an active Priority Input (0.6.8)
 RULE_NONE = "none"
 
 
@@ -170,6 +179,84 @@ def zone_item(t: Target, claims: list[Claim], *, manual_mode: bool, control_enab
         what = "switch off" if service == "turn_off" else f"set {what or 'on'}"
         manual = " (its manual override predates the zone)" if t.override else ""
         set_(CHANGE, "change", f"{verb} {what} because the {zone} zone is occupied{over}{manual}.")
+    return item
+
+
+# ------------------------------------------------------------ priority inputs (0.6.8)
+def priority_setting(claim: PriorityClaim, t: Target, look: dict[str, Any] | None = None) -> ResolvedSetting:
+    """On, with the winning request's brightness and appearance - only what the target supports."""
+    winner = claim.winner
+    caps = t.capabilities
+    values: dict[str, Any] = {}
+    if winner.brightness_pct is not None and caps.brightness:
+        values["brightness_pct"] = winner.brightness_pct
+    if winner.appearance == Appearance.KELVIN and winner.kelvin and caps.color_temp:
+        values["color_temp_kelvin"] = winner.kelvin
+    elif winner.appearance == Appearance.MOOD and look:
+        for key in ("color_temp_kelvin", "rgb_color", "hs_color"):
+            if look.get(key) is not None and (caps.color_temp if key == "color_temp_kelvin" else caps.color):
+                values[key] = look[key]
+                break
+    out = ResolvedSetting(action=LightAction.ON, **values)
+    out.sources = {"action": {"level": "priority", "rule": winner.id}}
+    return out
+
+
+def priority_item(t: Target, claim: PriorityClaim, *, replaced: PlanItem | None = None,
+                  look: dict[str, Any] | None = None) -> PlanItem:
+    """The plan item of an active Priority Input's claim on one target (the winning rule).
+
+    Not paused by Manual mood and not limited to Automatic rooms (an armed input is an explicit request);
+    every device, exclusion, conflict and manual-change protection still applies.
+    """
+    winner = claim.winner
+    resolved = priority_setting(claim, t, look)
+    service, data, requested, unsupported = build_command(resolved, t.capabilities)
+    superseded = [p.name for p in claim.inputs if p is not winner]
+    lower = replaced.rule.get("name") if replaced is not None and replaced.rule else None
+    if lower and replaced is not None and replaced.decision != SKIPPED:
+        superseded.append(lower)
+    name = f"Priority Input: {winner.name}"
+    item = PlanItem(
+        entity_id=t.entity_id, name=t.name, category=t.category, category_name=t.category_name,
+        is_group=t.is_group, current=t.current(), resolved=resolved, requested=requested, service=service,
+        data=data, decision=SKIPPED, reason_code="", reason="", unsupported=unsupported, override=t.override,
+        conflicts=t.conflicts, persistent=replaced.persistent if replaced is not None else False,
+        rule=rule_info(RULE_PRIORITY, name, input=winner.id, inputs=[p.id for p in claim.inputs],
+                       requests=[{"id": p.id, "name": p.name, "brightness_pct": p.brightness_pct}
+                                 for p in claim.inputs], superseded=superseded or None),
+    )
+
+    def set_(decision: str, code: str, reason: str) -> None:
+        item.decision, item.reason_code, item.reason = decision, code, reason
+
+    what = "on" if "brightness_pct" not in data else f"on at {data['brightness_pct']} %"
+    over = f"; takes precedence over {', '.join(superseded)}" if superseded else ""
+    since = claim.since.get(winner.id)
+    override = t.override or {}
+    made = dt_util.parse_datetime(override.get("since") or "") if override else None
+    began = dt_util.parse_datetime(since or "") if since else None
+    authorized = winner.override_manual and made is not None and began is not None and made < began
+    if t.excluded:
+        set_(SKIPPED, "excluded", f"Excluded from automatic management ({t.excluded})")
+    elif t.covered_by:
+        set_(SKIPPED, "covered_by_group", f"Member of managed group {t.covered_by}; controlled through the group")
+    elif t.offline:
+        set_(BLOCKED, "offline", f"Light is {t.state or 'missing'}; nothing can be sent ({winner.name})")
+    elif t.override and not authorized:
+        source = override.get("source", "manual")
+        set_(BLOCKED, "manual_override", f"Manual change ({source}) is respected by the Priority Input {winner.name}"
+             + ("" if winner.override_manual else " (it is not authorized to override manual changes)"))
+    elif t.conflicts:
+        names = ", ".join(c.get("name") or c["automation"] for c in t.conflicts)
+        set_(BLOCKED, "conflict", f"Also controlled by enabled automation(s) {names}; acknowledge or resolve it first")
+    elif matches(t, service or "", data):
+        set_(UNCHANGED, "already", f"Already on as the Priority Input {winner.name} requests{over}")
+    elif t.last_command == (service, data):
+        set_(UNCHANGED, "already_sent", "The same command was already sent and the light was not changed since")
+    else:
+        manual = " (its earlier manual change is overridden: authorized)" if t.override else ""
+        set_(CHANGE, "priority", f"Will switch {what}: Priority Input {winner.name} is active{over}{manual}.")
     return item
 
 

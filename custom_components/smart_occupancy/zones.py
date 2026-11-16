@@ -26,6 +26,14 @@ island), defined here and never in Home Assistant's area registry. It has:
 A zone is never active while its room is vacant, and predictions never make a
 zone active: zone occupancy comes from sensor states only.
 
+Detection (0.6.8): ``detection`` is ``sensors`` (default; every zone before
+0.6.8) or ``radar`` - a **Radar Distance Zone**: active while a radar's
+presence entity detects someone whose measured distance is within a band
+(``radar.py``; e.g. a desk 1.0-3.0 m from the radar). The radar's presence
+and distance entities are chosen independently; the distance is never used
+as a room-presence signal. Everything else (priority, holds_room, fail-safe,
+lights, brightness matrix column, arbitration) is the same as for any zone.
+
 Manual overrides (``manual``)
 -----------------------------
 ``respect`` (default): a person's manual change of a target is respected by
@@ -71,6 +79,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
+from .radar import RadarConfig
 from .const import (
     LUX_MAX_THRESHOLD,
     LUX_MIN,
@@ -87,6 +96,11 @@ KELVIN_MAX = 10000
 MAX_ZONES = 8
 MAX_ZONE_TARGETS = 24
 MAX_SPACES = 16
+
+
+class ZoneDetection(StrEnum):
+    SENSORS = "sensors"        # a subset of the room's presence signals (0.6.0)
+    RADAR = "radar"            # a radar's presence plus its distance within a band (0.6.8)
 
 
 class ZoneActivation(StrEnum):
@@ -242,6 +256,12 @@ class ZoneConfig:
     on_below: int | None = None
     release: ZoneRelease = ZoneRelease.RESTORE
     targets: tuple[ZoneTarget, ...] = ()
+    detection: ZoneDetection = ZoneDetection.SENSORS
+    radar: RadarConfig | None = None
+
+    @property
+    def is_radar(self) -> bool:
+        return self.detection == ZoneDetection.RADAR
 
     @classmethod
     def from_dict(cls, data: Any) -> ZoneConfig | None:
@@ -267,6 +287,8 @@ class ZoneConfig:
             on_below=_int(data.get("on_below"), LUX_MIN, LUX_MAX_THRESHOLD),
             release=_enum(ZoneRelease, data.get("release"), ZoneRelease.RESTORE),
             targets=tuple(targets[:MAX_ZONE_TARGETS]),
+            detection=_enum(ZoneDetection, data.get("detection"), ZoneDetection.SENSORS),
+            radar=RadarConfig.from_dict(data.get("radar")),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -276,6 +298,7 @@ class ZoneConfig:
             "unavailable": self.unavailable.value, "holds_room": self.holds_room, "priority": self.priority,
             "manual": self.manual.value, "daylight": self.daylight.value, "on_below": self.on_below,
             "release": self.release.value, "targets": [t.as_dict() for t in self.targets],
+            "detection": self.detection.value, "radar": self.radar.as_dict() if self.radar else None,
         }
 
     def target(self, entity_id: str) -> ZoneTarget | None:

@@ -28,6 +28,8 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **0.6.7 (Phase 4.7)** adds **ambient light levels and brightness rules**: each room classifies its natural light as *No light*, *Low light* or *Bright* (lamp-lit readings never raise the category), and a light you enrol gets a brightness matrix (category × Room occupied / each of its zones) that owns its on/off and brightness while the room is occupied, while the mood keeps choosing its colour (see [Ambient light levels and brightness rules](#ambient-light-levels-and-brightness-rules-phase-47-067)).
 
+**0.6.8 (Phase 4.8)** adds **custom ambient categories** (add, rename and remove categories, globally or per room, with a reviewed preview), **Fixture Types** (*Dumb Light — On/Off only* for relay lamps and on/off lights), **Radar Distance Zones** (a zone active while a radar sees someone within a distance band, e.g. a desk 1.0–3.0 m away) and **Priority Inputs** (a door contact that forces the cupboard light On while the door is open) (see [Phase 4.8](#custom-lux-categories-dumb-lights-radar-zones-and-priority-inputs-phase-48-068)).
+
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
@@ -40,6 +42,10 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - switches a light on for *possible* occupancy, unless the room is in **Automatic** and that light was chosen as its preliminary light (0.3.9); it switches off only a preliminary light it switched on itself and nobody changed since
 - switches lights off, or changes their brightness or colour, because of daylight or a lux reading, except a light that a room's Vacant profile wants *only when dark*: in an empty room it is switched off again when daylight is enough (0.4.0), and a light you enrolled in a room's Brightness Rules, whose on/off and brightness follow the room's ambient category while it is occupied (0.6.7; never its colour)
 - enrols a light in Brightness Rules by itself, or sends a command because a light was enrolled, a matrix was saved or the ambient levels were edited (0.6.7)
+- invents a brightness for a new ambient category or deletes the values of a removed one without your review; editing categories never sends a command (0.6.8)
+- sends brightness, colour, colour temperature or a fade to a light classified as a Dumb Light, or treats a switch as a light because it was classified (0.6.8)
+- treats a radar's distance as room presence, or activates a radar zone from a distance while the radar's presence entity is clear (0.6.8)
+- sends anything for a Priority Input that you did not review and enable, or while the Priority Input safety lock is on; reads an unavailable input as open or closed; or restores a light's earlier state when an input ends (the current rule decides) (0.6.8)
 - switches a light on because the global brightness or colour temperature changed
 - sends any automatic lighting command while Main Mood is **Manual**
 - calculates its own adaptive lighting: it only reads the values your existing system publishes
@@ -960,6 +966,63 @@ What an enrolled light does, **while the room is occupied** (vacancy behaviour i
 A light that is not enrolled, and a room without ambient brightness control, behave exactly as in 0.6.6.
 
 Decision log examples: *“Room occupied, Low light (≈ 12 lx), Floor Light → 15 %, colour from Hygge (2700 K).”* · *“Desk zone activated. Low light (≈ 12 lx), Floor Light → 45 %, colour unchanged.”* · *“Ambient light changed to Bright (≈ 24 lx): Desk zone active, Bright (≈ 24 lx), Floor Light → 80 %.”* · *“Desk zone ended. Room still occupied, Bright (≈ 24 lx), Floor Light → Off.”*
+
+## Custom lux categories, Dumb Lights, radar zones and Priority Inputs (Phase 4.8, 0.6.8)
+
+*Ambient categories decide the light-level state; room and zone occupancy choose the brightness rule; the mood decides the appearance; a Dumb Light classification limits commands to on/off; radar distances can activate ordinary zones; Priority Inputs temporarily outrank ordinary lighting. One arbitration engine decides, one executor sends.*
+
+### Custom ambient categories (Settings → Lighting → Ambient Light Levels)
+
+The categories table shows each category's name, where it starts and its range. **Edit this room's categories** (or **Own categories for this room**), **Edit global categories** and **Use Global Levels** open an editor: rename a category, change where it starts, **Add category** (at most 12 by default; the global maximum can be raised to 24) or **Remove** one. The first category starts at 0 lx, each next one higher than the one before, and the last has no upper limit, so the ranges are contiguous (a reading exactly at a threshold belongs to the brighter category). Names must be unique and not empty; the server checks every value.
+
+Each category has a **stable id**, so renaming never touches a brightness value. Every edit is previewed on the server before it can be saved:
+
+- an **added** category is *Not configured* in every matrix (no value is invented, so it switches nothing on);
+- a **removed** category whose values are used lists each affected matrix cell, and you choose **Move them to** another category (replacing its value) or **Delete them**. Saving is not possible until every removed category with values has a decision;
+- the global categories apply to every room without its own; rooms with their own categories are listed as unchanged and are never overwritten;
+- a removed fallback category is replaced (shown in the review).
+
+Saving sends no command: the category is classified again from the current evidence, and the next trigger uses the new values. Brightness templates are mapped onto a room's categories (same id → its value; otherwise the value of the category its start lies in). Everything else from 0.6.7 is unchanged: trusted readings, lamp contamination (a lamp-lit reading never raises the category), estimates, freshness, hysteresis, stability and the last-reliable fallback.
+
+### Fixture Types and Dumb Lights (Settings → Lighting → Fixture Types)
+
+Every managed light is listed with its classification and what it can do. **Classify** sets a fixture type (**Dumb Light — On/Off only**, dimmable, tunable white, colour, or a custom label), an optional Home Assistant label (descriptive only) and a display name. A **Dumb Light** is only switched on and off: `switch.turn_on` / `switch.turn_off` for a relay, `light.turn_on` / `light.turn_off` for a light, never with brightness, colour, colour temperature or a fade, even if the entity could do more. A classification never gives a light more than it can do, and Home Assistant's devices are not changed.
+
+**Add a lamp on a relay** makes a switch a lighting output of the room (and a Dumb Light) in one step. Only switches you choose become lights; other switches are never touched.
+
+The brightness matrix of an on/off light (relay, on/off light or Dumb Light) has **On / Off** cells instead of a slider (*Not configured* is still separate). The mood still chooses the appearance of lights that support it; a Dumb Light just follows on/off.
+
+### Radar Distance Zones (Settings → Presence → Zones)
+
+**Add radar distance zone** (offered when a distance sensor in m, cm or mm exists) or choose *Detection: radar distance* in a zone. Choose the radar's **presence** entity and its **distance** sensor (or a numeric attribute with its unit): distance sensors of the *same device* are found through the device registry and offered first, never paired by similar names. Then the band (e.g. **1.0 – 3.0 m**), **Enter after** (default 2 s), **Release after** (default 15 s), **Hysteresis** (default 0.2 m) and optionally a maximum age of the distance.
+
+- The zone becomes active only when presence is detected **and** a valid distance is inside the band (both ends included) for the entry delay. Distance alone is never presence: a stale distance while presence is clear never activates it.
+- An active zone stays active while the distance stays within the band ± hysteresis; outside it (or when presence clears) it is released after the exit delay, so someone standing at 3.0 m does not switch it on and off.
+- Distances are converted from mm / cm to metres; unknown units, non-numbers, negative and non-finite values are refused. An unavailable distance is never read as 0 m: the zone's fail-safe applies (*keep its state while presence is detected*, *release it*, or *active while presence is detected*). A sustained clear presence always releases the zone. A zone is never active in a vacant room.
+- The editor shows the band with its hysteresis margins, the live distance (from Home Assistant), the radar's presence, the zone state and why. **Test distance** evaluates a value against the band without sending anything.
+- A single reported distance is a **radial band** around the radar, not a rectangle, and it cannot tell several people apart.
+
+A radar zone is an ordinary zone: priority, *Keeps the room occupied*, lights, its column in the brightness matrix and the arbitration are the same as for sensor zones. Sensor zones are unchanged.
+
+### Priority Inputs (Settings → Lighting → Priority Inputs)
+
+A Priority Input forces lights **On** while an input is active: e.g. a magnetic contact on a cupboard door and the cupboard light. **Add Priority Input**: a name, the input (a `binary_sensor` contact, an `input_boolean`, or a switch that really is an input; a lighting output cannot be an input), **Active when** *on (door open)* or *off (normally closed contact)*, the lights, a brightness for dimmable lights (default 100 %; empty keeps the light's last brightness), the colour (*leave*, *the room mood's colour*, *white at … K*, only where supported), **Confirm after** (debounce, default 0 s), **Release after** (default 2 s), what happens when the input is **unavailable** (*hold* for a grace period, default 60 s, then release; *release at once*; *keep until it reports again*), whether it may override a manual change made **before** it became active, and whether a manual change made **while** it was active is kept or ended at release.
+
+A new input is **disabled**. **Review and enable** shows what it would do to each light now; only **Enable** arms it. **Lock all Priority Inputs** is a global safety lock.
+
+While an enabled input is active it is the **winning rule** of its lights, above zones, brightness rules, the mood, possible occupancy and the room's occupancy: it works when the room is vacant, in daylight, in Manual mood and in an Observing room, like an Active wall switch. It still respects unavailable devices, excluded lights and group members, unacknowledged automation conflicts and manual changes (unless authorized). Its commands are Smart Occupancy's own (not a person's change), go through the normal executor and are verified by the Room Supervisor.
+
+When the input ends, after the release delay, each light gets its **current** winning rule (in an Automatic room through the normal executor). Example: 14:00 room vacant, door closed, light off · 14:05 door opens, light forced On · 14:06 someone enters · 14:07 door closes → the occupied room's rule takes over. A light the input switched on that no automatic rule takes over (Observing room, Manual mood, or no rule sets it) is switched off again, unless a person changed it meanwhile. Several inputs can claim one light: it stays On while any of them is active, the highest requested brightness wins, and only one command is sent. A bouncing contact sends no extra commands (the release delay absorbs it). After a restart, active claims are held until the inputs have settled (10 s) and then follow their current state; nothing is replayed.
+
+Each input has a short activation history (24-hour times); an unavailable input is shown prominently.
+
+### Overview and decision log
+
+The room Overview shows active Priority Inputs (and unavailable ones), each radar zone with its distance, and **Why each light is on, off or dimmed** (the winning rule, what it takes precedence over, what it requests and why). Log examples: *“Kamar Norður ambient light 12 lx: Low light (was No light).”* · *“Radar Desk zone activated, distance 2.1 m within 1.0–3.0 m.”* · *“Radar Desk zone released (distance 3.6 m outside 1.0–3.0 m; released after 15 s).”* · *“Cupboard Door Priority Input active. Cupboard Light forced On, overriding Vacancy: turn off.”* · *“Cupboard Door released (input inactive). Cupboard Light → Off (current rule: Vacancy: turn off).”*
+
+### Upgrade (lighting store 1.8 → 1.9)
+
+The three 0.6.7 categories become editable categories with the ids `none`, `low` and `bright` (rooms with their own thresholds get their own categories), so every matrix keeps its values exactly. No fixture is classified, no switch becomes a light, every zone stays a sensor zone and no Priority Input exists. Rooms behave exactly as in 0.6.7 until you use the new features.
 
 ## Curtains (Phase 4.6.0, 0.6.1)
 

@@ -6,12 +6,17 @@ sensor, estimates daylight on its own or sends anything.
 
 Categories
 ----------
-A room has ordered categories (``LEVELS``: No light, Low light, Bright) and
-one threshold between each pair: a value **equal to a threshold belongs to the
-higher category** (defaults 5 and 20 lx: below 5 No light, 5 to below 20 Low
-light, 20 and above Bright). Thresholds are global defaults with optional room
-overrides. Only the number of thresholds depends on the number of levels, so
-more categories can be added later without changing the classifier.
+A room has ordered categories, darkest first. Each has a **stable id**, a name
+and the lux value it starts at (0.6.8, Phase 4.8): the first starts at 0 lx,
+the last has no upper bound, and the ranges are contiguous. A value **equal to
+a threshold belongs to the higher category**. The defaults are the 0.6.7
+categories (``LEVELS``: No light from 0, Low light from 5, Bright from 20 lx).
+Categories are global definitions with optional per-room definitions (a room
+may have a completely different structure); ``AmbientSettings.thresholds`` is
+the derived list of starts after the first. Renaming a category never changes
+its id, so brightness matrices keyed by id keep their values. Adding,
+removing and reassigning categories is planned and reviewed by
+``ambient_levels.py``.
 
 Evidence
 --------
@@ -48,16 +53,23 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 import math
+import re
 from typing import Any
 
 from .daylight import HIGH, MEDIUM, Estimate, fmt_lux
 
-# The categories, darkest first: (key, name). Thresholds: one between each pair.
+# The default categories, darkest first: (key, name). Thresholds: one between each pair.
 LEVELS: tuple[tuple[str, str], ...] = (("none", "No light"), ("low", "Low light"), ("bright", "Bright"))
 LEVEL_KEYS = tuple(k for k, _ in LEVELS)
 LEVEL_NAMES = dict(LEVELS)
 DEFAULT_THRESHOLDS = (5, 20)
 THRESHOLD_MAX = 2000
+# Custom categories (0.6.8): at least two; at most ``max_levels`` (global setting, default 12, limit 24).
+MIN_LEVELS = 2
+DEFAULT_MAX_LEVELS = 12
+MAX_LEVELS_LIMIT = 24
+LEVEL_NAME_MAX = 40
+_ID = re.compile(r"^[a-z0-9_]{1,40}$")
 DEFAULT_HYSTERESIS = 2.0
 HYSTERESIS_MAX = 200.0
 DEFAULT_STABLE_SECONDS = 120
@@ -107,21 +119,110 @@ def _int(value: Any, low: int, high: int) -> int | None:
     return None if number is None else int(round(number))
 
 
-def valid_thresholds(value: Any) -> tuple[int, ...] | None:
-    """Thresholds for every level boundary, strictly increasing and positive; None when invalid."""
-    if not isinstance(value, (list, tuple)) or len(value) != len(LEVELS) - 1:
+def valid_thresholds(value: Any, count: int = len(LEVELS)) -> tuple[int, ...] | None:
+    """Thresholds for every boundary of ``count`` levels, strictly increasing and positive; None when invalid."""
+    if not isinstance(value, (list, tuple)) or len(value) != count - 1:
         return None
     out: list[int] = []
     for item in value:
-        number = _int(item, 0, THRESHOLD_MAX)
-        if number is None or number <= 0 or (out and number <= out[-1]):
+        if isinstance(item, bool) or not isinstance(item, (int, float, str)):
+            return None
+        try:
+            raw = float(item)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(raw) or raw <= 0 or raw > THRESHOLD_MAX:
+            return None
+        number = int(round(raw))
+        if number <= 0 or (out and number <= out[-1]):
             return None
         out.append(number)
     return tuple(out)
 
 
+@dataclass(frozen=True, slots=True)
+class AmbientLevel:
+    """One ambient category: a stable id (never changed by a rename), its name and where it starts (lx)."""
+
+    id: str
+    name: str
+    start: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "name": self.name, "start": self.start}
+
+
+DEFAULT_LEVELS: tuple[AmbientLevel, ...] = tuple(
+    AmbientLevel(k, n, 0 if i == 0 else DEFAULT_THRESHOLDS[i - 1]) for i, (k, n) in enumerate(LEVELS))
+
+
+def levels_from_thresholds(thresholds: tuple[int, ...] | None) -> tuple[AmbientLevel, ...] | None:
+    """The default categories (0.6.7 ids and names) with these boundaries."""
+    if thresholds is None:
+        return None
+    return tuple(AmbientLevel(k, n, 0 if i == 0 else thresholds[i - 1]) for i, (k, n) in enumerate(LEVELS))
+
+
+def level_error(value: Any, *, max_levels: int = DEFAULT_MAX_LEVELS) -> str | None:
+    """Why a list of category definitions is invalid (None when it is valid).
+
+    Each item: ``{"id", "name", "start"}``. The first starts at 0 lx; the starts increase strictly; ids are
+    unique (lowercase letters, digits, ``_``); names are not empty and unique (case-insensitive).
+    """
+    if not isinstance(value, (list, tuple)):
+        return "The categories must be a list"
+    if len(value) < MIN_LEVELS:
+        return f"At least {MIN_LEVELS} categories are needed"
+    if len(value) > max_levels:
+        return f"At most {max_levels} categories"
+    ids: set[str] = set()
+    names: set[str] = set()
+    previous: float | None = None
+    for i, item in enumerate(value):
+        if not isinstance(item, dict):
+            return f"Category {i + 1} is invalid"
+        level_id = item.get("id")
+        if not isinstance(level_id, str) or not _ID.match(level_id):
+            return f"Category {i + 1} has an invalid id"
+        if level_id in ids:
+            return f"Duplicate category id {level_id}"
+        ids.add(level_id)
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return f"Category {i + 1} needs a name"
+        if len(name.strip()) > LEVEL_NAME_MAX:
+            return f"The name of category {i + 1} is too long"
+        if name.strip().casefold() in names:
+            return f"Duplicate category name {name.strip()}"
+        names.add(name.strip().casefold())
+        start = item.get("start")
+        if isinstance(start, bool) or not isinstance(start, (int, float)):
+            return f"{name.strip()}: the start must be a number"
+        if not math.isfinite(float(start)):
+            return f"{name.strip()}: the start must be a number"
+        if start < 0:
+            return f"{name.strip()}: the start cannot be negative"
+        if float(start) != int(start):
+            return f"{name.strip()}: the start must be a whole number of lux"
+        if start > THRESHOLD_MAX:
+            return f"{name.strip()}: at most {THRESHOLD_MAX} lx"
+        if i == 0 and start != 0:
+            return f"The first category ({name.strip()}) must start at 0 lx"
+        if previous is not None and start <= previous:
+            return f"{name.strip()} must start above {int(previous)} lx (each category starts higher than the one before)"
+        previous = float(start)
+    return None
+
+
+def valid_levels(value: Any, *, max_levels: int = MAX_LEVELS_LIMIT) -> tuple[AmbientLevel, ...] | None:
+    """Category definitions, or None when invalid (see ``level_error``)."""
+    if level_error(value, max_levels=max_levels) is not None:
+        return None
+    return tuple(AmbientLevel(item["id"], item["name"].strip(), int(item["start"])) for item in value)
+
+
 def _level(value: Any) -> str | None:
-    return value if value in LEVEL_KEYS else None
+    return value if isinstance(value, str) and _ID.match(value) else None
 
 
 def _fallback(value: Any) -> AmbientFallback | None:
@@ -138,9 +239,13 @@ TUNING_KEYS = ("hysteresis", "stable_seconds", "fallback", "fallback_level", "tr
 
 @dataclass(frozen=True, slots=True)
 class AmbientSettings:
-    """Ambient levels and brightness tuning. Globally every value is set; in a room ``None`` inherits it."""
+    """Ambient levels and brightness tuning. Globally every value is set; in a room ``None`` inherits it.
 
-    thresholds: tuple[int, ...] | None = None
+    ``levels`` (0.6.8): the category definitions. A 0.6.7 ``thresholds`` list (three categories) is read as the
+    default categories with those boundaries. ``max_levels`` is global only.
+    """
+
+    levels: tuple[AmbientLevel, ...] | None = None
     hysteresis: float | None = None
     stable_seconds: int | None = None
     fallback: AmbientFallback | None = None
@@ -150,12 +255,38 @@ class AmbientSettings:
     transition: float | None = None
     dead_band: int | None = None
     min_interval: int | None = None
+    max_levels: int | None = None
+
+    @property
+    def thresholds(self) -> tuple[int, ...] | None:
+        """The boundaries: where each category after the first starts."""
+        return tuple(level.start for level in self.levels[1:]) if self.levels else None
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        return tuple(level.id for level in self.levels or DEFAULT_LEVELS)
+
+    @property
+    def names(self) -> dict[str, str]:
+        return {level.id: level.name for level in self.levels or DEFAULT_LEVELS}
+
+    def name_of(self, key: str | None) -> str:
+        return self.names.get(key or "", key or "")
+
+    def fallback_index(self) -> int:
+        """The fallback category; when it no longer exists, the second category (or the only one)."""
+        keys = self.keys
+        key = self.fallback_level or DEFAULT_FALLBACK_LEVEL
+        return keys.index(key) if key in keys else min(1, len(keys) - 1)
 
     @classmethod
     def from_dict(cls, data: Any, *, defaults: bool = False) -> AmbientSettings:
         data = data if isinstance(data, dict) else {}
+        levels = valid_levels(data.get("levels")) if data.get("levels") is not None else None
+        if levels is None:
+            levels = levels_from_thresholds(valid_thresholds(data.get("thresholds")))
         out = cls(
-            thresholds=valid_thresholds(data.get("thresholds")),
+            levels=levels,
             hysteresis=_num(data.get("hysteresis"), 0, HYSTERESIS_MAX),
             stable_seconds=_int(data.get("stable_seconds"), 0, STABLE_MAX),
             fallback=_fallback(data.get("fallback")),
@@ -163,29 +294,37 @@ class AmbientSettings:
             transition=_num(data.get("transition"), 0, TRANSITION_LIMIT),
             dead_band=_int(data.get("dead_band"), 0, DEAD_BAND_MAX),
             min_interval=_int(data.get("min_interval"), 0, MIN_INTERVAL_MAX),
+            max_levels=_int(data.get("max_levels"), MIN_LEVELS, MAX_LEVELS_LIMIT) if defaults else None,
         )
         return GLOBAL_AMBIENT.merged(out) if defaults else out
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out = {
+            "levels": [level.as_dict() for level in self.levels] if self.levels else None,
+            # (Also written for 0.6.7, which reads three categories from it.)
             "thresholds": list(self.thresholds) if self.thresholds else None,
             "hysteresis": self.hysteresis, "stable_seconds": self.stable_seconds,
             "fallback": self.fallback.value if self.fallback else None, "fallback_level": self.fallback_level,
             "transition": self.transition, "dead_band": self.dead_band, "min_interval": self.min_interval,
         }
+        if self.max_levels is not None:
+            out["max_levels"] = self.max_levels
+        return out
 
     def merged(self, room: AmbientSettings) -> AmbientSettings:
         """These (global) settings with a room's own values applied."""
-        return replace(self, **{k: v for k in ("thresholds", *TUNING_KEYS) if (v := getattr(room, k)) is not None})
+        return replace(self, **{k: v for k in ("levels", *TUNING_KEYS) if (v := getattr(room, k)) is not None})
 
     def sources(self, room: AmbientSettings) -> dict[str, str]:
-        return {k: "room" if getattr(room, k) is not None else "global" for k in ("thresholds", *TUNING_KEYS)}
+        out = {k: "room" if getattr(room, k) is not None else "global" for k in ("levels", *TUNING_KEYS)}
+        out["thresholds"] = out["levels"]
+        return out
 
 
 GLOBAL_AMBIENT = AmbientSettings(
-    thresholds=DEFAULT_THRESHOLDS, hysteresis=DEFAULT_HYSTERESIS, stable_seconds=DEFAULT_STABLE_SECONDS,
+    levels=DEFAULT_LEVELS, hysteresis=DEFAULT_HYSTERESIS, stable_seconds=DEFAULT_STABLE_SECONDS,
     fallback=AmbientFallback.HOLD, fallback_level=DEFAULT_FALLBACK_LEVEL, transition=DEFAULT_TRANSITION,
-    dead_band=DEFAULT_DEAD_BAND, min_interval=DEFAULT_MIN_INTERVAL,
+    dead_band=DEFAULT_DEAD_BAND, min_interval=DEFAULT_MIN_INTERVAL, max_levels=DEFAULT_MAX_LEVELS,
 )
 
 
@@ -300,15 +439,16 @@ class AmbientTracker:
             return None
         return self.candidate_since + timedelta(seconds=stable_seconds)
 
-    def persist(self) -> dict[str, Any]:
-        return {"committed": LEVEL_KEYS[self.committed] if self.committed is not None else None,
-                "since": _iso(self.since), "reliable_at": _iso(self.reliable_at)}
+    def persist(self, keys: tuple[str, ...] = LEVEL_KEYS) -> dict[str, Any]:
+        """Kept by category id, so a restart with other categories never maps to a wrong one."""
+        committed = keys[self.committed] if self.committed is not None and self.committed < len(keys) else None
+        return {"committed": committed, "since": _iso(self.since), "reliable_at": _iso(self.reliable_at)}
 
     @classmethod
-    def restore(cls, data: Any) -> AmbientTracker:
+    def restore(cls, data: Any, keys: tuple[str, ...] = LEVEL_KEYS) -> AmbientTracker:
         data = data if isinstance(data, dict) else {}
         key = data.get("committed")
-        committed = LEVEL_KEYS.index(key) if key in LEVEL_KEYS else None
+        committed = keys.index(key) if key in keys else None
         return cls(committed=committed, since=_parse(data.get("since")), reliable_at=_parse(data.get("reliable_at")))
 
 
@@ -349,11 +489,15 @@ class AmbientStatus:
 
     @property
     def key(self) -> str:
-        return LEVEL_KEYS[self.level]
+        return self.settings.keys[self.level]
 
     @property
     def name(self) -> str:
-        return LEVEL_NAMES[self.key]
+        return self.settings.name_of(self.key)
+
+    def key_of(self, index: int | None) -> str | None:
+        keys = self.settings.keys
+        return keys[index] if index is not None and 0 <= index < len(keys) else None
 
     def lux_text(self) -> str:
         """"12 lx", "≈ 24 lx", "at most 23 lx" or "" (no value)."""
@@ -371,29 +515,30 @@ class AmbientStatus:
             word = {"held": "held", "fallback": "fallback"}.get(self.basis)
             return f"{self.name} ({word})" if word else self.name
         if self.candidate is not None and self.candidate != self.level:
-            return f"{self.name} ({lux}; {LEVEL_NAMES[LEVEL_KEYS[self.candidate]]} pending)"
+            return f"{self.name} ({lux}; {self.settings.name_of(self.key_of(self.candidate))} pending)"
         return f"{self.name} ({lux})"
 
     def as_dict(self) -> dict[str, Any]:
         s = self.settings
+        levels = s.levels or DEFAULT_LEVELS
         return {
             "enabled": self.enabled, "level": self.key, "name": self.name, "index": self.level,
             "label": self.label(), "basis": self.basis, "evidence": self.evidence.kind,
-            "evidence_level": LEVEL_KEYS[self.evidence.level] if self.evidence.level is not None else None,
+            "evidence_level": self.key_of(self.evidence.level),
             "lux": None if self.evidence.lux is None else round(self.evidence.lux, 1), "lux_text": self.lux_text(),
             "estimated": self.evidence.kind == ESTIMATED, "upper_bound": self.evidence.kind == BOUND,
             "text": self.evidence.text, "since": _iso(self.since),
-            "candidate": LEVEL_KEYS[self.candidate] if self.candidate is not None else None,
+            "candidate": self.key_of(self.candidate),
             "candidate_due": _iso(self.candidate_due), "note": self.note,
             "measured_lux": None if self.measured_lux is None else round(self.measured_lux, 1),
             "sensor": self.sensor, "sensor_name": self.sensor_name, "contaminated": self.contaminated,
             "contamination": self.contamination, "confidence": self.confidence, "reliable_at": _iso(self.reliable_at),
-            "thresholds": list(s.thresholds or DEFAULT_THRESHOLDS), "hysteresis": s.hysteresis,
+            "thresholds": [lv.start for lv in levels[1:]], "hysteresis": s.hysteresis,
             "stable_seconds": s.stable_seconds, "fallback": s.fallback.value if s.fallback else None,
-            "fallback_level": s.fallback_level,
-            "levels": [{"key": k, "name": n, "from": 0 if i == 0 else (s.thresholds or DEFAULT_THRESHOLDS)[i - 1],
-                        "below": (s.thresholds or DEFAULT_THRESHOLDS)[i] if i < len(LEVELS) - 1 else None}
-                       for i, (k, n) in enumerate(LEVELS)],
+            "fallback_level": s.keys[s.fallback_index()],
+            "levels": [{"key": lv.id, "name": lv.name, "from": lv.start,
+                        "below": levels[i + 1].start if i < len(levels) - 1 else None}
+                       for i, lv in enumerate(levels)],
         }
 
 
@@ -401,11 +546,13 @@ def classify(tracker: AmbientTracker, estimate: Estimate, settings: AmbientSetti
              ) -> tuple[Evidence, int | None]:
     """One evaluation: the evidence and the previous committed level when the category changed."""
     thresholds = settings.thresholds or DEFAULT_THRESHOLDS
+    if tracker.committed is not None and tracker.committed > len(thresholds):
+        tracker.committed = None  # (fewer categories than when it was committed: classified again)
     ev = evidence(estimate, thresholds, settings.hysteresis or 0, tracker.committed)
     instant = ev.level
     reliable = instant is not None and ev.held is None
     if instant is None and settings.fallback == AmbientFallback.LEVEL:
-        instant = LEVEL_KEYS.index(settings.fallback_level or DEFAULT_FALLBACK_LEVEL)
+        instant = settings.fallback_index()
         reliable = False
     old = tracker.update(instant, now, settings.stable_seconds or 0, reliable=reliable)
     return ev, old
@@ -413,26 +560,31 @@ def classify(tracker: AmbientTracker, estimate: Estimate, settings: AmbientSetti
 
 def status(tracker: AmbientTracker, ev: Evidence, settings: AmbientSettings, *, enabled: bool) -> AmbientStatus:
     """The category the brightness rules use now (the committed one, or the fallback level)."""
-    fallback = LEVEL_KEYS.index(settings.fallback_level or DEFAULT_FALLBACK_LEVEL)
+    fallback = settings.fallback_index()
+    keys = settings.keys
+
+    def name(index: int) -> str:
+        return settings.name_of(keys[index])
+
     note = None
     if tracker.committed is None:
         level, basis = fallback, "fallback"
-        note = (f"Not enough trustworthy light evidence yet: using the fallback {LEVEL_NAMES[LEVEL_KEYS[fallback]]}"
+        note = (f"Not enough trustworthy light evidence yet: using the fallback {name(fallback)}"
                 + (f" ({ev.held})" if ev.held else ""))
     else:
         level = tracker.committed
         if ev.held:
             basis = "held"
-            note = (f"Ambient sensor affected by room lighting. Holding {LEVEL_NAMES[LEVEL_KEYS[level]]} "
+            note = (f"Ambient sensor affected by room lighting. Holding {name(level)} "
                     "classification until trustworthy evidence is available.")
         elif ev.level is None:
             if settings.fallback == AmbientFallback.LEVEL and level == fallback:
                 basis = "fallback"
-                note = f"No trustworthy light evidence: using the fallback {LEVEL_NAMES[LEVEL_KEYS[level]]}"
+                note = f"No trustworthy light evidence: using the fallback {name(level)}"
             else:
                 basis = "held"
                 note = (f"No trustworthy light evidence ({ev.text.split('—', 1)[-1].strip()}). Holding "
-                        f"{LEVEL_NAMES[LEVEL_KEYS[level]]} until trustworthy evidence is available.")
+                        f"{name(level)} until trustworthy evidence is available.")
         else:
             basis = ev.kind
     return AmbientStatus(
