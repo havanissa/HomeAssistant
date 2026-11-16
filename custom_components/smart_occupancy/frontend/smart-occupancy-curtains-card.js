@@ -1,9 +1,20 @@
 /*
- * Smart Occupancy curtains card (served by the smart_occupancy integration, 0.6.3).
+ * Smart Occupancy curtains card (served by the smart_occupancy integration, 0.6.4).
  *
  *   type: custom:smart-occupancy-curtains-card
  *   title: Curtains        # optional
  *   area: stova            # optional: only the windows of one room
+ *   page: modes            # optional: open on Global Modes instead of Windows
+ *
+ * 0.6.4 (Global Curtain Modes): Curtains → Global Modes. Mode cards (Morning,
+ * Daytime, Evening, Night, Sleep, Sun Protection; Window Lamp, Glare and
+ * Excessive Heat under Advanced) and, for the selected mode, which preset each
+ * window or single cover uses when the automatic controller selects that mode.
+ * The All windows matrix edits the same configuration. Selecting a mode card
+ * only changes the view; edits are a draft until "Review & save", and a change
+ * that would move an Automatic window now needs an explicit confirmation and
+ * policy. Window overrides (from 0.6.3 or Window settings) are shown with
+ * their effect and can be moved to Global Modes.
  *
  * Overview: windows grouped by room, each with its covers (actual and desired
  * position), the recognised preset (or Custom), its mode, the automatic
@@ -26,7 +37,7 @@
  * times are 24-hour HH:mm in Home Assistant's time zone, also the time fields.
  */
 
-const VERSION = "0.6.3";
+const VERSION = "0.6.4";
 const CARD = "smart-occupancy-curtains-card";
 const WS = "smart_occupancy/curtains";
 
@@ -132,6 +143,11 @@ const STATUS_TONE = { moved: "ok", moving: "info", would_move: "info", at_target
   blocked: "warn", failed: "bad", off: "muted", released: "info", hold_started: "warn", enabled: "ok", resumed: "info",
   mode: "muted" };
 const SOURCE_WORD = { window: "this window", room: "the room", global: "all windows", default: "the default" };
+// Global Modes (0.6.4)
+const SRC_TAG = { global: "G", room: "R", window: "W", cover: "C", mixed: "M" };
+const SRC_TONE = { global: "info", room: "warn", window: "warn", cover: "warn", mixed: "muted" };
+const SRC_WORD = { global: "Global Mode", room: "Room override", window: "Window override", cover: "Cover override", mixed: "Mixed" };
+const MODE_STATUS_TONE = { automatic: "ok", observing: "info", off: "muted" };
 const ENTITY_LIST = { sleep_entity: "sleep", lux_entity: "lux", lamp_entity: "light" };
 const num1 = (v) => (v == null ? "—" : `${Math.round(v * 10) / 10}`);
 
@@ -163,6 +179,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     this._model = null;
     this._error = null;
     this._view = null;      // null = overview, otherwise a window id
+    this._page = null;      // "windows" or "modes" (Global Modes, 0.6.4); null = from the card config
     this._tab = "general";
     this._ui = {};
     this._status = {};
@@ -281,7 +298,8 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     const focusSel = active && active.dataset ? Object.entries(active.dataset).map(([k, v]) => `[data-${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}="${CSS.escape(v)}"]`).join("") : "";
     const typing = active && active.tagName === "INPUT" && ["text", "number"].includes(active.type) ? active.value : null;
     const w = this._view && this._win(this._view);
-    this.shadowRoot.innerHTML = `${STYLE}<ha-card>${w ? this._windowView(w) : this._overview()}</ha-card>`;
+    const page = w ? this._windowView(w) : this._pageName() === "modes" ? this._modesPage() : this._overview();
+    this.shadowRoot.innerHTML = `${STYLE}<ha-card>${page}</ha-card>`;
     if (focusSel) {
       const el = this.shadowRoot.querySelector(`${active.tagName.toLowerCase()}${focusSel}`);
       if (el) { if (typing !== null) el.value = typing; el.focus({ preventScroll: true }); }
@@ -299,7 +317,8 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
         <div class="title">${esc(this._config.title || "Curtains")}</div>
         <div class="sub">${windows.length} window${windows.length === 1 ? "" : "s"} · ${windows.filter((w) => w.mode === "automatic").length} automatic</div></div>
         ${this._canEdit ? `<button class="iconbtn" data-action="settings" aria-label="Curtain settings" title="Curtain settings" aria-pressed="${!!ui.settings}"><ha-icon icon="mdi:cog-outline"></ha-icon></button>` : ""}</div>
-      <div class="pad">
+      ${this._pageTabs()}
+      <div class="pad">${this._reviewHtml()}
       <div class="note">Windows in Automatic move on their own and explain every decision. Observing windows only say what they would do; every window can still get a preset you apply and confirm.</div>`;
     if (this._canEdit) {
       body += `<div class="actions"><button class="btn" data-action="add-window" ${ui.adding ? "disabled" : ""}><ha-icon icon="mdi:plus"></ha-icon>Add window</button>
@@ -318,8 +337,8 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
 
   _desired(w) {
     const d = w.auto && w.auto.decision;
-    const p = d && d.preset_id ? w.presets.find((x) => x.preset_id === d.preset_id) : null;
-    return p || w.presets.find((x) => x.preset_id === w.selected_preset) || null;
+    if (d && d.preset_id && d.target && d.target.state === "target") return { preset_id: d.preset_id, name: d.preset_name, positions: d.target.positions };
+    return w.presets.find((x) => x.preset_id === w.selected_preset) || null;
   }
 
   _coverRow(l, w) {
@@ -418,8 +437,10 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     if (w.mode === "off") return `<div class="auto muted"><ha-icon icon="mdi:power"></ha-icon><div class="amain">Off: curtains are not evaluated.</div></div>`;
     const d = a && a.decision;
     if (!d) return `<div class="auto muted"><div class="amain">Evaluating…</div></div>`;
-    const preset = d.preset_id ? w.presets.find((p) => p.preset_id === d.preset_id) : null;
-    const what = preset ? esc(preset.name) : d.condition === "manual_override" || d.condition === "waiting" ? "keeps the position" : "no preset set";
+    const tgt = d.target || {};
+    const what = d.preset_name ? `${esc(d.preset_name)} <span class="pill ${SRC_TONE[d.source] || "muted"}" title="Where the preset comes from">${esc(d.source_word || "")}</span>`
+      : d.condition === "manual_override" || d.condition === "waiting" ? "keeps the position"
+      : tgt.state === "no_action" ? `No action <span class="sub">(${esc(d.source_word || "")})</span>` : "no preset assigned";
     const st = a.status;
     const extra = st && st.text && st.text !== d.text ? `<div class="astatus"><span class="pill ${STATUS_TONE[st.action] || "muted"}">${esc(st.word)}</span> ${esc(st.text)}</div>`
       : st ? `<div class="astatus"><span class="pill ${STATUS_TONE[st.action] || "muted"}">${esc(st.word)}</span> <span class="sub">since ${fmtTime(st.at)}</span></div>` : "";
@@ -628,7 +649,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
           data-action="tab" data-tab="${k}" aria-label="${esc(l)}" data-tip="${esc(l)}"><ha-icon icon="${icon}"></ha-icon><span class="tlabel" aria-hidden="true">${l}</span></button>`;
       }).join("")}</div>
       <div class="tabcap" aria-hidden="true">${esc(current[1])}</div>
-      <div class="pad" role="tabpanel" id="so-cpanel" aria-labelledby="tab-${current[0]}">${this._enableHtml(w)}${this._confirmHtml(w)}${this._simHtml(w)}${content}</div>`;
+      <div class="pad" role="tabpanel" id="so-cpanel" aria-labelledby="tab-${current[0]}">${this._enableHtml(w)}${this._confirmHtml(w)}${this._simHtml(w)}${this._reviewHtml()}${content}</div>`;
   }
 
   _generalTab(w) {
@@ -659,7 +680,8 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       <div class="frow"><label for="lk-${esc(l.layer_id)}">Type</label><div class="fval"><select id="lk-${esc(l.layer_id)}" data-control="layer-kind" data-layer="${esc(l.layer_id)}" ${ro}>
         ${m.kinds.map((k) => `<option value="${k}" ${k === l.kind ? "selected" : ""}>${esc(m.words.kinds[k])}</option>`).join("")}</select></div></div>
       <div class="frow"><label for="ll-${esc(l.layer_id)}">Own name</label><div class="fval"><input id="ll-${esc(l.layer_id)}" type="text" maxlength="60" value="${esc(l.label || "")}" placeholder="${esc(l.entity_name)}"
-        data-control="layer-label" data-layer="${esc(l.layer_id)}" ${ro}>${this._canEdit ? `<button class="link" data-action="remove-layer" data-layer="${esc(l.layer_id)}">Remove</button>` : ""}</div></div></div>`).join("");
+        data-control="layer-label" data-layer="${esc(l.layer_id)}" ${ro}>${this._canEdit ? `<button class="link" data-action="remove-layer" data-layer="${esc(l.layer_id)}">Remove</button>` : ""}</div></div>
+      ${w.layered ? this._coverPresetsHtml(w, l) : ""}</div>`).join("");
     const free = m.candidates.filter((c) => !c.assigned_to);
     const sorted = [...free].sort((a, b) => (b.area_id === w.area_id) - (a.area_id === w.area_id) || a.name.localeCompare(b.name));
     const add = this._canEdit && w.layers.length < m.limits.layers ? `<div class="section"><div class="stitle small">Add a cover</div>
@@ -667,7 +689,8 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
         ${sorted.map((c) => `<option value="${esc(c.entity_id)}" ${this._ui.addEntity === c.entity_id ? "selected" : ""}>${esc(c.name)} · ${esc(c.area_name || "No room")}${c.caps.position ? "" : " · open/close only"}</option>`).join("")}</select>
         <button class="btn small" data-action="add-layer" ${this._ui.addEntity ? "" : "disabled"}>Add</button></div>
       <div class="hint">Covers already in another window are not offered: one cover belongs to one window. A new cover is "Leave unchanged" in the existing presets until you set it.</div></div>` : "";
-    return `${layers || `<div class="muted">No covers yet.</div>`}${this._statusHtml(`w-${w.window_id}`)}${add}`;
+    const single = w.layers.length === 1 ? `<div class="hint">With one cover, this window's presets (Presets tab) are the cover's presets.</div>` : "";
+    return `${layers || `<div class="muted">No covers yet.</div>`}${single}${this._statusHtml(`w-${w.window_id}`)}${this._statusHtml(`cp-${w.window_id}`)}${add}`;
   }
 
   _positionsText(w, p) {
@@ -730,11 +753,8 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       <div class="chks col">${flag("sleep_protection", "Sleep mode", "Stays closed while sleep is on (see Sleep mode below)")}
         ${flag("privacy", "Evening privacy", "Closes when it gets dark in the evening")}
         ${flag("solar_protection", "Sun protection", "Shades when the sun is in front of the window and the light is strong")}</div>
-      <div class="stitle small">Which preset each condition uses</div>
-      <div class="ctable">${conds.map((c) => `<div class="frow"><label for="cond-${c}"><ha-icon icon="${COND_ICON[c]}"></ha-icon> ${esc(m.words.conditions[c])}<br><span class="sub">${esc(COND_HINT[c] || "")}</span></label>
-        <div class="fval"><select id="cond-${c}" data-control="cond" data-cond="${c}" ${ro}><option value="">${c === "glare" || c === "heat" ? "Not set (uses Direct sunlight)" : "Not set (keep the position)"}</option>
-          ${w.presets.map((p) => `<option value="${esc(p.preset_id)}" ${w.conditions[c] === p.preset_id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div></div>`).join("")}</div>
-      <div class="hint"><b>Waiting for daylight</b> and a <b>manual override</b> never move anything: the covers stay where they are. <b>Useful solar heating</b> keeps the Morning / Normal daytime preset. Lighting moods are never used for curtains.</div>
+      ${this._windowModesHtml(w)}
+      <div class="hint"><b>Waiting for daylight</b> and a <b>manual override</b> never move anything: the covers stay where they are. <b>Useful solar heating</b> keeps the Morning / Daytime preset. A mode without any assignment leaves the covers where they are. Lighting moods are never used for curtains.</div>
       ${this._statusHtml(`w-${w.window_id}`)}
       ${this._rulesHtml(w, (g) => !ENV_GROUPS.has(g))}`;
   }
@@ -759,8 +779,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       let body = fields.map((rule) => this._ruleField(w, rule, scope)).join("");
       if (g === "sleep" && scope === "window") body = `${this._flagSetRow(w, scope, "lamp_bypass", "sleep", "Sleep wins over the window lamp")}${this._flagSetRow(w, scope, "manual_bypass", "sleep", "Sleep ends a manual hold that began before it")}${body}`;
       if (g === "lamp" && scope === "window") {
-        body += `<div class="frow"><label for="lamp-preset">Lamp On preset</label><div class="fval"><select id="lamp-preset" data-control="cond" data-cond="lamp" ${this._ro}><option value="">Not set</option>
-          ${w.presets.map((p) => `<option value="${esc(p.preset_id)}" ${w.conditions.lamp === p.preset_id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></div></div>`;
+        body += `<div class="frow"><label for="lamp-preset">Window Lamp preset</label><div class="fval">${this._ovSelect(w, "lamp", "lamp-preset")}<span class="sub">${esc(w.effective.lamp.text)}</span></div></div>`;
       }
       if (g === "lamp" && scope !== "window") body = `<div class="hint">The lamp and its preset are chosen per window.</div>${body}`;
       return `<details class="rgroup" ${this._ui.open?.[g] ? "open" : ""} data-group="${g}"><summary>${esc(label)}</summary><div class="hint">${esc(desc)}</div>${body}</details>`;
@@ -956,7 +975,364 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       ${d && d.direct_sun && d.direct_sun.status && d.direct_sun.status !== "off" ? `<div class="sub"><b>Direct sun:</b> ${esc(d.direct_sun.text)}</div>` : ""}
       ${d && d.thermal && d.thermal.state !== "off" ? `<div class="sub"><b>Temperature:</b> ${esc(d.thermal.text)}</div>` : ""}
       <details class="dladv" open><summary>Decision log (${log.length})</summary>${log.length ? log.map((x) => `<div class="prow"><div class="pmain"><time class="ltime" datetime="${esc(x.at)}" title="${esc(fullTime(x.at))}">${fmtTime(x.at)}</time><span class="pill ${STATUS_TONE[x.action] || "muted"}">${esc(x.word)}</span>${x.mode && x.mode !== "automatic" ? `<span class="sub">${esc(x.mode)}</span>` : ""}</div>
-        <div class="why">${fmtTime(x.at)} — ${esc(x.text)}</div></div>`).join("") : `<div class="muted">Nothing yet.</div>`}</details>`;
+        <div class="why">${fmtTime(x.at)} — ${esc(x.summary || x.text)}${x.summary && x.summary !== x.text ? `<br><span class="sub">${esc(x.text)}</span>` : ""}</div></div>`).join("") : `<div class="muted">Nothing yet.</div>`}</details>`;
+  }
+
+  // ------------------------------------------------------- Global Modes (0.6.4)
+  _pageName() { return this._page || (this._config.page === "modes" ? "modes" : "windows"); }
+
+  _pageTabs() {
+    const on = this._pageName();
+    const tab = (k, label, icon) => `<button class="seg ${on === k ? "on" : ""}" aria-pressed="${on === k}" data-action="page" data-page="${k}"><ha-icon icon="${icon}"></ha-icon>${label}</button>`;
+    return `<div class="pagetabs"><div class="segs" role="group" aria-label="Curtains">${tab("windows", "Windows", "mdi:window-closed-variant")}${tab("modes", "Global Modes", "mdi:view-grid-outline")}</div></div>`;
+  }
+
+  _gm() {
+    if (!this._ui.gm) this._ui.gm = { mode: "morning", view: "modes", ops: [], draft: null, error: null, add: null, cell: null, advCols: false };
+    return this._ui.gm;
+  }
+
+  _gmModel() { return this._gm().draft || this._model.global_modes; }
+
+  async _gmEdit(op) {
+    const gm = this._gm();
+    const ops = [...gm.ops, ...(Array.isArray(op) ? op : [op])];
+    gm.busy = true;
+    this._render();
+    try {
+      const res = await this._ws({ type: `${WS}/modes/change`, ops, dry_run: true });
+      gm.ops = ops;
+      gm.draft = res.global_modes;
+      gm.pending = res;
+      gm.error = null;
+      gm.add = null;
+      gm.cell = null;
+    } catch (err) {
+      gm.error = { code: err?.code, message: err?.message || String(err), op };
+    }
+    gm.busy = false;
+    this._render();
+  }
+
+  _gmAdd(replace) {
+    const gm = this._gm();
+    if (replace) {
+      if (gm.error && gm.error.op && !Array.isArray(gm.error.op)) this._gmEdit({ ...gm.error.op, replace: true });
+      return;
+    }
+    const add = gm.add;
+    if (!add || !add.target || !add.preset) return;
+    const [window_id, layer_id] = add.target.split("|");
+    this._gmEdit({ op: "assign", mode: gm.mode, window_id, layer_id: layer_id || null, preset_id: add.preset });
+  }
+
+  // A change made outside the Global Modes draft (Window settings): saved at once unless it would move an
+  // Automatic window now (or it is a migration), which is reviewed and confirmed first.
+  async _quickChange(ops, key, forceReview = false) {
+    this._status[key] = { busy: true };
+    this._requestRender();
+    try {
+      const res = await this._ws({ type: `${WS}/modes/change`, ops, dry_run: true });
+      delete this._status[key];
+      if (res.needs_confirm || forceReview) {
+        this._ui.review = { ops, result: res, key, policy: null };
+      } else {
+        await this._ws({ type: `${WS}/modes/change`, ops });
+        this._status[key] = { ok: "Saved" };
+        setTimeout(() => { if (this._status[key]?.ok) { delete this._status[key]; this._requestRender(); } }, 2000);
+      }
+    } catch (err) {
+      this._status[key] = { error: err?.message || String(err) };
+    }
+    this._scheduleFetch();
+    this._requestRender();
+  }
+
+  async _openReview(ops, key) {
+    if (!ops || !ops.length) return;
+    this._ui.review = { ops, key, result: null, policy: null };
+    this._render();
+    try {
+      const res = await this._ws({ type: `${WS}/modes/change`, ops, dry_run: true });
+      if (this._ui.review) this._ui.review.result = res;
+    } catch (err) {
+      if (this._ui.review) this._ui.review.error = err?.message || String(err);
+    }
+    this._render();
+  }
+
+  async _saveReview() {
+    const r = this._ui.review;
+    if (!r || !r.result || r.sending) return;
+    if (r.result.needs_confirm && !r.policy) return;
+    r.sending = true;
+    this._render();
+    try {
+      await this._ws({ type: `${WS}/modes/change`, ops: r.ops, confirm: !!r.result.needs_confirm, policy: r.policy || "now" });
+      this._ui.review = null;
+      if (r.key === "global") Object.assign(this._gm(), { ops: [], draft: null, pending: null, error: null, cell: null });
+      else { this._status[r.key] = { ok: "Saved" }; setTimeout(() => { delete this._status[r.key]; this._requestRender(); }, 2000); }
+    } catch (err) {
+      r.sending = false;
+      r.error = err?.message || String(err);
+    }
+    this._scheduleFetch();
+    this._render();
+  }
+
+  // The review before a mapping change is saved: what changes, what each affected window would do now.
+  _reviewHtml() {
+    const r = this._ui.review;
+    if (!r) return "";
+    if (!r.result) return `<div class="confirm ask" role="dialog" aria-label="Review changes"><div class="muted">${r.error ? `<span class="bad">${esc(r.error)}</span>` : "Working out what the change would do…"}</div>
+      <div class="actions"><button class="btn ghost" data-action="review-cancel">Close</button></div></div>`;
+    const res = r.result;
+    const status = (e) => {
+      if (e.mode === "off") return `<span class="pill muted">Off: not evaluated</span>`;
+      if (e.hold) return `<span class="pill warn">Manual hold: kept</span>`;
+      if (!e.active) return `<span class="pill muted">Not active now: no movement</span>`;
+      if (e.mode === "observing") return `<span class="pill info">Observing: nothing moves</span>`;
+      if (e.conflicts.length) return `<span class="pill warn">Blocked by automations</span>`;
+      return e.moves ? `<span class="pill warn">Would move ${e.moves} cover${e.moves === 1 ? "" : "s"}</span>` : `<span class="pill ok">Already there</span>`;
+    };
+    const rows = res.impact.map((e) => `<div class="prow"><div class="pmain"><b>${esc(e.name)}</b><span class="sub">${esc(e.room)} · ${esc(e.mode[0].toUpperCase() + e.mode.slice(1))}</span></div>${status(e)}
+        <div class="why">${e.changes.map((c) => `${esc(c.word)}: ${esc(c.before)} → <b>${esc(c.after)}</b>`).join("<br>")}</div>
+        ${e.condition ? `<div class="why">Now: <b>${esc(e.condition_word)}</b>${e.before ? ` (${esc(e.before)})` : ""}${e.active && e.predicted ? ` → <b>${esc(e.predicted_word)}</b>: ${esc(e.after || "keeps the position")}` : ""}</div>` : ""}
+        ${e.blocked && e.status ? `<div class="why">Currently prevented: ${esc(e.status)}</div>` : ""}
+        ${e.conflicts.length ? `<div class="why warn">Enabled automations may also move these covers: ${e.conflicts.map(esc).join(", ")}. Nothing is sent while they are enabled.</div>` : ""}
+        ${e.active && e.items.length ? `<div class="why">${e.items.filter((i) => i.decision !== "unchanged").map((i) => `${esc(i.name)}: ${pct(i.current)} → ${pct(i.target)} (${esc(i.word)})`).join(" · ")}</div>` : ""}</div>`).join("");
+    const needs = res.needs_confirm;
+    const pol = (k, label, hint) => `<label class="chk ptoggle"><input type="radio" name="gm-policy" value="${k}" data-control="gm-policy" ${r.policy === k ? "checked" : ""}><span><b>${label}</b><br><span class="sub">${hint}</span></span></label>`;
+    return `<div class="confirm ask" role="dialog" aria-label="Review changes">
+      <div class="chead">Review ${res.changes.length} change${res.changes.length === 1 ? "" : "s"}</div>
+      <ul class="clines">${res.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>
+      <div class="stitle small">${res.impact.length ? `Affected windows (${res.impact.length})` : "No window's effective preset changes"}</div>${rows}
+      ${needs ? `<div class="stitle small">Automatic windows whose current position would change</div>
+        <div class="chks col" role="radiogroup" aria-label="When to apply">${pol("now", "Apply now", "The automatic controller moves them now, after all its normal safety checks (manual holds, movement limits, competing automations).")}
+          ${pol("next_change", "At the next change of condition", "They keep their position now; the new preset is used from their next condition (e.g. when Morning becomes Daytime).")}</div>` : `<div class="note">Saving changes the configuration only; nothing moves because of it.</div>`}
+      ${r.error ? `<div class="bad" role="alert">${esc(r.error)}</div>` : ""}
+      <div class="actions"><button class="btn primary" data-action="review-save" ${r.sending || (needs && !r.policy) ? "disabled" : ""}>${needs ? "Save and confirm" : "Save"}</button>
+        <button class="btn ghost" data-action="review-cancel" ${r.sending ? "disabled" : ""}>Cancel</button></div></div>`;
+  }
+
+  _modesPage() {
+    const gm = this._gm();
+    const mm = this._gmModel();
+    const total = mm.modes.reduce((n, m) => n + m.count, 0);
+    let body = `<div class="header"><ha-icon icon="mdi:view-grid-outline"></ha-icon><div class="titles">
+        <div class="title">${esc(this._config.title || "Curtains")} · Global Modes</div>
+        <div class="sub">${total} assignment${total === 1 ? "" : "s"} · ${this._model.windows.length} window${this._model.windows.length === 1 ? "" : "s"}</div></div></div>
+      ${this._pageTabs()}<div class="pad">${this._reviewHtml()}`;
+    body += `<div class="note">Which preset each window or cover uses when the automatic controller selects a mode for it. Each window still decides its own mode; a window without an assignment keeps its position. Selecting and editing never move anything.</div>`;
+    body += `<div class="segs" role="group" aria-label="View">${[["modes", "Modes"], ["matrix", "All windows"]].map(([k, l]) => `<button class="seg ${gm.view === k ? "on" : ""}" aria-pressed="${gm.view === k}" data-action="gm-view" data-view="${k}">${l}</button>`).join("")}</div>`;
+    if (mm.overrides && !gm.ops.length && this._canEdit) {
+      body += `<div class="issue warn"><ha-icon icon="mdi:layers-outline"></ha-icon><div class="imain">${mm.overrides} setting${mm.overrides === 1 ? " is" : "s are"} made in window settings (window or cover overrides, also the mappings from 0.6.3). They win over Global Modes and are shown under each mode.
+        <div><button class="link" data-action="gm-adopt-all">Review moving them to Global Modes…</button></div></div></div>`;
+    }
+    if (gm.ops.length) {
+      body += `<div class="draftbar" role="status"><span><b>${gm.ops.length} unsaved change${gm.ops.length === 1 ? "" : "s"}</b> <span class="sub">${gm.pending && gm.pending.needs_confirm ? "· would move an Automatic window: reviewed before saving" : "· nothing moves until you save"}</span></span>
+        <div class="actions"><button class="btn small" data-action="gm-review" ${gm.busy ? "disabled" : ""}>Review & save</button><button class="btn small ghost" data-action="gm-discard">Discard</button></div></div>`;
+    }
+    const inEditor = gm.view === "modes" && gm.error && gm.error.op && !Array.isArray(gm.error.op) && gm.error.op.op === "assign";
+    if (gm.error && !inEditor) {
+      body += `<div class="issue bad" role="alert"><ha-icon icon="mdi:close-octagon-outline"></ha-icon><div class="imain">${esc(gm.error.message)}
+        <div class="actions">${gm.error.code === "overlap" ? `<button class="btn small" data-action="gm-replace">Replace the existing assignment</button>` : ""}<button class="btn small ghost" data-action="gm-error-close">Close</button></div></div></div>`;
+    }
+    body += gm.view === "matrix" ? this._matrixHtml(mm) : this._modesHtml(mm);
+    body += this._gmLogHtml(mm);
+    return `${body}</div>`;
+  }
+
+  _modeCard(m) {
+    const on = m.key === this._gm().mode;
+    return `<button class="mcard ${on ? "on" : ""}" aria-pressed="${on}" data-action="gm-mode" data-mode="${m.key}" title="${esc(m.hint)}"><ha-icon icon="${m.icon}"></ha-icon>
+      <span class="mname">${esc(m.word)}</span><span class="mcount">${m.count ? `${m.count} assigned` : "none"}${m.others.length ? ` · ${m.others.length} override${m.others.length === 1 ? "" : "s"}` : ""}</span></button>`;
+  }
+
+  _modesHtml(mm) {
+    const gm = this._gm();
+    const common = mm.modes.filter((m) => !m.advanced);
+    const adv = mm.modes.filter((m) => m.advanced);
+    const mode = mm.modes.find((m) => m.key === gm.mode) || common[0];
+    const advOpen = mode.advanced || this._ui.open?.["gm-adv"];
+    return `<div class="mgrid" role="group" aria-label="Modes">${common.map((m) => this._modeCard(m)).join("")}</div>
+      <details class="dladv" data-group="gm-adv" ${advOpen ? "open" : ""}><summary>Advanced: ${adv.map((m) => esc(m.word)).join(", ")}</summary>
+        <div class="mgrid">${adv.map((m) => this._modeCard(m)).join("")}</div>
+        <div class="hint">These need their own preset only where they should differ: Glare and Excessive Heat use a cover's Sun Protection preset when nothing is assigned; Useful solar heating keeps the Morning / Daytime preset. Manual holds and Waiting for daylight never move anything.</div></details>
+      ${this._modeEditor(mode)}`;
+  }
+
+  _modeEditor(m) {
+    const gm = this._gm();
+    const can = this._canEdit;
+    const ro = can ? "" : "disabled";
+    const rows = m.rows.map((r) => {
+      const st = r.status;
+      const pills = [`<span class="pill ${MODE_STATUS_TONE[st.mode]}">${esc(st.mode_word)}</span>`];
+      if (r.active) pills.push(`<span class="pill ok" title="The controller has selected ${esc(m.word)} for this window now">Active now</span>`);
+      else if (st.condition_word && st.mode !== "off") pills.push(`<span class="pill muted" title="What the controller has selected for this window now">Now: ${esc(st.condition_word)}</span>`);
+      if (st.hold) pills.push(`<span class="pill warn">Manual hold</span>`);
+      if (st.deferred) pills.push(`<span class="pill warn">Waits for next condition</span>`);
+      const hidden = r.hidden.map((h) => `<div class="why warn"><ha-icon icon="mdi:layers-outline"></ha-icon> ${esc(h.word)}${h.cover ? ` (${esc(h.cover)})` : ""}: <b>${esc(h.label)}</b> hides this setting.
+        ${can ? `<button class="link" data-action="gm-use-global" data-level="${esc(h.level)}" data-window="${esc(r.window_id)}" data-layer="${esc(h.layer_id || "")}">Use Global Setting</button>` : ""}</div>`).join("");
+      const id = `gm-${esc(r.window_id)}-${esc(r.layer_id || "w")}`;
+      return `<div class="arow ${r.missing || r.problems.length ? "bad" : ""}">
+        <div class="aname"><b>${esc(r.name)}</b><span class="sub">${esc(r.room)} · ${esc(r.type_word)}</span><span class="apills">${pills.join("")}</span></div>
+        <label class="sr" for="${id}">Preset for ${esc(r.name)}</label>
+        <select id="${id}" data-control="gm-preset" data-window="${esc(r.window_id)}" data-layer="${esc(r.layer_id || "")}" ${ro}>
+          ${r.missing ? `<option value="" selected>Missing preset — choose one</option>` : ""}
+          ${r.options.map((o) => `<option value="${esc(o.preset_id)}" ${o.preset_id === r.preset_id ? "selected" : ""} title="${esc(o.detail)}">${esc(o.name)}</option>`).join("")}</select>
+        ${can ? `<button class="iconbtn" data-action="gm-remove" data-window="${esc(r.window_id)}" data-layer="${esc(r.layer_id || "")}" aria-label="Remove ${esc(r.name)} from ${esc(m.word)}" title="Remove from ${esc(m.word)}"><ha-icon icon="mdi:close"></ha-icon></button>` : ""}
+        <div class="why">${esc(r.effective)}${r.options.find((o) => o.preset_id === r.preset_id) ? ` · ${esc(r.options.find((o) => o.preset_id === r.preset_id).detail)}` : ""}</div>
+        ${hidden}${r.problems.map((p) => `<div class="why warn">${esc(p)}</div>`).join("")}
+        ${r.conflicts.length ? `<div class="why warn">Competing automations: ${r.conflicts.map(esc).join(", ")}</div>` : ""}</div>`;
+    }).join("");
+    const assigned = new Set(m.rows.map((r) => `${r.window_id}|${r.layer_id || ""}`));
+    const targets = this._gmModel().targets.filter((t) => t.has_covers);
+    const groups = [...new Set(targets.map((t) => t.room))];
+    const add = gm.add || {};
+    const chosen = add.target ? targets.find((t) => `${t.window_id}|${t.layer_id || ""}` === add.target) : null;
+    const err = gm.view === "modes" && gm.error && gm.error.op && !Array.isArray(gm.error.op) && gm.error.op.op === "assign"
+      ? `<div class="issue bad" role="alert"><ha-icon icon="mdi:close-octagon-outline"></ha-icon><div class="imain">${esc(gm.error.message)}
+          <div class="actions">${gm.error.code === "overlap" ? `<button class="btn small" data-action="gm-replace">Replace the existing assignment</button>` : ""}<button class="btn small ghost" data-action="gm-error-close">Cancel</button></div></div></div>` : "";
+    const others = m.others.length ? `<div class="stitle small">Also set for ${esc(m.word)} in window settings (${m.others.length})</div>
+      ${m.others.map((o) => `<div class="prow"><div class="pmain"><b>${esc(o.name)}</b><span class="sub">${esc(o.room)}</span></div><span class="pill warn">${esc(o.word)}: ${esc(o.label)}</span>
+        ${can ? `<div class="why"><button class="link" data-action="gm-use-global" data-level="${esc(o.level)}" data-window="${esc(o.window_id || "")}" data-layer="${esc(o.layer_id || "")}" data-area="${esc(o.area_id || "")}">Use Global Setting</button></div>` : ""}</div>`).join("")}
+      ${can && m.others.some((o) => o.window_id) ? `<div class="actions"><button class="btn small ghost" data-action="gm-adopt-mode">Move these to Global Modes…</button><span class="sub">The same preset becomes the Global ${esc(m.word)} assignment where there is none; you review it before saving.</span></div>` : ""}` : "";
+    return `<section class="meditor" aria-label="${esc(m.word)} assignments">
+      <div class="mhead"><ha-icon icon="${m.icon}"></ha-icon><div><b>${esc(m.word)}</b><div class="sub">${esc(m.hint)}</div></div></div>
+      ${m.warnings.slice(0, 3).map((t) => `<div class="issue warn"><ha-icon icon="mdi:alert-outline"></ha-icon><div class="imain">${esc(t)}</div></div>`).join("")}
+      ${m.warnings.length > 3 ? `<details class="dladv"><summary>${m.warnings.length - 3} more warning${m.warnings.length - 3 === 1 ? "" : "s"}</summary>${m.warnings.slice(3).map((t) => `<div class="issue warn"><div class="imain">${esc(t)}</div></div>`).join("")}</details>` : ""}
+      ${rows ? `<div class="arows">${rows}</div>` : `<div class="muted">No window or cover is assigned to ${esc(m.word)}: they keep their position when the controller selects ${esc(m.word)}.</div>`}
+      ${can ? `<div class="addrow" role="group" aria-label="Add a window or cover to ${esc(m.word)}">
+        <select data-control="gm-add-target" aria-label="Window or cover"><option value="">Add Window / Cover…</option>
+          ${groups.map((g) => `<optgroup label="${esc(g)}">${targets.filter((t) => t.room === g).map((t) => {
+            const key = `${t.window_id}|${t.layer_id || ""}`;
+            return `<option value="${esc(key)}" ${assigned.has(key) ? "disabled" : ""} ${add.target === key ? "selected" : ""}>${esc(t.name)} · ${esc(t.type_word)}${assigned.has(key) ? " (assigned)" : ""}</option>`;
+          }).join("")}</optgroup>`).join("")}</select>
+        <select data-control="gm-add-preset" aria-label="Preset" ${chosen ? "" : "disabled"}><option value="">Preset…</option>
+          ${chosen ? chosen.options.map((o) => `<option value="${esc(o.preset_id)}" ${add.preset === o.preset_id ? "selected" : ""}>${esc(o.name)} (${esc(o.detail)})</option>`).join("") : ""}</select>
+        <button class="btn small" data-action="gm-add" ${chosen && add.preset && !gm.busy ? "" : "disabled"}><ha-icon icon="mdi:plus"></ha-icon>Add</button></div>` : ""}
+      ${err}${others}</section>`;
+  }
+
+  _matrixHtml(mm) {
+    const gm = this._gm();
+    const modes = mm.modes.filter((m) => gm.advCols || !m.advanced);
+    const cell = (row, m) => {
+      if (!row.cells) return `<td></td>`;
+      const c = row.cells[m.key];
+      const on = gm.cell && gm.cell.mode === m.key && gm.cell.kind === row.kind && (gm.cell.window_id || null) === (row.window_id || null)
+        && (gm.cell.layer_id || null) === (row.layer_id || null) && (gm.cell.area_id || null) === (row.area_id || null);
+      const tag = c.source ? `<span class="srctag ${SRC_TONE[c.source] || "muted"}" title="${esc(SRC_WORD[c.source] || c.source)}">${SRC_TAG[c.source] || "?"}</span>` : "";
+      const tone = c.state === "nothing" || c.state === "inherit" ? "muted" : c.state === "no_action" ? "na" : c.state === "missing" ? "bad" : "";
+      return `<td><button class="mxcell ${tone} ${on ? "on" : ""} ${row.kind === "cover" && c.inherited ? "inh" : ""}" data-action="gm-cell" data-kind="${row.kind}" data-window="${esc(row.window_id || "")}" data-layer="${esc(row.layer_id || "")}" data-area="${esc(row.area_id || "")}" data-mode="${m.key}"
+        title="${esc(c.text || `${c.label}${c.source_word ? ` — ${c.source_word}` : ""}`)}" ${this._canEdit && (row.kind !== "room" || row.area_id) ? "" : "disabled"}>${esc(c.label)}${tag}</button></td>`;
+    };
+    const rows = mm.matrix.map((row) => {
+      if (row.kind === "room") return `<tr class="mxroom"><th scope="row">${esc(row.name)}${row.area_id ? `<span class="sub"> · room</span>` : ""}</th>${modes.map((m) => cell(row, m)).join("")}</tr>`;
+      if (row.kind === "window") return `<tr><th scope="row"><span class="mxname">${esc(row.name)}</span> <span class="pill ${MODE_STATUS_TONE[row.mode]}">${esc(row.mode[0].toUpperCase() + row.mode.slice(1))}</span></th>${modes.map((m) => cell(row, m)).join("")}</tr>`;
+      return `<tr class="mxcover"><th scope="row"><span class="sub">↳</span> ${esc(row.name)}</th>${modes.map((m) => cell(row, m)).join("")}</tr>`;
+    }).join("");
+    return `${this._cellEditor(mm)}
+      <div class="tscroll mxwrap"><table class="mx"><thead><tr><th scope="col">Window / Cover</th>${modes.map((m) => `<th scope="col"><ha-icon icon="${m.icon}"></ha-icon><br>${esc(m.word)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="actions"><button class="link" data-action="gm-adv-cols">${gm.advCols ? "Hide" : "Show"} Window Lamp, Glare and Excessive Heat</button></div>
+      <div class="hint"><span class="srctag info">G</span> Global Modes · <span class="srctag warn">R</span> room · <span class="srctag warn">W</span> window · <span class="srctag warn">C</span> cover override. “—” = no assignment (keeps its position); cover rows show the window's target unless the cover has its own. Rooms set a preset every window in them has, or No action.</div>`;
+  }
+
+  _cellEditor(mm) {
+    const c = this._gm().cell;
+    if (!c) return "";
+    const row = mm.matrix.find((r) => r.kind === c.kind && (r.window_id || null) === (c.window_id || null) && (r.layer_id || null) === (c.layer_id || null)
+      && (r.area_id || null) === (c.area_id || null));
+    const mode = mm.modes.find((m) => m.key === c.mode);
+    if (!row || !mode) return "";
+    const cell = row.cells[c.mode];
+    let opts;
+    if (row.kind === "room") {
+      opts = `<option value="r:" ${!cell.value ? "selected" : ""}>Inherit (no room override)</option><option value="r:no_action" ${cell.value === "no_action" ? "selected" : ""}>No action in this room</option>
+        ${row.options.map((o) => `<option value="r:${esc(o.preset_id)}" ${cell.value === o.preset_id ? "selected" : ""}>${esc(o.name)}</option>`).join("")}`;
+    } else {
+      const lvl = row.kind === "cover" ? "cover" : "window";
+      opts = `<optgroup label="Global ${esc(mode.word)}"><option value="g:" ${!cell.global ? "selected" : ""}>Not assigned</option>
+          ${row.options.map((o) => `<option value="g:${esc(o.preset_id)}" ${cell.global === o.preset_id ? "selected" : ""}>${esc(o.name)} (${esc(o.detail)})</option>`).join("")}</optgroup>
+        <optgroup label="${lvl === "cover" ? "Cover" : "Window"} override"><option value="o:no_action" ${cell.override === "no_action" ? "selected" : ""}>No action (explicit override)</option>
+          ${cell.override ? `<option value="o:">Use Global Setting (clear the override)</option>` : ""}</optgroup>`;
+    }
+    const name = row.kind === "cover" ? `${row.window_name} — ${row.name}` : row.name;
+    return `<div class="cellbox" role="group" aria-label="${esc(name)}, ${esc(mode.word)}"><div><b>${esc(name)}</b> · ${esc(mode.word)}</div>
+      <div class="sub">Now: ${esc(cell.text || `${cell.label}${cell.source_word ? ` — ${cell.source_word}` : ""}`)}</div>
+      ${cell.override && cell.override !== "no_action" ? `<div class="sub warn">A ${row.kind} override with a preset is set in window settings; it wins over Global Modes.</div>` : ""}
+      <div class="fval"><select data-control="gm-cell-value" aria-label="Setting">${opts}</select><button class="btn small ghost" data-action="gm-cell-close">Close</button></div></div>`;
+  }
+
+  _gmCellValue(value) {
+    const c = this._gm().cell;
+    if (!c) return;
+    const [kind, v] = [value.slice(0, 1), value.slice(2)];
+    if (kind === "r") { this._gmEdit({ op: "set", level: "room", mode: c.mode, area_id: c.area_id, value: v || null }); return; }
+    if (kind === "g") {
+      if (v) this._gmEdit({ op: "assign", mode: c.mode, window_id: c.window_id, layer_id: c.layer_id, preset_id: v });
+      else this._gmEdit({ op: "unassign", mode: c.mode, window_id: c.window_id, layer_id: c.layer_id });
+      return;
+    }
+    this._gmEdit({ op: "set", level: c.kind === "cover" ? "cover" : "window", mode: c.mode, window_id: c.window_id, layer_id: c.layer_id, value: v || null });
+  }
+
+  _gmLogHtml(mm) {
+    const log = (this._model.global_modes && this._model.global_modes.log) || [];
+    return `<details class="dladv" data-group="gm-log" ${this._ui.open?.["gm-log"] ? "open" : ""}><summary>Recent automatic decisions (${log.length})</summary>
+      ${log.length ? log.map((x) => `<div class="logline"><time class="ltime" datetime="${esc(x.at)}" title="${esc(fullTime(x.at))}">${fmtTime(x.at)}</time> — ${esc(x.summary)}</div>`).join("") : `<div class="muted">Nothing yet.</div>`}</details>`;
+  }
+
+  // Window settings: this window's overrides per mode, with the effective preset and its source.
+  _ovSelect(w, mode, id) {
+    const v = w.conditions[mode];
+    return `<select id="${id}" data-control="cond" data-cond="${mode}" ${this._ro}>
+      <option value="" ${!v ? "selected" : ""}>Use Global Setting</option><option value="no_action" ${v === "no_action" ? "selected" : ""}>No action</option>
+      ${w.presets.map((p) => `<option value="${esc(p.preset_id)}" ${v === p.preset_id ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>`;
+  }
+
+  _windowModesHtml(w) {
+    const m = this._model;
+    const words = Object.fromEntries((m.global_modes.modes || []).map((x) => [x.key, x]));
+    const row = (mode) => {
+      const e = w.effective[mode];
+      const info = words[mode] || { word: mode, icon: "mdi:help", hint: "" };
+      return `<div class="frow"><label for="ov-${mode}"><ha-icon icon="${info.icon}"></ha-icon> ${esc(info.word)}<br><span class="sub">${esc(COND_HINT[mode] || info.hint || "")}</span></label>
+        <div class="fval">${this._ovSelect(w, mode, `ov-${mode}`)}<span class="sub ${e.problems.length ? "bad" : ""}">${esc(e.text)}</span></div></div>`;
+    };
+    const common = m.global_modes.common || [];
+    const adv = m.global_modes.advanced || [];
+    const covers = w.layered ? `<details class="dladv" data-group="ov-covers" ${this._ui.open?.["ov-covers"] ? "open" : ""}><summary>Single covers (cover overrides)</summary>
+      <div class="hint">A cover override uses that cover's own presets (Covers tab) and changes only that cover.</div>
+      ${w.layers.map((l) => `<div class="stitle small"><ha-icon icon="${KIND_ICON[l.kind] || KIND_ICON.custom}"></ha-icon> ${esc(l.name)}</div><div class="ctable">${[...common, ...adv].map((mode) => {
+        const v = (w.cover_modes[l.layer_id] || {})[mode];
+        const t = w.effective[mode].layers.find((x) => x.layer_id === l.layer_id) || {};
+        const now = t.state === "preset" ? `${t.preset_name || "—"}${t.position != null ? ` (${t.position} %)` : " (unchanged)"} — ${t.source_word}` : t.state === "no_action" ? `No action — ${t.source_word}` : "No preset assigned";
+        return `<div class="frow"><label for="cov-${esc(l.layer_id)}-${mode}">${esc((words[mode] || {}).word || mode)}</label><div class="fval">
+          <select id="cov-${esc(l.layer_id)}-${mode}" data-control="cov" data-mode="${mode}" data-layer="${esc(l.layer_id)}" ${this._ro}><option value="" ${!v ? "selected" : ""}>Use the window's setting</option>
+            <option value="no_action" ${v === "no_action" ? "selected" : ""}>No action</option>${l.presets.map((p) => `<option value="${esc(p.preset_id)}" ${v === p.preset_id ? "selected" : ""}>${esc(p.name)} (${p.position} %)</option>`).join("")}</select>
+          <span class="sub">${esc(now)}</span></div></div>`;
+      }).join("")}</div>`).join("")}</details>` : "";
+    const ov = w.overrides.length;
+    return `<div class="stitle small">Presets per mode</div>
+      <div class="hint">“Use Global Setting” follows Curtains → Global Modes. A preset or No action here is a window override: it wins over Global Modes for this window only.</div>
+      ${ov && this._canEdit ? `<div class="issue warn"><ha-icon icon="mdi:layers-outline"></ha-icon><div class="imain">${ov} override${ov === 1 ? "" : "s"} set for this window. <button class="link" data-action="adopt-window">Move them to Global Modes…</button></div></div>` : ""}
+      <div class="ctable">${common.map(row).join("")}</div>
+      <details class="dladv" data-group="ov-adv" ${this._ui.open?.["ov-adv"] ? "open" : ""}><summary>Advanced: ${adv.map((k) => esc((words[k] || {}).word || k)).join(", ")}</summary><div class="ctable">${adv.map(row).join("")}</div></details>
+      ${covers}${this._statusHtml(`ov-${w.window_id}`)}`;
+  }
+
+  // Covers tab: the presets of one cover of a layered window (used when it is assigned on its own).
+  _coverPresetsHtml(w, l) {
+    const ro = this._ro;
+    return `<details class="dladv" data-group="cp-${esc(l.layer_id)}" ${this._ui.open?.[`cp-${l.layer_id}`] ? "open" : ""}><summary>Presets of this cover (${l.presets.length})</summary>
+      <div class="hint">Used when this cover is assigned on its own (Global Modes or a cover override); assigning it never moves the other covers of the window. Changing a position here changes every assignment that uses the preset.</div>
+      ${l.presets.map((p) => `<div class="cprow"><input type="text" maxlength="60" value="${esc(p.name)}" aria-label="Preset name" data-control="cp-name" data-layer="${esc(l.layer_id)}" data-preset="${esc(p.preset_id)}" ${ro}>
+        <input type="number" class="num" min="0" max="100" step="1" value="${esc(p.position)}" aria-label="${esc(p.name)} position in %" data-control="cp-pos" data-layer="${esc(l.layer_id)}" data-preset="${esc(p.preset_id)}" ${ro}> %
+        ${this._canEdit ? `<button class="link" data-action="cp-del" data-layer="${esc(l.layer_id)}" data-preset="${esc(p.preset_id)}">Delete</button>` : ""}</div>`).join("")}
+      ${this._canEdit && l.presets.length < 12 ? `<button class="btn small ghost" data-action="cp-add" data-layer="${esc(l.layer_id)}"><ha-icon icon="mdi:plus"></ha-icon>Add preset</button>` : ""}</details>`;
   }
 
   // ------------------------------------------------------------------ events
@@ -1123,6 +1499,11 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
       }
       case "pe-range": case "pe-num": this._render(); return;
       case "add-entity": this._ui.addEntity = el.value || null; this._render(); return;
+      case "gm-preset": this._gmEdit({ op: "assign", mode: this._gm().mode, window_id: el.dataset.window, layer_id: el.dataset.layer || null, preset_id: el.value }); return;
+      case "gm-add-target": this._gm().add = { target: el.value || null, preset: null }; this._render(); return;
+      case "gm-add-preset": this._gm().add = { ...(this._gm().add || {}), preset: el.value || null }; this._render(); return;
+      case "gm-cell-value": this._gmCellValue(el.value); return;
+      case "gm-policy": if (this._ui.review) { this._ui.review.policy = el.value; this._render(); } return;
       default: break;
     }
     if (!w) return;
@@ -1164,7 +1545,13 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     else if (ctl === "w-area") this._update(w, { area_id: el.value || null });
     else if (ctl === "w-bearing") this._update(w, el.value === "" ? { direction: w.direction, bearing: null } : { bearing: Number(el.value) });
     else if (ctl === "w-flag") this._update(w, { [el.dataset.flag]: el.checked });
-    else if (ctl === "cond") this._update(w, { conditions: { [el.dataset.cond]: el.value || null } });
+    else if (ctl === "cond") this._quickChange([{ op: "set", level: "window", mode: el.dataset.cond, window_id: w.window_id, value: el.value || null }], `ov-${w.window_id}`);
+    else if (ctl === "cov") this._quickChange([{ op: "set", level: "cover", mode: el.dataset.mode, window_id: w.window_id, layer_id: el.dataset.layer, value: el.value || null }], `ov-${w.window_id}`);
+    else if (ctl === "cp-name" || ctl === "cp-pos") {
+      const msg = { type: `${WS}/cover_preset/save`, window_id: w.window_id, layer_id: el.dataset.layer, preset_id: el.dataset.preset };
+      if (ctl === "cp-name") { if (!el.value.trim()) return; msg.name = el.value.trim(); } else { if (el.value === "" || Number.isNaN(Number(el.value))) return; msg.position = Number(el.value); }
+      this._save(`cp-${w.window_id}`, msg);
+    }
     else if (ctl === "layer-kind") this._update(w, { layers: this._layersPayload(w, { [el.dataset.layer]: { kind: el.value } }) });
     else if (ctl === "layer-label") this._update(w, { layers: this._layersPayload(w, { [el.dataset.layer]: { label: el.value.trim() || null } }) });
     else if (ctl === "solar") {
@@ -1213,6 +1600,33 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
         this._save("env-use", { type: `${WS}/auto/settings`, scope: "global", values: { [el.dataset.key]: el.dataset.entity } }, "Used for all windows");
         return;
       case "enable-confirm": this._enableConfirmed(); return;
+      case "page": this._page = el.dataset.page; this._view = null; this._render(); return;
+      case "gm-mode": this._gm().mode = el.dataset.mode; this._gm().add = null; this._gm().error = null; this._render(); return;
+      case "gm-view": this._gm().view = el.dataset.view; this._gm().cell = null; this._render(); return;
+      case "gm-adv-cols": this._gm().advCols = !this._gm().advCols; this._render(); return;
+      case "gm-remove": this._gmEdit({ op: "unassign", mode: el.dataset.mode || this._gm().mode, window_id: el.dataset.window, layer_id: el.dataset.layer || null }); return;
+      case "gm-add": this._gmAdd(false); return;
+      case "gm-replace": this._gmAdd(true); return;
+      case "gm-error-close": this._gm().error = null; this._render(); return;
+      case "gm-use-global": this._gmEdit({ op: "set", level: el.dataset.level, mode: el.dataset.mode || this._gm().mode, window_id: el.dataset.window, layer_id: el.dataset.layer || null, area_id: el.dataset.area || null, value: null }); return;
+      case "gm-adopt-mode": {
+        const mode = this._gmModel().modes.find((m) => m.key === this._gm().mode);
+        const ids = [...new Set(mode.others.filter((o) => o.window_id).map((o) => o.window_id))];
+        if (ids.length) this._gmEdit(ids.map((id) => ({ op: "adopt", window_id: id, modes: [mode.key] })));
+        return;
+      }
+      case "gm-adopt-all": {
+        const ids = [...new Set(this._model.windows.filter((x) => x.overrides.length).map((x) => x.window_id))];
+        if (ids.length) this._gmEdit(ids.map((id) => ({ op: "adopt", window_id: id })));
+        return;
+      }
+      case "gm-cell": this._gm().cell = { kind: el.dataset.kind, window_id: el.dataset.window || null, layer_id: el.dataset.layer || null, area_id: el.dataset.area || null, mode: el.dataset.mode }; this._render(); return;
+      case "gm-cell-close": this._gm().cell = null; this._render(); return;
+      case "gm-discard": Object.assign(this._gm(), { ops: [], draft: null, error: null, cell: null }); this._render(); return;
+      case "gm-review": this._openReview(this._gm().ops, "global"); return;
+      case "review-cancel": this._ui.review = null; this._render(); return;
+      case "review-save": this._saveReview(); return;
+      case "adopt-window": if (w) this._openReview([{ op: "adopt", window_id: w.window_id }], `ov-${w.window_id}`); return;
       default: break;
     }
     if (!w) return;
@@ -1277,10 +1691,26 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
         return;
       case "del-preset": {
         const p = w.presets.find((x) => x.preset_id === el.dataset.preset);
-        const used = this._model.conditions.filter((c) => w.conditions[c] === p.preset_id).map((c) => this._model.words.conditions[c]);
-        const extra = used.length ? `\nIt is used for: ${used.join(", ")} (these become Not set).` : "";
+        const used = (w.usage && w.usage[p.preset_id]) || [];
+        const extra = used.length ? `\nIt is used for: ${used.join(", ")}. Window overrides using it go back to the Global setting; Global Modes assignments using it are removed.` : "";
         if (p && confirm(`Delete the preset ${p.name}?${extra}`)) {
           this._save(`p-${w.window_id}`, { type: `${WS}/preset/delete`, window_id: w.window_id, preset_id: p.preset_id }, "Deleted");
+        }
+        return;
+      }
+      case "cp-add": {
+        const l = w.layers.find((x) => x.layer_id === el.dataset.layer);
+        if (!l) return;
+        let n = l.presets.length + 1;
+        while (l.presets.some((x) => x.name === `Preset ${n}`)) n += 1;
+        this._save(`cp-${w.window_id}`, { type: `${WS}/cover_preset/save`, window_id: w.window_id, layer_id: l.layer_id, name: `Preset ${n}`, position: l.position ?? 50 }, "Added");
+        return;
+      }
+      case "cp-del": {
+        const l = w.layers.find((x) => x.layer_id === el.dataset.layer);
+        const cp = l && l.presets.find((x) => x.preset_id === el.dataset.preset);
+        if (cp && confirm(`Delete the preset ${cp.name} of ${l.name}? Assignments that use it are removed; nothing moves.`)) {
+          this._save(`cp-${w.window_id}`, { type: `${WS}/cover_preset/delete`, window_id: w.window_id, layer_id: l.layer_id, preset_id: cp.preset_id }, "Deleted");
         }
         return;
       }
@@ -1483,6 +1913,69 @@ const STYLE = `<style>
   input.time { flex: 0 0 auto; width: 5.5em; min-width: 5.5em; font-variant-numeric: tabular-nums; }
   input[aria-invalid="true"] { border-color: var(--error-color, #db4437); }
   time.ltime { font-variant-numeric: tabular-nums; font-weight: 500; }
+  /* Global Modes (0.6.4) */
+  .pagetabs { padding: 0 16px 6px; }
+  .pagetabs .seg ha-icon { --mdc-icon-size: 18px; margin-right: 4px; vertical-align: -3px; }
+  .mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+  .mcard { display: grid; justify-items: center; align-content: center; gap: 2px; padding: 10px 6px; min-height: 84px; border-radius: 12px;
+    border: 1px solid var(--divider-color); background: var(--card-background-color); text-align: center; touch-action: manipulation; }
+  .mcard ha-icon { --mdc-icon-size: 26px; color: var(--state-icon-color, var(--secondary-text-color)); }
+  .mcard.on { border-color: var(--primary-color); box-shadow: inset 0 0 0 1px var(--primary-color); }
+  .mcard.on ha-icon { color: var(--primary-color); }
+  .mcard:focus-visible, .mxcell:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+  .mname { font-weight: 500; }
+  .mcount { font-size: 0.8em; color: var(--secondary-text-color); }
+  .meditor { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--primary-color); border-radius: 12px; min-width: 0; }
+  .mhead { display: flex; gap: 10px; align-items: center; }
+  .mhead ha-icon { --mdc-icon-size: 26px; color: var(--primary-color); }
+  .arows { display: grid; }
+  .arow { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--divider-color); }
+  .arow.bad { border-left: 3px solid var(--error-color, #db4437); padding-left: 6px; }
+  .arow select { width: 100%; }
+  .arow .why ha-icon { --mdc-icon-size: 16px; vertical-align: -3px; }
+  .aname { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
+  .apills { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+  .addrow { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+  .addrow select { width: 100%; }
+  .draftbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 10px;
+    border: 1px solid var(--warning-color, #ff9800); background: var(--secondary-background-color); position: sticky; top: 0; z-index: 2; }
+  ul.clines { margin: 2px 0 2px 18px; padding: 0; }
+  .mxwrap { border: 1px solid var(--divider-color); border-radius: 10px; }
+  table.mx { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 0.88em; }
+  table.mx th, table.mx td { padding: 3px 4px; border-bottom: 1px solid var(--divider-color); text-align: left; vertical-align: middle; }
+  table.mx thead th { font-weight: 500; color: var(--secondary-text-color); text-align: center; min-width: 92px; }
+  table.mx thead th ha-icon { --mdc-icon-size: 18px; }
+  table.mx tbody th { position: sticky; left: 0; z-index: 1; background: var(--card-background-color); font-weight: 500; min-width: 120px; max-width: 180px; overflow-wrap: anywhere; }
+  table.mx thead th:first-child { position: sticky; left: 0; z-index: 1; background: var(--card-background-color); text-align: left; }
+  tr.mxroom th, tr.mxroom td { background: var(--secondary-background-color); }
+  tr.mxroom th { background: var(--secondary-background-color); }
+  tr.mxcover th { font-weight: 400; padding-left: 14px; }
+  .mxcell { width: 100%; min-height: 32px; padding: 2px 6px; border-radius: 6px; border: 1px solid transparent; background: none; text-align: left;
+    display: flex; gap: 4px; align-items: center; justify-content: space-between; overflow-wrap: anywhere; }
+  .mxcell:not(:disabled):hover { border-color: var(--divider-color); }
+  .mxcell.on { border-color: var(--primary-color); }
+  .mxcell.muted, .mxcell.inh { color: var(--secondary-text-color); }
+  .mxcell.na { font-style: italic; }
+  .mxcell.bad { color: var(--error-color, #db4437); }
+  .mxcell:disabled { opacity: 1; }
+  .srctag { display: inline-block; font-size: 0.7em; font-weight: 600; min-width: 1.4em; text-align: center; padding: 0 3px; border-radius: 4px; border: 1px solid currentColor; font-style: normal; }
+  .srctag.info { color: var(--primary-color); }
+  .srctag.warn { color: var(--warning-color, #ff9800); }
+  .srctag.muted { color: var(--secondary-text-color); }
+  .cellbox { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--primary-color); border-radius: 10px; background: var(--secondary-background-color); }
+  .cellbox select { flex: 1 1 14em; }
+  .logline { padding: 3px 0; border-bottom: 1px solid var(--divider-color); overflow-wrap: anywhere; font-size: 0.92em; }
+  .cprow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 3px 0; }
+  .cprow input[type=text] { flex: 1 1 10em; }
+  .stitle ha-icon, .frow label ha-icon { --mdc-icon-size: 18px; vertical-align: -3px; }
+  @container (max-width: 560px) {
+    .arow { grid-template-columns: minmax(0, 1fr) auto; }
+    .arow .aname { grid-column: 1 / -1; }
+    .addrow { grid-template-columns: minmax(0, 1fr); }
+    .pagetabs { padding: 0 12px 6px; }
+    .pagetabs .segs { width: 100%; }
+    .pagetabs .seg { flex: 1 1 0; }
+  }
   @container (max-width: 520px) {
     .tabs { flex-wrap: nowrap; padding: 0 4px; }
     .tab { flex: 1 1 0; min-width: 34px; padding: 6px 0; }

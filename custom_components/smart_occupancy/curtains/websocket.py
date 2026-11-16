@@ -10,6 +10,10 @@ conflicts; needs ``confirm: true`` and is refused while a blocker remains).
 ``resume`` releases a manual hold of a window, which an Automatic window
 then follows at once. Automatic cannot be set through ``window/update``.
 
+0.6.4: Global Curtain Modes (``modes/*`` and ``cover_preset/*`` in
+``global_modes.py``): the model carries every mode's assignments and each
+window's effective preset per mode with its source.
+
 0.6.3: ``auto/simulate`` (read only) predicts what every affected window would
 decide with changed settings *before* they are saved, so a new automatic
 feature (temperature-aware sun, glare, weather evidence) is never switched on
@@ -50,6 +54,8 @@ from .config import (
     MAX_OBSTRUCTIONS,
     MAX_PRESETS,
     MAX_WINDOWS,
+    MODES,
+    NO_ACTION,
     PERMITTED_MODES,
     TOLERANCE_LIMITS,
     VERIFY_TIMEOUT_LIMITS,
@@ -82,6 +88,7 @@ from .discovery import (
 from .environment import BAND_WORDS, ROLE_WORDS, STATUS_WORDS, discover
 from .executor import OVERALL_WORDS, PLAN_WORDS, RESULT_WORDS, preset_matches, recognise
 from .manager import SIGNAL_CURTAINS_UPDATED, CurtainManager
+from .modes import describe, effective, overrides_of
 from .solar import calibrate, exposure, relation_text
 
 _THROTTLE_SECONDS = 0.3
@@ -130,6 +137,7 @@ def _layer_model(hass: HomeAssistant, window: Window, layer: CoverLayer, desired
         "state": state.state if state else None, "missing": state is None, "available": available(state),
         "moving": bool(state and state.state in MOVING_STATES), "position": position, "caps": caps,
         "members": sorted(members(hass, layer.entity_id) - {layer.entity_id}),
+        "presets": [p.as_dict() for p in layer.presets],
         "desired": desired,
         "matches_desired": None if desired is None or position is None else abs(position - desired) <= tolerance,
         "conflicts": conflicts.get(layer.entity_id, []),
@@ -188,6 +196,11 @@ def window_model(hass: HomeAssistant, mgr: CurtainManager, window: Window,
         "selected_preset": window.selected_preset,
         "current": recognise(hass, window, tolerance),
         "conditions": {c: window.conditions.get(c) for c in CONDITIONS},
+        "cover_modes": {k: dict(v) for k, v in window.cover_modes.items()},
+        "layered": window.layered,
+        "effective": _effective_model(mgr.config, window),
+        "overrides": overrides_of(mgr.config, window),
+        "usage": _usage(mgr.config, window),
         "exposure": exposure(bearing, sun, window.solar),
         "manual": mgr.manual.get(window.window_id),
         "last": mgr.last.get(window.window_id),
@@ -197,6 +210,31 @@ def window_model(hass: HomeAssistant, mgr: CurtainManager, window: Window,
         "auto": mgr.auto.model(window),
         "allowed_automations": list(window.allowed_automations),
     }
+
+
+def _effective_model(config: CurtainConfig, window: Window) -> dict[str, Any]:
+    """Per mode: the window's effective preset, its source ("Half shade — Global Morning") and each cover's."""
+    out = {}
+    for mode in MODES:
+        eff = effective(config, window, mode)
+        out[mode] = {**eff.as_dict(), "text": describe(eff, mode)}
+    return out
+
+
+def _usage(config: CurtainConfig, window: Window) -> dict[str, list[str]]:
+    """Where each of the window's presets is used (shown before a preset is deleted)."""
+    from .config import MODE_WORDS
+
+    out: dict[str, list[str]] = {}
+    for mode in MODES:
+        if (v := window.conditions.get(mode)) and v != NO_ACTION:
+            out.setdefault(v, []).append(f"{MODE_WORDS[mode]} (window override)")
+        for a in config.modes.get(mode, ()):
+            if a.window_id == window.window_id and a.layer_id is None:
+                out.setdefault(a.preset_id, []).append(f"{MODE_WORDS[mode]} (Global Modes)")
+        if window.area_id and (v := config.room_modes.get(window.area_id, {}).get(mode)) and v != NO_ACTION:
+            out.setdefault(v, []).append(f"{MODE_WORDS[mode]} (room override)")
+    return out
 
 
 def build_model(hass: HomeAssistant, mgr: CurtainManager, connection) -> dict[str, Any]:
@@ -245,6 +283,7 @@ def build_model(hass: HomeAssistant, mgr: CurtainManager, connection) -> dict[st
         "entities": _entity_choices(hass),
         "environment": environment_summary(hass, mgr),
         "time_zone": hass.config.time_zone,
+        "global_modes": modes_model(hass, mgr, mgr.config),
     }
 
 
@@ -344,7 +383,10 @@ def _layers_from(hass: HomeAssistant, config: CurtainConfig, window: Window | No
         layer_id = item.get("layer_id")
         if layer_id not in existing:
             layer_id = known.layer_id if known else new_id("l_", {*existing, *(x.layer_id for x in layers)})
-        layers.append(CoverLayer(layer_id, entity_id, kind, label))
+        # 0.6.4: a kept layer keeps its own presets (also when its entity is replaced); a new one starts with
+        # Fully open / Half open / Fully closed.
+        kept = existing.get(layer_id)
+        layers.append(CoverLayer(layer_id, entity_id, kind, label, *((kept.presets,) if kept else ())))
     return tuple(layers)
 
 
@@ -420,7 +462,7 @@ def _apply_fields(hass: HomeAssistant, config: CurtainConfig, window: Window, ms
         if not isinstance(raw, dict) or set(raw) - set(CONDITIONS):
             raise CurtainConfigError("invalid_condition", "Unknown condition")
         ids = {p.preset_id for p in window.presets}
-        if bad := [v for v in raw.values() if v is not None and v not in ids]:
+        if bad := [v for c, v in raw.items() if v is not None and v not in ids and not (v == NO_ACTION and c in MODES)]:
             raise CurtainConfigError("unknown_preset", f"Preset {bad[0]} does not exist in this window")
         window = replace(window, conditions={**window.conditions, **raw})
     return window
@@ -609,7 +651,8 @@ def ws_preset_duplicate(hass, mgr, msg, connection):
 @websocket_api.async_response
 @_guard
 def ws_preset_delete(hass, mgr, msg, connection):
-    """Delete a preset; the selection and condition mappings that used it become "Not set"."""
+    """Delete a preset; the selection and window overrides that used it become "Not set" (inherit), and
+    Global Modes assignments of this window that used it are removed (0.6.4)."""
     window = _window(mgr, msg["window_id"])
     preset_id = msg["preset_id"]
     if window.preset(preset_id) is None:
@@ -758,13 +801,17 @@ def enable_review(hass: HomeAssistant, mgr: CurtainManager, window: Window) -> d
         if state is None or state.state not in ("on", "off"):
             warnings.append(f"The sleep source {values['sleep_entity'] or '(none)'} is unavailable: the window does "
                             "not open automatically until it reports.")
-    if values["lamp_enabled"] and (not values["lamp_entity"] or not window.conditions.get("lamp")):
-        warnings.append("The window lamp override needs a lamp and a Lamp On preset.")
+    config = mgr.config
+    if values["lamp_enabled"] and (not values["lamp_entity"] or not effective(config, window, "lamp").has_target):
+        warnings.append("The window lamp override needs a lamp and a Window Lamp preset.")
     unset = [CONDITION_WORDS[c] for c in ("morning", "day", "night", "sleep", "evening_privacy", "sun")
-             if not window.conditions.get(c) and (c != "sleep" or window.sleep_protection)
+             if not effective(config, window, c).has_target and (c != "sleep" or window.sleep_protection)
              and (c != "evening_privacy" or window.privacy) and (c != "sun" or window.solar_protection)]
     if unset:
         warnings.append(f"No preset for {', '.join(unset)}: the covers are kept as they are then.")
+    for mode in MODES:
+        for problem in effective(config, window, mode).problems:
+            warnings.append(f"{CONDITION_WORDS.get(mode, mode)}: {problem}.")
     if window.solar_protection and window.effective_bearing is None:
         warnings.append("Sun protection needs the window's direction.")
     env = model["environment"]["readings"]
@@ -786,8 +833,8 @@ def enable_review(hass: HomeAssistant, mgr: CurtainManager, window: Window) -> d
                         "(it never opens a window).")
     if model["hold"]:
         warnings.append("A manual hold is active; it is kept until it ends (or use Resume).")
-    preset = window.preset(decision.preset_id) if decision else None
-    plan = mgr.preview(window.window_id, preset.preset_id)["items"] if preset else []
+    preset = decision.target.preset if decision and decision.target.has_target else None
+    plan = mgr.plan(window, preset)["items"] if preset else []
     return {"window_id": window.window_id, "mode": window.mode, "decision": decision.as_dict() if decision else None,
             "preset_id": preset.preset_id if preset else None, "preset_name": preset.name if preset else None,
             "items": plan, "moves": sum(1 for i in plan if i["decision"] == "move"), "blockers": blockers,
@@ -898,14 +945,13 @@ def ws_auto_simulate(hass, mgr, msg, connection):
                         "predicted": None, "preset_name": None, "moves": 0, "changes": False})
             continue
         predicted = mgr.auto.simulate(window, values)
-        preset = window.preset(predicted.preset_id)
-        items = mgr.preview(window.window_id, preset.preset_id)["items"] if preset else []
+        preset = predicted.target.preset if predicted.target.has_target else None
+        items = mgr.plan(window, preset)["items"] if preset else []
         moves = sum(1 for i in items if i["decision"] == "move") if predicted.condition not in (
             "manual_override", "waiting") else 0
-        current_preset = window.preset(current.preset_id) if current else None
         out.append({"window_id": window.window_id, "name": window.name, "mode": window.mode,
                     "current": current.as_dict() if current else None,
-                    "current_preset_name": current_preset.name if current_preset else None,
+                    "current_preset_name": current.preset_name if current else None,
                     "predicted": predicted.as_dict(), "preset_name": preset.name if preset else None,
                     "items": items, "moves": moves,
                     "changes": current is None or (current.condition, current.preset_id) != (predicted.condition,
@@ -950,9 +996,11 @@ def _settings_change(hass: HomeAssistant, mgr: CurtainManager, msg: dict[str, An
     return new, affected
 
 
+from .global_modes import MODE_HANDLERS, modes_model  # noqa: E402  (it uses the helpers above)
+
 CURTAIN_HANDLERS = (
     ws_model, ws_subscribe, ws_window_create, ws_window_update, ws_window_remove, ws_preset_save,
     ws_preset_duplicate, ws_preset_delete, ws_preset_select, ws_preview, ws_apply, ws_manual_clear, ws_settings,
     ws_rescan, ws_calibration_reset, ws_auto_preview, ws_auto_enable, ws_resume, ws_auto_settings,
-    ws_automation_allow, ws_auto_simulate,
+    ws_automation_allow, ws_auto_simulate, *MODE_HANDLERS,
 )

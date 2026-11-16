@@ -20,6 +20,8 @@ A Home Assistant custom integration that will eventually provide intelligent occ
 
 **0.6.3 (Phase 4.6.2)** adds **solar and thermal curtain control** and **24-hour time everywhere**. Each window judges direct sunshine from the sun's geometry against its own direction (with obstructions and an optional overhang) *and* measured outdoor light; stuck, implausible, stale or missing sensors are recognised and never open or shade a window. Optional, per window: temperature-aware sun (a cold room keeps the sun's warmth, a warm room gets sun protection, a too-warm room a stronger preset), glare-sensitive windows, and weather evidence for windows without a light sensor. Every new behaviour is off until you switch it on, except stuck-sensor detection, which can only keep a window where it is; you see what a new feature would do before it is saved. Every time shown by the cards is 24-hour `HH:mm` in Home Assistant's time zone (see [Solar and thermal curtains](#solar-and-thermal-curtains-phase-462-063)).
 
+**0.6.4 (Phase 4.6.3)** adds **Global Curtain Modes**: Curtains → Global Modes shows Morning, Daytime, Evening, Night, Sleep and Sun Protection (Window Lamp, Glare and Excessive Heat under Advanced) and, for each, which preset every window or single cover uses when the automatic controller selects that mode for it. It is not a second scheduler: each window still decides its own mode, and all its safety rules apply. A mode without an assignment leaves the covers where they are (see [Global Curtain Modes](#global-curtain-modes-phase-463-064)).
+
 Every room starts in **Observe** mode. In Observe the integration plans and previews mood lighting, but sends no light command. Mood lighting runs only in rooms where an administrator explicitly enabled it in the Smart Room Lighting card (the pilot is Kamar Norður). The integration never:
 
 - changes, disables or triggers existing automations, scripts or scenes (a wall switch button you explicitly assigned to a scene or script activates it)
@@ -46,6 +48,7 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - treats a stuck, implausible, stale or missing light reading as sunshine or daylight, or lets a weather forecast override a working light sensor (0.6.3)
 - lets temperature, glare or solar heating override sleep, night, evening privacy or a manual hold, or controls heating equipment (0.6.3: a thermostat is only read)
 - shows a time in 12-hour notation (0.6.3)
+- moves a cover because a Global Modes card was selected or a mapping was saved; an Automatic window whose current target changes is moved only after the change was reviewed and confirmed, and then only through its normal safety checks (0.6.4)
 
 ## Requirements
 
@@ -1099,6 +1102,46 @@ Every time the cards show — curtains, lighting, presence, forecasts, the Room 
 ### Storage
 
 Curtain store minor version 3: window `solar.max_elevation`, condition mappings `glare` and `heat`, and the new settings (all defaults when absent). The state store adds `sensors` (when each light sensor's value last changed, so a restart does not hide a stuck sensor) and per window `thermal` and `last_phase`. 0.6.2 data loads unchanged.
+
+## Global Curtain Modes (Phase 4.6.3, 0.6.4)
+
+Open the Smart Curtains card and switch from **Windows** to **Global Modes** (or add the card with `page: modes`).
+
+### Modes view
+
+Six mode cards (Morning, Daytime, Evening, Night, Sleep, Sun Protection) show how many windows or covers are assigned; Window Lamp, Glare and Excessive Heat are under **Advanced**. **Selecting a card only changes the view; it never moves anything.** Below the cards, the selected mode lists its assignments: window or cover, room, *whole window* / *single cover*, a preset dropdown, its status (Automatic, Observing, Off, *Active now*, manual hold) and a remove button. **Add Window / Cover** adds a window, or one cover of a layered window, with one of *its own* presets.
+
+Edits are a draft (validated at once, nothing saved) until **Review & save**. The review lists every change and, per affected window, the previous and new preset, its current condition, a manual hold, a block or competing automations, and whether covers would move now. If an **Automatic** window's *current* target changes, saving needs a confirmation and a choice: **Apply now** (the controller moves it through all its normal safety checks: holds, minimum interval, daily budget, competing automations) or **At the next change of condition** (it keeps its position until its condition changes). Observing and Off windows never move because of a mapping.
+
+### Presets come from the target
+
+Mappings store **stable preset ids**, never positions. A whole-window assignment uses the window's preset library (for a layered window a preset sets every layer, e.g. *Half shade* = sheer 50 %, blackout 100 %). A single-cover assignment uses that cover's own presets (Fully open 100 % / Half open 50 % / Fully closed 0 % by default; rename, change or add them in the window's **Covers** tab) and changes **only that cover**. Changing *Half shade* from 50 % to 35 % in Window settings changes every assignment that uses it. A window and one of its covers cannot both be assigned in one mode (you are offered to replace the existing one), and one physical cover is never controlled twice in a mode. Deleting a preset removes the assignments that used it; renaming windows, presets or cover entities keeps every reference.
+
+### Where a preset comes from
+
+For each cover, the most specific setting wins:
+
+1. **Cover override** (Window settings → Automatic → Single covers)
+2. **Window override** (Window settings → Automatic → Presets per mode; this is where 0.6.3 stored its mapping)
+3. **Room override** (All windows view, room rows: a preset every window of the room has, or No action)
+4. **Global Modes** assignment
+5. nothing: **no action**, the cover keeps its position.
+
+Every level has three states: *Inherit* (“Use Global Setting”), a preset, or **No action** (explicitly “this mode does not move it”, which also hides less specific settings). The card shows the effective result and its source, e.g. *Half shade — Global Morning*, *Full blackout — Window override*, *No action — Explicit window override*. A Global Modes row that an override hides says so and offers **Use Global Setting**.
+
+Glare and Excessive Heat still use a cover's Sun Protection preset when nothing is assigned for them; Useful solar heating keeps the Morning / Daytime preset. No other mode ever falls back to a lower one: when the winning mode (e.g. Night) has no assignment, the covers stay where they are; it never opens the window instead. Morning set to *No action* keeps Morning as a phase that changes nothing (with nothing at all for Morning, the day starts directly, as before).
+
+### All windows view
+
+A matrix (windows and their covers × modes, rooms as header rows) shows each cell's preset, *Inherit*, *No action* or “—” with its source (G global, R room, W window, C cover override). Click a cell to change it. It scrolls sideways on a phone. Both views edit the same configuration.
+
+### Upgrading from 0.6.3
+
+Nothing is switched on and no mode changes: Off, Observing and Automatic windows stay as they were, and every window decides and moves exactly as before. Its 0.6.3 mapping is kept as **window overrides** (a mapping that was “not set” stays “no action”). The Global Modes page shows them under each mode; **Move these to Global Modes…** (per mode, per window, or for all) turns an override into the window's Global Modes assignment after a review, without changing what it does. New windows start without any mapping.
+
+### Decision log
+
+Every entry names where its preset came from, in 24-hour time: *07:35 — Morning. Stova Suður → Half shade (Global Mode).*, *16:20 — Sun Protection. Køkur Suður has no assignment; leaving positions unchanged.*, *22:35 — Lamp override active. Night is configured to bypass lamp control. …*. Global Modes → *Recent automatic decisions* shows the latest entries of every window. Warnings cover missing presets, removed or unavailable covers, overrides that hide a global setting, competing automations and assigned windows that are Observing or Off.
 
 ## Occupancy forecast (Phase 4, 0.5.0)
 

@@ -41,6 +41,12 @@ after these safety limits, in this order:
    and the first move after enabling are exempt).
 
 Covers that are already at their target get no command (the plan skips them).
+
+0.6.4 (Global Curtain Modes): the target of a decision comes from the window's
+Global Modes, room, window and cover settings (``modes.py``); a cover without
+an assignment for the decided condition is left where it is. Every log entry
+names where its preset came from. A confirmed mapping change can be set to
+apply only at a window's next change of condition (``defer``).
 """
 
 from __future__ import annotations
@@ -59,7 +65,7 @@ from homeassistant.util import dt as dt_util
 
 from ..const import OccupancyState
 from ..supervision import CurtainOrigin
-from .config import CONDITION_WORDS, Window
+from .config import CONDITION_WORDS, MODE_WORDS, CurtainConfig, Window
 from .environment import (
     BAND_WORDS,
     Reading,
@@ -79,6 +85,7 @@ from .executor import build_plan
 from .logic import (
     BUDGET_EXEMPT,
     DWELL_EXEMPT,
+    PHASE_EXEMPT,
     PROTECTIVE,
     SUN_BASES,
     Decision,
@@ -89,6 +96,7 @@ from .logic import (
     decide,
     precedence,
 )
+from .modes import effective
 from .rules import consistency
 from .solar import exposure, window_angle_from_sun_angle
 
@@ -112,7 +120,7 @@ ACTION_WORDS = {
     "moved": "Moved", "would_move": "Would move", "at_target": "Already there", "keep": "Keeping position",
     "hold": "Manual hold", "blocked": "Prevented", "failed": "Failed", "off": "Off", "released": "Hold released",
     "hold_started": "Manual hold started", "enabled": "Automatic enabled", "resumed": "Resumed",
-    "mode": "Mode changed", "moving": "Moving",
+    "mode": "Mode changed", "moving": "Moving", "config": "Mapping changed",
 }
 _NOT_LOGGED = frozenset({"moved", "moving"})  # "moved" is logged with its details when it is sent
 POLICY_WORDS = {"next_phase": "Until the next automatic phase", "duration": "For a number of minutes",
@@ -164,6 +172,8 @@ class WindowRuntime:
     last_condition: str | None = None   # the condition of the last automatic move
     status: dict[str, Any] = field(default_factory=dict)
     log: list[dict[str, Any]] = field(default_factory=list)
+    # 0.6.4: a confirmed mapping change that applies at the next change of condition: {"condition", "at"}
+    defer: dict[str, Any] | None = None
 
     def export(self) -> dict[str, Any]:
         hold = dict(self.hold, created=_iso(self.hold["created"])) if self.hold else None
@@ -173,7 +183,7 @@ class WindowRuntime:
                 "thermal": self.thermal, "applied": self.applied,
                 "moves": self.moves, "last_move_at": _iso(self.last_move_at),
                 "last_condition": self.last_condition, "status": self.status,
-                "log": self.log}
+                "log": self.log, "defer": self.defer}
 
     @classmethod
     def restore(cls, data: Any) -> WindowRuntime:
@@ -200,6 +210,8 @@ class WindowRuntime:
         rt.last_condition = data.get("last_condition") if isinstance(data.get("last_condition"), str) else None
         rt.status = dict(data.get("status")) if isinstance(data.get("status"), Mapping) else {}
         rt.log = [x for x in data.get("log") or () if isinstance(x, Mapping)][:LOG_LENGTH]
+        defer = data.get("defer")
+        rt.defer = dict(defer) if isinstance(defer, Mapping) and isinstance(defer.get("condition"), str) else None
         return rt
 
 
@@ -437,6 +449,7 @@ class AutoCurtains:
         rt.applied = None
         rt.status = {}
         rt.skip_limits = True
+        rt.defer = None
         self._log(window, rt, "resumed", "Automatic control resumed" + ("" if had else " (there was no hold)"))
         self.evaluate(window_id, resume=True, force_notify=True)
 
@@ -451,6 +464,16 @@ class AutoCurtains:
             self._log(window, rt, "enabled", "Automatic enabled by an administrator")
         else:
             self._log(window, rt, "mode", f"Mode changed from {window.mode.capitalize()} to {new.capitalize()}")
+
+    @callback
+    def config_changed(self, window: Window, text: str, defer: Mapping[str, Any] | None) -> None:
+        """A confirmed mapping change (Global Modes, 0.6.4): logged; with the "next change" policy the
+        window keeps its current position until its condition changes. The configuration change itself then
+        re-evaluates the window (nothing is sent here)."""
+        rt = self.rt(window.window_id)
+        if defer is not None and window.mode == "automatic":
+            rt.defer = dict(defer)
+        self._log(window, rt, "config", text)
 
     @callback
     def on_op_finished(self, op: Mapping[str, Any]) -> None:
@@ -686,7 +709,7 @@ class AutoCurtains:
             self._schedule(window_id, rt, None)
             return None
         ev = self._evidence(window, rt, values, now)
-        flags = Flags(window.sleep_protection, window.privacy, window.solar_protection, window.conditions)
+        flags = self.flags(window)
         decision = decide(flags, values, ev, hold=rt.hold, active_since=rt.active_since,
                           morning_since=rt.morning_since)
         if decision.hold_release and rt.hold is not None:
@@ -712,9 +735,19 @@ class AutoCurtains:
                                           default=None))
         return decision
 
-    def simulate(self, window: Window, values: Mapping[str, Any]) -> Decision:
-        """What a window would decide now with these settings. Changes nothing: it works on a copy of the
-        window's runtime and never logs, schedules, notifies or sends."""
+    @staticmethod
+    def flags_for(config: CurtainConfig, window: Window) -> Flags:
+        """The window's switches and its Global Modes resolver (0.6.4) for one configuration."""
+        return Flags(window.sleep_protection, window.privacy, window.solar_protection, window.conditions,
+                     targets=lambda condition, phase: effective(config, window, condition, phase))
+
+    def flags(self, window: Window) -> Flags:
+        return self.flags_for(self.mgr.config, window)
+
+    def simulate(self, window: Window, values: Mapping[str, Any], config: CurtainConfig | None = None) -> Decision:
+        """What a window would decide now with these settings (and, 0.6.4, this curtain configuration).
+        Changes nothing: it works on a copy of the window's runtime and never logs, schedules, notifies or
+        sends."""
         source = self.rt(window.window_id)
         timer, source.timer = source.timer, None
         try:
@@ -723,7 +756,7 @@ class AutoCurtains:
             source.timer = timer
         now = dt_util.now()
         ev = self._evidence(window, rt, values, now, dry=True)
-        flags = Flags(window.sleep_protection, window.privacy, window.solar_protection, window.conditions)
+        flags = self.flags_for(config or self.mgr.config, window)
         decision = decide(flags, values, ev, hold=rt.hold, active_since=rt.active_since,
                           morning_since=rt.morning_since)
         if decision.hold_release and rt.hold is not None:
@@ -754,7 +787,12 @@ class AutoCurtains:
     def _act(self, window: Window, rt: WindowRuntime, values: Mapping[str, Any], decision: Decision,
              utc: datetime, resume: bool, force_notify: bool) -> datetime | None:
         """Send (Automatic) or describe (Observing) what the decision needs. Returns the next time to look again."""
-        preset = window.preset(decision.preset_id)
+        preset = decision.target.preset if decision.target.has_target else None
+        if rt.defer and (resume or (decision.condition != rt.defer.get("condition")
+                                    and decision.condition not in PHASE_EXEMPT)):
+            # The condition changed (or Resume): the new mapping applies normally from now on. Waiting for
+            # daylight (e.g. sensors settling after a restart) is not a change of condition.
+            rt.defer = None
         if decision.condition == "manual_override":
             self._status(window, rt, "hold", decision.text, None, force_notify)
             return None
@@ -767,11 +805,13 @@ class AutoCurtains:
         bad = [p for p in plan if p.decision in ("unavailable", "missing", "unsupported")]
         name = preset.name
         cond = CONDITION_WORDS.get(decision.condition, decision.condition)
+        source = decision.target.source_word
         if window.mode == "observing":
             if bad:
                 text = f"Observing: {cond} → {name}, but {bad[0].reason}"
             elif moves:
-                text = f"Observing: would move {len(moves)} cover{'s' if len(moves) != 1 else ''} to {name} ({cond})"
+                text = (f"Observing: would move {len(moves)} cover{'s' if len(moves) != 1 else ''} to {name} ({cond}, "
+                        f"{source})")
             else:
                 text = f"{name}: every cover is already there ({cond})"
             self._status(window, rt, "would_move" if moves and not bad else "at_target" if not bad else "blocked",
@@ -797,6 +837,11 @@ class AutoCurtains:
             return blocked("busy", busy[0].reason)
         key = _key(preset.preset_id, preset.positions)
         applied = rt.applied if rt.applied and rt.applied.get("key") == key else None
+        if moves and rt.defer and not applied:
+            since = _dt(rt.defer.get("at"))
+            return blocked("deferred", f"The mapping for {cond} changed"
+                           + (f" at {dt_util.as_local(since).strftime('%H:%M')}" if since else "")
+                           + f": {name} applies at the next change of condition (as chosen when it was saved)")
         if not moves:
             rt.skip_limits = False
             if not applied or applied.get("status") not in SUCCESS:
@@ -848,7 +893,7 @@ class AutoCurtains:
         rt.last_condition = decision.condition
         rt.skip_limits = False
         text = (f"{reason}. Applying {name} ({cond}): moving {len(sends)} cover{'s' if len(sends) != 1 else ''}"
-                + (f" (attempt {attempts + 1})" if attempts else ""))
+                + (f" (attempt {attempts + 1})" if attempts else "") + f". Preset from {source}")
         self._status(window, rt, "moved", text, preset, True)
         self._log(window, rt, "moved", text, preset)
         self.hass.async_create_task(mgr.async_run(op, sends, context), f"smart_occupancy curtain {op['op_id']}")
@@ -882,7 +927,10 @@ class AutoCurtains:
         decision = rt.decision
         entry = {"at": _iso(dt_util.utcnow()), "action": action, "word": ACTION_WORDS.get(action, action),
                  "condition": decision.condition if decision else None,
-                 "preset_name": preset.name if preset else None, "text": text, "mode": window.mode}
+                 "preset_name": preset.name if preset else None, "text": text, "mode": window.mode,
+                 "source": decision.target.source if decision and preset else None,
+                 "source_word": decision.target.source_word if decision and preset else None,
+                 "window": window.name, "summary": summary(window, decision, action, text, preset)}
         rt.log = [entry, *rt.log][:LOG_LENGTH]
         _LOGGER.info("curtain_decision window=%s action=%s condition=%s text=%s", window.window_id, action,
                      entry["condition"], text)
@@ -916,7 +964,7 @@ class AutoCurtains:
             "sleep": {"enabled": window.sleep_protection, "entity": values["sleep_entity"], "state": sleep_state,
                       "active": window.sleep_protection and sleep_state == "on"},
             "lamp": {"enabled": bool(values["lamp_enabled"] and values["lamp_entity"]), "entity": values["lamp_entity"],
-                     "state": lamp_state, "preset_id": window.conditions.get("lamp"),
+                     "state": lamp_state, "preset_id": effective(self.mgr.config, window, "lamp").preset_id,
                      "active": bool(decision and decision.condition == "lamp"),
                      "releasing_until": _iso(rt.lamp_off_at + timedelta(seconds=values["lamp_release"]))
                      if rt.lamp_off_at else None},
@@ -925,6 +973,7 @@ class AutoCurtains:
                       "fallback": values["fallback"]},
             "morning_since": _iso(rt.morning_since),
             "applied": rt.applied,
+            "defer": rt.defer,
             "moves_today": int(rt.moves.get("count", 0)) if rt.moves.get("date") == dt_util.now().date().isoformat()
             else 0,
             "last_move_at": _iso(rt.last_move_at),
@@ -971,3 +1020,27 @@ class AutoCurtains:
                                                        "applied", "moves_today", "precedence", "values", "sources",
                                                        "log")}
         return {"started_at": _iso(self.started_at), "windows": out, "sensors": self.export_sensors()}
+
+
+def summary(window: Window, decision: Decision | None, action: str, text: str, preset) -> str:
+    """One line for the decision log, e.g. "Morning. Stova Suður → Half shade (Global Mode)." (0.6.4)."""
+    if decision is None or action in ("enabled", "resumed", "mode", "released", "hold_started", "config", "off"):
+        return text
+    word = MODE_WORDS.get(decision.condition, CONDITION_WORDS.get(decision.condition, decision.condition))
+    lead = ""
+    if decision.lamp_bypassed:
+        base = MODE_WORDS.get(decision.base, decision.base)
+        lead = f"Lamp override active. {base} is configured to bypass lamp control. "
+    if decision.condition == "manual_override":
+        return f"{lead}Manual hold. {window.name} keeps its position."
+    if decision.condition == "waiting":
+        return f"{lead}Waiting for daylight. {window.name} keeps its position."
+    target = decision.target
+    if preset is None or not target.has_target:
+        if target.state == "no_action":
+            return f"{lead}{word}. {window.name} is set to No action ({target.source_word}); leaving positions unchanged."
+        return f"{lead}{word}. {window.name} has no assignment; leaving positions unchanged."
+    unassigned = target.unassigned()
+    tail = f" {', '.join(unassigned)} unchanged (no assignment)." if unassigned else ""
+    verb = {"would_move": " would go", "blocked": " (prevented)", "failed": " (failed)"}.get(action, "")
+    return f"{lead}{word}. {window.name}{verb} → {preset.name} ({target.source_word}).{tail}"

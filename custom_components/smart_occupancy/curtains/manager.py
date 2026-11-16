@@ -56,7 +56,8 @@ STORE_KEY = "smart_occupancy.curtains"
 STORE_VERSION = 1
 # 0.6.2: automatic rule settings (defaults, rooms, window auto); 0.6.3: environment / thermal settings, the
 # Glare and Excess heat mappings and the overhang limit. Older data loads as it is (new keys are defaults).
-STORE_MINOR_VERSION = 3
+# 0.6.4: Global Modes (modes, room_modes), cover presets per layer, cover overrides and explicit No action.
+STORE_MINOR_VERSION = 4
 STATE_STORE_KEY = "smart_occupancy.curtains_state"
 STATE_STORE_VERSION = 1
 SIGNAL_CURTAINS_UPDATED = "smart_occupancy_curtains_updated"
@@ -350,8 +351,13 @@ class CurtainManager:
     def preview(self, window_id: str, preset_id: str) -> dict[str, Any]:
         """What applying a preset would do now. Never sends anything."""
         window, preset = self._window_preset(window_id, preset_id)
+        return self.plan(window, preset)
+
+    def plan(self, window: Window, preset) -> dict[str, Any]:
+        """What sending these targets (a preset, or a resolved per-cover target) would do now. Never sends."""
+        window_id = window.window_id
         plan = build_plan(self.hass, window, preset, self.config.settings.tolerance, self._busy)
-        return {"window_id": window_id, "preset_id": preset_id, "preset_name": preset.name,
+        return {"window_id": window_id, "preset_id": preset.preset_id, "preset_name": preset.name,
                 "positions": dict(preset.positions), "mode": window.mode,
                 "items": [i.as_dict() for i in plan],
                 "moves": sum(1 for i in plan if i.decision == "move"),

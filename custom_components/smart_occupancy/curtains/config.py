@@ -1,5 +1,5 @@
 """Curtain configuration: windows, cover layers, presets and settings (0.6.1, automatic rules 0.6.2,
-solar and thermal conditions 0.6.3).
+solar and thermal conditions 0.6.3, Global Curtain Modes 0.6.4).
 
 Everything here is plain data with strict validation. Positions are percent
 open (Home Assistant's cover convention: 0 = closed, 100 = fully open). A
@@ -46,9 +46,22 @@ CONDITION_WORDS = {
     "solar_heating": "Useful solar heating",
 }
 
+# Global Curtain Modes (0.6.4): the conditions a mapping can be set for. The first six are the common
+# modes on the Global Modes page; the others are under Advanced. Manual override never has a preset.
+MODES: tuple[str, ...] = ("morning", "day", "evening_privacy", "night", "sleep", "sun", "lamp", "glare", "heat")
+COMMON_MODES: tuple[str, ...] = MODES[:6]
+ADVANCED_MODES: tuple[str, ...] = MODES[6:]
+MODE_WORDS = {
+    "morning": "Morning", "day": "Daytime", "evening_privacy": "Evening", "night": "Night", "sleep": "Sleep",
+    "sun": "Sun Protection", "lamp": "Window Lamp", "glare": "Glare", "heat": "Excessive Heat",
+    "solar_heating": "Useful solar heating", "waiting": "Waiting for daylight", "manual_override": "Manual override",
+}
+NO_ACTION = "no_action"   # an explicit "this mode does not control this target" (not the same as missing)
+
 MAX_WINDOWS = 64
 MAX_LAYERS = 6
 MAX_PRESETS = 24
+MAX_COVER_PRESETS = 12
 MAX_OBSTRUCTIONS = 4
 NAME_MAX = 60
 
@@ -128,14 +141,51 @@ def _number(value: Any, default: float, low: float, high: float) -> float:
 
 # ---------------------------------------------------------------- data model
 @dataclass(frozen=True, slots=True)
+class CoverPreset:
+    """A named position of one cover (0.6.4), used when that cover is assigned on its own."""
+
+    preset_id: str
+    name: str
+    position: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"preset_id": self.preset_id, "name": self.name, "position": self.position}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> CoverPreset | None:
+        if not isinstance(data, Mapping):
+            return None
+        preset_id, name = data.get("preset_id"), data.get("name")
+        if not isinstance(preset_id, str) or preset_id == NO_ACTION or not isinstance(name, str) or not name.strip():
+            return None
+        try:
+            position = valid_position(data.get("position"))
+        except CurtainConfigError:
+            return None
+        return None if position is None else cls(preset_id, name.strip()[:NAME_MAX], position)
+
+
+def default_cover_presets() -> tuple[CoverPreset, ...]:
+    """Starting presets of one cover; every name and position is editable (and more can be added)."""
+    return (CoverPreset("c_open", "Fully open", 100), CoverPreset("c_half", "Half open", 50),
+            CoverPreset("c_closed", "Fully closed", 0))
+
+
+@dataclass(frozen=True, slots=True)
 class CoverLayer:
     layer_id: str
     entity_id: str
     kind: str = "custom"
     label: str | None = None  # optional own name, e.g. "Ljós"
+    # 0.6.4: this cover's own presets (for assigning it on its own); see default_cover_presets().
+    presets: tuple[CoverPreset, ...] = field(default_factory=default_cover_presets)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"layer_id": self.layer_id, "entity_id": self.entity_id, "kind": self.kind, "label": self.label}
+        return {"layer_id": self.layer_id, "entity_id": self.entity_id, "kind": self.kind, "label": self.label,
+                "presets": [p.as_dict() for p in self.presets]}
+
+    def preset(self, preset_id: str | None) -> CoverPreset | None:
+        return next((p for p in self.presets if p.preset_id == preset_id), None) if preset_id else None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> CoverLayer | None:
@@ -144,8 +194,17 @@ class CoverLayer:
             return None
         kind = data.get("kind")
         label = data.get("label")
+        raw = data.get("presets")
+        if isinstance(raw, (list, tuple)):
+            presets: list[CoverPreset] = []
+            for item in raw:
+                if (p := CoverPreset.from_dict(item)) is not None and all(x.preset_id != p.preset_id for x in presets):
+                    presets.append(p)
+            cover_presets = tuple(presets[:MAX_COVER_PRESETS])
+        else:
+            cover_presets = default_cover_presets()   # stored before 0.6.4: the starting presets
         return cls(layer_id, entity_id, kind if kind in COVER_KINDS else "custom",
-                   label if isinstance(label, str) and label.strip() else None)
+                   label if isinstance(label, str) and label.strip() else None, cover_presets)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +221,8 @@ class Preset:
     def from_dict(cls, data: Mapping[str, Any], layers: Iterable[str]) -> Preset | None:
         preset_id, name = data.get("preset_id"), data.get("name")
         if not isinstance(preset_id, str) or not isinstance(name, str) or not name.strip():
+            return None
+        if preset_id == NO_ACTION:
             return None
         raw = data.get("positions") if isinstance(data.get("positions"), Mapping) else {}
         positions: dict[str, int | None] = {}
@@ -252,7 +313,11 @@ class Window:
     solar: SolarSettings = field(default_factory=SolarSettings)
     presets: tuple[Preset, ...] = ()
     selected_preset: str | None = None
+    # Window overrides: condition -> preset id, NO_ACTION, or missing / None = inherit (0.6.4; in 0.6.3 this
+    # was the only mapping and None meant "keep the position", which inheriting nothing still means).
     conditions: Mapping[str, str | None] = field(default_factory=dict)
+    # Cover overrides (0.6.4): layer id -> {mode: cover preset id or NO_ACTION}; only what is set.
+    cover_modes: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     # Automatic rule settings set for this window only (see rules.py); everything else is inherited.
     auto: Mapping[str, Any] = field(default_factory=dict)
     # Automations an administrator reviewed and allowed to coexist with Automatic for these covers.
@@ -287,8 +352,14 @@ class Window:
             "sleep_protection": self.sleep_protection, "solar": self.solar.as_dict(),
             "presets": [p.as_dict() for p in self.presets], "selected_preset": self.selected_preset,
             "conditions": {c: self.conditions.get(c) for c in CONDITIONS},
+            "cover_modes": {k: dict(v) for k, v in self.cover_modes.items() if v},
             "auto": _rules().dump(self.auto), "allowed_automations": list(self.allowed_automations),
         }
+
+    @property
+    def layered(self) -> bool:
+        """More than one cover: single covers of it can be assigned on their own (0.6.4)."""
+        return len(self.layers) > 1
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Window | None:
@@ -314,6 +385,15 @@ class Window:
             bearing = None
         mode = data.get("mode")
         raw_conditions = data.get("conditions") if isinstance(data.get("conditions"), Mapping) else {}
+        raw_cover = data.get("cover_modes") if isinstance(data.get("cover_modes"), Mapping) else {}
+        cover_modes: dict[str, dict[str, str]] = {}
+        for layer in layers:
+            item = raw_cover.get(layer.layer_id)
+            if isinstance(item, Mapping):
+                kept = {m: v for m, v in item.items() if m in MODES and isinstance(v, str)
+                        and (v == NO_ACTION or layer.preset(v) is not None)}
+                if kept:
+                    cover_modes[layer.layer_id] = kept
         selected = data.get("selected_preset")
         area_id = data.get("area_id")
         return cls(
@@ -331,7 +411,9 @@ class Window:
             solar=SolarSettings.from_dict(data.get("solar")),
             presets=tuple(presets[:MAX_PRESETS]),
             selected_preset=selected if selected in preset_ids else None,
-            conditions={c: (v if (v := raw_conditions.get(c)) in preset_ids else None) for c in CONDITIONS},
+            conditions={c: (v if (v := raw_conditions.get(c)) in preset_ids or (v == NO_ACTION and c in MODES)
+                            else None) for c in CONDITIONS},
+            cover_modes=cover_modes,
             auto=_rules().load(data.get("auto"), "window"),
             allowed_automations=tuple(a for a in data.get("allowed_automations") or ()
                                       if isinstance(a, str) and a.startswith("automation."))[:64],
@@ -376,18 +458,63 @@ class CurtainSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class Assignment:
+    """One Global Modes assignment (0.6.4): a whole window (``layer_id`` None) or one cover of a layered
+    window, and the stable id of the preset it uses (a window preset, or that cover's own preset)."""
+
+    window_id: str
+    layer_id: str | None
+    preset_id: str
+
+    @property
+    def target(self) -> tuple[str, str | None]:
+        return self.window_id, self.layer_id
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"window_id": self.window_id, "layer_id": self.layer_id, "preset_id": self.preset_id}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Assignment | None:
+        if not isinstance(data, Mapping):
+            return None
+        window_id, layer_id, preset_id = data.get("window_id"), data.get("layer_id"), data.get("preset_id")
+        if not isinstance(window_id, str) or not isinstance(preset_id, str) or preset_id == NO_ACTION:
+            return None
+        if layer_id is not None and not isinstance(layer_id, str):
+            return None
+        return cls(window_id, layer_id or None, preset_id)
+
+
+def overlapping(items: Iterable[Assignment], window_id: str, layer_id: str | None) -> list[Assignment]:
+    """Assignments of one mode that would control the same covers as (window_id, layer_id): the same
+    target, the whole window and one of its covers, or one of its covers and the whole window."""
+    return [a for a in items if a.window_id == window_id
+            and (a.layer_id == layer_id or a.layer_id is None or layer_id is None)]
+
+
+@dataclass(frozen=True, slots=True)
 class CurtainConfig:
     windows: Mapping[str, Window] = field(default_factory=dict)
     settings: CurtainSettings = field(default_factory=CurtainSettings)
     # Automatic rule settings for every window, and per room (area id); see rules.py.
     defaults: Mapping[str, Any] = field(default_factory=dict)
     rooms: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    # Global Curtain Modes (0.6.4): mode -> assignments, and room overrides: area id -> {mode: preset id
+    # (resolved in each window of the room) or NO_ACTION}.
+    modes: Mapping[str, tuple[Assignment, ...]] = field(default_factory=dict)
+    room_modes: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         rules = _rules()
         return {"windows": [w.as_dict() for w in self.windows.values()], "settings": self.settings.as_dict(),
                 "defaults": rules.dump(self.defaults),
-                "rooms": {k: rules.dump(v) for k, v in self.rooms.items() if v}}
+                "rooms": {k: rules.dump(v) for k, v in self.rooms.items() if v},
+                "modes": {m: [a.as_dict() for a in self.modes.get(m, ())] for m in MODES if self.modes.get(m)},
+                "room_modes": {k: dict(v) for k, v in self.room_modes.items() if v}}
+
+    def assignment(self, mode: str, window_id: str, layer_id: str | None) -> Assignment | None:
+        """The assignment of this exact target in a mode."""
+        return next((a for a in self.modes.get(mode, ()) if a.target == (window_id, layer_id)), None)
 
     def rules_for(self, window: Window) -> tuple[dict[str, Any], dict[str, str]]:
         """The effective automatic settings of a window and where each comes from."""
@@ -413,17 +540,63 @@ class CurtainConfig:
         rules = _rules()
         rooms_raw = data.get("rooms") if isinstance(data.get("rooms"), Mapping) else {}
         rooms = {k: v for k, raw in rooms_raw.items() if isinstance(k, str) and (v := rules.load(raw, "room"))}
+        # Global Modes (0.6.4; absent before). An assignment of a window or cover that no longer exists, or a
+        # second one for covers already assigned in that mode, is dropped. One whose preset is missing is
+        # kept (it acts as No action and is reported) so nothing is silently re-pointed.
+        modes: dict[str, tuple[Assignment, ...]] = {}
+        raw_modes = data.get("modes") if isinstance(data.get("modes"), Mapping) else {}
+        for mode in MODES:
+            kept: list[Assignment] = []
+            for item in raw_modes.get(mode) or ():
+                a = Assignment.from_dict(item)
+                window = windows.get(a.window_id) if a else None
+                if window is None or (a.layer_id is not None and (not window.layered or window.layer(a.layer_id)
+                                                                   is None)):
+                    continue
+                if not overlapping(kept, a.window_id, a.layer_id):
+                    kept.append(a)
+            if kept:
+                modes[mode] = tuple(kept)
+        raw_rooms = data.get("room_modes") if isinstance(data.get("room_modes"), Mapping) else {}
+        room_modes = {k: kept for k, v in raw_rooms.items() if isinstance(k, str) and isinstance(v, Mapping)
+                      and (kept := {m: x for m, x in v.items() if m in MODES and isinstance(x, str) and x})}
         return cls(windows=windows, settings=CurtainSettings.from_dict(data.get("settings")),
-                   defaults=rules.load(data.get("defaults"), "global"), rooms=rooms)
+                   defaults=rules.load(data.get("defaults"), "global"), rooms=rooms, modes=modes,
+                   room_modes=room_modes)
 
     def owner_of(self, entity_id: str) -> str | None:
         return next((w.window_id for w in self.windows.values() if entity_id in w.entity_ids), None)
 
     def with_window(self, window: Window) -> CurtainConfig:
-        return replace(self, windows={**self.windows, window.window_id: window})
+        return replace(self, windows={**self.windows, window.window_id: window})._pruned(window.window_id)
 
     def without_window(self, window_id: str) -> CurtainConfig:
-        return replace(self, windows={k: v for k, v in self.windows.items() if k != window_id})
+        return replace(self, windows={k: v for k, v in self.windows.items() if k != window_id})._pruned(window_id)
+
+    def with_modes(self, modes: Mapping[str, Iterable[Assignment]]) -> CurtainConfig:
+        return replace(self, modes={m: tuple(v) for m, v in modes.items() if m in MODES and v})
+
+    def _pruned(self, window_id: str) -> CurtainConfig:
+        """Global assignments of a window follow its changes: a removed window, a removed cover or a
+        deleted preset takes its assignments with it (the preset's positions were never copied)."""
+        window = self.windows.get(window_id)
+        changed = False
+        modes: dict[str, tuple[Assignment, ...]] = {}
+        for mode, items in self.modes.items():
+            kept = []
+            for a in items:
+                if a.window_id == window_id:
+                    ok = window is not None and (
+                        window.preset(a.preset_id) is not None if a.layer_id is None else
+                        window.layered and (layer := window.layer(a.layer_id)) is not None
+                        and layer.preset(a.preset_id) is not None)
+                    if not ok:
+                        changed = True
+                        continue
+                kept.append(a)
+            if kept:
+                modes[mode] = tuple(kept)
+        return replace(self, modes=modes) if changed else self
 
 
 # ------------------------------------------------------------------ defaults
@@ -462,7 +635,8 @@ def default_presets(layers: tuple[CoverLayer, ...]) -> tuple[Preset, ...]:
 
 
 def default_conditions(presets: tuple[Preset, ...]) -> dict[str, str | None]:
-    """Suggested condition -> preset mapping for the default presets (editable per window)."""
+    """The condition -> preset mapping 0.6.1-0.6.3 gave a new window (kept for reference and tests; 0.6.4
+    creates new windows without a mapping)."""
     ids = {p.preset_id for p in presets}
 
     def pick(*candidates: str) -> str | None:
@@ -493,10 +667,11 @@ def with_layers(window: Window, layers: tuple[CoverLayer, ...]) -> Window:
     in every existing preset and a removed layer disappears from them. Presets are only created
     from the templates when the window has none yet (nothing is ever overwritten)."""
     ids = [x.layer_id for x in layers]
+    cover_modes = {k: v for k, v in window.cover_modes.items() if k in ids}
     if not window.presets and layers:
-        presets = default_presets(layers)
-        conditions = default_conditions(presets)
-        return replace(window, layers=layers, presets=presets, conditions=conditions,
+        # 0.6.4: a new window starts without any mapping (every mode inherits from Global Modes, where it is
+        # assigned explicitly); no preset is chosen for it by default.
+        return replace(window, layers=layers, presets=default_presets(layers), cover_modes=cover_modes,
                        selected_preset=window.selected_preset)
     presets = tuple(Preset(p.preset_id, p.name, {i: p.positions.get(i) for i in ids}) for p in window.presets)
-    return replace(window, layers=layers, presets=presets)
+    return replace(window, layers=layers, presets=presets, cover_modes=cover_modes)

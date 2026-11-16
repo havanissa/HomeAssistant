@@ -127,7 +127,23 @@ def test_curtains_card_never_moves_a_cover_itself() -> None:
         "auto/preview", "auto/enable", "resume", "auto/settings", "automation/allow",
         # 0.6.3: the predicted result of a settings change, shown before it is saved (read only)
         "auto/simulate",
+        # 0.6.4: Global Curtain Modes (validated drafts, reviewed saves) and the presets of single covers
+        "modes/change", "cover_preset/save", "cover_preset/delete",
     }, commands
+    # Selecting a mode card only changes the view: no websocket call at all.
+    select = source.split('case "gm-mode":', 1)[1].split("\n", 1)[0]
+    assert "_ws(" not in select and "_gmEdit" not in select and "_save(" not in select
+    # A draft is only ever validated (dry_run); the only save with a confirmation is the review's own button,
+    # and it needs a chosen policy when an Automatic window would move.
+    assert source.count("confirm: !!r.result.needs_confirm") == 1
+    review = source.split("async _saveReview() {", 1)[1].split("\n  }\n", 1)[0]
+    assert "if (r.result.needs_confirm && !r.policy) return;" in review
+    edit = source.split("async _gmEdit(op) {", 1)[1].split("\n  }\n", 1)[0]
+    assert "dry_run: true" in edit and "confirm" not in edit
+    for word in ("Morning", "Daytime", "Evening", "Night", "Sleep", "Sun Protection"):
+        assert word in (Path(__file__).parent.parent / "custom_components" / "smart_occupancy" / "curtains" /
+                        "config.py").read_text(encoding="utf-8")
+    assert '"Global Modes"' in source and "All windows" in source and "Add Window / Cover" in source
     assert source.count("type: `${WS}/auto/enable`") == 1
     enable = source.split("async _enableConfirmed() {", 1)[1].split("\n  }\n", 1)[0]
     assert "confirm: true" in enable and "if (!e || !e.review" in enable

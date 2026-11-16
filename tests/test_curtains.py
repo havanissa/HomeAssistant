@@ -283,7 +283,8 @@ async def test_single_cover_defaults_and_custom_half_open(hass, pilot, house, co
     await api.ok("preset/save", window_id=wid, preset_id=half["preset_id"], positions={layer: 35})
     w = await window(api, wid)
     assert preset(w, "Half open")["positions"][layer] == 35 and preset(w, "Half open")["preset_id"] == half["preset_id"]
-    assert w["conditions"]["morning"] == half["preset_id"]  # defaults follow the preset's id, not its value
+    # 0.6.4: a new window has no mapping at all (no assignment means no action; nothing is chosen for it).
+    assert set(w["conditions"].values()) == {None} and w["effective"]["morning"]["state"] == "nothing"
     assert covers.calls == []
 
 
@@ -296,10 +297,8 @@ async def test_multi_cover_defaults_and_preset_library(hass, pilot, house, cover
     assert [(p["name"], p["positions"][sheer], p["positions"][blackout]) for p in w["presets"]] == [
         ("Fully open", 100, 100), ("Half shade", 50, 100), ("Full shade", 0, 100), ("Evening privacy", 0, 60),
         ("Full blackout", 100, 0)]
-    assert w["conditions"] == {
-        "morning": "p_half_shade", "day": "p_open", "sun": "p_full_shade", "evening_privacy": "p_evening_privacy",
-        "night": "p_blackout", "sleep": "p_blackout", "lamp": "p_half_shade", "manual_override": None,
-        "glare": None, "heat": None}   # 0.6.3: not set = the Direct sunlight preset
+    assert set(w["conditions"].values()) == {None}   # 0.6.4: no mapping until one is assigned
+    await api.ok("window/update", window_id=wid, conditions={"night": "p_blackout", "sleep": "p_blackout"})
 
     # A new custom preset with two independent positions, one cover left unchanged in another.
     tv = (await api.ok("preset/save", window_id=wid, name="TV", positions={sheer: 20, blackout: 70}))["preset_id"]
@@ -336,7 +335,7 @@ async def test_condition_mapping_is_per_window_and_never_runs(hass, pilot, house
     kamar = (await api.ok("window/create", name="Kamar", layers=[{"entity_id": KAMAR}]))["window_id"]
     await api.ok("window/update", window_id=stova, conditions={"morning": "p_open", "manual_override": "p_full_shade"})
     assert (await window(api, stova))["conditions"]["morning"] == "p_open"
-    assert (await window(api, kamar))["conditions"]["morning"] == "p_half"
+    assert (await window(api, kamar))["conditions"]["morning"] is None
     err = await api.error("window/update", window_id=kamar, conditions={"morning": "p_half_shade"})
     assert err["code"] == "unknown_preset"  # a preset of another window
     assert (await api.error("window/update", window_id=kamar, conditions={"lunch": None}))["code"] == \

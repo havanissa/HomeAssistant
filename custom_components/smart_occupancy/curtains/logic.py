@@ -50,6 +50,13 @@ Two overlays sit above the base condition:
 Nothing thermal ever bypasses sleep, night, evening privacy or a manual hold:
 those are decided before the sun is looked at.
 
+0.6.4 (Global Curtain Modes): which preset a condition uses is no longer a
+single window mapping but is resolved per cover from Global Modes, room,
+window and cover settings (``modes.py``, passed in as ``Flags.targets``). The
+arbitration here is unchanged; only "is this condition mapped?" and "what does
+it send?" ask the resolver. A condition without an assignment keeps the covers
+where they are; it never hands over to a lower condition.
+
 Unavailable covers, competing automations, running movements, the minimum
 interval and the daily budget are *safety* limits applied by the runtime
 (``auto.py``) before anything is sent; they rank above everything here.
@@ -62,7 +69,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from .config import CONDITION_WORDS, SUN_FALLBACK
+from .config import CONDITION_WORDS, MODE_WORDS, SUN_FALLBACK
+from .modes import NOTHING, Effective, mapping_effective
 
 PROTECTIVE = ("sleep", "night", "evening_privacy")
 SUN_BASES = frozenset({"sun", "glare", "heat", "solar_heating"})   # the sun is in front and shining
@@ -214,12 +222,21 @@ class Evidence:
 
 @dataclass(slots=True)
 class Flags:
-    """The window's own switches and its condition -> preset mapping."""
+    """The window's own switches and how a condition finds its target.
+
+    ``targets(condition, phase)`` is the Global Modes resolver of the window (0.6.4); without it the plain
+    ``conditions`` mapping is used (pure-logic callers)."""
 
     sleep_protection: bool
     privacy: bool
     solar_protection: bool
     conditions: Mapping[str, str | None]
+    targets: Callable[[str, str | None], Effective] | None = None
+
+    def lookup(self, condition: str, phase: str | None = None) -> Effective:
+        if self.targets is not None:
+            return self.targets(condition, phase)
+        return mapping_effective(self.conditions, condition, phase)
 
 
 @dataclass(slots=True)
@@ -237,14 +254,23 @@ class Decision:
     direct_sun: dict[str, Any] = field(default_factory=dict)
     thermal: dict[str, Any] = field(default_factory=dict)
     sun_hold: bool = False            # kept in its sun position: the weather evidence was lost
+    target: Effective = NOTHING       # 0.6.4: what the condition sends, per cover, and where it comes from
+    lamp_bypassed: bool = False       # the lamp is on, but the base condition is set to win over it
+
+    @property
+    def preset_name(self) -> str | None:
+        return self.target.preset.name if self.target.has_target and self.target.preset else None
 
     def as_dict(self) -> dict[str, Any]:
         return {"condition": self.condition, "condition_word": CONDITION_WORDS.get(self.condition, self.condition),
+                "mode_word": MODE_WORDS.get(self.condition, CONDITION_WORDS.get(self.condition, self.condition)),
                 "base": self.base, "base_word": CONDITION_WORDS.get(self.base, self.base), "preset_id": self.preset_id,
+                "preset_name": self.preset_name, "target": self.target.as_dict(),
+                "source": self.target.source, "source_word": self.target.source_word,
                 "text": self.text, "evidence": self.evidence, "hold_release": self.hold_release,
                 "next_check": self.next_check.isoformat(timespec="seconds") if self.next_check else None,
                 "opening_blocked": self.opening_blocked, "phase": self.phase, "direct_sun": self.direct_sun,
-                "thermal": self.thermal}
+                "thermal": self.thermal, "lamp_bypassed": self.lamp_bypassed}
 
 
 def precedence(values: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -475,12 +501,13 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
             else:
                 lead = f"Sleep mode ended, but {opening_blocked}" if woke else \
                     opening_blocked[0].upper() + opening_blocked[1:]
-                tail = "Morning preset not yet applied" if flags.conditions.get("morning") else \
+                tail = "Morning preset not yet applied" if flags.lookup("morning").has_target else \
                     "The covers keep their position"
                 text = f"Waiting for daylight. {lead}. {tail}"
         else:
-            mapped_morning = flags.conditions.get("morning")
-            morning_used = mapped_morning is not None and not (
+            # Morning is a phase of its own when anything is set for it (a preset, or an explicit No action
+            # that keeps the covers during the morning); with nothing at all the day starts directly (0.6.2).
+            morning_used = flags.lookup("morning").state != "nothing" and not (
                 flags.sleep_protection and values["sleep_end"] == "resume")
             since = morning_since if morning_since is not None and morning_since.date() == now.date() else None
             if since is None and morning_used and not evening:  # a morning starts before noon
@@ -538,13 +565,16 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
                             notes, None, morning_start, _next(deadlines, now), opening_blocked, **extras)
 
     # ---- window lamp
-    condition, preset = base, preset_for(flags, base, phase)
-    if ev.lamp in ("on", "releasing") and flags.conditions.get("lamp"):
+    condition = base
+    target = _target(flags, base, phase)
+    lamp_bypassed = False
+    if ev.lamp in ("on", "releasing") and flags.lookup("lamp").has_target:
         lamp_name = CONDITION_WORDS.get(base, base)
         if base in values["lamp_bypass"] or (base in SUN_FALLBACK and "sun" in values["lamp_bypass"]):
             text = f"{text}. Lamp override bypassed: {lamp_name} is set to win over the lamp"
+            lamp_bypassed = True
         else:
-            condition, preset = "lamp", flags.conditions.get("lamp")
+            condition, target = "lamp", flags.lookup("lamp")
             text = ("Lamp override active" if ev.lamp == "on" else
                     f"Lamp off: holding the lamp preset until {_fmt(ev.lamp_release_at)}")
             bypass = [CONDITION_WORDS[c] for c in values["lamp_bypass"]]
@@ -552,28 +582,30 @@ def decide(flags: Flags, values: Mapping[str, Any], ev: Evidence, *, hold: Mappi
                 text += f". {', '.join(bypass)} {'is' if len(bypass) == 1 else 'are'} set to win over the lamp"
             if ev.lamp_release_at:
                 deadlines.append(ev.lamp_release_at)
-    if condition != "waiting" and preset is None:
+    if condition != "waiting" and not target.has_target:
         what = CONDITION_WORDS.get(condition, condition)
         if condition in SUN_FALLBACK:
             what += " (nor for Direct sunlight)"
         elif condition == "solar_heating":
             what = CONDITION_WORDS.get(phase, phase)
-        text += f". No preset is set for {what}: the covers are kept as they are"
-    return Decision(condition, base, preset, text, notes, hold_release, morning_start, _next(deadlines, now),
-                    opening_blocked, **extras)
+        if target.state == "no_action":
+            text += f". {what} is set to No action ({target.source_word}): the covers are kept as they are"
+        else:
+            text += f". No preset is set for {what}: the covers are kept as they are"
+    return Decision(condition, base, target.preset_id, text, notes, hold_release, morning_start, _next(deadlines, now),
+                    opening_blocked, **extras, target=target, lamp_bypassed=lamp_bypassed)
+
+
+def _target(flags: Flags, condition: str, phase: str | None) -> Effective:
+    if condition == "waiting":
+        return NOTHING
+    return flags.lookup(condition, phase)
 
 
 def preset_for(flags: Flags, condition: str, phase: str | None) -> str | None:
     """The preset a condition uses: its own mapping; glare and excess heat fall back to Direct sunlight;
     useful solar heating keeps the Morning / Normal daytime preset."""
-    if condition == "waiting":
-        return None
-    if condition == "solar_heating":
-        return flags.conditions.get(phase or "day")
-    preset = flags.conditions.get(condition)
-    if preset is None and condition in SUN_FALLBACK:
-        preset = flags.conditions.get("sun")
-    return preset
+    return _target(flags, condition, phase).preset_id
 
 
 def _next(deadlines: list[datetime], now: datetime) -> datetime | None:

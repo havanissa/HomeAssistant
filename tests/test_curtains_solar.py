@@ -815,11 +815,15 @@ async def test_upgrade_from_0_6_2_keeps_every_window_as_it_was(hass, pilot, hous
         "safety", "manual_override", "sleep", "night", "evening_privacy", "lamp", "sun", "morning", "day", "waiting"]
     await r.mgr.async_flush()
     saved = hass_storage["smart_occupancy.curtains"]
-    assert saved["minor_version"] == 3                                 # stored again, data as it was
+    assert saved["minor_version"] == 4                                 # stored again, data as it was
     new = CurtainConfig.from_dict(saved["data"]).as_dict()["windows"][0]
     assert new["conditions"] == {**window["conditions"], "glare": None, "heat": None}
     assert new["solar"] == {**window["solar"], "max_elevation": None}
-    assert {k: v for k, v in new.items() if k not in ("conditions", "solar")} == {
-        k: v for k, v in window.items() if k not in ("conditions", "solar")}
+    # 0.6.4: every cover gets its own starting presets; no cover override and no Global Modes assignment.
+    assert [{k: v for k, v in x.items() if k != "presets"} for x in new["layers"]] == window["layers"]
+    assert all([p["position"] for p in x["presets"]] == [100, 50, 0] for x in new["layers"])
+    assert new["cover_modes"] == {} and not saved["data"].get("modes") and not saved["data"].get("room_modes")
+    skip = ("conditions", "solar", "layers", "cover_modes")
+    assert {k: v for k, v in new.items() if k not in skip} == {k: v for k, v in window.items() if k not in skip}
     assert saved["data"]["defaults"] == stored["defaults"] and saved["data"]["settings"] == stored["settings"]
     assert covers.calls[0].data == {"entity_id": STOVA_SHEER, "position": 0}
