@@ -144,18 +144,36 @@ async def begin(hass, pilot, freezer, covers, hass_ws_client, when: str, *, lux:
     return entry, run
 
 
-async def kamar(api: Api, house: House, **fields: Any) -> str:
+# The condition -> preset mapping 0.6.1-0.6.3 gave a new window. Since 0.6.4 a new window has no mapping;
+# the scenarios assign this one through Global Modes, so every scenario also runs the Global Modes path.
+SINGLE_MODES = {"morning": "p_half", "day": "p_open", "sun": "p_half", "evening_privacy": "p_closed",
+                "night": "p_closed", "sleep": "p_closed", "lamp": "p_half"}
+LAYERED_MODES = {"morning": "p_half_shade", "day": "p_open", "sun": "p_full_shade",
+                 "evening_privacy": "p_evening_privacy", "night": "p_blackout", "sleep": "p_blackout",
+                 "lamp": "p_half_shade"}
+
+
+async def global_modes(api: Api, window_id: str, mapping: dict[str, str]) -> None:
+    await api.ok("modes/change", ops=[{"op": "assign", "mode": m, "window_id": window_id, "preset_id": p}
+                                      for m, p in mapping.items()])
+
+
+async def kamar(api: Api, house: House, *, assign: bool = True, **fields: Any) -> str:
     """Kamar Erva: one blackout cover, sleep protected, facing east (Fully open / Half open / Fully closed)."""
     created = await api.ok("window/create", name="Kamar Erva", area_id=house.kamar, direction="E",
                            layers=[{"entity_id": KAMAR, "kind": "blackout"}], sleep_protection=True, **fields)
+    if assign:
+        await global_modes(api, created["window_id"], SINGLE_MODES)
     return created["window_id"]
 
 
-async def stova(api: Api, house: House, **fields: Any) -> str:
+async def stova(api: Api, house: House, *, assign: bool = True, **fields: Any) -> str:
     """Stova Suður: sheer + blackout, facing south, evening privacy."""
     created = await api.ok("window/create", name="Stova Suður", area_id=house.stova, direction="S", privacy=True,
                            layers=[{"entity_id": STOVA_SHEER, "kind": "sheer"},
                                    {"entity_id": STOVA_BLACKOUT, "kind": "blackout"}], **fields)
+    if assign:
+        await global_modes(api, created["window_id"], LAYERED_MODES)
     return created["window_id"]
 
 

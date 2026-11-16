@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.4 — Global Curtain Modes (Phase 4.6.3)
+
+### Added
+
+- **Curtains → Global Modes** in the Smart Curtains card (`page: modes` opens it directly): mode cards Morning, Daytime, Evening, Night, Sleep, Sun Protection (Window Lamp, Glare, Excessive Heat under Advanced) with counts; the selected mode's assignments (window or single cover, room, type, preset dropdown, status, remove, effective preset and source, hidden-by-override warnings with *Use Global Setting*) and **Add Window / Cover**; overlap errors offer *Replace*. Selecting a card never calls the integration.
+- **All windows** matrix (rooms, windows, covers × modes; preset / Inherit / No action / — with source tag), with a compact cell editor; scrolls horizontally on phones.
+- **Draft, review and confirmed save** (`modes/change` with `dry_run`, `confirm`, `policy`): changes, per-window previous / proposed preset, current condition, movement now, hold, block and competing automations. Saving a change to an Automatic window's active target needs `confirm: true` and a policy: `now` (normal safety gates) or `next_change` (kept until the condition changes; survives restarts; Waiting for daylight does not count as a change).
+- **Cover presets** per layer (`cover_preset/save`, `cover_preset/delete`; Covers tab), default Fully open 100 / Half open 50 / Fully closed 0, stable ids.
+- **Resolution per cover** (`curtains/modes.py`): cover override → window override → room override → Global Modes → no action; explicit **No action** distinct from inherit; Glare / Excess heat fall back per cover to Sun Protection; one target per physical cover.
+- Window settings → Automatic: **Presets per mode** (Use Global Setting / No action / preset, with the effective result and source), single-cover overrides, and *Move them to Global Modes…* (reviewed `adopt`).
+- Decision log entries carry `source` and a `summary` (“Morning. Stova Suður → Half shade (Global Mode).”, “… has no assignment; leaving positions unchanged.”, lamp bypass); *Recent automatic decisions* on the Global Modes page.
+- Tests: `tests/test_curtains_modes.py` (modes, assignments, cover presets, layered presets by reference, stable ids, no assignment = no action, inherit vs No action, four-level precedence, 0.6.3 migration and adopt, overlaps, editing and Observing never move, arbitration, sun fallbacks, missing / deleted presets, renamed and replaced covers, restart persistence, review / confirm / policies, admin only, 24-hour texts); the existing scenario tests now assign their mappings through Global Modes.
+
+### Changed
+
+- The automatic controller resolves each decided condition through `modes.py`; its arbitration is unchanged (pure-logic equality with the frozen 0.6.2 logic still holds).
+- New windows start **without** a condition mapping (0.6.1–0.6.3 suggested one); a mode without an assignment keeps the covers where they are.
+- Deleting a window preset sets window overrides that used it back to *inherit* and removes Global Modes assignments that used it.
+- Movement log text ends with “Preset from <source>”; Observing status names the source.
+- Curtain store minor version 4 (`modes`, `room_modes`, layer `presets`, window `cover_modes`); state store adds `defer`. 0.6.3 data loads unchanged: mappings become window overrides, no window changes mode.
+
+### Not changed
+
+- Solar and thermal calculations, sleep / night / privacy / lamp / manual-hold arbitration, safety gates, the executor, occupancy, lighting, forecasts. No existing Home Assistant automation is changed.
+
 ## 0.6.3 — Solar and thermal curtain control, 24-hour time (Phase 4.6.2)
 
 ### Added
