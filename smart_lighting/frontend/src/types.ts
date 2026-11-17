@@ -1,0 +1,166 @@
+// Shapes of the backend's read-only JSON API (see backend/smart_lighting/core.py).
+
+export type CheckStatus = "ok" | "warning" | "error" | "info";
+
+export interface Check {
+  key: string;
+  title: string;
+  status: CheckStatus;
+  detail: string;
+}
+
+export interface Connection {
+  state: "connected" | "connecting" | "disconnected" | "auth_failed" | "not_configured" | string;
+  connected: boolean;
+  ha_version?: string | null;
+  connected_since?: string | null;
+  last_disconnect?: string | null;
+  last_error?: string | null;
+  connect_attempts?: number;
+  reconnects?: number;
+  latency_ms?: number | null;
+  last_pong?: string | null;
+  events_total?: number;
+  events_per_minute?: number;
+}
+
+export interface HaInfo {
+  location_name: string | null;
+  version: string | null;
+  state: string | null;
+  time_zone: string | null;
+  country: string | null;
+  language: string | null;
+  currency: string | null;
+  unit_system: { length: string | null; temperature: string | null };
+  safe_mode: boolean | null;
+  recovery_mode: boolean | null;
+  component_count: number;
+  entity_count: number | null;
+  area_count: number | null;
+}
+
+export interface IntegrationEntry {
+  title: string | null;
+  state: string | null;
+  disabled_by: string | null;
+  reason: string | null;
+}
+
+export interface Integration {
+  domain: string;
+  status: "loaded" | "installed" | "not_running" | "not_installed" | "unknown" | string;
+  detected: boolean;
+  version: string | null;
+  name: string | null;
+  entries: IntegrationEntry[];
+  entity_count: number;
+  entities_by_domain: Record<string, number>;
+  checked: boolean;
+  errors: string[];
+}
+
+export interface EntitySummary {
+  entity_id: string;
+  state: string | null;
+  name: string;
+  unit: string | null;
+  device_class?: string | null;
+  icon?: string | null;
+  last_changed: string | null;
+}
+
+export interface ModuleInfo {
+  key: string;
+  title: string;
+  icon: string;
+  kind: "foundation" | "feature";
+  status: "available" | "pending";
+  summary: string;
+  handled_by: string | null;
+}
+
+export interface MigrationItem {
+  key: string;
+  title: string;
+  status: "done" | "pending" | "available";
+  phase: string | null;
+}
+
+export interface Migration {
+  current_phase: string;
+  foundation_complete: boolean;
+  modules_total: number;
+  modules_migrated: number;
+  percent: number;
+  automatic_migration: boolean;
+  items: MigrationItem[];
+}
+
+export interface Safety {
+  read_only: boolean;
+  device_control: boolean;
+  automation_engine: boolean;
+  automatic_migration: boolean;
+  modifies_integration: boolean;
+  service_calls_sent: number;
+  commands_sent: Record<string, number>;
+  allowed_commands: string[];
+}
+
+export interface SupervisorInfo {
+  configured: boolean;
+  available: boolean;
+  app: Record<string, unknown>;
+  system: Record<string, unknown>;
+  error: string | null;
+  checked_at: string | null;
+}
+
+export interface AppInfo {
+  name: string;
+  version: string;
+  phase: string;
+  started_at: string;
+  uptime_s: number;
+  health: CheckStatus;
+  dev_mode: boolean;
+}
+
+export interface Overview {
+  app: AppInfo;
+  checks: Check[];
+  home_assistant: { connection: Connection; info: HaInfo | null };
+  integration: Integration | null;
+  integration_entities: EntitySummary[];
+  supervisor: SupervisorInfo | null;
+  modules: ModuleInfo[];
+  migration: Migration;
+  safety: Safety;
+  generated_at: string;
+}
+
+export interface LogEntry {
+  time: string;
+  level: string;
+  logger: string;
+  message: string;
+}
+
+export interface Diagnostics extends Overview {
+  settings: Record<string, unknown>;
+  runtime: Record<string, string>;
+  log: LogEntry[];
+}
+
+export type LiveMessage =
+  | { type: "overview"; overview: Overview }
+  | {
+      type: "status";
+      app: AppInfo;
+      checks: Check[];
+      connection: Connection;
+      info: HaInfo | null;
+    }
+  | { type: "entities"; changed: EntitySummary[] }
+  | { type: "pong" };
