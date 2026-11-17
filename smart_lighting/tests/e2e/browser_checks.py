@@ -5,9 +5,10 @@ Needs the stack from stack.sh, a real Home Assistant and Playwright:
     python -I browser_checks.py --ha-url http://127.0.0.1:18123 --ha-token <LLAT> \
         --ha-config <HA config dir> --out <output dir> [--chromium <path>]
 
-Every page is used inside the sidebar-panel iframe, at phone (360, 390),
-tablet (768, portrait and landscape) and desktop widths, with touch emulation
-on mobile sizes. A websocket to Home Assistant records every call_service
+Every page is used inside the sidebar-panel iframe. Desktop and tablet
+(portrait and landscape) are the primary targets; phone sizes (360, 390) are
+kept as a regression check of the fallback layout. Touch emulation on
+tablets and phones. A websocket to Home Assistant records every call_service
 event during the run: the App must cause none.
 """
 
@@ -44,6 +45,8 @@ VIEWPORTS = {
     "tablet-768": {"viewport": {"width": 768, "height": 1024}, "is_mobile": True, "has_touch": True, "device_scale_factor": 2},
     "tablet-landscape": {"viewport": {"width": 1024, "height": 768}, "is_mobile": True, "has_touch": True, "device_scale_factor": 2},
     "phone-landscape": {"viewport": {"width": 740, "height": 360}, "is_mobile": True, "has_touch": True, "device_scale_factor": 3},
+    "tablet-landscape-1366": {"viewport": {"width": 1366, "height": 1024}, "is_mobile": True, "has_touch": True, "device_scale_factor": 2},
+    "desktop-1920": {"viewport": {"width": 1920, "height": 1080}, "is_mobile": False, "has_touch": False, "device_scale_factor": 1},
     "desktop-1440": {"viewport": {"width": 1440, "height": 900}, "is_mobile": False, "has_touch": False, "device_scale_factor": 1},
 }
 
@@ -142,6 +145,11 @@ def go(frame: Frame, route: str, layout: str, page: Page) -> None:
     expect(frame.locator("h1.page-title")).to_have_text(TITLES[route])
 
 
+# Expected dashboard columns (content width without sidebar / rail).
+EXPECTED_COLUMNS = {"tablet-768": 2, "tablet-landscape": 2, "phone-landscape": 2, "tablet-landscape-1366": 3,
+                    "desktop-1440": 3, "desktop-1920": 3, "phone-360": 1, "phone-390": 1}
+
+
 def layout_of(name: str) -> str:
     width = VIEWPORTS[name]["viewport"]["width"]
     return "phone" if width < 600 else "tablet" if width < 1024 else "desktop"
@@ -171,6 +179,8 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
         check(f"{name}: sidebar with labels", not bottom_visible and sidebar_box and sidebar_box["width"] > 200, sidebar_box)
 
     page.screenshot(path=str(shots / f"{name}-dashboard-light.png"), full_page=False)
+    columns = frame.evaluate("getComputedStyle(document.querySelector('sl-dashboard .grid')).gridTemplateColumns.split(' ').length")
+    check(f"{name}: dashboard uses {EXPECTED_COLUMNS[name]} column(s)", columns == EXPECTED_COLUMNS[name], columns)
 
     # Every module, by touch/click, with no horizontal scrolling and no controls on pending screens.
     overflow, pending_controls, target_issues = [], [], {}
@@ -182,6 +192,7 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
             card = frame.locator(f"[data-testid=pending-{route}]")
             expect(card).to_be_visible()
             expect(frame.locator(".page-header .chip-pending")).to_have_text("Migration pending")
+            expect(card.locator("[data-testid=controlled-by]")).to_contain_text("Smart Occupancy integration")
             n = card.locator("input, select, textarea, button").count()
             if n:
                 pending_controls.append(f"{route}:{n}")
@@ -190,7 +201,7 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
             target_issues[route] = issues
     check(f"{name}: all 10 modules reachable", True)
     check(f"{name}: no horizontal scrolling on any module", not overflow, overflow)
-    check(f"{name}: pending modules show no controls", not pending_controls, pending_controls)
+    check(f"{name}: pending modules show no controls and the integration in control", not pending_controls, pending_controls)
     if layout != "desktop":
         check(f"{name}: touch targets >= 44px", not target_issues, target_issues)
 
@@ -248,6 +259,10 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
         first.tap() if layout != "desktop" else search.press("Enter")
     expect(dialog).to_have_count(0)
     expect(lookup.locator("[data-testid=lookup-details]")).to_contain_text("input_select.manual_mood")
+    if vw >= 1024:
+        picker_box = lookup.locator("sl-picker").bounding_box()
+        details_box = lookup.locator("[data-testid=lookup-details]").bounding_box()
+        check(f"{name}: lookup selector and details side by side", details_box["x"] >= picker_box["x"] + picker_box["width"])
     check(f"{name}: entity selector search and choose", True)
     # Area search ignores accents and case.
     lookup.locator(".segmented label", has_text="Area").tap() if layout != "desktop" else lookup.locator(".segmented label", has_text="Area").click()
@@ -383,7 +398,7 @@ def main() -> None:
         with page.expect_download() as dl:
             frame.locator("[data-testid=download-diagnostics]").click()
         body = Path(dl.value.path()).read_text()
-        check("diagnostics download", json.loads(body)["app"]["version"] == "0.1.0")
+        check("diagnostics download", json.loads(body)["app"]["version"] == "0.1.1")
         check("no secrets in the download", SUPERVISOR_TOKEN not in body and args.ha_token not in body)
 
         for url, title in ((INGRESS + "#/curtains", "Curtains"), (INGRESS.rstrip("/") + "#/settings", "Settings")):

@@ -58,6 +58,8 @@ python -I tests/e2e/browser_checks.py --ha-url http://127.0.0.1:18123 --ha-token
 tests/e2e/stack.sh down
 ```
 
-`browser_checks.py` drives the interface inside the sidebar-panel iframe at
-360, 390, 768 (portrait and landscape) and 1440 px with touch emulation, and
-fails on any Home Assistant service call during the run.
+`browser_checks.py` drives the interface inside the sidebar-panel iframe.
+Primary targets: desktop (1440, 1920 px) and tablets (768 portrait, 1024 and
+1366 landscape, with touch). Phone sizes (360, 390 px, 740 landscape) are
+kept as a regression check of the fallback layout. It fails on any Home
+Assistant service call during the run.

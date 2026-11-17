@@ -93,8 +93,12 @@ export class SlLookupCard extends StoreElement {
           </label>`,
         )}
       </fieldset>
-      <sl-picker .kind=${this.kind} .value=${this.selected} label="Find" @value-changed=${this.onPicked}></sl-picker>
-      <div class="lookup-details" data-testid="lookup-details">${this.renderDetails()}</div>
+      <div class="lookup-body">
+        <sl-picker .kind=${this.kind} .value=${this.selected} label="Find" @value-changed=${this.onPicked}></sl-picker>
+        <div class="lookup-details" data-testid="lookup-details">
+          ${this.selected ? this.renderDetails() : html`<p class="muted">Choose an item to see its details.</p>`}
+        </div>
+      </div>
     </section>`;
   }
 }

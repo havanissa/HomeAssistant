@@ -1,7 +1,8 @@
-// The App frame, designed phone-first:
-//   phone   (< 600 px): top bar + bottom navigation; "More" opens a sheet with every module
-//   tablet  (600-1023): collapsible navigation rail (icons + labels, expands to a full list)
-//   desktop (>= 1024): sidebar
+// The App frame. Desktop and tablet are the primary targets (everyday phone
+// use goes through the integration's compact Lovelace cards); phones still work:
+//   desktop / landscape tablet (>= 1024 px): sidebar
+//   portrait tablet (600-1023): collapsible navigation rail
+//   phone   (< 600 px): top bar + bottom navigation; "More" lists every module
 import { html, nothing } from "lit";
 
 import { icon } from "./icons";

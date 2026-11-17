@@ -1,8 +1,10 @@
-/* Smart Lighting App: Home Assistant-inspired design, mobile first.
-   Base styles are the phone layout; tablet (>= 600px) and desktop
-   (>= 1024px) are layered on top. Text sizes are in rem, so browser zoom
-   and text scaling work; touch targets are at least 44px. Light and dark
-   themes; "auto" follows the device. */
+/* Smart Lighting App: Home Assistant-inspired design.
+   Primary targets are desktop and tablet (including landscape); the phone
+   layout remains as a working fallback (everyday phone use is through the
+   integration's Lovelace cards). The cascade starts from the narrow layout
+   and adds tablet (>= 600px), desktop (>= 1024px) and wide (>= 1600px).
+   Text sizes are in rem; touch targets are at least 44px for tablets.
+   Light and dark themes; "auto" follows the device. */
 
 :root {
   color-scheme: light;
@@ -307,7 +309,7 @@ sl-app {
 .content {
   flex: 1;
   width: 100%;
-  max-width: 77.5rem;
+  max-width: 100rem;
   margin: 0 auto;
   padding: var(--sl-gutter) max(var(--sl-gutter), var(--sl-safe-right))
     calc(var(--sl-bottom-nav) + var(--sl-safe-bottom) + 1.5rem) max(var(--sl-gutter), var(--sl-safe-left));
@@ -763,9 +765,22 @@ dialog.sheet::backdrop {
   align-items: start;
 }
 
-@media (min-width: 760px) {
+/* Columns follow the content area's own width (sidebar or rail excluded):
+   1 column, 2 from 38rem, 3 from 66rem (wide desktops, landscape tablets
+   with room to spare). */
+.content {
+  container-type: inline-size;
+}
+
+@container (min-width: 38rem) {
   .grid {
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 21rem), 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container (min-width: 66rem) {
+  .grid:not(.grid-2) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -1480,4 +1495,24 @@ summary::-webkit-details-marker {
 
 .lookup-details {
   margin-top: 0.75rem;
+  min-width: 0;
+}
+
+.block {
+  display: block;
+}
+
+/* Desktop: selector and details side by side. */
+@media (min-width: 1024px) {
+  .lookup-body {
+    display: grid;
+    grid-template-columns: minmax(16rem, 1fr) minmax(0, 2fr);
+    gap: 1.5rem;
+    align-items: start;
+  }
+  .lookup-details {
+    margin-top: 1.35rem;
+    padding-left: 1.5rem;
+    border-left: 1px solid var(--sl-divider);
+  }
 }

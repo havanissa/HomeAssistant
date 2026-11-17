@@ -37,10 +37,15 @@ export class SlPendingModule extends StoreElement {
           <dd>${module?.summary ?? "—"}</dd>
           <dt>Configure it today in</dt>
           <dd>${module?.handled_by ?? "The existing integration's dashboard cards."}</dd>
-          <dt>Existing integration</dt>
-          <dd>
-            ${chip(status.tone, status.label)}
-            ${running ? html`<span class="muted">It keeps handling ${title.toLowerCase()} unchanged.</span>` : nothing}
+          <dt>In control</dt>
+          <dd data-testid="controlled-by">
+            ${module?.controlled_by === "app"
+              ? chip("ok", "This App")
+              : html`${chip("info", "Smart Occupancy integration")} ${chip(status.tone, status.label)}`}
+            ${running && module?.controlled_by !== "app"
+              ? html`<span class="muted block">It keeps handling ${title.toLowerCase()} unchanged. Only one system
+                  controls these devices at a time.</span>`
+              : nothing}
           </dd>
         </dl>
       </section>

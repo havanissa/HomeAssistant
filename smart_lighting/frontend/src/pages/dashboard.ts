@@ -158,15 +158,21 @@ export class SlDashboard extends StoreElement {
         <span style="width: ${m.percent}%"></span>
       </div>
       <p class="muted">
-        The App foundation (Phase ${m.current_phase}) is in place. No feature module has been migrated yet, so the
-        existing integration still does everything. Nothing migrates automatically: each module moves to the App only
-        after you approve it.
+        The App foundation (Phase ${m.current_phase}) is in place. Modules move one at a time, only after you approve
+        it, and the matching integration function is switched off only after the replacement is validated. Each
+        module is controlled by exactly one system: today the integration controls ${m.controlled_by_integration} of
+        ${m.modules_total}, the App ${m.controlled_by_app}.
       </p>
       <ol class="steps">
         ${m.items.map(
           (item) => html`<li class="step step-${item.status}">
             <span class="step-mark" aria-hidden="true">${icon(item.status === "done" ? "ok" : "pending", 18)}</span>
-            <span class="step-title">${item.title}</span>
+            <span class="step-title"
+              >${item.title}
+              ${item.controlled_by
+                ? html`<span class="muted small block">In control: ${item.controlled_by === "app" ? "App" : "integration"}</span>`
+                : nothing}</span
+            >
             ${item.status === "done" ? chip("ok", "Done") : chip("pending", "Pending")}
           </li>`,
         )}

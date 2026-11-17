@@ -61,18 +61,32 @@ and its configuration are not affected.
 
 ## Using the App
 
-- **Phones:** the four most used screens are in the bottom bar; **More**
-  opens every module. Selectors (for example in Diagnostics → Home Assistant
-  lookup) open full screen with the search field at the top.
-- **Tablets:** a navigation rail on the left; the menu button at its top
-  expands it to show every module by name.
-- **Desktops:** a sidebar.
+The App is made for **desktops and tablets** (portrait and landscape): it is
+where you configure, inspect and diagnose. For everyday use on a **phone**,
+use the compact Lovelace dashboard cards (status, moods, Automatic /
+Observing, overrides, curtain presets); today these are the integration's
+cards. The App also opens on phones, with a simpler layout.
+
+- **Desktops and landscape tablets:** a sidebar with every module; wide
+  screens show up to three columns of cards.
+- **Portrait tablets:** a navigation rail on the left; the menu button at its
+  top expands it to show every module by name.
+- **Phones:** the main screens are in the bottom bar; **More** lists every module.
 - **Status:** the top bar always shows the Home Assistant connection
   (Connected, Reconnecting, …). If the App backend itself cannot be reached,
   it shows "App unreachable" and keeps retrying.
 - **Theme:** Settings → Appearance: Automatic (follows your device), Light or
   Dark. It is remembered in that browser.
 - **Advanced details:** Settings → Show advanced settings.
+
+## Migration: one system in control
+
+Modules move from the integration to the App one at a time, only after you
+approve each step. The App's version of a module is validated first, and
+only then is the matching integration function switched off, so the
+integration and the App never control the same devices at the same time.
+Every module screen shows which system is **in control**; in this version
+that is always the integration.
 
 ## Configuration
 
