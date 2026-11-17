@@ -19,6 +19,11 @@ npm ci
 npm run build   # type-checks, then writes backend/smart_lighting/static/
 ```
 
+`npm test` runs the frontend unit tests (Vitest, `frontend/tests/`): floor
+plan geometry, shared walls, openings, coordinates, calibration, undo/redo and
+suggestions. The floor plan's coordinate system and data format are described
+in `backend/smart_lighting/floorplan_model.py` and `frontend/src/floorplan/model.ts`.
+
 Always commit the rebuilt `static/` folder together with source changes;
 `tests/test_package.py` fails when the build is older than the sources or
 contains stale files.
@@ -68,6 +73,10 @@ stale writes, confirmations, the leave guard, connection loss, backups and
 restore, layouts; `--phase restart-check` after restarting the App container
 and Home Assistant checks persistence. It needs the Kamar Norður room seeded
 through the options flow, demo lights and covers and a few template sensors.
+`floorplan_checks.py` (Phase A2.1) draws, links, places, reviews an adjacency
+through the Rooms editor, watches live states and checks sessions, backups,
+export/import and that Home Assistant is unchanged apart from that reviewed
+adjacency; it needs a fresh App data folder and has a `--phase restart-check`.
 Primary targets: desktop (1440, 1920 px) and tablets (768 portrait, 1024 and
 1366 landscape, with touch). Phone sizes (360, 390 px, 740 landscape) are
 kept as a regression check of the fallback layout. It fails on any Home

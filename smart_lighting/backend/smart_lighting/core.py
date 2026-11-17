@@ -14,6 +14,7 @@ import aiohttp
 
 from . import modules
 from .const import APP_NAME, APP_PHASE, APP_VERSION
+from .floorplan import FloorPlanService
 from .ha import ALLOWED_COMMANDS, CONFIG_WRITE_COMMANDS, READ_ONLY_COMMANDS, HomeAssistantClient, utcnow_iso
 from .logbuffer import RingBufferHandler
 from .rooms import RoomsService
@@ -38,6 +39,7 @@ class AppCore:
         self.ha: HomeAssistantClient | None = None
         self.supervisor: SupervisorClient | None = None
         self.rooms: RoomsService | None = None
+        self.floorplan: FloorPlanService | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._rooms_timer: asyncio.TimerHandle | None = None
         self._rooms_listeners: list = []
@@ -47,6 +49,8 @@ class AppCore:
         self.ha = HomeAssistantClient(self.session, self.settings.ha_ws_url, self.settings.token)
         self.supervisor = SupervisorClient(self.session, self.settings.supervisor_url, self.settings.token)
         self.rooms = RoomsService(self.ha, self.settings.data_dir)
+        self.floorplan = FloorPlanService(self.ha, self.rooms, self.settings.data_dir)
+        self.floorplan.load()
         self.ha.add_listener(self._on_ha)
         await self.ha.start()
         self._tasks.append(asyncio.create_task(self._supervisor_loop(), name="supervisor-refresh"))
@@ -127,7 +131,8 @@ class AppCore:
             "read_only": False,
             "configuration_writes": True,
             "write_scope": "Room configuration of the existing integration (sensor and light assignments, "
-                           "through its validated, administrator-only commands)",
+                           "through its validated, administrator-only commands); floor plans in the App's own "
+                           "storage",
             "config_writes_sent": writes,
             "recent_config_writes": list(self.ha.config_writes) if self.ha else [],
             "device_control": False,
@@ -208,6 +213,20 @@ class AppCore:
                 checks.append({"key": "rooms_api", "title": "Room configuration API", "status": WARNING,
                                "detail": self.rooms.api_error or "Not available"})
 
+        if self.floorplan is not None:
+            fp = self.floorplan.status()
+            if fp["read_only"]:
+                checks.append({"key": "floorplan", "title": "Floor plan storage", "status": WARNING,
+                               "detail": fp["read_only"]})
+            elif any(n["code"].startswith("recovered") for n in fp["notices"]):
+                checks.append({"key": "floorplan", "title": "Floor plan storage", "status": WARNING,
+                               "detail": "Recovered after a damaged save; see the Floor plan page"})
+            else:
+                s = fp["summary"]
+                checks.append({"key": "floorplan", "title": "Floor plan storage", "status": OK,
+                               "detail": f"{s['floors']} floor(s), {s['rooms']} room(s), {s['placements']} device "
+                                         "icon(s); stored in the App"})
+
         safety = self.safety()
         checks.append(
             {
@@ -256,6 +275,7 @@ class AppCore:
             "integration_entities": ha.integration_entities() if ha else [],
             "supervisor": self.supervisor.as_dict() if self.supervisor else None,
             "rooms": self.rooms.status() if self.rooms else None,
+            "floorplan": self.floorplan.status() if self.floorplan else None,
             "modules": modules.modules(),
             "migration": modules.migration(),
             "safety": self.safety(),

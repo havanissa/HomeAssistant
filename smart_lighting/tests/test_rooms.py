@@ -285,7 +285,8 @@ async def test_live_watch_and_room_changes(app_client: Any, fake_ha: FakeHomeAss
         update = await next_of("states")
         assert update["changed"] == [{"entity_id": "binary_sensor.kamar_pir", "state": "on",
                                       "last_changed": "2026-11-17T10:00:00+00:00",
-                                      "last_updated": "2026-11-17T10:00:00+00:00", "availability": "ok"}]
+                                      "last_updated": "2026-11-17T10:00:00+00:00", "availability": "ok",
+                                      "attrs": {}}]
         # A change through the integration's own editor reaches open pages as a "rooms" message.
         fake_ha.rooms_options[KAMAR]["lights"] = []
         await fake_ha.notify_entry_changed()

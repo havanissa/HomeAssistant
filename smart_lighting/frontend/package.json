@@ -1,13 +1,14 @@
 {
   "name": "smart-lighting-frontend",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Web interface of the Smart Occupancy & Lighting Home Assistant App",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",
-    "build": "tsc --noEmit && vite build"
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run"
   },
   "dependencies": {
     "@mdi/js": "7.4.47",
@@ -15,6 +16,7 @@
   },
   "devDependencies": {
     "typescript": "5.9.3",
-    "vite": "8.3.8"
+    "vite": "8.3.8",
+    "vitest": "5.1.0"
   }
 }

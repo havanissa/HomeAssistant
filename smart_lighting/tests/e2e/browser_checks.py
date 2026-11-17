@@ -31,16 +31,16 @@ SUPERVISOR_TOKEN = "e2e-supervisor-token-0123456789abcdef"
 BASE = "http://127.0.0.1:18200"
 PANEL = f"{BASE}/hassio/ingress/smart_lighting"
 INGRESS = f"{BASE}/api/hassio_ingress/{INGRESS_TOKEN}/"
-ROUTES = ["dashboard", "rooms", "presence", "lighting", "moods", "switches", "curtains", "predictions", "diagnostics", "settings"]
-TITLES = {r: r.capitalize() for r in ROUTES}
+ROUTES = ["dashboard", "rooms", "floorplan", "presence", "lighting", "moods", "switches", "curtains", "predictions", "diagnostics", "settings"]
+TITLES = {r: r.capitalize() for r in ROUTES} | {"floorplan": "Floor plan"}
 BOTTOM = ["dashboard", "rooms", "lighting", "moods"]
 READ_ONLY = {
     "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "config_entries/subscribe",
     "manifest/get", "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
-    "config/auth/list", "smart_occupancy/rooms/get", "smart_occupancy/rooms/review",
+    "config/floor_registry/list", "config/auth/list", "smart_occupancy/rooms/get", "smart_occupancy/rooms/review",
     "smart_occupancy/rooms/restore/review",
 }
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 INTEGRATION_VERSION = "0.6.9"
 
 VIEWPORTS = {
@@ -194,6 +194,8 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
             overflow.append(route)
         if route == "rooms":
             expect(frame.locator("[data-testid=room-grid] .room-card").first).to_be_visible()
+        elif route == "floorplan":
+            expect(frame.locator(".fp-page")).to_be_visible()
         elif route not in ("dashboard", "diagnostics", "settings"):
             card = frame.locator(f"[data-testid=pending-{route}]")
             expect(card).to_be_visible()
@@ -205,7 +207,7 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
         issues = small_targets(frame)
         if issues:
             target_issues[route] = issues
-    check(f"{name}: all 10 modules reachable", True)
+    check(f"{name}: all 11 modules reachable", True)
     check(f"{name}: no horizontal scrolling on any module", not overflow, overflow)
     check(f"{name}: pending modules show no controls and the integration in control", not pending_controls, pending_controls)
     go(frame, "rooms", layout, page)
@@ -219,7 +221,7 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
         frame.locator(".bottom-nav [data-bottom=more]").tap()
         sheet = frame.locator("dialog.more-sheet")
         expect(sheet).to_be_visible()
-        check(f"{name}: More sheet lists every module", sheet.locator("[data-nav]").count() == 10)
+        check(f"{name}: More sheet lists every module", sheet.locator("[data-nav]").count() == 11)
         page.screenshot(path=str(shots / f"{name}-more-sheet.png"))
         frame.locator("dialog.more-sheet .sheet-head .icon-btn").tap()
         expect(sheet).to_have_count(0)

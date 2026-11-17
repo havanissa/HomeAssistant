@@ -141,10 +141,10 @@ def test_built_interface_is_present_and_current() -> None:
 
 def test_frontend_navigation_matches_modules() -> None:
     router = (APP / "frontend/src/router.ts").read_text(encoding="utf-8")
-    nav_keys = re.findall(r'\{ key: "([a-z]+)", title: "([A-Za-z]+)"', router)
+    nav_keys = re.findall(r'\{ key: "([a-z]+)", title: "([A-Za-z ]+)"', router)
     assert [k for k, _ in nav_keys] == [m.key for m in MODULES]
     assert [t for _, t in nav_keys] == [
-        "Dashboard", "Rooms", "Presence", "Lighting", "Moods", "Switches", "Curtains", "Predictions",
+        "Dashboard", "Rooms", "Floor plan", "Presence", "Lighting", "Moods", "Switches", "Curtains", "Predictions",
         "Diagnostics", "Settings",
     ]
     assert dict(nav_keys) == {m.key: m.title for m in MODULES}

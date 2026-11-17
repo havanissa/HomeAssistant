@@ -99,6 +99,7 @@ class FakeHomeAssistant:
              "group_ids": ["system-users"]},
         ]
         self.entry_subscriptions: dict[web.WebSocketResponse, list[int]] = {}
+        self.floors = [{"floor_id": "ground", "name": "Ground floor", "level": 0, "icon": None}]
 
     # -- data ---------------------------------------------------------------
     def config(self) -> dict[str, Any]:
@@ -133,21 +134,23 @@ class FakeHomeAssistant:
              "device_id": None, "area_id": None, "name": "Registry only", "original_name": None},
             {"entity_id": "switch.disabled_switch", "platform": "zha", "disabled_by": "user",
              "device_id": "dev-lux", "area_id": None, "name": None, "original_name": "Off"},
-            {"entity_id": "binary_sensor.kamar_pir", "platform": "zha", "disabled_by": None,
+            {"entity_id": "binary_sensor.kamar_pir", "id": "reg-pir", "platform": "zha", "disabled_by": None,
              "device_id": "dev-pir", "area_id": None, "name": None, "original_name": "PIR"},
             {"entity_id": "binary_sensor.kamar_radar", "platform": "mqtt", "disabled_by": None,
              "device_id": "dev-radar", "area_id": None, "name": None, "original_name": "Radar"},
             {"entity_id": "binary_sensor.stova_door", "platform": "zha", "disabled_by": None,
              "device_id": "dev-door", "area_id": None, "name": None, "original_name": "Door"},
-            {"entity_id": "light.kamar_lamp", "platform": "hue", "disabled_by": None,
+            {"entity_id": "light.kamar_lamp", "id": "reg-lamp", "platform": "hue", "disabled_by": None,
              "device_id": None, "area_id": "kamar_nordur", "name": None, "original_name": "Lamp"},
             {"entity_id": "cover.kamar_curtain", "platform": "zha", "disabled_by": None,
              "device_id": None, "area_id": "kamar_nordur", "name": None, "original_name": "Curtain"},
         ]
         if self.integration_installed:
             items += [
-                {"entity_id": "binary_sensor.kamar_nordur_occupancy", "platform": "smart_occupancy", "disabled_by": None},
-                {"entity_id": "sensor.kamar_nordur_status", "platform": "smart_occupancy", "disabled_by": None},
+                {"entity_id": "binary_sensor.kamar_nordur_occupancy", "platform": "smart_occupancy", "disabled_by": None,
+                 "unique_id": "smart_occupancy_room_kamar_nordur_occupied"},
+                {"entity_id": "sensor.kamar_nordur_status", "platform": "smart_occupancy", "disabled_by": None,
+                 "unique_id": "smart_occupancy_room_kamar_nordur_state"},
                 {"entity_id": "sensor.disabled_one", "platform": "smart_occupancy", "disabled_by": "user"},
             ]
         return items
@@ -283,6 +286,8 @@ class FakeHomeAssistant:
                           {"area_id": "uti", "name": "Úti"}])
         elif kind == "config/device_registry/list":
             await result(self.devices())
+        elif kind == "config/floor_registry/list":
+            await result(self.floors)
         elif kind == "config/auth/list":
             await result(self.users)
         elif kind == "config_entries/subscribe":
@@ -351,8 +356,8 @@ class FakeHomeAssistant:
         if request.headers.get("Authorization") != f"Bearer {self.token}":
             return web.json_response({"result": "error", "message": "Unauthorized"}, status=401)
         if request.path == "/addons/self/info":
-            data = {"name": "Smart Occupancy & Lighting", "slug": "smart_lighting", "version": "0.2.0",
-                    "version_latest": "0.2.0", "update_available": False, "state": "started", "arch": "amd64",
+            data = {"name": "Smart Occupancy & Lighting", "slug": "smart_lighting", "version": "0.2.1",
+                    "version_latest": "0.2.1", "update_available": False, "state": "started", "arch": "amd64",
                     "options": {"log_level": "info"}, "ingress_url": "/api/hassio_ingress/xyz/"}
         else:
             data = {"supervisor": "2026.11.2", "homeassistant": HA_VERSION, "hassos": "17.1",

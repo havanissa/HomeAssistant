@@ -16,6 +16,12 @@ room configuration is a POST that needs:
 
 The browser sends room data only; the backend chooses the Home Assistant
 command from its fixed allowlist (``ha.CONFIG_WRITE_COMMANDS``).
+
+Phase A2.1 adds the floor plan API (``/api/floorplan/...``). It reads and
+writes only the App's own storage (``/data/floorplan``) and Home Assistant
+reads; its changing requests (save, image upload, import, restore) need the
+same administrator and CSRF checks. Uploaded images are served only through
+this Ingress-only server, never from a public URL.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from aiohttp import web
 
 from .const import APP_VERSION
 from .core import AppCore
+from .floorplan import FloorPlanError
 from .live import LiveHub, origin_allowed
 from .rooms import RoomsError
 from .settings import Settings
@@ -43,6 +50,9 @@ _INGRESS_PATH = re.compile(r"^(/[A-Za-z0-9._~\-]+)+$")
 _STATIC_FILE = r"{name:[A-Za-z0-9_\-]+\.(?:svg|png|ico|webmanifest)}"
 CSRF_HEADER = "X-Smart-Lighting"
 MAX_BODY = 2 * 1024 * 1024
+MAX_PLAN_BODY = 4 * 1024 * 1024
+MAX_IMPORT_BODY = 48 * 1024 * 1024
+MAX_IMAGE_BODY = 15 * 1024 * 1024
 
 CSP = "; ".join(
     (
@@ -105,7 +115,8 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
                 response.headers.setdefault("Cache-Control", "no-store")
         return response
 
-    app = web.Application(middlewares=[access_middleware, headers_middleware], client_max_size=MAX_BODY)
+    # Each changing request reads its body with its own limit (read_limited); this is only the outer bound.
+    app = web.Application(middlewares=[access_middleware, headers_middleware], client_max_size=MAX_IMPORT_BODY)
     owns_core = core is None
     app[CORE_KEY] = core or AppCore(settings)
     app[HUB_KEY] = LiveHub(app[CORE_KEY])
@@ -171,9 +182,20 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     def rooms_error(err: RoomsError) -> web.Response:
         return _json({"error": str(err), "code": err.code}, status=err.status)
 
-    async def write_guard(request: web.Request) -> dict[str, Any]:
-        """CSRF and administrator checks for every changing request; returns the JSON body."""
-        if request.headers.get(CSRF_HEADER) != "1" or request.content_type != "application/json":
+    async def read_limited(request: web.Request, limit: int) -> bytes:
+        if request.content_length is not None and request.content_length > limit:
+            raise RoomsError("too_large", f"The request is larger than {limit // (1024 * 1024)} MB", 413)
+        chunks, size = [], 0
+        async for chunk in request.content.iter_chunked(65536):
+            size += len(chunk)
+            if size > limit:
+                raise RoomsError("too_large", f"The request is larger than {limit // (1024 * 1024)} MB", 413)
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    async def admin_guard(request: web.Request) -> None:
+        """CSRF and administrator checks for every changing request (before its body is read)."""
+        if request.headers.get(CSRF_HEADER) != "1":
             raise RoomsError("forbidden", "This request must come from the Smart Lighting interface", 403)
         if request.headers.get("Origin") and not origin_allowed(request):
             raise RoomsError("forbidden", "Cross-site requests are not allowed", 403)
@@ -188,9 +210,15 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
             if not admin:
                 _LOGGER.warning("Refused a configuration request from a user who is not an administrator")
                 raise RoomsError("forbidden", "Only Home Assistant administrators can change the configuration", 403)
+
+    async def write_guard(request: web.Request, limit: int = MAX_BODY) -> dict[str, Any]:
+        """Checks for every changing JSON request; returns the JSON body."""
+        if request.content_type != "application/json":
+            raise RoomsError("forbidden", "This request must come from the Smart Lighting interface", 403)
+        await admin_guard(request)
         try:
-            body = await request.json()
-        except ValueError as err:
+            body = json.loads(await read_limited(request, limit))
+        except (ValueError, UnicodeDecodeError) as err:
             raise RoomsError("invalid_json", "The request body is not valid JSON") from err
         if not isinstance(body, dict):
             raise RoomsError("invalid_json", "The request body must be an object")
@@ -202,6 +230,8 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
                 return await func(request)
             except RoomsError as err:
                 return rooms_error(err)
+            except FloorPlanError as err:
+                return _json({"error": str(err), "code": err.code, **err.extra}, status=err.status)
         return handler
 
     @rooms_handler
@@ -267,6 +297,89 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         return _json(await rooms_service(request).restore(body.get("backup"), body.get("revision"),
                                                            body.get("confirmed")))
 
+    # -------------------------------------------------------- floor plan
+    def floorplan_service(request: web.Request):
+        core: AppCore = request.app[CORE_KEY]
+        if core.floorplan is None:
+            raise RoomsError("not_connected", "The App is starting", 503)
+        return core.floorplan
+
+    def download_name(prefix: str, stamp: str | None) -> dict[str, str]:
+        clean = re.sub(r"[^0-9TZ]", "", stamp or "")[:16]
+        return {"Content-Disposition": f'attachment; filename="{prefix}-{clean}.json"'}
+
+    @rooms_handler
+    async def floorplan_get(request: web.Request) -> web.Response:
+        return _json(floorplan_service(request).document())
+
+    @rooms_handler
+    async def floorplan_save(request: web.Request) -> web.Response:
+        body = await write_guard(request, MAX_PLAN_BODY)
+        return _json(await floorplan_service(request).save(body.get("plan"), body.get("revision")))
+
+    @rooms_handler
+    async def floorplan_context(request: web.Request) -> web.Response:
+        service = floorplan_service(request)
+        rooms_service(request)  # Home Assistant must be connected
+        await service.rooms.ensure()
+        return _json(service.context())
+
+    @rooms_handler
+    async def floorplan_entity(request: web.Request) -> web.Response:
+        service = floorplan_service(request)
+        rooms_service(request)
+        return _json(service.entity_details(request.match_info["entity_id"]))
+
+    @rooms_handler
+    async def floorplan_upload(request: web.Request) -> web.Response:
+        if not request.content_type.startswith("image/"):
+            raise FloorPlanError("unsupported_type", "Only PNG, JPEG and WebP images can be used", 415)
+        await admin_guard(request)
+        data = await read_limited(request, MAX_IMAGE_BODY)
+        return _json(await floorplan_service(request).upload_image(data))
+
+    @rooms_handler
+    async def floorplan_image(request: web.Request) -> web.StreamResponse:
+        found = floorplan_service(request).image_path(request.match_info["image_id"])
+        if found is None:
+            raise FloorPlanError("unknown_image", "Unknown image", 404)
+        path, content_type = found
+        return web.FileResponse(path, headers={
+            "Content-Type": content_type,
+            "Cache-Control": "private, max-age=31536000, immutable",  # content-addressed
+            "Content-Disposition": "inline",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        })
+
+    @rooms_handler
+    async def floorplan_export(request: web.Request) -> web.Response:
+        data = floorplan_service(request).export()
+        return _json(data, headers=download_name("smart-lighting-floorplan", data["exported_at"]))
+
+    @rooms_handler
+    async def floorplan_import_review(request: web.Request) -> web.Response:
+        body = await write_guard(request, MAX_IMPORT_BODY)
+        return _json(floorplan_service(request).import_review(body.get("file")))
+
+    @rooms_handler
+    async def floorplan_import(request: web.Request) -> web.Response:
+        body = await write_guard(request, MAX_IMPORT_BODY)
+        return _json(await floorplan_service(request).import_plan(body.get("file"), body.get("revision")))
+
+    @rooms_handler
+    async def floorplan_backups(request: web.Request) -> web.Response:
+        return _json({"backups": floorplan_service(request).backups()})
+
+    @rooms_handler
+    async def floorplan_backup(request: web.Request) -> web.Response:
+        data = floorplan_service(request).backup(request.match_info["backup_id"])
+        return _json(data, headers=download_name("smart-lighting-floorplan-backup", data.get("created_at")))
+
+    @rooms_handler
+    async def floorplan_restore(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        return _json(await floorplan_service(request).restore(request.match_info["backup_id"], body.get("revision")))
+
     async def live(request: web.Request) -> web.StreamResponse:
         return await request.app[HUB_KEY].handle(request)
 
@@ -291,6 +404,18 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     app.router.add_get("/api/rooms/{area_id}", room_workspace)
     app.router.add_post("/api/rooms/{area_id}/review", room_review)
     app.router.add_post("/api/rooms/{area_id}/save", room_save)
+    app.router.add_get("/api/floorplan", floorplan_get)
+    app.router.add_post("/api/floorplan/save", floorplan_save)
+    app.router.add_get("/api/floorplan/context", floorplan_context)
+    app.router.add_get("/api/floorplan/entity/{entity_id}", floorplan_entity)
+    app.router.add_post("/api/floorplan/images", floorplan_upload)
+    app.router.add_get("/api/floorplan/images/{image_id}", floorplan_image)
+    app.router.add_get("/api/floorplan/export", floorplan_export)
+    app.router.add_post("/api/floorplan/import/review", floorplan_import_review)
+    app.router.add_post("/api/floorplan/import", floorplan_import)
+    app.router.add_get("/api/floorplan/backups", floorplan_backups)
+    app.router.add_get("/api/floorplan/backups/{backup_id}", floorplan_backup)
+    app.router.add_post("/api/floorplan/backups/{backup_id}/restore", floorplan_restore)
     app.router.add_route("*", "/api/{tail:.*}", api_not_found)
     assets = settings.static_dir / "assets"
     if assets.is_dir():

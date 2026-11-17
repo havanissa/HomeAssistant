@@ -10,6 +10,7 @@ export interface NavItem {
 export const NAV: NavItem[] = [
   { key: "dashboard", title: "Dashboard", icon: "view-dashboard" },
   { key: "rooms", title: "Rooms", icon: "floor-plan" },
+  { key: "floorplan", title: "Floor plan", icon: "home-map-marker" },
   { key: "presence", title: "Presence", icon: "motion-sensor" },
   { key: "lighting", title: "Lighting", icon: "lightbulb-group" },
   { key: "moods", title: "Moods", icon: "palette" },
@@ -20,7 +21,7 @@ export const NAV: NavItem[] = [
   { key: "settings", title: "Settings", icon: "cog" },
 ];
 
-export const FOUNDATION = new Set(["dashboard", "diagnostics", "settings"]);
+export const FOUNDATION = new Set(["dashboard", "floorplan", "diagnostics", "settings"]);
 
 /** Phone bottom navigation; every module (these included) is under "More". */
 export const BOTTOM_NAV = ["dashboard", "rooms", "lighting", "moods"];
@@ -39,6 +40,11 @@ export function subPath(): string[] {
     .slice(1)
     .filter(Boolean)
     .map((p) => decodeURIComponent(p));
+}
+
+/** Query parameters after the path, e.g. #/rooms/kitchen/presence?adjacent=hall. */
+export function hashQuery(): URLSearchParams {
+  return new URLSearchParams(window.location.hash.split("?")[1] ?? "");
 }
 
 export function navigate(key: string): void {

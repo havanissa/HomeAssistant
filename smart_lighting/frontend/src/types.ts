@@ -185,6 +185,7 @@ export type LiveMessage =
   | { type: "states"; changed: LiveState[] }
   | { type: "rooms"; status: Record<string, unknown> | null }
   | { type: "registries" }
+  | { type: "floorplan"; revision: string }
   | { type: "pong" };
 
 export interface LiveState {
@@ -193,4 +194,6 @@ export interface LiveState {
   last_changed: string | null;
   last_updated: string | null;
   availability: string;
+  /** A few display-only attributes (brightness, position, the integration's room state). */
+  attrs?: Record<string, unknown>;
 }

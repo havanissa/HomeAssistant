@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.2.1
+
+Phase A2.1: Floor plan. Optional: everything else works without a floor plan.
+No change to the integration (0.6.9 is enough) and no change to any
+automation.
+
+- **Floor plan page** (sidebar, and from Rooms and every room): three modes.
+  **Build** draws floors and rooms; **Configure** links rooms to areas and
+  places devices; **Live** shows the home read-only. Tool palette and floors
+  on the left, a large canvas (zoom, pan, pinch, fit, reset), an inspector on
+  the right; both panels collapse. Save status, undo and redo (Ctrl+Z,
+  Ctrl+Shift+Z), Ctrl+S, keyboard tools and arrow-key nudging.
+- **Drawing:** multiple floors (name, level, optional Home Assistant floor);
+  rectangular and polygon rooms; rooms that meet share their corners and walls
+  (a corner on another room's wall splits it), so moving a shared corner or
+  wall reshapes both rooms; move a whole straight wall or one part; add and
+  delete corners; type a wall length; doors (with hinge side), windows and
+  open-plan openings that stay on their wall when it moves or is split; grid
+  and snapping to corners, walls and the grid; measurements on request.
+  Overlapping rooms and crossing walls are refused. Deleting a room or floor
+  asks first.
+- **Background image:** PNG, JPEG or WebP up to 15 MB, checked by its content
+  and stored in the App; position, scale, rotation, opacity, lock, hide;
+  calibration with a known distance (optionally scaling the drawing with it).
+  Images are served only through Home Assistant's Ingress.
+- **Areas:** link a drawn room to an area by its stable id; unlinked areas,
+  rooms without an area, renamed and deleted areas are shown. Linking an area
+  that is already linked asks: move the link, or model one shared (open-plan)
+  space. Areas are never created, renamed or deleted. Works without areas.
+- **Devices:** searchable palette by type (presence, lights, switches,
+  temperature and light level, covers, other) from the App's discovery; drag
+  onto the plan, or click / tap a device and then tap the plan. Icons can be
+  moved, relabelled, replaced with another entity or removed. The inspector
+  shows name, entity id, device, Home Assistant area, state, availability,
+  capabilities, the integration's assignments (with type and role) and, apart
+  from that, where the icon is on the plan. Assigning a device placed in a room
+  opens the Rooms editor with the change prepared; nothing changes until it is
+  reviewed and saved there. Entities renamed in Home Assistant are found by
+  their registry id.
+- **Live:** room occupancy from the integration's own room entities (Occupied,
+  Possibly occupied, Vacancy pending, Vacant, Uncertain, Unavailable, Not
+  observed), Automatic / Observing / Paused / Blocked lighting and manual
+  overrides, lights with brightness, cover positions, sensor values, contacts
+  and motion. Unknown and unavailable are drawn differently from off and
+  vacant. Filters, a legend and the devices that need attention. No coverage,
+  person positions or estimated data are drawn.
+- **Relationships:** rooms that share a wall, a door or an open-plan opening
+  are suggested as adjacent, with the reason; window directions once north is
+  set; adjacency the integration has but the plan does not show is reported.
+  **Review** opens the Rooms editor with the adjacency prepared; the
+  integration reviews and saves it. Suggestions can be dismissed.
+- **Storage** (`/data/floorplan`): versioned format (with migrations and
+  protection against files from a newer App), validation of every save,
+  atomic writes, recovery from a damaged or interrupted save, backups (before
+  changes, at most one per 10 minutes while editing, always before an import
+  or a restore; latest 30), export with images and reviewed import, and
+  revisions: a save based on an older version (another browser session) is
+  refused and asks; other sessions are told about every save.
+- **Safety:** reads only one more Home Assistant command (the floor registry).
+  No service call, no registry change; the floor plan never writes the
+  integration's configuration.
+- Version 0.2.1; App tests 130 (backend) + 31 (frontend unit); end-to-end
+  `tests/e2e/floorplan_checks.py`.
+
 ## 0.2.0
 
 Phase A2: Rooms and device management. Needs Smart Occupancy & Lighting
