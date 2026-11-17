@@ -12,7 +12,7 @@ import pytest
 
 from smart_lighting.const import APP_VERSION
 from smart_lighting.core import AppCore
-from smart_lighting.ha import READ_ONLY_COMMANDS, HomeAssistantClient, ReadOnlyViolation
+from smart_lighting.ha import CONFIG_WRITE_COMMANDS, READ_ONLY_COMMANDS, HomeAssistantClient, ReadOnlyViolation
 from smart_lighting.logbuffer import setup_logging
 from smart_lighting.web import CORE_KEY, build_app
 
@@ -30,7 +30,8 @@ async def test_startup_connects_and_reports_healthy(app_client: Any, fake_ha: Fa
     assert health["home_assistant"] == "connected"
     by_key = {c["key"]: c for c in health["checks"]}
     assert by_key["home_assistant"]["status"] == "ok"
-    assert by_key["read_only"]["status"] == "ok"
+    assert by_key["safety"]["status"] == "ok"
+    assert by_key["rooms_api"]["status"] == "ok"
     assert by_key["supervisor"]["status"] == "ok"
     assert by_key["interface"]["status"] == "ok"
     assert by_key["live_updates"]["status"] == "ok"
@@ -41,7 +42,7 @@ async def test_overview_reads_home_assistant_and_detects_integration(app_client:
     info = overview["home_assistant"]["info"]
     assert info["location_name"] == "Heima"
     assert info["version"] == "2026.11.1"
-    assert info["entity_count"] == 4
+    assert info["entity_count"] == 9
     assert info["area_count"] == 3
     integration = overview["integration"]
     assert integration["status"] == "loaded"
@@ -55,7 +56,8 @@ async def test_overview_reads_home_assistant_and_detects_integration(app_client:
     ]
     assert overview["supervisor"]["available"] is True
     assert "options" not in overview["supervisor"]["app"]  # only whitelisted fields
-    assert overview["migration"]["modules_migrated"] == 0
+    assert overview["migration"]["modules_migrated"] == 0  # no automation runs in the App
+    assert overview["migration"]["interfaces_migrated"] == 1  # the Rooms configuration interface
     assert overview["migration"]["modules_total"] == 7
     assert overview["safety"]["service_calls_sent"] == 0
 
@@ -78,11 +80,14 @@ async def test_integration_not_installed(fake_ha: FakeHomeAssistant, aiohttp_cli
 async def test_only_read_only_commands_are_sent(app_client: Any, fake_ha: FakeHomeAssistant) -> None:
     await app_client.get("/api/overview")
     await app_client.get("/api/diagnostics")
+    await app_client.get("/api/rooms")
+    await app_client.get("/api/rooms/kamar_nordur")
     sent = {c["type"] for c in fake_ha.commands}
-    assert sent <= READ_ONLY_COMMANDS
+    assert sent <= READ_ONLY_COMMANDS  # reading never sends a configuration command
     assert "call_service" not in sent
     subscriptions = [c for c in fake_ha.commands if c["type"] == "subscribe_events"]
-    assert [c["event_type"] for c in subscriptions] == ["state_changed"]
+    assert [c["event_type"] for c in subscriptions] == [
+        "state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated"]
     # The supervisor endpoints used are the two basic, read-only ones.
     assert set(fake_ha.supervisor_requests) == {"/addons/self/info", "/info"}
 
@@ -97,6 +102,11 @@ async def test_only_read_only_commands_are_sent(app_client: Any, fake_ha: FakeHo
         ("subscribe_events", {"event_type": "call_service"}),
         ("subscribe_events", {}),
         ("execute_script", {"sequence": []}),
+        ("smart_occupancy/rooms/set", {"area_id": "x", "room": None}),  # writes only through config_write()
+        ("smart_occupancy/lighting/room/activate", {"area_id": "x"}),
+        ("smart_occupancy/curtains/preset/apply", {}),
+        ("config/auth/delete", {"user_id": "x"}),
+        ("subscribe_events", {"event_type": "smart_occupancy_lighting_updated"}),
     ],
 )
 async def test_write_commands_are_refused_before_sending(
@@ -109,13 +119,28 @@ async def test_write_commands_are_refused_before_sending(
     assert len(fake_ha.commands) == before
 
 
-def test_client_has_no_write_api() -> None:
+@pytest.mark.parametrize("command", ["call_service", "get_states", "smart_occupancy/rooms/get",
+                                     "smart_occupancy/lighting/room/activate", "config_entries/update"])
+async def test_config_write_accepts_only_room_commands(app_client: Any, fake_ha: FakeHomeAssistant, command: str) -> None:
+    before = len(fake_ha.commands)
+    with pytest.raises(ReadOnlyViolation):
+        await app_client.core.ha.config_write(command)
+    await asyncio.sleep(0.05)
+    assert len(fake_ha.commands) == before
+
+
+def test_client_has_no_device_api() -> None:
     names = {n for n in dir(HomeAssistantClient) if not n.startswith("__")}
-    assert not {n for n in names if re.search(r"service|turn_on|turn_off|set_state|fire|write|update_entry", n)}
+    assert not {n for n in names if re.search(r"service|turn_on|turn_off|set_state|fire|update_entry", n)}
+    assert {n for n in names if "write" in n} == {"config_write", "config_writes_sent"}
     assert READ_ONLY_COMMANDS == {
-        "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "manifest/get",
-        "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
+        "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "config_entries/subscribe",
+        "manifest/get", "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
+        "config/auth/list", "smart_occupancy/rooms/get", "smart_occupancy/rooms/review",
+        "smart_occupancy/rooms/restore/review",
     }
+    # The only commands that change anything: the integration's validated room configuration commands.
+    assert CONFIG_WRITE_COMMANDS == {"smart_occupancy/rooms/set", "smart_occupancy/rooms/restore"}
 
 
 async def test_token_never_reaches_the_browser(app_client: Any) -> None:
@@ -307,9 +332,9 @@ async def test_lookup_for_searchable_selectors(app_client: Any) -> None:
     data = await (await app_client.get("/api/lookup")).json()
     assert [a["name"] for a in data["areas"]] == ["Kamar Norður", "Stova", "Úti"]
     kamar = data["areas"][0]
-    assert kamar["device_count"] == 1 and kamar["entity_count"] == 1  # the loft light, via its device
+    assert kamar["device_count"] == 3 and kamar["entity_count"] == 5  # devices' entities count via the device
     devices = {d["id"]: d for d in data["devices"]}
-    assert set(devices) == {"dev-loft", "dev-lux"}  # disabled devices are left out
+    assert set(devices) == {"dev-loft", "dev-lux", "dev-pir", "dev-radar", "dev-door"}  # disabled ones left out
     assert devices["dev-loft"]["name"] == "Loft ljós"  # the user's own name wins
     assert devices["dev-loft"]["area"] == "Kamar Norður"
     assert devices["dev-lux"]["entity_count"] == 1

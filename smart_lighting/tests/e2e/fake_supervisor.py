@@ -45,6 +45,9 @@ REQUEST_FILTER = {
 RESPONSE_FILTER = {"transfer-encoding", "content-length", "content-type", "content-encoding"}
 
 recorded_commands: list[dict] = []
+# The Home Assistant user the Ingress requests come from (the owner of HA_TOKEN, an administrator), like the
+# Supervisor passes the logged-in user. Set at start-up from auth/current_user.
+ingress_user: dict = {"id": "unknown", "name": "admin", "display": "E2E Admin"}
 ingress_requests: list[dict] = []
 core_sockets: set[web.WebSocketResponse] = set()
 
@@ -57,8 +60,8 @@ async def self_info(request: web.Request) -> web.Response:
     if not _authorized(request):
         return web.json_response({"result": "error", "message": "Unauthorized"}, status=401)
     return web.json_response({"result": "ok", "data": {
-        "name": "Smart Occupancy & Lighting", "slug": "local_smart_lighting", "version": "0.1.1",
-        "version_latest": "0.1.1", "update_available": False, "state": "started", "arch": "amd64",
+        "name": "Smart Occupancy & Lighting", "slug": "local_smart_lighting", "version": "0.2.0",
+        "version_latest": "0.2.0", "update_available": False, "state": "started", "arch": "amd64",
         "repository": "local", "ingress": True, "ingress_panel": True, "boot": "auto", "watchdog": False,
         "ingress_url": f"/api/hassio_ingress/{INGRESS_TOKEN}/", "options": {"log_level": "info"},
     }})
@@ -126,9 +129,9 @@ def _ingress_headers(request: web.Request, token: str) -> CIMultiDict[str]:
     headers["X-Forwarded-For"] = f"{forwarded}, {peer}" if forwarded else peer
     headers["X-Forwarded-Host"] = request.headers.get("X-Forwarded-Host") or request.host
     headers["X-Forwarded-Proto"] = request.headers.get("X-Forwarded-Proto") or request.scheme
-    headers["X-Remote-User-Id"] = "e2e-admin-id"
-    headers["X-Remote-User-Name"] = "admin"
-    headers["X-Remote-User-Display-Name"] = "E2E Admin"
+    headers["X-Remote-User-Id"] = ingress_user["id"]
+    headers["X-Remote-User-Name"] = ingress_user["name"]
+    headers["X-Remote-User-Display-Name"] = ingress_user["display"]
     return headers
 
 
@@ -188,7 +191,7 @@ async def panel(request: web.Request) -> web.Response:
 
 async def test_commands(request: web.Request) -> web.Response:
     return web.json_response({"commands": recorded_commands, "ingress_requests": len(ingress_requests),
-                              "core_connections": len(core_sockets)})
+                              "core_connections": len(core_sockets), "ingress_user": ingress_user["id"]})
 
 
 async def test_drop_core(request: web.Request) -> web.Response:
@@ -202,6 +205,13 @@ async def on_startup(app: web.Application) -> None:
     # Ingress passes bodies through untouched (like Core); API calls decode.
     app["session"] = aiohttp.ClientSession(auto_decompress=False)
     app["api_session"] = aiohttp.ClientSession()
+    async with app["api_session"].ws_connect(f"{HA_URL}/api/websocket") as ws:
+        await ws.receive_json()
+        await ws.send_json({"type": "auth", "access_token": HA_TOKEN})
+        await ws.receive_json()
+        await ws.send_json({"id": 1, "type": "auth/current_user"})
+        user = (await ws.receive_json()).get("result") or {}
+    ingress_user.update(id=user.get("id", "unknown"), display=user.get("name") or "E2E Admin")
 
 
 async def on_cleanup(app: web.Application) -> None:

@@ -1,10 +1,17 @@
-"""Read-only connection to the Home Assistant websocket API.
+"""Connection to the Home Assistant websocket API, restricted by an allowlist.
 
 Through the Supervisor proxy (``ws://supervisor/core/websocket``) the App acts
-as a Home Assistant administrator. Phase A1 must not change anything, so this
-client enforces a fixed allowlist of read-only commands: there is no way to
-call a service, write a state, fire an event or change a registry through it.
-Any other command raises :class:`ReadOnlyViolation` before it is sent.
+as a Home Assistant administrator, so this client enforces a fixed allowlist
+before anything is sent:
+
+* :data:`READ_ONLY_COMMANDS` - reads and subscriptions, sent with :meth:`command`.
+* :data:`CONFIG_WRITE_COMMANDS` (Phase A2) - the existing integration's
+  validated room configuration commands, sent only with :meth:`config_write`.
+  They change the integration's room assignments and nothing else.
+
+There is no way to call a service, write a state, fire an event or change a
+Home Assistant registry through this client. Any other command raises
+:class:`ReadOnlyViolation` before it is sent.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ from .integration import IntegrationReport, build_report
 
 _LOGGER = logging.getLogger(__name__)
 
-#: The only websocket commands this App may send in Phase A1. All are reads.
+#: Websocket commands that only read (or subscribe). All may be sent with ``command()``.
 READ_ONLY_COMMANDS: frozenset[str] = frozenset(
     {
         "ping",
@@ -33,14 +40,33 @@ READ_ONLY_COMMANDS: frozenset[str] = frozenset(
         "get_states",
         "subscribe_events",
         "config_entries/get",
+        "config_entries/subscribe",
         "manifest/get",
         "config/entity_registry/list",
         "config/area_registry/list",
         "config/device_registry/list",
+        "config/auth/list",
+        # The existing integration's room configuration API (0.6.9): reads and dry runs.
+        "smart_occupancy/rooms/get",
+        "smart_occupancy/rooms/review",
+        "smart_occupancy/rooms/restore/review",
     }
 )
+#: The only commands that change anything: the existing integration's validated, administrator-only room
+#: configuration commands (Phase A2). They write its config entry options (room assignments) and nothing else.
+CONFIG_WRITE_COMMANDS: frozenset[str] = frozenset(
+    {
+        "smart_occupancy/rooms/set",
+        "smart_occupancy/rooms/restore",
+    }
+)
+ALLOWED_COMMANDS: frozenset[str] = READ_ONLY_COMMANDS | CONFIG_WRITE_COMMANDS
 #: Event types the App may subscribe to.
-ALLOWED_EVENT_TYPES: frozenset[str] = frozenset({"state_changed"})
+ALLOWED_EVENT_TYPES: frozenset[str] = frozenset(
+    {"state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated"}
+)
+REGISTRY_EVENTS = ("area_registry_updated", "device_registry_updated", "entity_registry_updated")
+REGISTRY_DEBOUNCE = 2.0
 
 RECONNECT_DELAYS = (1, 2, 5, 10, 30)
 AUTH_FAILED_DELAY = 60
@@ -53,7 +79,7 @@ Listener = Callable[[str, Any], None]
 
 
 class ReadOnlyViolation(RuntimeError):
-    """A command outside the read-only allowlist was requested."""
+    """A command outside the allowlist (or a write through the read path) was requested."""
 
 
 class HomeAssistantError(Exception):
@@ -115,12 +141,18 @@ class HomeAssistantClient:
         self.integration = IntegrationReport.unknown()
 
         self.commands_sent: Counter[str] = Counter()
+        self.config_writes: list[dict[str, Any]] = []  # last writes (type, time, result), for diagnostics
         self.events_total = 0
+        self._registry_timer: asyncio.TimerHandle | None = None
         self._event_times: deque[float] = deque()
 
     # ------------------------------------------------------------------ API
     def add_listener(self, listener: Listener) -> Callable[[], None]:
-        """Register ``listener(kind, payload)``; kinds: status, entity, integration."""
+        """Register ``listener(kind, payload)``.
+
+        Kinds: status, entity (integration entity changed), state (any entity: ``(entity_id, state)``),
+        integration (report changed), config_entry (the integration's config entry changed), registries.
+        """
         self._listeners.append(listener)
         return lambda: self._listeners.remove(listener)
 
@@ -238,6 +270,8 @@ class HomeAssistantClient:
 
     async def stop(self) -> None:
         self._stopping = True
+        if self._registry_timer is not None:
+            self._registry_timer.cancel()
         if self._ws is not None:
             await self._ws.close()
         if self._task is not None:
@@ -248,8 +282,32 @@ class HomeAssistantClient:
 
     async def command(self, command_type: str, **params: Any) -> Any:
         """Send one read-only command and return its result."""
+        if command_type in CONFIG_WRITE_COMMANDS:
+            raise ReadOnlyViolation(f"{command_type!r} changes configuration; use config_write()")
         _, future = await self._send(command_type, params)
         return await asyncio.wait_for(future, COMMAND_TIMEOUT)
+
+    async def config_write(self, command_type: str, **params: Any) -> Any:
+        """Send one of the integration's validated configuration commands (CONFIG_WRITE_COMMANDS only)."""
+        if command_type not in CONFIG_WRITE_COMMANDS:
+            raise ReadOnlyViolation(f"{command_type!r} is not a permitted configuration command")
+        record: dict[str, Any] = {"type": command_type, "time": utcnow_iso(), "area_id": params.get("area_id")}
+        self.config_writes = [*self.config_writes[-19:], record]
+        try:
+            _, future = await self._send(command_type, params)
+            result = await asyncio.wait_for(future, COMMAND_TIMEOUT)
+        except HomeAssistantError as err:
+            record["result"] = err.code
+            raise
+        except (ConnectionError, TimeoutError) as err:
+            # The write may or may not have been applied: the caller must re-read before trying again.
+            record["result"] = f"unknown ({type(err).__name__})"
+            raise
+        record["result"] = "ok"
+        return result
+
+    def config_writes_sent(self) -> int:
+        return sum(n for cmd, n in self.commands_sent.items() if cmd in CONFIG_WRITE_COMMANDS)
 
     # ------------------------------------------------------------ internals
     def _notify(self, kind: str, payload: Any = None) -> None:
@@ -268,8 +326,8 @@ class HomeAssistantClient:
             self._notify("status", self.status())
 
     async def _send(self, command_type: str, params: dict[str, Any]) -> tuple[int, asyncio.Future[Any]]:
-        if command_type not in READ_ONLY_COMMANDS:
-            raise ReadOnlyViolation(f"Command {command_type!r} is not allowed (Phase A1 is read-only)")
+        if command_type not in ALLOWED_COMMANDS:
+            raise ReadOnlyViolation(f"Command {command_type!r} is not allowed")
         if command_type == "subscribe_events" and params.get("event_type") not in ALLOWED_EVENT_TYPES:
             raise ReadOnlyViolation(f"Subscribing to {params.get('event_type')!r} is not allowed")
         ws = self._ws
@@ -288,7 +346,11 @@ class HomeAssistantClient:
         return msg_id, future
 
     async def _subscribe(self, event_type: str, handler: Callable[[dict[str, Any]], None]) -> None:
-        msg_id, future = await self._send("subscribe_events", {"event_type": event_type})
+        await self._subscribe_command("subscribe_events", {"event_type": event_type}, handler)
+
+    async def _subscribe_command(self, command_type: str, params: dict[str, Any],
+                                 handler: Callable[[Any], None]) -> None:
+        msg_id, future = await self._send(command_type, params)
         self._subscriptions[msg_id] = handler
         try:
             await asyncio.wait_for(future, COMMAND_TIMEOUT)
@@ -382,6 +444,14 @@ class HomeAssistantClient:
         # Subscribe first, so no state change between the snapshot and the
         # subscription is lost (Home Assistant answers in order).
         await self._subscribe("state_changed", self._on_state_changed)
+        for event_type in REGISTRY_EVENTS:
+            await self._subscribe(event_type, self._on_registry_event)
+        try:
+            # Changes of the integration's config entry (also from its own options flow), state included.
+            await self._subscribe_command("config_entries/subscribe", {"type_filter": ["service"]},
+                                          self._on_config_entries)
+        except HomeAssistantError as err:
+            _LOGGER.warning("Could not subscribe to config entry changes: %s", err)
         self.config = await self.command("get_config") or {}
         states = await self.command("get_states") or []
         self.states = {s["entity_id"]: s for s in states if isinstance(s, dict) and "entity_id" in s}
@@ -496,6 +566,33 @@ class HomeAssistantClient:
             self.states[entity_id] = new_state
         if entity_id in self.integration.entity_set:
             self._notify("entity", entity_summary(new_state, entity_id))
+        self._notify("state", (entity_id, new_state))
+
+    def _on_registry_event(self, event: dict[str, Any]) -> None:
+        """Re-read the registries shortly after they change (bursts are coalesced)."""
+        if self._registry_timer is not None:
+            self._registry_timer.cancel()
+        self._registry_timer = asyncio.get_running_loop().call_later(REGISTRY_DEBOUNCE, self._registry_changed)
+
+    def _registry_changed(self) -> None:
+        self._registry_timer = None
+
+        async def refresh() -> None:
+            try:
+                await self._refresh_registries()
+            except (ConnectionError, TimeoutError) as err:
+                _LOGGER.debug("Registry refresh skipped: %s", err)
+                return
+            self._notify("registries")
+
+        asyncio.get_running_loop().create_task(refresh())
+
+    def _on_config_entries(self, events: Any) -> None:
+        for item in events if isinstance(events, list) else []:
+            entry = (item or {}).get("entry") or {}
+            if entry.get("domain") == self._domain:
+                self._notify("config_entry", {"change": item.get("type"), "state": entry.get("state"),
+                                              "entry_id": entry.get("entry_id")})
 
 
 def entity_summary(state: dict[str, Any] | None, entity_id: str) -> dict[str, Any]:

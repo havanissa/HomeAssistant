@@ -5,7 +5,7 @@
 // /api/hassio_ingress/<token>/ as well as at "/" during development.
 // The browser only ever talks to the App backend, never to Home Assistant.
 
-import type { EntitySummary, LiveMessage, Overview } from "./types";
+import type { EntitySummary, LiveMessage, LiveState, Overview } from "./types";
 
 export type LinkState = "connecting" | "live" | "polling" | "offline";
 
@@ -26,6 +26,12 @@ class Store {
   link: LinkState = "connecting";
   linkError: string | null = null;
   lastUpdate: Date | null = null;
+  /** Live states of watched entities (Rooms editor). */
+  liveStates = new Map<string, LiveState>();
+  /** Bumped when the room configuration or Home Assistant's registries change. */
+  roomsVersion = 0;
+  registriesVersion = 0;
+  roomsRevision: string | null = null;
   private listeners = new Set<Listener>();
 
   subscribe(listener: Listener): () => void {
@@ -64,6 +70,16 @@ class Store {
           home_assistant: { connection: message.connection, info: message.info },
         };
         break;
+      case "states":
+        for (const s of message.changed) this.liveStates.set(s.entity_id, s);
+        break;
+      case "rooms":
+        this.roomsVersion += 1;
+        this.roomsRevision = (message.status?.revision as string | undefined) ?? null;
+        break;
+      case "registries":
+        this.registriesVersion += 1;
+        break;
       case "entities": {
         if (!this.overview) return;
         const changed = new Map<string, EntitySummary>(message.changed.map((e) => [e.entity_id, e]));
@@ -89,6 +105,17 @@ const POLL_MS = 10_000;
 /** Websocket to the backend for live updates, with HTTP polling as fallback. */
 export class LiveConnection {
   private ws: WebSocket | null = null;
+  private watched: string[] = [];
+
+  /** Ask the backend for live states of these entities (read-only; replaces the previous list). */
+  watch(entityIds: string[]): void {
+    this.watched = [...new Set(entityIds)].slice(0, 2000);
+    this.sendWatch();
+  }
+
+  private sendWatch(): void {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: "watch", entities: this.watched }));
+  }
   private failures = 0;
   private retryTimer: number | undefined;
   private pollTimer: number | undefined;
@@ -122,6 +149,7 @@ export class LiveConnection {
       this.failures = 0;
       this.stopPolling();
       store.setLink("live");
+      if (this.watched.length) this.sendWatch();
     };
     ws.onmessage = (event: MessageEvent<string>) => {
       try {
@@ -157,3 +185,5 @@ export class LiveConnection {
     this.pollTimer = undefined;
   }
 }
+
+export const live = new LiveConnection();

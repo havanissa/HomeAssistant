@@ -75,18 +75,25 @@ export interface ModuleInfo {
   title: string;
   icon: string;
   kind: "foundation" | "feature";
-  status: "available" | "pending";
+  status: "available" | "gui" | "pending";
   summary: string;
   handled_by: string | null;
   controlled_by: "integration" | "app" | null;
+  gui_owner?: "integration" | "app" | null;
+  config_source?: "integration" | "app" | null;
+  automation_owner?: "integration" | "app" | null;
+  scope?: string | null;
 }
 
 export interface MigrationItem {
   key: string;
   title: string;
-  status: "done" | "pending" | "available";
+  status: "done" | "pending" | "available" | "gui";
   phase: string | null;
   controlled_by: "integration" | "app" | null;
+  gui_owner?: "integration" | "app" | null;
+  config_source?: "integration" | "app" | null;
+  automation_owner?: "integration" | "app" | null;
 }
 
 export interface Migration {
@@ -94,7 +101,9 @@ export interface Migration {
   foundation_complete: boolean;
   modules_total: number;
   modules_migrated: number;
+  interfaces_migrated?: number;
   percent: number;
+  interface_percent?: number;
   automatic_migration: boolean;
   controlled_by_integration: number;
   controlled_by_app: number;
@@ -103,6 +112,11 @@ export interface Migration {
 
 export interface Safety {
   read_only: boolean;
+  configuration_writes?: boolean;
+  write_scope?: string;
+  config_writes_sent?: number;
+  recent_config_writes?: Array<{ type: string; time: string; area_id: string | null; result?: string }>;
+  allowed_write_commands?: string[];
   device_control: boolean;
   automation_engine: boolean;
   automatic_migration: boolean;
@@ -141,6 +155,7 @@ export interface Overview {
   modules: ModuleInfo[];
   migration: Migration;
   safety: Safety;
+  rooms?: Record<string, unknown> | null;
   generated_at: string;
 }
 
@@ -167,4 +182,15 @@ export type LiveMessage =
       info: HaInfo | null;
     }
   | { type: "entities"; changed: EntitySummary[] }
+  | { type: "states"; changed: LiveState[] }
+  | { type: "rooms"; status: Record<string, unknown> | null }
+  | { type: "registries" }
   | { type: "pong" };
+
+export interface LiveState {
+  entity_id: string;
+  state: string | null;
+  last_changed: string | null;
+  last_updated: string | null;
+  availability: string;
+}

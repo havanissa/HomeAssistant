@@ -51,7 +51,7 @@ export class SlDashboard extends StoreElement {
       </header>
       ${kv([
         ["Version", o.app.version],
-        ["Phase", `${o.app.phase} · foundation (read-only)`],
+        ["Phase", `${o.app.phase} · Rooms configuration`],
         ["Running for", formatDuration(o.app.uptime_s)],
         ["Health checks", problems.length ? plural(problems.length, "needs attention", "need attention") : "All passed"],
       ])}
@@ -82,7 +82,7 @@ export class SlDashboard extends StoreElement {
       <p class="muted">
         Smart Occupancy & Lighting custom integration (<code>${integration?.domain ?? "smart_occupancy"}</code>).
         ${integration?.detected
-          ? "It keeps running all automation. This App only reads its status and never changes it."
+          ? "It keeps running all automation. The App edits only its room configuration, through the integration's own validated commands."
           : "When it is installed, the App shows its status here. Nothing is installed or changed automatically."}
       </p>
       ${integration?.detected
@@ -131,7 +131,7 @@ export class SlDashboard extends StoreElement {
             <span class="tile-icon">${icon(m.icon)}</span>
             <span class="tile-body">
               <span class="tile-title">${m.title}</span>
-              ${m.status === "available" ? chip("ok", "Available") : chip("pending", "Pending")}
+              ${m.status === "available" ? chip("ok", "Available") : m.status === "gui" ? chip("info", "Configured in the App") : chip("pending", "Pending")}
             </span>
           </a>`,
         )}
@@ -145,23 +145,24 @@ export class SlDashboard extends StoreElement {
       <header class="card-head">
         ${icon("pending")}
         <h3>Migration progress</h3>
-        ${chip(m.modules_migrated === m.modules_total ? "ok" : "pending", `${m.modules_migrated} of ${m.modules_total} modules`)}
+        ${chip("info", `${m.interfaces_migrated ?? 0} of ${m.modules_total} configured in the App`)}
+        ${chip(m.modules_migrated === m.modules_total ? "ok" : "pending", `${m.modules_migrated} of ${m.modules_total} automations moved`)}
       </header>
       <div
         class="progress"
         role="progressbar"
-        aria-label="Modules migrated"
+        aria-label="Configuration interfaces in the App"
         aria-valuemin="0"
         aria-valuemax=${m.modules_total}
-        aria-valuenow=${m.modules_migrated}
+        aria-valuenow=${m.interfaces_migrated ?? 0}
       >
-        <span style="width: ${m.percent}%"></span>
+        <span style="width: ${m.interface_percent ?? 0}%"></span>
       </div>
       <p class="muted">
-        The App foundation (Phase ${m.current_phase}) is in place. Modules move one at a time, only after you approve
-        it, and the matching integration function is switched off only after the replacement is validated. Each
-        module is controlled by exactly one system: today the integration controls ${m.controlled_by_integration} of
-        ${m.modules_total}, the App ${m.controlled_by_app}.
+        Phase ${m.current_phase}: the Rooms configuration interface is in the App; the configuration itself stays in
+        the integration, which also keeps running every automation. Modules move one at a time, only after you
+        approve it. Each module's automation is run by exactly one system: today the integration runs
+        ${m.controlled_by_integration} of ${m.modules_total}, the App ${m.controlled_by_app}.
       </p>
       <ol class="steps">
         ${m.items.map(
@@ -170,10 +171,14 @@ export class SlDashboard extends StoreElement {
             <span class="step-title"
               >${item.title}
               ${item.controlled_by
-                ? html`<span class="muted small block">In control: ${item.controlled_by === "app" ? "App" : "integration"}</span>`
+                ? html`<span class="muted small block"
+                    >Configured in: ${item.gui_owner === "app" ? "App" : "integration"} · stored in:
+                    ${item.config_source === "app" ? "App" : "integration"} · automation:
+                    ${item.controlled_by === "app" ? "App" : "integration"}</span
+                  >`
                 : nothing}</span
             >
-            ${item.status === "done" ? chip("ok", "Done") : chip("pending", "Pending")}
+            ${item.status === "done" ? chip("ok", "Done") : item.status === "gui" ? chip("info", "Interface in App") : chip("pending", "Pending")}
           </li>`,
         )}
       </ol>
@@ -187,8 +192,8 @@ export class SlDashboard extends StoreElement {
       <p class="notice notice-info" data-testid="readonly-notice">
         ${icon("shield-check", 20)}
         <span
-          >Phase A1 is read-only. The App reads Home Assistant but does not control devices or change any
-          configuration. Your existing Smart Occupancy setup keeps working unchanged.</span
+          >Phase A2: Rooms can be configured here. Changes are reviewed before saving and stored in the Smart
+          Occupancy integration, which keeps running every automation. The App never controls devices.</span
         >
       </p>
       ${o

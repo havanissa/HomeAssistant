@@ -113,20 +113,26 @@ export class SlDiagnostics extends StoreElement {
         </section>
 
         <section class="card" data-testid="card-safety">
-          <header class="card-head">${icon("shield-check")}<h3>Safety</h3>${chip("ok", "Read-only")}</header>
+          <header class="card-head">${icon("shield-check")}<h3>Safety</h3>${chip("ok", "No device control")}</header>
           ${kv([
             ["Service calls sent", String(o.safety.service_calls_sent)],
+            ["Configuration changes", o.safety.write_scope ?? "None"],
+            ["Configuration commands sent", String(o.safety.config_writes_sent ?? 0)],
             ["Device control", o.safety.device_control ? "On" : "Off"],
             ["Automation engine", o.safety.automation_engine ? "Running" : "None (the integration stays in charge)"],
             ["Automatic migration", o.safety.automatic_migration ? "On" : "Off"],
-            ["Changes to the integration", o.safety.modifies_integration ? "Yes" : "None"],
+            ["Changes to the integration", o.safety.modifies_integration ? "Room configuration (this session)" : "None"],
           ])}
           <details>
             <summary>Home Assistant requests made</summary>
             <ul class="plain-list mono">
               ${Object.entries(o.safety.commands_sent).map(([cmd, n]) => html`<li>${cmd}: ${n}</li>`)}
             </ul>
-            <p class="muted small">Allowed (all read-only): ${o.safety.allowed_commands.join(", ")}.</p>
+            <p class="muted small">Allowed reads: ${o.safety.allowed_commands.join(", ")}.</p>
+            <p class="muted small">Allowed configuration commands: ${(o.safety.allowed_write_commands ?? []).join(", ") || "none"}.</p>
+            ${(o.safety.recent_config_writes ?? []).length
+              ? html`<ul class="plain-list mono">${(o.safety.recent_config_writes ?? []).map((w) => html`<li>${w.time} ${w.type} ${w.area_id ?? ""} → ${w.result ?? "…"}</li>`)}</ul>`
+              : nothing}
           </details>
         </section>
 

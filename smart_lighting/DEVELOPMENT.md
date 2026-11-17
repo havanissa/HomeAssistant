@@ -5,7 +5,7 @@ Layout of the App folder:
 | Path | What |
 | --- | --- |
 | `config.yaml`, `Dockerfile`, `requirements.txt`, `rootfs/` | App package (built on the device by the Supervisor) |
-| `backend/smart_lighting/` | Python backend (aiohttp): Ingress web server, read-only Home Assistant client |
+| `backend/smart_lighting/` | Python backend (aiohttp): Ingress web server, allowlisted Home Assistant client, Rooms service (`rooms.py`) |
 | `backend/smart_lighting/static/` | **Built** web interface (committed, so the device build needs no Node.js) |
 | `frontend/` | Web interface source (Lit + TypeScript + Vite) |
 | `tests/` | Backend and package tests (pytest) |
@@ -31,7 +31,9 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements_test.txt
 ```
 
 The tests run the backend against a fake Home Assistant websocket API that
-records every command, and check that only read-only commands are sent.
+records every command (with a small stand-in for the integration's room API),
+and check that only allowlisted commands are sent and that configuration
+commands are only sent for an administrator, from the App's own page.
 
 ## Running locally against a Home Assistant
 
@@ -58,7 +60,14 @@ python -I tests/e2e/browser_checks.py --ha-url http://127.0.0.1:18123 --ha-token
 tests/e2e/stack.sh down
 ```
 
-`browser_checks.py` drives the interface inside the sidebar-panel iframe.
+`browser_checks.py` drives the interface inside the sidebar-panel iframe and
+writes nothing (A1 regression, every viewport). `rooms_checks.py` (Phase A2)
+then edits rooms against the integration (0.6.9) on that Home Assistant:
+discovery, assignment, review and save, the integration's own options flow,
+stale writes, confirmations, the leave guard, connection loss, backups and
+restore, layouts; `--phase restart-check` after restarting the App container
+and Home Assistant checks persistence. It needs the Kamar Norður room seeded
+through the options flow, demo lights and covers and a few template sensors.
 Primary targets: desktop (1440, 1920 px) and tablets (768 portrait, 1024 and
 1366 landscape, with touch). Phone sizes (360, 390 px, 740 landscape) are
 kept as a regression check of the fallback layout. It fails on any Home

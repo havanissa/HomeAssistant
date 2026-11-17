@@ -19,6 +19,7 @@ from pathlib import Path
 from .const import (
     DEFAULT_HA_WS_URL,
     DEFAULT_PORT,
+    DATA_DIR,
     DEFAULT_SUPERVISOR_URL,
     OPTIONS_PATH,
     SUPERVISOR_INGRESS_IP,
@@ -43,6 +44,7 @@ class Settings:
     log_level: str
     static_dir: Path
     dev_mode: bool
+    data_dir: Path | None = None
 
     @property
     def token_present(self) -> bool:
@@ -72,6 +74,7 @@ class Settings:
             "log_level": self.log_level,
             "token": "present (hidden)" if self.token else "missing",
             "development_mode": self.dev_mode,
+            "data_dir": str(self.data_dir) if self.data_dir else None,
         }
 
 
@@ -120,4 +123,5 @@ def load_settings(
         log_level=log_level,
         static_dir=static_dir,
         dev_mode=bool(env.get("SL_DEV")),
+        data_dir=Path(env.get("SL_DATA_DIR", DATA_DIR)) if env.get("SL_DATA_DIR", DATA_DIR) else None,
     )

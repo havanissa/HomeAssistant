@@ -35,9 +35,13 @@ ROUTES = ["dashboard", "rooms", "presence", "lighting", "moods", "switches", "cu
 TITLES = {r: r.capitalize() for r in ROUTES}
 BOTTOM = ["dashboard", "rooms", "lighting", "moods"]
 READ_ONLY = {
-    "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "manifest/get",
-    "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
+    "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "config_entries/subscribe",
+    "manifest/get", "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
+    "config/auth/list", "smart_occupancy/rooms/get", "smart_occupancy/rooms/review",
+    "smart_occupancy/rooms/restore/review",
 }
+APP_VERSION = "0.2.0"
+INTEGRATION_VERSION = "0.6.9"
 
 VIEWPORTS = {
     "phone-360": {"viewport": {"width": 360, "height": 740}, "is_mobile": True, "has_touch": True, "device_scale_factor": 3},
@@ -188,7 +192,9 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
         go(frame, route, layout, page)
         if not no_horizontal_overflow(frame):
             overflow.append(route)
-        if route not in ("dashboard", "diagnostics", "settings"):
+        if route == "rooms":
+            expect(frame.locator("[data-testid=room-grid] .room-card").first).to_be_visible()
+        elif route not in ("dashboard", "diagnostics", "settings"):
             card = frame.locator(f"[data-testid=pending-{route}]")
             expect(card).to_be_visible()
             expect(frame.locator(".page-header .chip-pending")).to_have_text("Migration pending")
@@ -202,6 +208,9 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
     check(f"{name}: all 10 modules reachable", True)
     check(f"{name}: no horizontal scrolling on any module", not overflow, overflow)
     check(f"{name}: pending modules show no controls and the integration in control", not pending_controls, pending_controls)
+    go(frame, "rooms", layout, page)
+    expect(frame.locator("[data-testid=room-grid] .room-card").first).to_be_visible()
+    page.screenshot(path=str(shots / f"{name}-rooms-light.png"))
     if layout != "desktop":
         check(f"{name}: touch targets >= 44px", not target_issues, target_issues)
 
@@ -347,7 +356,7 @@ def main() -> None:
     overview = get_json(INGRESS + "api/overview")
     check("ingress: overview through Ingress", overview["home_assistant"]["connection"]["state"] == "connected")
     check("integration detected and running", overview["integration"]["status"] == "loaded", overview["integration"])
-    check("integration version read", overview["integration"]["version"] == "0.6.8", overview["integration"]["version"])
+    check("integration version read", overview["integration"]["version"] == INTEGRATION_VERSION, overview["integration"]["version"])
     check("Home Assistant version read", overview["home_assistant"]["info"]["version"] == "2026.11.1")
     check("supervisor information read", overview["supervisor"]["available"] and not overview["supervisor"]["error"], overview["supervisor"])
     ent_ids = [e["entity_id"] for e in overview["integration_entities"]]
@@ -398,7 +407,7 @@ def main() -> None:
         with page.expect_download() as dl:
             frame.locator("[data-testid=download-diagnostics]").click()
         body = Path(dl.value.path()).read_text()
-        check("diagnostics download", json.loads(body)["app"]["version"] == "0.1.1")
+        check("diagnostics download", json.loads(body)["app"]["version"] == APP_VERSION)
         check("no secrets in the download", SUPERVISOR_TOKEN not in body and args.ha_token not in body)
 
         for url, title in ((INGRESS + "#/curtains", "Curtains"), (INGRESS.rstrip("/") + "#/settings", "Settings")):
@@ -413,7 +422,8 @@ def main() -> None:
     check("no service calls on Home Assistant during the run", not watcher.events, watcher.events)
     commands = get_json(f"{BASE}/_test/commands")["commands"]
     types = {c["type"] for c in commands}
-    check("only read-only commands reached Home Assistant", types <= READ_ONLY, sorted(types - READ_ONLY))
+    check("only read-only commands reached Home Assistant (no configuration written in this run)", types <= READ_ONLY,
+          sorted(types - READ_ONLY))
     check("integration configuration unchanged", entry_snapshot() == before_entry)
     filtered = [e for e in errors if "favicon" not in e]
     check("no browser console or page errors", not filtered, filtered)

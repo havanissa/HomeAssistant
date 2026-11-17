@@ -2,7 +2,7 @@
 
 A Home Assistant custom integration that will eventually provide intelligent occupancy detection, predictive room occupancy, mood-based lighting and lighting supervision.
 
-> **New: the Smart Lighting App (Phase A1, preview).** This repository is also a Home Assistant **App repository**. The App *Smart Occupancy & Lighting* opens from the sidebar as **Smart Lighting** and will gradually take over configuration from the dashboard cards. Phase A1 is a read-only foundation: it shows the connection, its health, this integration's status and the migration progress, and changes nothing. The integration below keeps working unchanged. Installation and details: [smart_lighting/DOCS.md](smart_lighting/DOCS.md).
+> **New: the Smart Lighting App (Phase A2).** This repository is also a Home Assistant **App repository**. The App *Smart Occupancy & Lighting* opens from the sidebar as **Smart Lighting** and gradually takes over configuration from the dashboard cards. Since App 0.2.0 (with this integration 0.6.9) its **Rooms** page is a full room editor: every area, its devices, sensor and light assignments, reviewed before saving. The configuration stays in this integration (its options), which keeps running every automation; *Configure → Rooms* keeps working on the same settings (see [Room configuration API](#room-configuration-api-for-the-smart-lighting-app-069)). Installation and details: [smart_lighting/DOCS.md](smart_lighting/DOCS.md).
 
 **This is Phase 0.3.5: mood-based lighting with simple dashboard cards (Smart Lighting Profiles, Smart Room Lighting, Room Status), on top of the Phase 0.2 occupancy engine (see [CHANGELOG.md](CHANGELOG.md)).** Phase 0.3.5 adds **native wall switches and remotes** (Zigbee2MQTT, MQTT device triggers and event entities): assign a switch to a room, learn its buttons, give each button an action, and let presses count as manual changes that automatic lighting respects (see [Wall switches and remotes](#wall-switches-and-remotes-phase-035)). Phase 0.3.3 switches a room's mood lighting on when someone arrives **and it is dark**: indoor light sensors (protected against being lit by the room's own lamps), an optional outdoor sensor and the sun decide whether artificial light is needed. Phase 0.3.2 lets moods, light types and single lights follow your **existing global brightness and colour temperature adjustment**, and adds the **Manual** pause. The interface stays simple by default; everything else is under *Advanced*.
 
@@ -121,6 +121,19 @@ Updating from 0.1.x or 0.2.x keeps your configuration. See [Upgrading](#upgradin
 | Mood profiles | A form-based fallback for the dashboard editors: edit one profile entry at the **Global**, **Room override** or **Individual light override** level. It is saved in the lighting store at once and does not reload the integration. |
 
 Each options run makes one change and saves it. The integration then reloads with the new configuration.
+
+### Room configuration API for the Smart Lighting App (0.6.9)
+
+The Smart Lighting App edits the same room settings as *Configure → Rooms*, through these administrator-only websocket commands (`rooms_api.py`). There is no second configuration: they read and write the config entry options (`rooms.<area_id>`).
+
+| Command | What it does |
+|---|---|
+| `smart_occupancy/rooms/get` | The stored rooms with a revision each, the editor schema (sensor types, roles, allowed domains) and read-only runtime data: occupancy decision, problems, lighting / switch / curtain summary. |
+| `smart_occupancy/rooms/review` | Dry run of one room change: the changes, blocking errors, the problems the integration would report afterwards (its own validation), and consequences that need confirmation. Changes nothing. |
+| `smart_occupancy/rooms/set` | Saves one reviewed room change. Refused when the room changed since it was read (`stale_revision`), when it is invalid, or when a consequence was not confirmed (`confirmation_required`). |
+| `smart_occupancy/rooms/restore/review`, `smart_occupancy/rooms/restore` | The same for replacing every room with a backup. |
+
+Only `enabled`, `sensors` (type, role, inverted, included), `lights`, `reference_occupancy_entity` and `adjacent_rooms` can be changed. A sensor that stays assigned keeps its role, inverted flag and Presence-tab exclusion; room timing overrides and every other option are kept as they are. A change that only includes or excludes assigned sensors is applied at once (like the Presence tab); any other change reloads the integration, exactly as after *Configure → Rooms*. The reload sends no light or cover command (lighting takes the current mood and occupancy as its baseline and applies nothing on start). Disabling or removing a room (its entities are removed), resuming a room with activated automatic lighting, changing assignments in a room with *Automatic* lighting, and removing sensors used by lighting zones need explicit confirmation. Writes are refused while the integration is not running.
 
 ## Mood lighting (Phase 0.3)
 
