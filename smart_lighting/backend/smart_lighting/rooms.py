@@ -71,6 +71,22 @@ _PIR_WORDS = re.compile(r"\bpir\b|motion|rtcgq|sml00|occupancy sensor", re.I)
 _SWITCH_WORDS = re.compile(r"switch|remote|button|dimmer|wxkg|opple|tradfri on/off|rodret|styrbar|symfonisk", re.I)
 _ACTION_SENSOR = re.compile(r"_(action|click)$")
 _UNAVAILABLE = {"unavailable"}
+#: Attributes forwarded with live states (small, display-only values; Phase A2.1 floor plan).
+LIVE_ATTRS = ("brightness", "current_position", "current_tilt_position", "unit_of_measurement", "device_class",
+              "occupied", "lighting_control", "observe_only", "lighting_paused", "operating_mode", "reason")
+
+
+def live_attributes(state: dict[str, Any] | None) -> dict[str, Any]:
+    """A few display-only attributes of a state (no lists, no long texts); manual overrides as a count."""
+    attrs = (state or {}).get("attributes") or {}
+    out: dict[str, Any] = {}
+    for key in LIVE_ATTRS:
+        value = attrs.get(key)
+        if isinstance(value, (bool, int, float)) or (isinstance(value, str) and len(value) <= 300):
+            out[key] = value
+    if isinstance(attrs.get("manual_overrides"), list):
+        out["manual_overrides"] = len(attrs["manual_overrides"])
+    return out
 
 
 class RoomsError(Exception):
@@ -411,6 +427,7 @@ class RoomsService:
             "last_changed": (state or {}).get("last_changed"),
             "last_updated": (state or {}).get("last_updated"),
             "availability": _availability(entity_id, reg, state, idx, self.ha.states),
+            "attrs": live_attributes(state),
         }
 
     def _context(self) -> tuple:

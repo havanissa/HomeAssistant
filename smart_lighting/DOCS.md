@@ -4,7 +4,7 @@ The **Smart Lighting** App is the new home of the Smart Occupancy & Lighting
 configuration. It replaces the integration's dashboard cards and options
 screens module by module, and only after you approve each step.
 
-## Phase A2: what this version does
+## Phase A2.1: what this version does
 
 - **Rooms** is a full room editor. Every Home Assistant area is listed, with
   its status (Configured, Not configured, Disabled, Problem), current
@@ -13,6 +13,8 @@ screens module by module, and only after you approve each step.
 - Open a room to see the devices found in its area, assign or remove sensors
   and lights, set each sensor's type and role, mark inverted signals, include
   or exclude sensors, choose a reference occupancy entity and adjacent rooms.
+- **Floor plan** (optional): draw your home, link rooms to areas, place
+  devices on the plan and watch occupancy, lights and devices live.
 - Every change is a draft until you **review** it. Saving stores it in the
   Smart Occupancy & Lighting integration, the only place the room
   configuration lives; the integration's own *Configure → Rooms* keeps
@@ -129,6 +131,54 @@ with unsaved edits asks first.
 each save or restore (latest 30), **Export current configuration**, download a
 backup, or **Restore** one (from the list or a file) after reviewing it.
 
+## Floor plan
+
+Smart Lighting → **Floor plan** (also from Rooms and from each room). The
+floor plan is optional and is stored in the App only; it is not part of the
+integration's configuration and changes no automation.
+
+**Build.** Add a floor (or *Add Home Assistant floors*). Choose **Rectangle
+room** and drag, or click two corners; **Polygon room** and click each corner,
+then click the first corner (or double-click, Enter, *Finish room*). Draw
+rooms side by side: corners snap to existing corners and walls, so neighbouring
+rooms share their walls. Select a room to move it (drag it once it is
+selected) or reshape it by its corners; select a wall to drag it sideways
+(the whole straight wall, or only that part), type its length, or add a
+corner (also by double-clicking the wall). **Door**, **Window** and
+**Open-plan opening** go on a wall with a click and can be slid along it.
+Measurements are optional: coordinates are metres; a floor is a sketch until
+you calibrate it or type exact lengths. Undo / redo, then **Save**.
+
+**Background image.** Import a PNG, JPEG or WebP plan (up to 15 MB), adjust
+its opacity, position, size and rotation, then **Calibrate**: click two
+points whose real distance you know and enter it. Trace the rooms over it.
+
+**Configure.** Select a room and pick its Home Assistant area. The *Areas* tab
+lists rooms without an area and areas not on the plan. An area normally
+belongs to one drawn room; for an open-plan space drawn as several parts,
+choose *Model as one shared space*. In the *Devices* tab, drag a device onto
+the plan, or click it and then click or tap where it is. Click an icon to see
+its state, device, area and how the integration uses it. **Placing an icon
+changes nothing**: to assign a device to a room, use *Assign … in the Rooms
+editor*, which prepares the change there for review.
+
+**Relationships.** The *Relations* tab suggests adjacent rooms from the
+drawing (a shared wall, a door, an open-plan opening) and explains why.
+In Smart Occupancy an adjacent room is extra evidence when someone leaves
+through a door; occupancy never spreads between rooms. **Review** opens the
+Rooms editor with the adjacency prepared; nothing is applied automatically.
+
+**Live.** Read-only: room occupancy as the integration reports it, lighting
+mode and manual overrides, lights, covers, sensors and contacts. Grey hatching
+means uncertain, red hatching or a red ring means unavailable: these are never
+shown as vacant or off. Icons are where you put them, not measured positions.
+
+**Saving, sessions and backups.** The status next to the title shows unsaved
+changes; leaving asks first. If the plan was saved in another browser
+session, you are told; saving over it asks first. ⋮ → **Export** (with
+images), **Import a file** (reviewed, replaces the plan, the old one is kept as
+a backup) and **Backups**.
+
 ## Migration: one system in control
 
 Modules move from the integration to the App one at a time, only after you
@@ -163,8 +213,15 @@ integration. The integration and the App never control the same devices.
 - The App backend sends only a fixed list of commands to Home Assistant: reads,
   and the integration's own validated room commands. It cannot call services,
   write states or change registries. Its token never reaches the browser.
+- Floor plans and their images are stored in the App's data folder. Images are
+  checked by their content (PNG, JPEG, WebP only; no SVG) and are only served
+  through Home Assistant's Ingress, never from a public address.
 
-## Known limitations (Phase A2)
+## Known limitations (Phase A2.1)
+
+- Floor plan: no curved walls, wall thickness, stairs or furniture (it is not a
+  CAD program); radar zones, sensor coverage and sun analysis are not drawn yet.
+  Live occupancy needs rooms observed by Smart Occupancy.
 
 - Only the room configuration (rooms, sensor and light assignments) is edited
   here. Presence timing, lighting behaviour, moods, switches, curtains and

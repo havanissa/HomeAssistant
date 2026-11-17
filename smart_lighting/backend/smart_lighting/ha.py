@@ -45,6 +45,7 @@ READ_ONLY_COMMANDS: frozenset[str] = frozenset(
         "config/entity_registry/list",
         "config/area_registry/list",
         "config/device_registry/list",
+        "config/floor_registry/list",
         "config/auth/list",
         # The existing integration's room configuration API (0.6.9): reads and dry runs.
         "smart_occupancy/rooms/get",
@@ -63,9 +64,11 @@ CONFIG_WRITE_COMMANDS: frozenset[str] = frozenset(
 ALLOWED_COMMANDS: frozenset[str] = READ_ONLY_COMMANDS | CONFIG_WRITE_COMMANDS
 #: Event types the App may subscribe to.
 ALLOWED_EVENT_TYPES: frozenset[str] = frozenset(
-    {"state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated"}
+    {"state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated",
+     "floor_registry_updated"}
 )
-REGISTRY_EVENTS = ("area_registry_updated", "device_registry_updated", "entity_registry_updated")
+REGISTRY_EVENTS = ("area_registry_updated", "device_registry_updated", "entity_registry_updated",
+                   "floor_registry_updated")
 REGISTRY_DEBOUNCE = 2.0
 
 RECONNECT_DELAYS = (1, 2, 5, 10, 30)
@@ -137,6 +140,7 @@ class HomeAssistantClient:
         self.area_count: int | None = None
         self.areas: list[dict[str, Any]] = []
         self.devices: list[dict[str, Any]] = []
+        self.floors: list[dict[str, Any]] = []
         self.entity_registry: list[dict[str, Any]] = []
         self.integration = IntegrationReport.unknown()
 
@@ -470,7 +474,9 @@ class HomeAssistantClient:
         areas = await self._read_registry("config/area_registry/list")
         devices = await self._read_registry("config/device_registry/list")
         registry = await self._read_registry("config/entity_registry/list")
+        floors = await self._read_registry("config/floor_registry/list")
         self.areas = areas or []
+        self.floors = floors or []
         self.area_count = len(areas) if areas is not None else None
         self.devices = devices or []
         self.entity_registry = registry or []

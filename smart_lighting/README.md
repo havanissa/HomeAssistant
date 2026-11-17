@@ -14,6 +14,8 @@ integration.
 - Made for desktops and tablets (including landscape); light and dark. On
   phones, the integration's compact dashboard cards are the everyday controls
 - Rooms: discovery, assignments, review before saving, backups and live room diagnostics
+- Floor plan (optional, Phase A2.1): draw floors and rooms, import a plan image, link areas,
+  place devices, suggested adjacent rooms, and a live read-only view of the home
 - Live connection status and live states
 - Diagnostics with health checks, a searchable entity / device / area lookup and a downloadable report
 

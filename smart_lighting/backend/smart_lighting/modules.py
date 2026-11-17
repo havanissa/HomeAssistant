@@ -47,7 +47,7 @@ class Module:
     scope: str | None = None  # what the App's interface covers (GUI modules)
 
     def __post_init__(self) -> None:
-        if self.kind != "feature":
+        if self.kind != "feature":  # foundation and tools (the floor plan) migrate nothing
             return
         automation = APP if self.status == AVAILABLE else INTEGRATION
         object.__setattr__(self, "automation_owner", self.automation_owner or automation)
@@ -72,6 +72,12 @@ MODULES: tuple[Module, ...] = (
         scope="Room configuration: enabled rooms, sensor and light assignments, sensor kind and role, inverted "
               "signals, reference occupancy entity and adjacent rooms. Stored in the integration; the integration "
               "keeps running room occupancy.",
+    ),
+    Module(
+        "floorplan", "Floor plan", "home-map-marker", "tool", AVAILABLE,
+        "Draw floors and rooms, link them to areas, place devices and watch them live (Phase A2.1).",
+        "This App. Stored in the App's own storage; it is not part of the integration's configuration and changes "
+        "no automation.",
     ),
     Module(
         "presence", "Presence", "motion-sensor", "feature", PENDING,
@@ -128,7 +134,7 @@ def migration() -> dict[str, object]:
     migrated = [m for m in features if m.automation_owner == APP]
     interfaces = [m for m in features if m.gui_owner == APP]
     return {
-        "current_phase": "A2",
+        "current_phase": "A2.1",
         "foundation_complete": True,
         "modules_total": len(features),
         "modules_migrated": len(migrated),

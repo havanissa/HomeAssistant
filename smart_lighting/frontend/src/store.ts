@@ -32,6 +32,9 @@ class Store {
   roomsVersion = 0;
   registriesVersion = 0;
   roomsRevision: string | null = null;
+  /** Revision of the stored floor plan, as last announced by the backend (any session). */
+  floorplanRevision: string | null = null;
+  floorplanVersion = 0;
   private listeners = new Set<Listener>();
 
   subscribe(listener: Listener): () => void {
@@ -79,6 +82,10 @@ class Store {
         break;
       case "registries":
         this.registriesVersion += 1;
+        break;
+      case "floorplan":
+        this.floorplanRevision = message.revision;
+        this.floorplanVersion += 1;
         break;
       case "entities": {
         if (!this.overview) return;

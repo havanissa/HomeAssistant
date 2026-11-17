@@ -9,7 +9,8 @@ token. The backend forwards a small, read-only stream:
 * ``states``: live states of the entities a page asked to watch (batched; Phase A2)
 * ``rooms``: the room configuration changed (in the App, the integration's own
   editor or by a restore), with its new revision
-* ``registries``: Home Assistant's area, device or entity registry changed
+* ``registries``: Home Assistant's area, device, entity or floor registry changed
+* ``floorplan``: the stored floor plan changed (any browser session), with its new revision (Phase A2.1)
 
 The browser may send ``ping`` and ``{"type": "watch", "entities": [...]}``
 (entity ids only, at most 2000). Nothing it sends can change anything.
@@ -80,6 +81,8 @@ class LiveHub:
         assert self.core.ha is not None
         self._unsubscribe = self.core.ha.add_listener(self._on_ha)
         self.core.add_rooms_listener(self._on_rooms)
+        if self.core.floorplan is not None:
+            self.core.floorplan.add_listener(self._on_floorplan)
         self._tasks = [
             asyncio.create_task(self._flush_loop(), name="live-flush"),
             asyncio.create_task(self._heartbeat_loop(), name="live-heartbeat"),
@@ -103,6 +106,10 @@ class LiveHub:
             self._schedule(self._broadcast({"type": "rooms", "status": rooms}))
         else:
             self._schedule(self._broadcast({"type": "registries"}))
+
+    def _on_floorplan(self, revision: str) -> None:
+        if self.clients:
+            self._schedule(self._broadcast({"type": "floorplan", "revision": revision}))
 
     def _on_ha(self, kind: str, payload: Any) -> None:
         if kind == "state":

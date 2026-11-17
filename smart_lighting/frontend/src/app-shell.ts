@@ -12,6 +12,7 @@ import { chip, haConnectionInfo, linkInfo, StoreElement } from "./ui";
 
 import "./pages/dashboard";
 import "./pages/diagnostics";
+import "./pages/floorplan";
 import "./pages/pending";
 import "./pages/room-editor";
 import "./pages/rooms";
@@ -33,9 +34,11 @@ export class SlApp extends StoreElement {
     this.moreOpen = false;
   }
 
-  /** The room whose editor is open ("rooms/<area>"), if any. */
+  /** Pages with unsaved edits: the room editor ("rooms/<area>") and the floor plan (all its modes). */
   private editorKey(route: string, sub: string[]): string | null {
-    return route === "rooms" && sub[0] ? sub[0] : null;
+    if (route === "rooms" && sub[0]) return `rooms/${sub[0]}`;
+    if (route === "floorplan") return "floorplan";
+    return null;
   }
 
   private onHashChange = (): void => {
@@ -46,7 +49,7 @@ export class SlApp extends StoreElement {
       const warning = leaveWarning();
       if (warning && !window.confirm(warning)) {
         // Stay: put the previous address back without another navigation.
-        history.replaceState(null, "", this.lastHash || "#/rooms");
+        history.replaceState(null, "", this.lastHash || `#/${this.route}`);
         return;
       }
     }
@@ -57,7 +60,7 @@ export class SlApp extends StoreElement {
       this.route = route;
       window.scrollTo({ top: 0 });
       // Move focus to the new page's heading for screen readers and keyboards.
-      void this.updateComplete.then(() => this.querySelector<HTMLElement>(".page-header h2, .editor-title h2")?.focus({ preventScroll: true }));
+      void this.updateComplete.then(() => this.querySelector<HTMLElement>(".page-header h2, .editor-title h2, .fp-title h2")?.focus({ preventScroll: true }));
     }
     this.railExpanded = false;
     this.closeMore();
@@ -176,6 +179,8 @@ export class SlApp extends StoreElement {
         return html`<sl-diagnostics></sl-diagnostics>`;
       case "settings":
         return html`<sl-settings></sl-settings>`;
+      case "floorplan":
+        return html`<sl-floorplan .mode=${this.sub[0] ?? ""}></sl-floorplan>`;
       case "rooms":
         return this.sub[0]
           ? html`<sl-room-editor .areaId=${this.sub[0]} .tab=${this.sub[1] ?? "overview"}></sl-room-editor>`

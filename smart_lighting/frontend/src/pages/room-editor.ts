@@ -8,7 +8,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { formatTime, plural } from "../format";
 import { icon } from "../icons";
 import { normalize } from "../lookup";
-import { setLeaveGuard } from "../router";
+import { hashQuery, setLeaveGuard } from "../router";
 import { live, store } from "../store";
 import {
   ApiError,
@@ -128,6 +128,9 @@ export class SlRoomEditor extends StoreElement {
   private seenRooms = -1;
   private seenRegistries = -1;
   private loading = false;
+  /** Opened from the floor plan (shows the way back). */
+  private fromFloorplan = false;
+  private preparedFor: string | null = null;
 
   constructor() {
     super();
@@ -225,6 +228,10 @@ export class SlRoomEditor extends StoreElement {
       if (area !== this.areaId) return;
       this.applyWorkspace(ws, keepDraft);
       this.loadError = null;
+      if (this.preparedFor !== area) {
+        this.preparedFor = area;
+        void this.applyPrepared();
+      }
     } catch (err) {
       this.loadError = err instanceof ApiError ? err.message : String(err);
     } finally {
@@ -247,6 +254,47 @@ export class SlRoomEditor extends StoreElement {
     }
     for (const id of Object.keys(ws.entities)) this.extra.delete(id);
     live.watch(Object.keys(ws.entities).concat([...this.extra.keys()]));
+  }
+
+  /**
+   * A change prepared elsewhere (the floor plan: ?adjacent=<area>, ?assign=<entity>&as=sensor|light,
+   * ?select=<entity>) goes into the draft only. Nothing is saved until it is reviewed here.
+   */
+  private async applyPrepared(): Promise<void> {
+    const q = hashQuery();
+    if (!q.toString()) return;
+    // Drop the query at once, so a reload does not prepare it again.
+    history.replaceState(null, "", window.location.hash.split("?")[0]);
+    this.fromFloorplan = q.get("from") === "floorplan";
+    const wanted = q.get("assign");
+    if (wanted && /^[a-z0-9_]+\.[a-z0-9_]+$/.test(wanted) && !this.ws?.entities[wanted] && !this.extra.has(wanted)) {
+      try {
+        const details = await getRooms<{ entity: EntityInfo }>(`api/floorplan/entity/${encodeURIComponent(wanted)}`);
+        this.extra.set(wanted, details.entity);
+        live.watch(Object.keys(this.ws?.entities ?? {}).concat([...this.extra.keys()]));
+      } catch {
+        /* assigned with the defaults; the review still checks it */
+      }
+    }
+    const ws = this.ws;
+    const done: string[] = [];
+    const adjacent = q.get("adjacent");
+    if (ws && this.draft && adjacent && adjacent !== ws.area.id && ws.areas.some((a) => a.id === adjacent)) {
+      if (!this.draft.adjacent_rooms.includes(adjacent)) {
+        this.update_((d) => (d.adjacent_rooms = [...d.adjacent_rooms, adjacent]));
+        done.push(`${this.areaName(adjacent)} added as an adjacent room`);
+      } else done.push(`${this.areaName(adjacent)} is already an adjacent room`);
+    }
+    const assign = q.get("assign");
+    if (ws && assign && /^[a-z0-9_]+\.[a-z0-9_]+$/.test(assign) && !this.assignment(assign)) {
+      if (q.get("as") === "light" && assign.startsWith("light.")) this.assignLight(assign);
+      else if (q.get("as") === "sensor") this.assignSensor(assign);
+      if (this.assignment(assign)) done.push(`${this.name(assign)} assigned as ${q.get("as") === "light" ? "a light" : "a sensor"}`);
+    }
+    const select = q.get("select") ?? assign;
+    if (select && /^[a-z0-9_]+\.[a-z0-9_]+$/.test(select)) this.select(select);
+    if (done.length) this.notice = `Prepared from the floor plan: ${done.join("; ")}. Review and save to apply it, or Discard.`;
+    this.requestUpdate();
   }
 
   private async onRoomsChanged(): Promise<void> {
@@ -479,6 +527,7 @@ export class SlRoomEditor extends StoreElement {
     const status = STATUS[ws.summary.status];
     return html`<header class="editor-head">
       <a class="btn back-btn" href="#/rooms" data-testid="back-to-rooms">${icon("arrow-left", 20)}<span>Rooms</span></a>
+      ${this.fromFloorplan ? html`<a class="btn" href="#/floorplan/configure" data-testid="back-to-floorplan">${icon("home-map-marker", 20)}<span>Floor plan</span></a>` : nothing}
       <span class="room-icon">${icon(areaIcon(ws.area.icon), 24)}</span>
       <div class="editor-title">
         <h2 tabindex="-1" data-testid="room-title">${ws.area.name}</h2>
@@ -489,6 +538,7 @@ export class SlRoomEditor extends StoreElement {
       <div class="editor-actions">
         <button type="button" class="icon-btn panel-toggle" aria-label=${this.leftOpen ? "Hide the room list" : "Show the room list"} aria-pressed=${this.leftOpen ? "true" : "false"} @click=${() => (this.leftOpen = !this.leftOpen)}>${icon("dock-left")}</button>
         <button type="button" class="icon-btn panel-toggle" aria-label=${this.inspectorOpen ? "Hide the inspector" : "Show the inspector"} aria-pressed=${this.inspectorOpen ? "true" : "false"} @click=${() => (this.inspectorOpen = !this.inspectorOpen)}>${icon("dock-right")}</button>
+        <a class="icon-btn" href="#/floorplan/configure?area=${encodeURIComponent(ws.area.id)}" aria-label="Show on the floor plan" title="Show on the floor plan" data-testid="show-on-floorplan">${icon("home-map-marker")}</a>
         <button type="button" class="icon-btn" aria-label="Reload from Home Assistant" @click=${() => void this.load(true, true)}>${icon("refresh")}</button>
       </div>
     </header>`;

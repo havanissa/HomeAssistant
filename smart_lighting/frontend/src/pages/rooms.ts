@@ -210,6 +210,7 @@ export class SlRooms extends StoreElement {
         "Rooms",
         "Every Home Assistant area, its devices and its room configuration. Changes are saved in the Smart Occupancy integration, which keeps running all automation.",
         html`<div class="actions">
+          <a class="btn" href="#/floorplan" data-testid="open-floorplan">${icon("home-map-marker", 20)}<span>Floor plan</span></a>
           <button type="button" class="btn" @click=${() => void this.load()} aria-label="Refresh">${icon("refresh", 20)}<span>Refresh</span></button>
           <button type="button" class="btn" data-testid="open-backups" @click=${() => (this.backupsOpen = true)}>
             ${icon("history", 20)}<span>Backups</span>

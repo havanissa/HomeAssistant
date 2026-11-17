@@ -1,11 +1,11 @@
-# Home Assistant App configuration: Smart Occupancy & Lighting (Phase A2).
+# Home Assistant App configuration: Smart Occupancy & Lighting (Phase A2.1).
 name: Smart Occupancy & Lighting
-version: "0.2.0"
+version: "0.2.1"
 slug: smart_lighting
 description: >-
-  Web interface for Smart Occupancy & Lighting. Phase A2: room and device
-  management, saved in the existing integration (which keeps running all
-  automation). It never controls a device.
+  Web interface for Smart Occupancy & Lighting. Room and device management,
+  saved in the existing integration (which keeps running all automation), and
+  an optional floor plan with a live view. It never controls a device.
 url: https://github.com/havanissa/HomeAssistant/tree/main/smart_lighting
 arch:
   - aarch64

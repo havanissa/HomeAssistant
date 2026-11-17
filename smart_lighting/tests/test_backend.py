@@ -87,7 +87,8 @@ async def test_only_read_only_commands_are_sent(app_client: Any, fake_ha: FakeHo
     assert "call_service" not in sent
     subscriptions = [c for c in fake_ha.commands if c["type"] == "subscribe_events"]
     assert [c["event_type"] for c in subscriptions] == [
-        "state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated"]
+        "state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated",
+        "floor_registry_updated"]
     # The supervisor endpoints used are the two basic, read-only ones.
     assert set(fake_ha.supervisor_requests) == {"/addons/self/info", "/info"}
 
@@ -136,7 +137,7 @@ def test_client_has_no_device_api() -> None:
     assert READ_ONLY_COMMANDS == {
         "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "config_entries/subscribe",
         "manifest/get", "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
-        "config/auth/list", "smart_occupancy/rooms/get", "smart_occupancy/rooms/review",
+        "config/floor_registry/list", "config/auth/list", "smart_occupancy/rooms/get", "smart_occupancy/rooms/review",
         "smart_occupancy/rooms/restore/review",
     }
     # The only commands that change anything: the integration's validated room configuration commands.
