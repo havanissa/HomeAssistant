@@ -10,6 +10,7 @@ from typing import Any
 import aiohttp
 import pytest
 
+from smart_lighting.const import APP_VERSION
 from smart_lighting.core import AppCore
 from smart_lighting.ha import READ_ONLY_COMMANDS, HomeAssistantClient, ReadOnlyViolation
 from smart_lighting.logbuffer import setup_logging
@@ -25,7 +26,7 @@ async def test_startup_connects_and_reports_healthy(app_client: Any, fake_ha: Fa
     assert resp.status == 200
     health = await resp.json()
     assert health["status"] == "ok"
-    assert health["version"] == "0.1.0"
+    assert health["version"] == APP_VERSION
     assert health["home_assistant"] == "connected"
     by_key = {c["key"]: c for c in health["checks"]}
     assert by_key["home_assistant"]["status"] == "ok"

@@ -76,7 +76,7 @@ export class SlSettings extends StoreElement {
     const o = store.overview;
     return html`
       ${pageHeader("Settings", "Appearance and information about the App.")}
-      <div class="grid">
+      <div class="grid grid-2">
         <section class="card" data-testid="appearance">
           <header class="card-head">${icon("palette")}<h3>Appearance</h3></header>
           <fieldset class="segmented" aria-label="Theme">

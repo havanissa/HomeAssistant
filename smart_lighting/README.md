@@ -10,7 +10,8 @@ not control any device and does not change any configuration; the existing
 integration keeps doing all the work.
 
 - Opens full-page from the sidebar through Home Assistant's own login (Ingress); no exposed port
-- Works on phones (bottom navigation), tablets and desktops; light and dark
+- Made for desktops and tablets (including landscape); light and dark. On
+  phones, the integration's compact dashboard cards are the everyday controls
 - Live connection status and live states of the integration's entities
 - Diagnostics with health checks, a searchable entity / device / area lookup and a downloadable report
 

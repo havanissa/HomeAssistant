@@ -90,4 +90,17 @@ def test_modules_and_migration() -> None:
     m = migration()
     assert m["modules_migrated"] == 0 and m["percent"] == 0
     assert m["automatic_migration"] is False
-    assert m["items"][0] == {"key": "foundation", "title": "App foundation", "status": "done", "phase": "A1"}
+    assert m["items"][0] == {"key": "foundation", "title": "App foundation", "status": "done", "phase": "A1",
+                             "controlled_by": None}
+
+
+def test_one_system_in_control_per_module() -> None:
+    from smart_lighting.modules import APP, INTEGRATION
+
+    features = [m for m in MODULES if m.kind == "feature"]
+    # Phase A1: the integration controls every feature; the App controls nothing.
+    assert {m.controlled_by for m in features} == {INTEGRATION}
+    assert all(m.controlled_by is None for m in MODULES if m.kind == "foundation")
+    m = migration()
+    assert m["controlled_by_integration"] == 7 and m["controlled_by_app"] == 0
+    assert all(i["controlled_by"] in (INTEGRATION, APP) for i in m["items"][1:])

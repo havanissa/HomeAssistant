@@ -190,8 +190,8 @@ class FakeHomeAssistant:
         if request.headers.get("Authorization") != f"Bearer {self.token}":
             return web.json_response({"result": "error", "message": "Unauthorized"}, status=401)
         if request.path == "/addons/self/info":
-            data = {"name": "Smart Occupancy & Lighting", "slug": "smart_lighting", "version": "0.1.0",
-                    "version_latest": "0.1.0", "update_available": False, "state": "started", "arch": "amd64",
+            data = {"name": "Smart Occupancy & Lighting", "slug": "smart_lighting", "version": "0.1.1",
+                    "version_latest": "0.1.1", "update_available": False, "state": "started", "arch": "amd64",
                     "options": {"log_level": "info"}, "ingress_url": "/api/hassio_ingress/xyz/"}
         else:
             data = {"supervisor": "2026.11.2", "homeassistant": HA_VERSION, "hassos": "17.1",

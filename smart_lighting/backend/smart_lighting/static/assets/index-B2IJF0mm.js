@@ -94,14 +94,18 @@
         <span style="width: ${t.percent}%"></span>
       </div>
       <p class="muted">
-        The App foundation (Phase ${t.current_phase}) is in place. No feature module has been migrated yet, so the
-        existing integration still does everything. Nothing migrates automatically: each module moves to the App only
-        after you approve it.
+        The App foundation (Phase ${t.current_phase}) is in place. Modules move one at a time, only after you approve
+        it, and the matching integration function is switched off only after the replacement is validated. Each
+        module is controlled by exactly one system: today the integration controls ${t.controlled_by_integration} of
+        ${t.modules_total}, the App ${t.controlled_by_app}.
       </p>
       <ol class="steps">
         ${t.items.map(e=>A`<li class="step step-${e.status}">
             <span class="step-mark" aria-hidden="true">${B(e.status===`done`?`ok`:`pending`,18)}</span>
-            <span class="step-title">${e.title}</span>
+            <span class="step-title"
+              >${e.title}
+              ${e.controlled_by?A`<span class="muted small block">In control: ${e.controlled_by===`app`?`App`:`integration`}</span>`:M}</span
+            >
             ${e.status===`done`?G(`ok`,`Done`):G(`pending`,`Pending`)}
           </li>`)}
       </ol>
@@ -191,8 +195,12 @@
             ${e.label}
           </label>`)}
       </fieldset>
-      <sl-picker .kind=${this.kind} .value=${this.selected} label="Find" @value-changed=${this.onPicked}></sl-picker>
-      <div class="lookup-details" data-testid="lookup-details">${this.renderDetails()}</div>
+      <div class="lookup-body">
+        <sl-picker .kind=${this.kind} .value=${this.selected} label="Find" @value-changed=${this.onPicked}></sl-picker>
+        <div class="lookup-details" data-testid="lookup-details">
+          ${this.selected?this.renderDetails():A`<p class="muted">Choose an item to see its details.</p>`}
+        </div>
+      </div>
     </section>`}};customElements.define(`sl-lookup-card`,pt);function $(e){return e==null||e===``?`—`:typeof e==`boolean`?e?`Yes`:`No`:String(e)}var mt=class extends W{static{this.properties={details:{state:!0},loadingDetails:{state:!0},detailsError:{state:!0},showJson:{state:!0},copied:{state:!0}}}constructor(){super(),this.details=null,this.loadingDetails=!1,this.detailsError=null,this.showJson=!1,this.copied=null}async copyJson(){let e=JSON.stringify(this.details,null,2);try{await navigator.clipboard.writeText(e),this.copied=`Copied`}catch{let e=this.querySelector(`textarea.json-view`);e?.focus(),e?.select(),this.copied=`Selected: use your device's Copy`}window.setTimeout(()=>this.copied=null,4e3)}connectedCallback(){super.connectedCallback(),this.loadDetails()}async loadDetails(){this.loadingDetails=!0;try{this.details=await f(`api/diagnostics`),this.detailsError=null}catch(e){this.detailsError=String(e)}finally{this.loadingDetails=!1}}render(){let e=p.overview,t=A`<div class="actions">
       <button class="btn" @click=${()=>void this.loadDetails()} ?disabled=${this.loadingDetails}>
         ${B(`refresh`,18)} Refresh
@@ -286,10 +294,11 @@
           <dd>${t?.summary??`—`}</dd>
           <dt>Configure it today in</dt>
           <dd>${t?.handled_by??`The existing integration's dashboard cards.`}</dd>
-          <dt>Existing integration</dt>
-          <dd>
-            ${G(i.tone,i.label)}
-            ${a?A`<span class="muted">It keeps handling ${n.toLowerCase()} unchanged.</span>`:M}
+          <dt>In control</dt>
+          <dd data-testid="controlled-by">
+            ${t?.controlled_by===`app`?G(`ok`,`This App`):A`${G(`info`,`Smart Occupancy integration`)} ${G(i.tone,i.label)}`}
+            ${a&&t?.controlled_by!==`app`?A`<span class="muted block">It keeps handling ${n.toLowerCase()} unchanged. Only one system
+                  controls these devices at a time.</span>`:M}
           </dd>
         </dl>
       </section>
@@ -302,7 +311,7 @@
       ${K([[`Log level`,t?.log_level],[`Home Assistant API`,t?.home_assistant_websocket],[`Supervisor API`,t?.supervisor_api],[`API credentials`,t?.token],[`Accepted clients`,Array.isArray(t?.allowed_clients)?(t?.allowed_clients).join(`, `):null],[`Interface path`,n],[`Live updates`,J(p.link).label],[`Development mode`,e?.app.dev_mode?`On`:`Off`]])}
     </section>`}render(){let e=p.overview;return A`
       ${q(`Settings`,`Appearance and information about the App.`)}
-      <div class="grid">
+      <div class="grid grid-2">
         <section class="card" data-testid="appearance">
           <header class="card-head">${B(`palette`)}<h3>Appearance</h3></header>
           <fieldset class="segmented" aria-label="Theme">

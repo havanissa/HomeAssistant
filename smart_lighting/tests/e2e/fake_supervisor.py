@@ -57,8 +57,8 @@ async def self_info(request: web.Request) -> web.Response:
     if not _authorized(request):
         return web.json_response({"result": "error", "message": "Unauthorized"}, status=401)
     return web.json_response({"result": "ok", "data": {
-        "name": "Smart Occupancy & Lighting", "slug": "local_smart_lighting", "version": "0.1.0",
-        "version_latest": "0.1.0", "update_available": False, "state": "started", "arch": "amd64",
+        "name": "Smart Occupancy & Lighting", "slug": "local_smart_lighting", "version": "0.1.1",
+        "version_latest": "0.1.1", "update_available": False, "state": "started", "arch": "amd64",
         "repository": "local", "ingress": True, "ingress_panel": True, "boot": "auto", "watchdog": False,
         "ingress_url": f"/api/hassio_ingress/{INGRESS_TOKEN}/", "options": {"log_level": "info"},
     }})

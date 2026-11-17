@@ -78,6 +78,7 @@ export interface ModuleInfo {
   status: "available" | "pending";
   summary: string;
   handled_by: string | null;
+  controlled_by: "integration" | "app" | null;
 }
 
 export interface MigrationItem {
@@ -85,6 +86,7 @@ export interface MigrationItem {
   title: string;
   status: "done" | "pending" | "available";
   phase: string | null;
+  controlled_by: "integration" | "app" | null;
 }
 
 export interface Migration {
@@ -94,6 +96,8 @@ export interface Migration {
   modules_migrated: number;
   percent: number;
   automatic_migration: boolean;
+  controlled_by_integration: number;
+  controlled_by_app: number;
   items: MigrationItem[];
 }
 

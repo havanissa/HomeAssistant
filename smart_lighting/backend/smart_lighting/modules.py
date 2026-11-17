@@ -13,6 +13,13 @@ from dataclasses import asdict, dataclass
 AVAILABLE = "available"
 PENDING = "pending"
 
+# Which system is in control of a feature module. Exactly one at a time: a
+# module moves to the App only after its replacement is validated and the
+# matching integration function is switched off, so the integration and the
+# App never control the same devices simultaneously.
+INTEGRATION = "integration"
+APP = "app"
+
 
 @dataclass(frozen=True)
 class Module:
@@ -23,6 +30,12 @@ class Module:
     status: str
     summary: str
     handled_by: str | None = None  # where this is configured today
+    controlled_by: str | None = None  # INTEGRATION or APP for feature modules
+
+    def __post_init__(self) -> None:
+        if self.kind == "feature" and self.controlled_by is None:
+            # Until a module is migrated and validated, the integration is in control.
+            object.__setattr__(self, "controlled_by", APP if self.status == AVAILABLE else INTEGRATION)
 
     def as_dict(self) -> dict[str, str | None]:
         return asdict(self)
@@ -95,8 +108,13 @@ def migration() -> dict[str, object]:
         "modules_migrated": len(migrated),
         "percent": round(100 * len(migrated) / len(features)) if features else 0,
         "automatic_migration": False,
+        "controlled_by_integration": sum(1 for m in features if m.controlled_by == INTEGRATION),
+        "controlled_by_app": sum(1 for m in features if m.controlled_by == APP),
         "items": [
-            {"key": "foundation", "title": "App foundation", "status": "done", "phase": "A1"},
-            *({"key": m.key, "title": m.title, "status": m.status, "phase": None} for m in features),
+            {"key": "foundation", "title": "App foundation", "status": "done", "phase": "A1", "controlled_by": None},
+            *(
+                {"key": m.key, "title": m.title, "status": m.status, "phase": None, "controlled_by": m.controlled_by}
+                for m in features
+            ),
         ],
     }

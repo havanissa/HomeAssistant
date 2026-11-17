@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.1
+
+Design direction update (still Phase A1, read-only).
+
+- Desktop and tablet (including landscape) are the primary targets. Card
+  columns now follow the available width: up to three on wide screens and
+  landscape tablets, two on portrait tablets. The Home Assistant lookup shows
+  the selector and the details side by side on desktops. The phone layout
+  stays as a simpler fallback; everyday phone use is through Lovelace cards.
+- Each module shows which system is **in control** (the integration for
+  every module in this phase). Migration moves one module at a time and never
+  lets the integration and the App control the same devices together.
+
 ## 0.1.0
 
 Phase A1: App foundation (read-only).
