@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.9 — Room configuration API for the Smart Lighting App (App Phase A2)
+
+### Added
+
+- `rooms_api.py`: administrator-only websocket commands `smart_occupancy/rooms/get`, `rooms/review`, `rooms/set`, `rooms/restore/review` and `rooms/restore`. They read and write the existing room configuration in the config entry options (no second store) with the integration's own models (`RoomConfig`, `SensorAssignment`) and validation (`validation.validate`, the options flow's sensor domains). Revisions (SHA-256 of the stored JSON) refuse stale writes, including after a change in *Configure → Rooms*. Only the room's editable keys change; every other option and the room's other keys (timing, legacy mood overrides) are kept; assigned sensors keep their role, inverted flag and exclusion. Consequences that need explicit confirmation: disabling or removing a room, resuming activated automatic lighting, changing assignments in an *Automatic* room, removing sensors used by lighting zones, a restore. Writes are refused while the entry is not loaded.
+- Tests: `tests/test_rooms_api.py` (11): reading, admin only, review without changes, saving one room with every other option preserved, invalid input (duplicates, wrong domains, missing or own entities, unknown areas), stale write after a change in the options flow, confirmations, no light command across the reload with Automatic lighting, live sensor exclusion, a new room for an unconfigured area, backup restore, not loaded.
+
+### Not changed
+
+- Occupancy, lighting, switches, curtains and forecasts; the options flow and the dashboard cards (card versions follow the release number only).
+
 ## 0.6.8 — Custom lux categories, Dumb Lights, radar distance zones and Priority Inputs (Phase 4.8)
 
 ### Added

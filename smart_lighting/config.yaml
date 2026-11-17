@@ -1,11 +1,11 @@
-# Home Assistant App configuration: Smart Occupancy & Lighting (Phase A1).
+# Home Assistant App configuration: Smart Occupancy & Lighting (Phase A2).
 name: Smart Occupancy & Lighting
-version: "0.1.1"
+version: "0.2.0"
 slug: smart_lighting
 description: >-
-  Web interface for Smart Occupancy & Lighting. Phase A1: read-only
-  foundation (connection, health and migration status). It does not control
-  any device and does not change the existing integration.
+  Web interface for Smart Occupancy & Lighting. Phase A2: room and device
+  management, saved in the existing integration (which keeps running all
+  automation). It never controls a device.
 url: https://github.com/havanissa/HomeAssistant/tree/main/smart_lighting
 arch:
   - aarch64
@@ -25,7 +25,8 @@ panel_title: Smart Lighting
 panel_admin: true
 
 # Home Assistant Core API through the Supervisor proxy (SUPERVISOR_TOKEN).
-# Phase A1 only sends read-only websocket commands (see backend/ha.py).
+# The backend sends only allowlisted websocket commands (backend/ha.py): reads,
+# and the integration's validated room configuration commands.
 homeassistant_api: true
 # The basic Supervisor endpoints used (/addons/self/info, /info) need no
 # extra Supervisor API access.

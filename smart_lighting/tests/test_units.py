@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from smart_lighting import integration
-from smart_lighting.modules import AVAILABLE, MODULES, PENDING, migration
+from smart_lighting.modules import AVAILABLE, GUI, MODULES, PENDING, migration
 from smart_lighting.settings import load_settings
 
 
@@ -84,22 +84,29 @@ def test_modules_and_migration() -> None:
     assert len(keys) == len(set(keys)) == 10
     features = [m for m in MODULES if m.kind == "feature"]
     assert [m.key for m in features] == ["rooms", "presence", "lighting", "moods", "switches", "curtains", "predictions"]
-    # Phase A1: every feature module is pending and says where it is configured today.
-    assert all(m.status == PENDING and m.handled_by for m in features)
+    # Phase A2: Rooms has its configuration interface in the App; every other feature is pending.
+    assert [m.key for m in features if m.status == GUI] == ["rooms"]
+    assert all(m.status == PENDING and m.handled_by for m in features if m.key != "rooms")
     assert all(m.status == AVAILABLE for m in MODULES if m.kind == "foundation")
     m = migration()
-    assert m["modules_migrated"] == 0 and m["percent"] == 0
+    assert m["current_phase"] == "A2"
+    assert m["modules_migrated"] == 0 and m["percent"] == 0  # no automation has moved
+    assert m["interfaces_migrated"] == 1
     assert m["automatic_migration"] is False
-    assert m["items"][0] == {"key": "foundation", "title": "App foundation", "status": "done", "phase": "A1",
-                             "controlled_by": None}
+    assert m["items"][0]["key"] == "foundation" and m["items"][0]["status"] == "done"
 
 
 def test_one_system_in_control_per_module() -> None:
     from smart_lighting.modules import APP, INTEGRATION
 
     features = [m for m in MODULES if m.kind == "feature"]
-    # Phase A1: the integration controls every feature; the App controls nothing.
+    # Phase A2: the integration still executes every automation; the App controls nothing.
     assert {m.controlled_by for m in features} == {INTEGRATION}
+    assert {m.automation_owner for m in features} == {INTEGRATION}
+    assert {m.config_source for m in features} == {INTEGRATION}  # one authoritative configuration
+    rooms = next(m for m in features if m.key == "rooms")
+    assert (rooms.gui_owner, rooms.config_source, rooms.automation_owner) == (APP, INTEGRATION, INTEGRATION)
+    assert {m.gui_owner for m in features if m.key != "rooms"} == {INTEGRATION}
     assert all(m.controlled_by is None for m in MODULES if m.kind == "foundation")
     m = migration()
     assert m["controlled_by_integration"] == 7 and m["controlled_by_app"] == 0

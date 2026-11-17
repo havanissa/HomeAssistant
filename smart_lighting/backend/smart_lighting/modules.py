@@ -1,22 +1,32 @@
 """The App's modules and their migration status.
 
-Phase A1 delivers only the foundation (Dashboard, Diagnostics, Settings).
-Every feature module is *pending*: its screen says so and offers no controls.
-Until a module is migrated and its replacement explicitly approved, the
-existing integration (custom_components/smart_occupancy) keeps doing the work.
+Three separate questions per feature module, because they migrate at
+different times:
+
+* ``gui_owner`` - where the module is configured: the existing integration's
+  dashboard cards / options (``integration``) or this App (``app``).
+* ``config_source`` - where the authoritative configuration is stored. Today
+  this is always the integration (its config entry options and stores); the
+  App edits it through the integration's own validated commands.
+* ``automation_owner`` / ``controlled_by`` - which system executes the
+  automation and controls devices. Exactly one at a time: a module's
+  automation moves to the App only after its replacement is validated and the
+  matching integration function is switched off, so both never control the
+  same devices. In Phase A2 this is the integration for every module.
+
+Phase A2 moves only the Rooms configuration interface (room, sensor and light
+assignments) to the App. Room occupancy, lighting, switches, curtains and
+predictions keep running in the integration, unchanged.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-AVAILABLE = "available"
+AVAILABLE = "available"  # the App is in control (automation migrated)
+GUI = "gui"  # the configuration interface is in the App; the integration still executes everything
 PENDING = "pending"
 
-# Which system is in control of a feature module. Exactly one at a time: a
-# module moves to the App only after its replacement is validated and the
-# matching integration function is switched off, so the integration and the
-# App never control the same devices simultaneously.
 INTEGRATION = "integration"
 APP = "app"
 
@@ -29,13 +39,21 @@ class Module:
     kind: str  # "foundation" or "feature"
     status: str
     summary: str
-    handled_by: str | None = None  # where this is configured today
-    controlled_by: str | None = None  # INTEGRATION or APP for feature modules
+    handled_by: str | None = None  # where this is configured today (text)
+    controlled_by: str | None = None  # INTEGRATION or APP: who executes the automation
+    gui_owner: str | None = None
+    config_source: str | None = None
+    automation_owner: str | None = None
+    scope: str | None = None  # what the App's interface covers (GUI modules)
 
     def __post_init__(self) -> None:
-        if self.kind == "feature" and self.controlled_by is None:
-            # Until a module is migrated and validated, the integration is in control.
-            object.__setattr__(self, "controlled_by", APP if self.status == AVAILABLE else INTEGRATION)
+        if self.kind != "feature":
+            return
+        automation = APP if self.status == AVAILABLE else INTEGRATION
+        object.__setattr__(self, "automation_owner", self.automation_owner or automation)
+        object.__setattr__(self, "controlled_by", self.controlled_by or self.automation_owner)
+        object.__setattr__(self, "gui_owner", self.gui_owner or (APP if self.status in (AVAILABLE, GUI) else INTEGRATION))
+        object.__setattr__(self, "config_source", self.config_source or INTEGRATION)
 
     def as_dict(self) -> dict[str, str | None]:
         return asdict(self)
@@ -47,10 +65,13 @@ MODULES: tuple[Module, ...] = (
         "Connection, App health, integration detection and migration progress.",
     ),
     Module(
-        "rooms", "Rooms", "floor-plan", "feature", PENDING,
-        "Rooms, their areas and room status.",
-        "The integration's Room Status card and its options "
-        "(Settings → Devices & services → Smart Occupancy & Lighting).",
+        "rooms", "Rooms", "floor-plan", "feature", GUI,
+        "Rooms, their areas, devices, sensor and light assignments, and live room diagnostics.",
+        "This App (Rooms). The integration's own room editor (Configure → Rooms) keeps working on the same "
+        "configuration.",
+        scope="Room configuration: enabled rooms, sensor and light assignments, sensor kind and role, inverted "
+              "signals, reference occupancy entity and adjacent rooms. Stored in the integration; the integration "
+              "keeps running room occupancy.",
     ),
     Module(
         "presence", "Presence", "motion-sensor", "feature", PENDING,
@@ -98,22 +119,32 @@ def modules() -> list[dict[str, str | None]]:
 
 
 def migration() -> dict[str, object]:
-    """Migration progress. Only completed work counts; nothing is estimated."""
+    """Migration progress. Only completed work counts; nothing is estimated.
+
+    ``modules_migrated`` counts modules whose *automation* runs in the App (none
+    yet); ``interfaces_migrated`` counts modules configured in the App.
+    """
     features = [m for m in MODULES if m.kind == "feature"]
-    migrated = [m for m in features if m.status == AVAILABLE]
+    migrated = [m for m in features if m.automation_owner == APP]
+    interfaces = [m for m in features if m.gui_owner == APP]
     return {
-        "current_phase": "A1",
+        "current_phase": "A2",
         "foundation_complete": True,
         "modules_total": len(features),
         "modules_migrated": len(migrated),
+        "interfaces_migrated": len(interfaces),
         "percent": round(100 * len(migrated) / len(features)) if features else 0,
+        "interface_percent": round(100 * len(interfaces) / len(features)) if features else 0,
         "automatic_migration": False,
         "controlled_by_integration": sum(1 for m in features if m.controlled_by == INTEGRATION),
         "controlled_by_app": sum(1 for m in features if m.controlled_by == APP),
         "items": [
-            {"key": "foundation", "title": "App foundation", "status": "done", "phase": "A1", "controlled_by": None},
+            {"key": "foundation", "title": "App foundation", "status": "done", "phase": "A1", "controlled_by": None,
+             "gui_owner": None, "config_source": None, "automation_owner": None},
             *(
-                {"key": m.key, "title": m.title, "status": m.status, "phase": None, "controlled_by": m.controlled_by}
+                {"key": m.key, "title": m.title, "status": m.status, "phase": "A2" if m.status == GUI else None,
+                 "controlled_by": m.controlled_by, "gui_owner": m.gui_owner, "config_source": m.config_source,
+                 "automation_owner": m.automation_owner}
                 for m in features
             ),
         ],

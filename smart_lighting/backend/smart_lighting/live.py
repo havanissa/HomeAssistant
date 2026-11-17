@@ -6,13 +6,22 @@ token. The backend forwards a small, read-only stream:
 * ``overview``: the full overview, on connect and when the integration report changes
 * ``status``: connection status changes and a periodic heartbeat with statistics
 * ``entities``: state changes of the existing integration's entities (batched)
+* ``states``: live states of the entities a page asked to watch (batched; Phase A2)
+* ``rooms``: the room configuration changed (in the App, the integration's own
+  editor or by a restore), with its new revision
+* ``registries``: Home Assistant's area, device or entity registry changed
+
+The browser may send ``ping`` and ``{"type": "watch", "entities": [...]}``
+(entity ids only, at most 2000). Nothing it sends can change anything.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -24,6 +33,8 @@ _LOGGER = logging.getLogger(__name__)
 
 FLUSH_INTERVAL = 0.5
 HEARTBEAT_INTERVAL = 5.0
+MAX_WATCH = 2000
+_ENTITY_ID = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 
 
 def origin_allowed(request: web.Request) -> bool:
@@ -59,13 +70,16 @@ class LiveHub:
     def __init__(self, core: AppCore) -> None:
         self.core = core
         self.clients: set[web.WebSocketResponse] = set()
+        self.watching: dict[web.WebSocketResponse, frozenset[str]] = {}
         self._pending_entities: dict[str, dict[str, Any]] = {}
+        self._pending_states: set[str] = set()
         self._tasks: list[asyncio.Task[None]] = []
         self._unsubscribe = None
 
     async def start(self) -> None:
         assert self.core.ha is not None
         self._unsubscribe = self.core.ha.add_listener(self._on_ha)
+        self.core.add_rooms_listener(self._on_rooms)
         self._tasks = [
             asyncio.create_task(self._flush_loop(), name="live-flush"),
             asyncio.create_task(self._heartbeat_loop(), name="live-heartbeat"),
@@ -81,8 +95,20 @@ class LiveHub:
         for ws in list(self.clients):
             await ws.close()
 
+    def _on_rooms(self, kind: str) -> None:
+        if not self.clients:
+            return
+        if kind == "rooms":
+            rooms = self.core.rooms.status() if self.core.rooms else None
+            self._schedule(self._broadcast({"type": "rooms", "status": rooms}))
+        else:
+            self._schedule(self._broadcast({"type": "registries"}))
+
     def _on_ha(self, kind: str, payload: Any) -> None:
-        if kind == "entity":
+        if kind == "state":
+            if self.watching and any(payload[0] in w for w in self.watching.values()):
+                self._pending_states.add(payload[0])
+        elif kind == "entity":
             self._pending_entities[payload["entity_id"]] = payload
         elif kind == "status":
             self._schedule(self._broadcast_status())
@@ -127,11 +153,56 @@ class LiveHub:
                 await self._broadcast({"type": "entities", "changed": changed})
             elif not self.clients:
                 self._pending_entities.clear()
+            if self._pending_states:
+                ids, self._pending_states = self._pending_states, set()
+                await self._send_states(ids)
+
+    async def _send_states(self, ids: set[str]) -> None:
+        rooms = self.core.rooms
+        if rooms is None:
+            return
+        views = {e: rooms.entity_live(e) for e in ids}
+        for ws, watched in list(self.watching.items()):
+            changed = [views[e] for e in ids & watched]
+            if not changed or ws.closed:
+                continue
+            try:
+                await ws.send_json({"type": "states", "changed": changed})
+            except (ConnectionError, RuntimeError):
+                self.clients.discard(ws)
+                self.watching.pop(ws, None)
 
     async def _heartbeat_loop(self) -> None:
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL)
             await self._broadcast_status()
+
+    def _on_client_message(self, ws: web.WebSocketResponse, data: str) -> None:
+        """Only ``watch`` is accepted (read-only); anything else is ignored."""
+        if len(data) > 200_000:
+            return
+        try:
+            message = json.loads(data)
+        except ValueError:
+            return
+        if not isinstance(message, dict) or message.get("type") != "watch":
+            return
+        entities = message.get("entities")
+        if not isinstance(entities, list):
+            return
+        ids = frozenset(e for e in entities[:MAX_WATCH] if isinstance(e, str) and _ENTITY_ID.match(e))
+        if ids:
+            self.watching[ws] = ids
+            self._schedule(self._send_initial(ws, ids))
+        else:
+            self.watching.pop(ws, None)
+
+    async def _send_initial(self, ws: web.WebSocketResponse, ids: frozenset[str]) -> None:
+        rooms = self.core.rooms
+        if rooms is None or ws.closed:
+            return
+        with contextlib.suppress(ConnectionError, RuntimeError):
+            await ws.send_json({"type": "states", "changed": [rooms.entity_live(e) for e in sorted(ids)]})
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
         if not origin_allowed(request):
@@ -146,9 +217,11 @@ class LiveHub:
                 if msg.type == WSMsgType.TEXT:
                     if msg.data == '{"type":"ping"}':
                         await ws.send_json({"type": "pong"})
-                    # Nothing else is accepted from the browser in Phase A1.
+                        continue
+                    self._on_client_message(ws, msg.data)
                 elif msg.type == WSMsgType.ERROR:
                     break
         finally:
             self.clients.discard(ws)
+            self.watching.pop(ws, None)
         return ws

@@ -1189,9 +1189,10 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     from .curtains.websocket import CURTAIN_HANDLERS
     from .zone_websocket import ZONE_HANDLERS
     from .priority_websocket import PRIORITY_HANDLERS
+    from .rooms_api import ROOMS_HANDLERS
 
     for handler in (*SWITCH_HANDLERS, *PRESENCE_HANDLERS, *PRELIMINARY_HANDLERS, *PROFILE_HANDLERS, *FORECAST_HANDLERS,
-                    *ZONE_HANDLERS, *CURTAIN_HANDLERS, *BRIGHTNESS_HANDLERS, *PRIORITY_HANDLERS):
+                    *ZONE_HANDLERS, *CURTAIN_HANDLERS, *BRIGHTNESS_HANDLERS, *PRIORITY_HANDLERS, *ROOMS_HANDLERS):
         websocket_api.async_register_command(hass, handler)
     for handler in (
         ws_editor, ws_subscribe, ws_preview, ws_profile_set, ws_mood_set, ws_settings_set, ws_adaptive_set, ws_room_set,
