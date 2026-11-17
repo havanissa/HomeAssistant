@@ -38,10 +38,11 @@ READ_ONLY = {
     "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "config_entries/subscribe",
     "manifest/get", "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
     "config/floor_registry/list", "config/auth/list", "smart_occupancy/rooms/get", "smart_occupancy/rooms/review",
-    "smart_occupancy/rooms/restore/review",
+    "smart_occupancy/rooms/restore/review", "smart_occupancy/presence/get", "smart_occupancy/presence/review",
+    "history/history_during_period",
 }
-APP_VERSION = "0.2.1"
-INTEGRATION_VERSION = "0.6.9"
+APP_VERSION = "0.3.0"
+INTEGRATION_VERSION = "0.6.10"
 
 VIEWPORTS = {
     "phone-360": {"viewport": {"width": 360, "height": 740}, "is_mobile": True, "has_touch": True, "device_scale_factor": 3},
@@ -196,6 +197,9 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
             expect(frame.locator("[data-testid=room-grid] .room-card").first).to_be_visible()
         elif route == "floorplan":
             expect(frame.locator(".fp-page")).to_be_visible()
+        elif route == "presence":
+            # Phase A3.1: the Presence interface is in the App; the integration keeps the engine.
+            expect(frame.locator("[data-testid=presence-ownership]")).to_contain_text("Smart Occupancy integration")
         elif route not in ("dashboard", "diagnostics", "settings"):
             card = frame.locator(f"[data-testid=pending-{route}]")
             expect(card).to_be_visible()

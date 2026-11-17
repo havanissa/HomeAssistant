@@ -17,6 +17,7 @@ from .const import APP_NAME, APP_PHASE, APP_VERSION
 from .floorplan import FloorPlanService
 from .ha import ALLOWED_COMMANDS, CONFIG_WRITE_COMMANDS, READ_ONLY_COMMANDS, HomeAssistantClient, utcnow_iso
 from .logbuffer import RingBufferHandler
+from .presence import PresenceService
 from .rooms import RoomsService
 from .settings import Settings
 from .supervisor import SupervisorClient
@@ -40,6 +41,7 @@ class AppCore:
         self.supervisor: SupervisorClient | None = None
         self.rooms: RoomsService | None = None
         self.floorplan: FloorPlanService | None = None
+        self.presence: PresenceService | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._rooms_timer: asyncio.TimerHandle | None = None
         self._rooms_listeners: list = []
@@ -50,11 +52,12 @@ class AppCore:
         self.supervisor = SupervisorClient(self.session, self.settings.supervisor_url, self.settings.token)
         self.rooms = RoomsService(self.ha, self.settings.data_dir)
         self.floorplan = FloorPlanService(self.ha, self.rooms, self.settings.data_dir)
+        self.presence = PresenceService(self.ha, self.rooms)
         self.floorplan.load()
         self.ha.add_listener(self._on_ha)
         await self.ha.start()
         self._tasks.append(asyncio.create_task(self._supervisor_loop(), name="supervisor-refresh"))
-        _LOGGER.info("%s %s (Phase %s) started; room configuration edits only through the integration's API",
+        _LOGGER.info("%s %s (Phase %s) started; room and presence edits only through the integration's API",
                      APP_NAME, APP_VERSION, APP_PHASE)
 
     def add_rooms_listener(self, listener) -> None:
@@ -130,13 +133,14 @@ class AppCore:
         return {
             "read_only": False,
             "configuration_writes": True,
-            "write_scope": "Room configuration of the existing integration (sensor and light assignments, "
-                           "through its validated, administrator-only commands); floor plans in the App's own "
-                           "storage",
+            "write_scope": "Room and presence configuration of the existing integration (sensor and light "
+                           "assignments, sensor roles, occupancy timing), through its validated, administrator-only "
+                           "commands; floor plans in the App's own storage",
             "config_writes_sent": writes,
             "recent_config_writes": list(self.ha.config_writes) if self.ha else [],
             "device_control": False,
             "automation_engine": False,
+            "occupancy_engine": "integration",
             "automatic_migration": False,
             "modifies_integration": writes > 0,
             "service_calls_sent": other_commands,  # always 0: the client cannot send them
@@ -213,6 +217,16 @@ class AppCore:
                 checks.append({"key": "rooms_api", "title": "Room configuration API", "status": WARNING,
                                "detail": self.rooms.api_error or "Not available"})
 
+        if ha and ha.connected and self.presence is not None and self.presence.api_state != "unknown":
+            p = self.presence.status()
+            if p["api"] == "ok":
+                checks.append({"key": "presence_api", "title": "Presence API", "status": OK,
+                               "detail": "Available; the integration's occupancy engine is shown and configured"
+                               + ("" if p["history"] else " (no Recorder history)")})
+            else:
+                checks.append({"key": "presence_api", "title": "Presence API", "status": WARNING,
+                               "detail": p["error"] or "Not available"})
+
         if self.floorplan is not None:
             fp = self.floorplan.status()
             if fp["read_only"]:
@@ -234,7 +248,7 @@ class AppCore:
                 "title": "Safety",
                 "status": OK if safety["service_calls_sent"] == 0 else ERROR,
                 "detail": "No service calls and no device control. Configuration changes only through the "
-                          f"integration's room commands ({safety['config_writes_sent']} so far).",
+                          f"integration's room and presence commands ({safety['config_writes_sent']} so far).",
             }
         )
         return checks
@@ -276,6 +290,7 @@ class AppCore:
             "supervisor": self.supervisor.as_dict() if self.supervisor else None,
             "rooms": self.rooms.status() if self.rooms else None,
             "floorplan": self.floorplan.status() if self.floorplan else None,
+            "presence": self.presence.status() if self.presence else None,
             "modules": modules.modules(),
             "migration": modules.migration(),
             "safety": self.safety(),

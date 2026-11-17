@@ -99,6 +99,21 @@ class FakeHomeAssistant:
              "group_ids": ["system-users"]},
         ]
         self.entry_subscriptions: dict[web.WebSocketResponse, list[int]] = {}
+        # The integration's presence API (0.6.10), simplified; the Recorder history.
+        self.presence_api = True
+        self.global_timing: dict[str, int] = {"correlation_window": 10, "exit_confirmation": 300,
+                                              "inactivity_timeout": 600, "dropout_grace": 30,
+                                              "trigger_stuck_after": 1800, "presence_stuck_after": 0,
+                                              "startup_hold": 120}
+        self.history_components = True
+        self.history_calls: list[dict[str, Any]] = []
+        self.history: dict[str, list[dict[str, Any]]] = {
+            "sensor.kamar_nordur_status": [{"s": "vacant", "lu": 1794900000.0},
+                                           {"s": "possible_occupancy", "lu": 1794900060.0},
+                                           {"s": "confirmed_occupancy", "lu": 1794900070.0}],
+            "binary_sensor.kamar_radar": [{"s": "off", "lu": 1794900000.0}, {"s": "on", "lu": 1794900061.5},
+                                          {"s": "on", "lu": 1794900062.0}],
+        }
         self.floors = [{"floor_id": "ground", "name": "Ground floor", "level": 0, "icon": None}]
 
     # -- data ---------------------------------------------------------------
@@ -112,7 +127,8 @@ class FakeHomeAssistant:
             "language": "en",
             "currency": "DKK",
             "unit_system": {"length": "km", "temperature": "°C"},
-            "components": ["http", "websocket_api", "smart_occupancy", "light"],
+            "components": ["http", "websocket_api", "smart_occupancy", "light"]
+            + (["recorder", "history"] if self.history_components else []),
             "safe_mode": False,
             "recovery_mode": False,
         }
@@ -215,6 +231,58 @@ class FakeHomeAssistant:
                             for c in self.require_confirmation],
                 "requires_confirmation": list(self.require_confirmation), "apply": "reload" if changes else "none",
                 "writable": self.loaded}
+
+    def presence_model(self, area_id: str | None) -> dict[str, Any]:
+        rooms = {}
+        for a, r in self.rooms_options.items():
+            if area_id and a != area_id:
+                continue
+            timing = r.get("timing") or {}
+            signals = [{"entity_id": x["entity_id"], "name": x["entity_id"], "kind": x["kind"], "kind_name": x["kind"],
+                        "role": x["role"], "inverted": x.get("inverted", False), "enabled": x.get("enabled", True),
+                        "state": "on", "label": "Detected", "value": "active", "status": "active",
+                        "condition": "active", "health": "available", "available": True,
+                        "deadlines": {}, "effect": "presence"} for x in r.get("sensors", [])]
+            rooms[a] = {
+                "area_id": a, "name": a, "configured": True, "enabled": r.get("enabled", False),
+                "revision": revision_of(r), "sensors": copy.deepcopy(r.get("sensors", [])),
+                "timing": [{"key": k, "value": timing.get(k, v), "global": v, "overridden": k in timing}
+                           for k, v in self.global_timing.items()],
+                "timing_overrides": dict(timing),
+                "entities": {"state": "sensor.kamar_nordur_status", "reason": None,
+                             "occupied": "binary_sensor.kamar_nordur_occupancy"} if a == "kamar_nordur" else {},
+                "problems": [], "automation": {"lighting_automatic": False, "curtains_automatic": []}, "zones": [],
+                "diagnostics": [{"code": "single_signal", "level": "info", "basis": "heuristic", "title": "One signal",
+                                 "detail": "", "action": "", "target": "sensors", "entity_id": None,
+                                 "setting": None}],
+                "occupancy": {"state": "confirmed_occupancy", "occupied": True, "reason": "Radar active",
+                              "confidence": {"score": 80}} if r.get("enabled") else None,
+                "signals": signals if r.get("enabled") else [],
+                "explain": {"next": []} if r.get("enabled") else None,
+            }
+        return {"api_version": 1, "integration_version": "0.6.10", "now": "2026-11-17T10:00:00+00:00",
+                "loaded": self.loaded, "writable": self.loaded, "state": "loaded", "operating_mode": "observe",
+                "global": {"timing": dict(self.global_timing), "revision": revision_of(self.global_timing)},
+                "timing_schema": [{"key": k, "default": v, "min": 0, "max": 86400} for k, v in self.global_timing.items()],
+                "kinds": [], "roles": [], "states": [], "transitions": [],
+                "state_values": {"active": ["on"], "inactive": ["off"]}, "rooms": rooms,
+                "log": [{"seq": 1, "time": "2099-01-01T00:00:00.000+00:00", "kind": "start", "area_id": None}],
+                "log_seq": 1}
+
+    def presence_plan(self, area_id: str | None, change: dict[str, Any], expected: str | None) -> dict[str, Any]:
+        current = revision_of(self.global_timing) if area_id is None else revision_of(self.rooms_options.get(area_id))
+        timing = change.get("timing") or {}
+        errors = [{"code": "timing_range", "setting": k, "message": f"{k} out of range"}
+                  for k, v in timing.items() if v is not None and v < 0]
+        changes = [{"type": "timing", "key": k, "new": v} for k, v in timing.items()]
+        changes += [{"type": "sensor_role", "entity_id": x["entity_id"]} for x in change.get("sensors") or []]
+        return {"scope": "global" if area_id is None else "room", "area_id": area_id, "revision": current,
+                "stale": expected is not None and expected != current, "errors": errors,
+                "changes": changes if not errors else [], "affected_rooms": [],
+                "impacts": [{"code": c, "level": "confirm", "title": c, "detail": c}
+                            for c in self.require_confirmation],
+                "requires_confirmation": list(self.require_confirmation),
+                "apply": "live" if changes and not errors else "none", "writable": self.loaded}
 
     async def notify_entry_changed(self) -> None:
         for ws, ids in list(self.entry_subscriptions.items()):
@@ -334,6 +402,36 @@ class FakeHomeAssistant:
                 await result({"applied": "reload", "rooms": list(msg["rooms"]),
                               "revision": revision_of(self.rooms_options)})
                 await self.notify_entry_changed()
+        elif kind.startswith("smart_occupancy/presence/") and not self.presence_api:
+            await error("unknown_command", "Unknown command.")
+        elif kind == "smart_occupancy/presence/get":
+            await result(self.presence_model(msg.get("area_id")))
+        elif kind == "smart_occupancy/presence/review":
+            await result(self.presence_plan(msg.get("area_id"), msg["change"], msg.get("expected_revision")))
+        elif kind == "smart_occupancy/presence/set":
+            plan = self.presence_plan(msg.get("area_id"), msg["change"], msg["expected_revision"])
+            if plan["stale"]:
+                await error("stale_revision", "Changed elsewhere")
+            elif plan["errors"]:
+                await error("invalid_room", plan["errors"][0]["message"])
+            elif [c for c in plan["requires_confirmation"] if c not in msg.get("confirmed", [])]:
+                await error("confirmation_required", "These consequences must be confirmed")
+            else:
+                timing = msg["change"].get("timing") or {}
+                if msg.get("area_id") is None:
+                    self.global_timing.update({k: v for k, v in timing.items() if v is not None})
+                    revision = revision_of(self.global_timing)
+                else:
+                    room = self.rooms_options[msg["area_id"]]
+                    room["timing"] = {**room.get("timing", {}), **{k: v for k, v in timing.items()
+                                                                     if v is not None}}
+                    revision = revision_of(room)
+                await result({"applied": plan["apply"], "changes": plan["changes"], "revision": revision,
+                              "rooms_revision": revision_of(self.rooms_options)})
+                await self.notify_entry_changed()
+        elif kind == "history/history_during_period":
+            self.history_calls.append(msg)
+            await result({e: self.history[e] for e in msg["entity_ids"] if e in self.history})
         else:
             await error("unknown_command", f"Unknown command {kind}")
 
@@ -356,8 +454,8 @@ class FakeHomeAssistant:
         if request.headers.get("Authorization") != f"Bearer {self.token}":
             return web.json_response({"result": "error", "message": "Unauthorized"}, status=401)
         if request.path == "/addons/self/info":
-            data = {"name": "Smart Occupancy & Lighting", "slug": "smart_lighting", "version": "0.2.1",
-                    "version_latest": "0.2.1", "update_available": False, "state": "started", "arch": "amd64",
+            data = {"name": "Smart Occupancy & Lighting", "slug": "smart_lighting", "version": "0.3.0",
+                    "version_latest": "0.3.0", "update_available": False, "state": "started", "arch": "amd64",
                     "options": {"log_level": "info"}, "ingress_url": "/api/hassio_ingress/xyz/"}
         else:
             data = {"supervisor": "2026.11.2", "homeassistant": HA_VERSION, "hassos": "17.1",

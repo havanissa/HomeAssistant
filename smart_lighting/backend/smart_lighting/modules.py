@@ -14,9 +14,12 @@ different times:
   matching integration function is switched off, so both never control the
   same devices. In Phase A2 this is the integration for every module.
 
-Phase A2 moves only the Rooms configuration interface (room, sensor and light
-assignments) to the App. Room occupancy, lighting, switches, curtains and
-predictions keep running in the integration, unchanged.
+Phase A2 moved the Rooms configuration interface (room, sensor and light
+assignments) to the App. Phase A3.1 moves the Presence interface: occupancy
+sensors and their roles, occupancy timing, the live occupancy debugger and
+presence diagnostics. Room occupancy itself (the engine and its entities),
+lighting, switches, curtains and predictions keep running in the integration,
+unchanged; Phase A3.2 may move the occupancy engine, only after approval.
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ class Module:
     config_source: str | None = None
     automation_owner: str | None = None
     scope: str | None = None  # what the App's interface covers (GUI modules)
+    phase: str | None = None  # the App phase that moved its interface
 
     def __post_init__(self) -> None:
         if self.kind != "feature":  # foundation and tools (the floor plan) migrate nothing
@@ -72,6 +76,7 @@ MODULES: tuple[Module, ...] = (
         scope="Room configuration: enabled rooms, sensor and light assignments, sensor kind and role, inverted "
               "signals, reference occupancy entity and adjacent rooms. Stored in the integration; the integration "
               "keeps running room occupancy.",
+        phase="A2",
     ),
     Module(
         "floorplan", "Floor plan", "home-map-marker", "tool", AVAILABLE,
@@ -80,9 +85,15 @@ MODULES: tuple[Module, ...] = (
         "no automation.",
     ),
     Module(
-        "presence", "Presence", "motion-sensor", "feature", PENDING,
-        "Occupancy sensors, presence settings, zones and radar distance zones.",
-        "The Smart Room Lighting card (Presence and zone settings).",
+        "presence", "Presence", "motion-sensor", "feature", GUI,
+        "Occupancy of every room, sensors and their roles, occupancy timing, a live occupancy debugger and "
+        "presence diagnostics.",
+        "This App (Presence). The integration's room card (Presence tab) and options flow keep working on the same "
+        "configuration. Lighting zones and radar distance zones are still edited in the Smart Room Lighting card.",
+        scope="Presence configuration: sensor roles, inverted and included signals, global occupancy timing and "
+              "room overrides; live engine view, timeline and diagnostics. Stored in the integration; the "
+              "integration's occupancy engine keeps deciding occupancy (it moves only in Phase A3.2, after approval).",
+        phase="A3.1",
     ),
     Module(
         "lighting", "Lighting", "lightbulb-group", "feature", PENDING,
@@ -134,7 +145,7 @@ def migration() -> dict[str, object]:
     migrated = [m for m in features if m.automation_owner == APP]
     interfaces = [m for m in features if m.gui_owner == APP]
     return {
-        "current_phase": "A2.1",
+        "current_phase": "A3.1",
         "foundation_complete": True,
         "modules_total": len(features),
         "modules_migrated": len(migrated),
@@ -148,7 +159,7 @@ def migration() -> dict[str, object]:
             {"key": "foundation", "title": "App foundation", "status": "done", "phase": "A1", "controlled_by": None,
              "gui_owner": None, "config_source": None, "automation_owner": None},
             *(
-                {"key": m.key, "title": m.title, "status": m.status, "phase": "A2" if m.status == GUI else None,
+                {"key": m.key, "title": m.title, "status": m.status, "phase": m.phase if m.status == GUI else None,
                  "controlled_by": m.controlled_by, "gui_owner": m.gui_owner, "config_source": m.config_source,
                  "automation_owner": m.automation_owner}
                 for m in features

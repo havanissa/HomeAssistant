@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.10 — Presence API for the Smart Lighting App (App Phase A3.1)
+
+### Added
+
+- `presence_api.py`: administrator-only websocket commands `smart_occupancy/presence/get`, `presence/review` and `presence/set`. `get` returns every room's live engine view (state, reason, confidence, evidence, last activity, quiet period, vacancy deadline and path, start-up hold, per-signal status and the moments it changes by itself: sustained confirmation, stuck, dropout bridge, recent door movement), what the engine waits for next, timing with its inheritance, the timing schema (ranges, what 0 means), diagnostics (`measured` from the engine and the states, `integration` from its health checks, `heuristic` suggestions from the configuration: presence sensor as Trigger, inverted motion sensor, fast vacancy slower than the vacancy timeout, stuck detection off, …), lighting zones and radar distance zones with their live status, and the presence log. `review` / `set` change one room's sensors (validated exactly like the Rooms API) and timing overrides, or the global timing defaults. Revisions: the room's (as in the Rooms API) or the global defaults' own. Timing, role, inverted and include/exclude are applied live (`coordinator.async_apply_presence`); adding or removing a sensor or changing its type reloads. Consequences that need confirmation: rooms with Automatic lighting affected, and a decision that changes at once. The review predicts each affected room's decision by evaluating a copy of its engine with the new settings (`predict`).
+- `presence_log.py`: bounded presence log (400 entries, memory only, kept across reloads): engine transitions with their evidence, presence configuration changes (live or reload, App or integration) and starts.
+- Tests: `tests/test_presence_api.py` (13).
+
+### Changed
+
+- `coordinator.async_apply_presence` accepts the exact options to store, so live presence changes from the Presence and Rooms APIs keep option keys the typed configuration does not know.
+
+### Not changed
+
+- The occupancy engine and its states, lighting, switches, curtains and forecasts; the options flow, the room card's Presence tab and its commands; the dashboard cards (versions follow the release number only).
+
 ## 0.6.9 — Room configuration API for the Smart Lighting App (App Phase A2)
 
 ### Added

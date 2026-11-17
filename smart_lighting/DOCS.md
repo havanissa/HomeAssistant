@@ -4,7 +4,54 @@ The **Smart Lighting** App is the new home of the Smart Occupancy & Lighting
 configuration. It replaces the integration's dashboard cards and options
 screens module by module, and only after you approve each step.
 
-## Phase A2.1: what this version does
+## Phase A3.1: what this version does
+
+- **Presence** shows every configured room's occupancy exactly as the Smart
+  Occupancy integration decides it: the state (Vacant, Possible occupancy,
+  Occupied, Vacancy pending, Uncertain), its confidence, the sensors and their
+  live readings, time since the last activity, and the engine's own
+  confirmation or vacancy countdown. Filter by occupied, possible, vacant,
+  uncertain, unavailable sensors or problems.
+- A room's **Presence workspace** has its sensors on the left (assigned and
+  available in the area), the engine's decision in the centre (state machine,
+  the reason in the engine's words, what happens next and when, the current
+  visit step by step, lighting and radar distance zones) and an inspector on
+  the right: type (with Home Assistant's own suggestion), role with an
+  explanation, inverted, included, availability, device and advanced details.
+- **Timing**: the engine's own parameters (vacancy timeout, fast vacancy
+  timeout, occupancy confirmation, radar dropout bridge, PIR and presence
+  stuck detection, start-up hold). **Global timing** sets the defaults; a
+  room shows whether each value is inherited or its own, and *Use global*
+  removes an override. Values are validated by the integration.
+- **Timeline**: sensor activations and clears, unavailability, the engine's
+  decisions with their reasons and evidence, and presence setting changes, for
+  the last 15 min, 1 h, 6 h or 24 h (Home Assistant's Recorder, read only when
+  you open or refresh it) plus everything live while the page is open. Filter
+  by event type and sensor; select an event for its details. Times are
+  24-hour, in Home Assistant's time zone.
+- **Diagnostics**: missing, unavailable and stuck sensors, states the engine
+  does not understand, disagreeing presence sensors, rooms that cannot
+  confirm occupancy, suspicious roles and inverted sensors, unusual timing,
+  and the integration's own health checks. Each item says whether it was
+  *measured*, comes from a *health check* or is a *suggestion*, and links to
+  the setting. Nothing is changed automatically.
+- Saving: every change is reviewed first. The review lists the changes, the
+  rooms affected and the integration's prediction of each room's decision
+  right after saving (computed on a copy of the engine). Changes that affect
+  rooms with Automatic lighting, or that change a decision at once, must be
+  confirmed. Timing, role, inverted and included are applied at once without a
+  reload; adding or removing a sensor or changing its type reloads the
+  integration (occupancy is restored).
+- **Floor plan → Live → Presence overlay**: rooms with their decision and
+  countdown, presence sensors as the engine sees them, warnings; select a
+  sensor or a room to open it in Presence. Radar distance zones are listed
+  with their configured band and the measured distance; no coverage or
+  person position is drawn.
+
+The occupancy engine itself stays in the integration (Phase A3.2 may move it,
+only after you approve it).
+
+## Phase A2 and A2.1
 
 - **Rooms** is a full room editor. Every Home Assistant area is listed, with
   its status (Configured, Not configured, Disabled, Problem), current
@@ -19,9 +66,9 @@ screens module by module, and only after you approve each step.
   Smart Occupancy & Lighting integration, the only place the room
   configuration lives; the integration's own *Configure → Rooms* keeps
   working on the same settings.
-- The other modules (Presence timing, Lighting, Moods, Switches, Curtains,
-  Predictions) are shown read-only or as **Migration pending** and are still
-  configured in the integration's dashboard cards.
+- The other modules (Lighting, Moods, Switches, Curtains, Predictions) are
+  shown read-only or as **Migration pending** and are still configured in the
+  integration's dashboard cards.
 - Dashboard and Diagnostics: connection, health, the integration's status,
   safety and the migration progress.
 
@@ -30,12 +77,14 @@ It does **not**:
 - control lights, covers or any other device, or call any Home Assistant action (service)
 - run automations: the integration keeps doing all the work, unchanged
 - change Home Assistant's areas, devices or entities, Zigbee bindings or MQTT
-- change anything in the integration other than the room settings you save
+- change anything in the integration other than the room and presence settings you save
+- run its own occupancy engine
 - migrate anything automatically
 - need the internet while it runs
 
-Saving a room needs **Smart Occupancy & Lighting 0.6.9 or newer** (update it
-in HACS first). With an older version, Rooms are shown read-only.
+Saving a room needs **Smart Occupancy & Lighting 0.6.9 or newer**; the
+Presence pages need **0.6.10 or newer** (update it in HACS first). With an
+older version, Rooms are shown read-only and Presence asks for the update.
 
 ## Installation (Home Assistant OS)
 
@@ -184,8 +233,9 @@ a backup) and **Backups**.
 Modules move from the integration to the App one at a time, only after you
 approve each step. For each module the App reports where it is **configured**,
 where the configuration is **stored**, and which system **runs** it. In this
-version Rooms is configured in the App, stored in the integration and run by
-the integration; every other module is configured, stored and run in the
+version Rooms and Presence are configured in the App, stored in the
+integration and run by the integration (its occupancy engine decides
+occupancy); every other module is configured, stored and run in the
 integration. The integration and the App never control the same devices.
 
 ## Configuration
@@ -210,22 +260,29 @@ integration. The integration and the App never control the same devices.
 
 - Only Home Assistant administrators can save (the App checks the user Home
   Assistant's Ingress reports). Requests must come from the App's own page.
-- The App backend sends only a fixed list of commands to Home Assistant: reads,
-  and the integration's own validated room commands. It cannot call services,
+- The App backend sends only a fixed list of commands to Home Assistant: reads
+  (including the Recorder history, for a bounded window when you open a
+  timeline), and the integration's own validated room and presence commands. It cannot call services,
   write states or change registries. Its token never reaches the browser.
 - Floor plans and their images are stored in the App's data folder. Images are
   checked by their content (PNG, JPEG, WebP only; no SVG) and are only served
   through Home Assistant's Ingress, never from a public address.
 
-## Known limitations (Phase A2.1)
+## Known limitations (Phase A3.1)
 
 - Floor plan: no curved walls, wall thickness, stairs or furniture (it is not a
-  CAD program); radar zones, sensor coverage and sun analysis are not drawn yet.
+  CAD program); sensor coverage and sun analysis are not drawn (the
+  integration does not know a sensor's coverage or direction).
   Live occupancy needs rooms observed by Smart Occupancy.
-
-- Only the room configuration (rooms, sensor and light assignments) is edited
-  here. Presence timing, lighting behaviour, moods, switches, curtains and
-  forecasts are configured in the integration's dashboard cards as before.
+- Presence: lighting zones and radar distance zones are shown, not edited
+  (they stay in the Smart Room Lighting card). The integration's presence log
+  keeps the latest 400 decisions and changes while Home Assistant runs;
+  older history comes from the Recorder (room state, reason and sensors), so
+  decisions before the last restart show the state and reason only.
+- Confidence is the integration's evidence-quality score, not a probability.
+- Only rooms, presence sensors and occupancy timing are edited here. Lighting
+  behaviour, moods, switches, curtains and forecasts are configured in the
+  integration's dashboard cards as before.
 - Saving needs the integration to be running; while it is not, rooms are shown
   from its stored configuration.
 - The theme follows your device (or your choice in Settings), not the Home

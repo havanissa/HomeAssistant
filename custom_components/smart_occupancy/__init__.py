@@ -38,6 +38,7 @@ from .const import DOMAIN
 from .coordinator import SmartOccupancyConfigEntry, SmartOccupancyCoordinator
 from .entity import expected_unique_ids
 from .models import IntegrationConfig, migrate_options, rename_entity_references
+from .presence_log import record_config_change, record_reload
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntr
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    record_reload(hass)
     return True
 
 
@@ -166,6 +168,8 @@ async def _async_options_updated(hass: HomeAssistant, entry: SmartOccupancyConfi
     # Presence settings saved from the room card (0.3.8) are applied live; every other change reloads.
     if entry.runtime_data.consume_live_options(dict(entry.options)):
         return
+    record_config_change(hass, entry.runtime_data.config, IntegrationConfig.from_dict(dict(entry.options)),
+                         applied="reload")
     await hass.config_entries.async_reload(entry.entry_id)
 
 

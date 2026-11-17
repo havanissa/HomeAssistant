@@ -81,6 +81,10 @@ import {
 } from "../floorplan/model";
 import { ADJACENCY_HELP, suggest, type Suggestion } from "../floorplan/suggestions";
 import { formatArea, formatLength, parseLength, type Units } from "../floorplan/units";
+import { clock, clockOffset, countdown, type PresenceOverview } from "../presence/model";
+import { entityWarnings, overlayView, sensorIndex } from "../presence/overlay";
+import { stateChip } from "../presence/components";
+import { LiveReload } from "./presence";
 
 const MODES: Array<{ key: Mode; title: string; icon: string; help: string }> = [
   { key: "build", title: "Build", icon: "rectangle", help: "Draw floors, rooms, doors and windows" },
@@ -158,6 +162,9 @@ export class SlFloorplan extends StoreElement {
     floorId: { state: true },
     tool: { state: true },
     selection: { state: true },
+    presence: { state: true },
+    presenceData: { state: true },
+    presenceError: { state: true },
     leftOpen: { state: true },
     inspectorOpen: { state: true },
     leftTab: { state: true },
@@ -210,6 +217,15 @@ export class SlFloorplan extends StoreElement {
   declare showValues: boolean;
   declare chain: boolean;
   declare problemsOnly: boolean;
+  /** Phase A3.1: the Presence overlay of the Live mode (the integration's presence view). */
+  declare presence: boolean;
+  declare presenceData: PresenceOverview | null;
+  declare presenceError: string | null;
+  private presenceOffset = 0;
+  private presenceLoading = false;
+  private presenceSeenRooms = -1;
+  private presenceTimer: number | undefined;
+  private presenceReload = new LiveReload(() => this.loadPresence(), () => (this.watched ? this.watched.split(",") : []));
   declare showDismissed: boolean;
   declare paletteLimit: number;
   declare menuOpen: boolean;
@@ -255,6 +271,9 @@ export class SlFloorplan extends StoreElement {
     this.showValues = prefBool("values", true);
     this.chain = true;
     this.problemsOnly = false;
+    this.presence = prefBool("presence", false);
+    this.presenceData = null;
+    this.presenceError = null;
     this.showDismissed = false;
     this.paletteLimit = PALETTE_LIMIT;
     this.menuOpen = false;
@@ -283,9 +302,57 @@ export class SlFloorplan extends StoreElement {
     window.removeEventListener("keydown", this.onKey);
     setLeaveGuard(null);
     live.watch([]);
+    this.presenceReload.stop();
+    window.clearInterval(this.presenceTimer);
+  }
+
+  async loadPresence(): Promise<void> {
+    if (this.presenceLoading) return;
+    this.presenceLoading = true;
+    try {
+      const data = await getRooms<PresenceOverview>("api/presence");
+      this.presenceOffset = clockOffset(data.now);
+      this.presenceData = data;
+      this.presenceError = null;
+      this.updateWatch();
+    } catch (err) {
+      this.presenceError = err instanceof Error ? err.message : String(err);
+    } finally {
+      this.presenceLoading = false;
+    }
+  }
+
+  private setPresence(on: boolean): void {
+    this.presence = on;
+    setPref("presence", on ? "1" : "0");
+    window.clearInterval(this.presenceTimer);
+    if (on) {
+      void this.loadPresence();
+      this.presenceTimer = window.setInterval(() => this.requestUpdate(), 1000);
+    } else {
+      this.presenceData = null;
+      this.updateWatch();
+    }
+  }
+
+  private presenceOn(): boolean {
+    return this.mode === "live" && this.presence;
   }
 
   protected willUpdate(changed: Map<string, unknown>): void {
+    if (this.presenceOn()) {
+      if (!this.presenceData && !this.presenceLoading && !this.presenceError) {
+        void this.loadPresence();
+        window.clearInterval(this.presenceTimer);
+        this.presenceTimer = window.setInterval(() => this.requestUpdate(), 1000);
+      }
+      if (this.presenceData) this.presenceReload.check();
+      if (store.roomsVersion !== this.presenceSeenRooms) {
+        const first = this.presenceSeenRooms === -1;
+        this.presenceSeenRooms = store.roomsVersion;
+        if (!first) void this.loadPresence();
+      }
+    }
     if (!MODES.some((m) => m.key === this.mode) && this.plan) {
       // Default: watch a drawn home live; start drawing when there is nothing yet.
       const mode: Mode = this.plan.floors.some((f) => f.rooms.length) ? "live" : "build";
@@ -381,6 +448,9 @@ export class SlFloorplan extends StoreElement {
       const ents = room.area_id ? this.ctx?.room_entities[room.area_id] : undefined;
       if (ents?.state) ids.add(ents.state);
       if (ents?.mood_lighting) ids.add(ents.mood_lighting);
+      // Presence overlay: the room's sensors too (their changes refresh the engine's view).
+      const pr = this.presenceOn() && room.area_id ? this.presenceData?.rooms.find((r) => r.area_id === room.area_id) : undefined;
+      for (const s of pr?.sensors ?? []) ids.add(s.entity_id);
     }
     const key = [...ids].sort().join(",");
     if (key !== this.watched) {
@@ -979,8 +1049,17 @@ export class SlFloorplan extends StoreElement {
         });
       } else {
         const l = roomLive(areaKnown ? room.area_id : null, this.ctx, store.liveStates);
-        const extra = [l.lighting, l.overrides ? plural(l.overrides, "manual override", "manual overrides") : null].filter(Boolean).join(" · ");
-        out.set(room.id, { tone: l.tone, title, subtitle: l.label, detail: extra || null });
+        const pr = this.presenceOn() && room.area_id ? this.presenceData?.rooms.find((r) => r.area_id === room.area_id) : undefined;
+        if (pr) {
+          // Presence overlay: the engine's countdown (only when it reports one) and the room's warnings.
+          const cd = countdown(pr, this.presenceOffset);
+          const warn = pr.counts.errors + pr.counts.warnings;
+          const extra = [cd ? `${cd.label} ${clock(cd.seconds)}` : `${pr.counts.active} of ${pr.counts.sensors} sensors active`, warn ? plural(warn, "warning", "warnings") : null].filter(Boolean).join(" · ");
+          out.set(room.id, { tone: l.tone, title, subtitle: l.label, detail: extra || null });
+        } else {
+          const extra = [l.lighting, l.overrides ? plural(l.overrides, "manual override", "manual overrides") : null].filter(Boolean).join(" · ");
+          out.set(room.id, { tone: l.tone, title, subtitle: l.label, detail: extra || null });
+        }
       }
     }
     return out;
@@ -988,11 +1067,27 @@ export class SlFloorplan extends StoreElement {
 
   private placementViews(floor: Floor): PlacementView[] {
     const out: PlacementView[] = [];
+    const overlay = this.presenceOn() && this.presenceData;
+    const sensors = overlay ? sensorIndex(this.presenceData) : null;
+    const warnings = overlay ? entityWarnings(this.presenceData) : null;
     for (const p of floor.placements) {
       const r = this.resolve(p);
       const e = r.entity;
       const view = deviceView(r.entity_id, store.liveStates.get(r.entity_id), e);
       const group = e?.group ?? "other";
+      if (sensors && warnings) {
+        // Presence overlay: presence sensors and contacts only, as the engine sees them.
+        const uses = sensors.get(r.entity_id);
+        if (!uses && group !== "presence") continue;
+        const ov = uses ? overlayView(uses) : { tone: view.tone === "active" ? "idle" as DeviceTone : view.tone, text: `${view.text} · not used` };
+        const warn = warnings.get(r.entity_id);
+        out.push({
+          id: p.id, x: p.x, y: p.y, icon: e?.icon ?? "puzzle", tone: ov.tone,
+          title: `${p.label || e?.name || r.entity_id} · ${ov.text}${uses ? ` · ${uses.map((u) => u.room.name).join(", ")}` : ""}`,
+          value: ov.text, badge: warn?.length || ov.tone === "unavailable" ? "!" : null,
+        });
+        continue;
+      }
       if (this.mode === "live") {
         if (this.groups.size && !this.groups.has(group)) continue;
         if (this.problemsOnly && !["unavailable", "unknown", "missing"].includes(view.tone)) continue;
@@ -1294,6 +1389,11 @@ export class SlFloorplan extends StoreElement {
     const roomTones: RoomTone[] = ["occupied", "possible", "vacating", "vacant", "uncertain", "unavailable", "not_observed", "not_linked"];
     const deviceTones: DeviceTone[] = ["active", "idle", "off", "unknown", "unavailable", "missing"];
     return html`${this.renderFloors()}
+      <section class="panel-section" data-testid="fp-presence-overlay">
+        <label class="switch-row compact"><input type="checkbox" role="switch" data-testid="fp-presence-toggle" .checked=${this.presence} @change=${(e: Event) => this.setPresence((e.target as HTMLInputElement).checked)} />
+          <span>Presence overlay<span class="small muted block">Occupancy decisions, sensors as the engine sees them, warnings</span></span></label>
+        ${this.presence ? this.renderPresenceSummary(rooms.map((r) => r.area_id)) : nothing}
+      </section>
       <section class="panel-section" data-testid="fp-live-summary">
         <h3 class="panel-title">${icon("eye", 18)}Now on ${floor?.name ?? "this floor"}</h3>
         <div class="stat-tiles fp-stats">
@@ -1320,8 +1420,55 @@ export class SlFloorplan extends StoreElement {
         <h3 class="panel-title">${icon("info", 18)}Legend</h3>
         <ul>${roomTones.map((t) => html`<li><span class="fp-swatch room tone-${t}"></span>${ROOM_TONE_LABEL[t]}</li>`)}</ul>
         <ul>${deviceTones.map((t) => html`<li><span class="fp-swatch device tone-${t}"></span>${DEVICE_TONE_LABEL[t]}</li>`)}</ul>
-        <p class="muted small">Occupancy comes from the Smart Occupancy integration's own room states. Icons are where you placed the devices: they are not measured positions, people's locations or sensor coverage. Radar zones and coverage are not shown (not provided by the integration yet).</p>
+        <p class="muted small">Occupancy comes from the Smart Occupancy integration's own room states. Icons are where you placed the devices: they are not measured positions, people's locations or sensor coverage. No sensor coverage is drawn: the integration does not know it. Radar distance zones are listed in a room's Presence section (configured band and measured distance).</p>
       </section>`;
+  }
+
+  private renderPresenceSummary(areaIds: Array<string | null>): TemplateResult {
+    const data = this.presenceData;
+    if (this.presenceError) return html`<p class="notice notice-warning small">${icon("warning", 18)}<span>${this.presenceError}</span></p>`;
+    if (!data) return html`<p class="muted small">Loading presence…</p>`;
+    const rooms = data.rooms.filter((r) => areaIds.includes(r.area_id));
+    const warnings = [...entityWarnings(data).entries()].filter(([, list]) => list.some((d) => areaIds.includes(d.area_id ?? null)));
+    return html`<div data-testid="fp-presence-summary">
+      <ul class="fp-problem-list">${rooms.map((r) => {
+        const cd = countdown(r, this.presenceOffset);
+        return html`<li><button type="button" class="fp-room-row" @click=${() => this.focusArea(r.area_id)}>${stateChip(r.occupancy?.state, r.occupancy?.state_label)}
+          <span class="label">${r.name}</span><span class="small muted">${cd ? `${cd.label} ${clock(cd.seconds)}` : ""}</span></button></li>`;
+      })}</ul>
+      ${warnings.length ? html`<h4 class="section-title">Sensor warnings</h4><ul class="fp-problem-list">${warnings.slice(0, 8).map(([id, list]) => html`<li>
+          <a class="fp-room-row" href=${`#/presence/${encodeURIComponent(list[0].area_id ?? "")}?sensor=${encodeURIComponent(id)}`}>${icon("warning", 18)}<span class="label">${list[0].title}</span></a></li>`)}</ul>` : nothing}
+      <p class="muted small">From the Smart Occupancy integration's engine. Icons show where you placed sensors, not what they cover; no person positions are drawn.</p>
+    </div>`;
+  }
+
+  private presenceRoomSection(areaId: string | null): unknown {
+    if (!this.presenceOn() || !areaId) return nothing;
+    const pr = this.presenceData?.rooms.find((r) => r.area_id === areaId);
+    if (!pr) return html`<section class="inspector-section" data-testid="fp-room-presence"><h4>Presence</h4><p class="muted small">This area has no room configuration in Smart Occupancy.</p>
+      <a class="btn" href=${`#/rooms/${encodeURIComponent(areaId)}/presence`}>${icon("floor-plan", 16)}Set it up in Rooms</a></section>`;
+    const cd = countdown(pr, this.presenceOffset);
+    const radar = pr.zones.filter((z) => z.detection === "radar" && z.radar);
+    return html`<section class="inspector-section" data-testid="fp-room-presence"><h4>Presence</h4>
+      <p>${stateChip(pr.occupancy?.state, pr.occupancy?.state_label)} ${cd ? html`<span class="small">${cd.label} <strong class="mono">${clock(cd.seconds)}</strong></span>` : nothing}</p>
+      ${pr.occupancy ? html`<p class="small">${pr.occupancy.reason}</p>` : nothing}
+      <p class="small muted">${pr.counts.active} of ${pr.counts.sensors} sensors active${pr.counts.unavailable ? ` · ${pr.counts.unavailable} unavailable` : ""}${pr.counts.errors + pr.counts.warnings ? ` · ${plural(pr.counts.errors + pr.counts.warnings, "warning", "warnings")}` : ""}</p>
+      ${radar.length ? html`<h4 class="section-title">Radar distance zones</h4><ul class="plain-list small">${radar.map((z) => html`<li><strong>${z.name}</strong>: configured ${z.band}${z.live_radar ? ` · measured ${z.live_radar.distance_valid ? z.live_radar.distance_text : z.live_radar.distance_text ?? "no valid value"}` : ""} · ${z.active ? "active" : "inactive"}</li>`)}</ul>
+        <p class="muted small">A radar reports a distance, not a direction: the band is every point at that distance it can see. Nothing is drawn for it on the plan.</p>` : nothing}
+      <a class="btn btn-primary" data-testid="fp-open-presence" href=${`#/presence/${encodeURIComponent(areaId)}`}>${icon("motion-sensor", 16)}Open the Presence workspace</a>
+    </section>`;
+  }
+
+  private presenceSensorSection(entityId: string): unknown {
+    if (!this.presenceOn() || !this.presenceData) return nothing;
+    const uses = sensorIndex(this.presenceData).get(entityId);
+    const warn = entityWarnings(this.presenceData).get(entityId) ?? [];
+    if (!uses) return html`<section class="inspector-section" data-testid="fp-sensor-presence"><h4>Presence</h4><p class="small muted">Not used for occupancy by any room.</p></section>`;
+    return html`<section class="inspector-section" data-testid="fp-sensor-presence"><h4>Presence</h4>
+      ${uses.map((u) => html`<p class="small"><strong>${u.room.name}</strong>: ${u.signal.kind_name} · ${u.signal.role_name.split(":")[0]}${u.signal.inverted ? " · inverted" : ""} — ${overlayView([u]).text}</p>
+        <a class="btn" data-testid="fp-open-sensor" href=${`#/presence/${encodeURIComponent(u.room.area_id)}?sensor=${encodeURIComponent(entityId)}`}>${icon("motion-sensor", 16)}Open in the Presence inspector</a>`)}
+      ${warn.length ? html`<ul class="plain-list small">${warn.map((d) => html`<li class="tone-${d.level}">${d.title}</li>`)}</ul>` : nothing}
+    </section>`;
   }
 
   // ------------------------------------------------------------ inspector
@@ -1428,6 +1575,7 @@ export class SlFloorplan extends StoreElement {
             <p class="muted small">From the Smart Occupancy integration (read-only).</p>
           </section>`
         : nothing}
+      ${this.presenceRoomSection(known ? room.area_id : null)}
       <section class="inspector-section" data-testid="fp-room-area">
         <h4>Home Assistant area</h4>
         ${this.mode === "configure" && editable
@@ -1612,6 +1760,7 @@ export class SlFloorplan extends StoreElement {
         ${r.renamed ? html`<p class="notice notice-info small">${icon("info", 18)}<span>Renamed in Home Assistant from ${p.entity_id}; found by its registry id.</span></p>` : nothing}
         ${r.missing ? html`<p class="notice notice-warning small">${icon("warning", 18)}<span>${p.entity_id} no longer exists in Home Assistant. Replace it with another entity, or remove the icon.</span></p>` : nothing}
       </section>
+      ${this.presenceSensorSection(r.entity_id)}
       <section class="inspector-section" data-testid="fp-device-identity">
         <h4>Device</h4>
         ${kvRows([

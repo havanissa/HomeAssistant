@@ -84,18 +84,21 @@ def test_modules_and_migration() -> None:
     assert len(keys) == len(set(keys)) == 11
     features = [m for m in MODULES if m.kind == "feature"]
     assert [m.key for m in features] == ["rooms", "presence", "lighting", "moods", "switches", "curtains", "predictions"]
-    # Phase A2: Rooms has its configuration interface in the App; every other feature is pending.
-    assert [m.key for m in features if m.status == GUI] == ["rooms"]
-    assert all(m.status == PENDING and m.handled_by for m in features if m.key != "rooms")
+    # Phases A2 and A3.1: Rooms and Presence have their configuration interface in the App; the rest is pending.
+    assert [(m.key, m.phase) for m in features if m.status == GUI] == [("rooms", "A2"), ("presence", "A3.1")]
+    assert all(m.status == PENDING and m.handled_by for m in features if m.key not in ("rooms", "presence"))
     assert all(m.status == AVAILABLE for m in MODULES if m.kind == "foundation")
     # Phase A2.1: the floor plan is an App tool; it migrates no module and counts in no migration figure.
     tools = [m for m in MODULES if m.kind == "tool"]
     assert [(m.key, m.status, m.controlled_by, m.automation_owner) for m in tools] == [
         ("floorplan", AVAILABLE, None, None)]
     m = migration()
-    assert m["current_phase"] == "A2.1"
-    assert m["modules_migrated"] == 0 and m["percent"] == 0  # no automation has moved
-    assert m["interfaces_migrated"] == 1
+    assert m["current_phase"] == "A3.1"
+    assert m["modules_migrated"] == 0 and m["percent"] == 0  # no automation has moved (occupancy included)
+    assert m["interfaces_migrated"] == 2
+    presence = next(i for i in m["items"] if i["key"] == "presence")
+    assert (presence["gui_owner"], presence["config_source"], presence["automation_owner"], presence["phase"]) == (
+        "app", "integration", "integration", "A3.1")
     assert m["automatic_migration"] is False
     assert m["items"][0]["key"] == "foundation" and m["items"][0]["status"] == "done"
 
@@ -104,13 +107,15 @@ def test_one_system_in_control_per_module() -> None:
     from smart_lighting.modules import APP, INTEGRATION
 
     features = [m for m in MODULES if m.kind == "feature"]
-    # Phase A2: the integration still executes every automation; the App controls nothing.
+    # Phase A3.1: the integration still executes every automation (occupancy too); the App controls nothing.
     assert {m.controlled_by for m in features} == {INTEGRATION}
     assert {m.automation_owner for m in features} == {INTEGRATION}
     assert {m.config_source for m in features} == {INTEGRATION}  # one authoritative configuration
     rooms = next(m for m in features if m.key == "rooms")
     assert (rooms.gui_owner, rooms.config_source, rooms.automation_owner) == (APP, INTEGRATION, INTEGRATION)
-    assert {m.gui_owner for m in features if m.key != "rooms"} == {INTEGRATION}
+    presence = next(m for m in features if m.key == "presence")
+    assert (presence.gui_owner, presence.config_source, presence.automation_owner) == (APP, INTEGRATION, INTEGRATION)
+    assert {m.gui_owner for m in features if m.key not in ("rooms", "presence")} == {INTEGRATION}
     assert all(m.controlled_by is None for m in MODULES if m.kind in ("foundation", "tool"))
     m = migration()
     assert m["controlled_by_integration"] == 7 and m["controlled_by_app"] == 0

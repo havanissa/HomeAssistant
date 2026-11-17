@@ -7,7 +7,8 @@ before anything is sent:
 * :data:`READ_ONLY_COMMANDS` - reads and subscriptions, sent with :meth:`command`.
 * :data:`CONFIG_WRITE_COMMANDS` (Phase A2) - the existing integration's
   validated room configuration commands, sent only with :meth:`config_write`.
-  They change the integration's room assignments and nothing else.
+  They change the integration's room assignments and nothing else. Phase A3.1
+  adds its validated presence command (sensors and occupancy timing).
 
 There is no way to call a service, write a state, fire an event or change a
 Home Assistant registry through this client. Any other command raises
@@ -51,14 +52,21 @@ READ_ONLY_COMMANDS: frozenset[str] = frozenset(
         "smart_occupancy/rooms/get",
         "smart_occupancy/rooms/review",
         "smart_occupancy/rooms/restore/review",
+        # Phase A3.1: the integration's presence API (0.6.10): live engine view and dry runs.
+        "smart_occupancy/presence/get",
+        "smart_occupancy/presence/review",
+        # The Recorder's history (bounded windows, on request only) for the presence timeline.
+        "history/history_during_period",
     }
 )
-#: The only commands that change anything: the existing integration's validated, administrator-only room
-#: configuration commands (Phase A2). They write its config entry options (room assignments) and nothing else.
+#: The only commands that change anything: the existing integration's validated, administrator-only room and
+#: presence configuration commands (Phases A2, A3.1). They write its config entry options and nothing else.
 CONFIG_WRITE_COMMANDS: frozenset[str] = frozenset(
     {
         "smart_occupancy/rooms/set",
         "smart_occupancy/rooms/restore",
+        # Phase A3.1: a room's sensors and timing overrides, or the global occupancy timing defaults.
+        "smart_occupancy/presence/set",
     }
 )
 ALLOWED_COMMANDS: frozenset[str] = READ_ONLY_COMMANDS | CONFIG_WRITE_COMMANDS
