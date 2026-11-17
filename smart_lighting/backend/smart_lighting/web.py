@@ -22,6 +22,11 @@ writes only the App's own storage (``/data/floorplan``) and Home Assistant
 reads; its changing requests (save, image upload, import, restore) need the
 same administrator and CSRF checks. Uploaded images are served only through
 this Ingress-only server, never from a public URL.
+
+Phase A3.1 adds the presence API (``/api/presence/...``): the integration's
+live occupancy view, a bounded Recorder timeline, diagnostics, and reviewed
+changes of sensors and occupancy timing (``review`` / ``save``, with the same
+administrator and CSRF checks; saved through ``smart_occupancy/presence/set``).
 """
 
 from __future__ import annotations
@@ -380,6 +385,49 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         body = await write_guard(request)
         return _json(await floorplan_service(request).restore(request.match_info["backup_id"], body.get("revision")))
 
+    # ---------------------------------------------------------- presence
+    def presence_service(request: web.Request):
+        core: AppCore = request.app[CORE_KEY]
+        rooms_service(request)  # Home Assistant must be connected
+        if core.presence is None:
+            raise RoomsError("not_connected", "The App is starting", 503)
+        return core.presence
+
+    def scope(body: dict[str, Any]) -> Any:
+        area_id = body.get("area_id")
+        if area_id is not None and not isinstance(area_id, str):
+            raise RoomsError("invalid_area", "Invalid area id")
+        return area_id or None
+
+    @rooms_handler
+    async def presence_overview(request: web.Request) -> web.Response:
+        return _json(await presence_service(request).overview())
+
+    @rooms_handler
+    async def presence_diagnostics(request: web.Request) -> web.Response:
+        return _json(await presence_service(request).diagnostics())
+
+    @rooms_handler
+    async def presence_room(request: web.Request) -> web.Response:
+        return _json(await presence_service(request).workspace(request.match_info["area_id"]))
+
+    @rooms_handler
+    async def presence_timeline(request: web.Request) -> web.Response:
+        return _json(await presence_service(request).timeline(request.match_info["area_id"],
+                                                              request.query.get("window", "3600")))
+
+    @rooms_handler
+    async def presence_review(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        return _json(await presence_service(request).review(scope(body), body.get("change"), body.get("revision")))
+
+    @rooms_handler
+    async def presence_save(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        service = presence_service(request)
+        result = await service.save(scope(body), body.get("change"), body.get("revision"), body.get("confirmed"))
+        return _json({"result": result})
+
     async def live(request: web.Request) -> web.StreamResponse:
         return await request.app[HUB_KEY].handle(request)
 
@@ -416,6 +464,12 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     app.router.add_get("/api/floorplan/backups", floorplan_backups)
     app.router.add_get("/api/floorplan/backups/{backup_id}", floorplan_backup)
     app.router.add_post("/api/floorplan/backups/{backup_id}/restore", floorplan_restore)
+    app.router.add_get("/api/presence", presence_overview)
+    app.router.add_get("/api/presence/diagnostics", presence_diagnostics)
+    app.router.add_post("/api/presence/review", presence_review)
+    app.router.add_post("/api/presence/save", presence_save)
+    app.router.add_get("/api/presence/rooms/{area_id}", presence_room)
+    app.router.add_get("/api/presence/rooms/{area_id}/timeline", presence_timeline)
     app.router.add_route("*", "/api/{tail:.*}", api_not_found)
     assets = settings.static_dir / "assets"
     if assets.is_dir():

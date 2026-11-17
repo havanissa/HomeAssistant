@@ -57,7 +57,7 @@ async def test_overview_reads_home_assistant_and_detects_integration(app_client:
     assert overview["supervisor"]["available"] is True
     assert "options" not in overview["supervisor"]["app"]  # only whitelisted fields
     assert overview["migration"]["modules_migrated"] == 0  # no automation runs in the App
-    assert overview["migration"]["interfaces_migrated"] == 1  # the Rooms configuration interface
+    assert overview["migration"]["interfaces_migrated"] == 2  # the Rooms and Presence interfaces
     assert overview["migration"]["modules_total"] == 7
     assert overview["safety"]["service_calls_sent"] == 0
 
@@ -138,10 +138,12 @@ def test_client_has_no_device_api() -> None:
         "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "config_entries/subscribe",
         "manifest/get", "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
         "config/floor_registry/list", "config/auth/list", "smart_occupancy/rooms/get", "smart_occupancy/rooms/review",
-        "smart_occupancy/rooms/restore/review",
+        "smart_occupancy/rooms/restore/review", "smart_occupancy/presence/get", "smart_occupancy/presence/review",
+        "history/history_during_period",
     }
-    # The only commands that change anything: the integration's validated room configuration commands.
-    assert CONFIG_WRITE_COMMANDS == {"smart_occupancy/rooms/set", "smart_occupancy/rooms/restore"}
+    # The only commands that change anything: the integration's validated room and presence configuration commands.
+    assert CONFIG_WRITE_COMMANDS == {"smart_occupancy/rooms/set", "smart_occupancy/rooms/restore",
+                                     "smart_occupancy/presence/set"}
 
 
 async def test_token_never_reaches_the_browser(app_client: Any) -> None:

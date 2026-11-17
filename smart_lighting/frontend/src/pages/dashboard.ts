@@ -51,7 +51,7 @@ export class SlDashboard extends StoreElement {
       </header>
       ${kv([
         ["Version", o.app.version],
-        ["Phase", `${o.app.phase} · Rooms configuration`],
+        ["Phase", `${o.app.phase} · Rooms and Presence configuration`],
         ["Running for", formatDuration(o.app.uptime_s)],
         ["Health checks", problems.length ? plural(problems.length, "needs attention", "need attention") : "All passed"],
       ])}
@@ -159,8 +159,8 @@ export class SlDashboard extends StoreElement {
         <span style="width: ${m.interface_percent ?? 0}%"></span>
       </div>
       <p class="muted">
-        Phase ${m.current_phase}: the Rooms configuration interface is in the App; the configuration itself stays in
-        the integration, which also keeps running every automation. Modules move one at a time, only after you
+        Phase ${m.current_phase}: the Rooms and Presence configuration interfaces are in the App; the configuration
+        itself stays in the integration, which also keeps running every automation, room occupancy included. Modules move one at a time, only after you
         approve it. Each module's automation is run by exactly one system: today the integration runs
         ${m.controlled_by_integration} of ${m.modules_total}, the App ${m.controlled_by_app}.
       </p>
@@ -192,8 +192,9 @@ export class SlDashboard extends StoreElement {
       <p class="notice notice-info" data-testid="readonly-notice">
         ${icon("shield-check", 20)}
         <span
-          >Phase A2: Rooms can be configured here. Changes are reviewed before saving and stored in the Smart
-          Occupancy integration, which keeps running every automation. The App never controls devices.</span
+          >Phase A3.1: Rooms and Presence can be configured here. Changes are reviewed before saving and stored in
+          the Smart Occupancy integration, which keeps running every automation and its occupancy engine. The App
+          never controls devices.</span
         >
       </p>
       ${o

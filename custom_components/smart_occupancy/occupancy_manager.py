@@ -67,6 +67,8 @@ class OccupancyManager:
         self._store: Store[dict[str, Any]] = Store(hass, OCCUPANCY_STORE_VERSION, OCCUPANCY_STORE_KEY)
         self._dirty = False
         self._running = False
+        # Called with (area_id, previous, result, now) on every occupancy transition (0.6.10: presence log).
+        self.on_transition: Callable[[str, RoomResult | None, RoomResult, datetime], None] | None = None
 
         for area_id, room in config.enabled_rooms.items():
             sensors = room.sensors
@@ -300,6 +302,11 @@ class OccupancyManager:
             )
             self.history.record(area_id, result.state, result.occupied, now)
             self._mark_dirty()
+            if self.on_transition is not None:
+                try:
+                    self.on_transition(area_id, previous, result, now)
+                except Exception:  # noqa: BLE001 - the log must never break occupancy
+                    _LOGGER.exception("Presence log failed")
         if (tracker := self.comparisons.get(area_id)) is not None:
             room = self.config.rooms[area_id]
             helper = _reference_value(self.hass.states.get(room.reference_occupancy_entity or ""))

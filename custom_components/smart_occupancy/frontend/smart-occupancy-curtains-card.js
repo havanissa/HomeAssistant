@@ -44,7 +44,7 @@
  * times are 24-hour HH:mm in Home Assistant's time zone, also the time fields.
  */
 
-const VERSION = "0.6.9";
+const VERSION = "0.6.10";
 const CARD = "smart-occupancy-curtains-card";
 const WS = "smart_occupancy/curtains";
 

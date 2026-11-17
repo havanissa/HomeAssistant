@@ -5,7 +5,7 @@ Layout of the App folder:
 | Path | What |
 | --- | --- |
 | `config.yaml`, `Dockerfile`, `requirements.txt`, `rootfs/` | App package (built on the device by the Supervisor) |
-| `backend/smart_lighting/` | Python backend (aiohttp): Ingress web server, allowlisted Home Assistant client, Rooms service (`rooms.py`) |
+| `backend/smart_lighting/` | Python backend (aiohttp): Ingress web server, allowlisted Home Assistant client, Rooms service (`rooms.py`), Presence service (`presence.py`) |
 | `backend/smart_lighting/static/` | **Built** web interface (committed, so the device build needs no Node.js) |
 | `frontend/` | Web interface source (Lit + TypeScript + Vite) |
 | `tests/` | Backend and package tests (pytest) |
@@ -21,7 +21,8 @@ npm run build   # type-checks, then writes backend/smart_lighting/static/
 
 `npm test` runs the frontend unit tests (Vitest, `frontend/tests/`): floor
 plan geometry, shared walls, openings, coordinates, calibration, undo/redo and
-suggestions. The floor plan's coordinate system and data format are described
+suggestions, and the presence logic (`frontend/src/presence/model.ts`: countdowns, timing
+inheritance, the visit chain, the timeline). The floor plan's coordinate system and data format are described
 in `backend/smart_lighting/floorplan_model.py` and `frontend/src/floorplan/model.ts`.
 
 Always commit the rebuilt `static/` folder together with source changes;
@@ -77,6 +78,12 @@ through the options flow, demo lights and covers and a few template sensors.
 through the Rooms editor, watches live states and checks sessions, backups,
 export/import and that Home Assistant is unchanged apart from that reviewed
 adjacency; it needs a fresh App data folder and has a `--phase restart-check`.
+`presence_checks.py` (Phase A3.1) needs the integration 0.6.10 and Kamar
+Norður seeded with the template radar (following `input_boolean.nobara_pc`,
+which the script moves with state writes, not service calls) and the door;
+it checks the Presence dashboard, workspace, timing, sensor changes, a stale
+write, the timeline, global defaults, diagnostics and the floor plan overlay,
+and has a `--phase restart-check`.
 Primary targets: desktop (1440, 1920 px) and tablets (768 portrait, 1024 and
 1366 landscape, with touch). Phone sizes (360, 390 px, 740 landscape) are
 kept as a regression check of the fallback layout. It fails on any Home

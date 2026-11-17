@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import area_registry as ar, entity_registry as er
 
+from custom_components.smart_occupancy.const import VERSION
 from custom_components.smart_occupancy.rooms_api import build_room, diff_room, revision_of
 
 from .conftest import setup_entry
@@ -94,7 +95,7 @@ async def test_get_reads_the_existing_options(hass: HomeAssistant, lit: Lit, has
     entry = await setup_entry(hass, full_options(lit))
     data = await model(await client(hass, hass_ws_client))
     assert data["loaded"] and data["writable"] and data["entry_id"] == entry.entry_id
-    assert data["integration_version"] == "0.6.9" and data["api_version"] == 1
+    assert data["integration_version"] == VERSION and data["api_version"] == 1
     assert set(data["rooms"]) == {lit.area, lit.other}
     room = data["rooms"][lit.area]
     assert room["config"] == entry.options["rooms"][lit.area]  # exactly what is stored

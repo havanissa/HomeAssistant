@@ -799,6 +799,8 @@ class RoomsService:
             "integration_version": model.get("integration_version"),
             "revision": model.get("revision"),
             "rooms": {a: r.get("config") for a, r in self._rooms().items()},
+            # Phase A3.1: the global occupancy timing defaults (room overrides are inside each room).
+            "occupancy": model.get("timing"),
         }
 
     def _write_backup(self, reason: str) -> str | None:
@@ -837,7 +839,8 @@ class RoomsService:
             except (OSError, ValueError):
                 continue
             out.append({"id": path.stem, "created_at": data.get("created_at"), "reason": data.get("reason"),
-                        "rooms": len(data.get("rooms") or {}), "revision": data.get("revision")})
+                        "rooms": len(data.get("rooms") or {}), "revision": data.get("revision"),
+                        "occupancy": isinstance(data.get("occupancy"), dict)})
         return out
 
     def backup(self, backup_id: str) -> dict[str, Any]:

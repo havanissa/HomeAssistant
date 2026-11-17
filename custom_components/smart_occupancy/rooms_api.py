@@ -727,7 +727,11 @@ def ws_rooms_set(hass: HomeAssistant, connection: websocket_api.ActiveConnection
         _send_error(connection, msg, err)
         return
     coordinator: SmartOccupancyCoordinator = entry.runtime_data
-    if plan["apply"] == "live" and coordinator.async_apply_presence(plan["_new_config"]):
+    if plan["apply"] != "none":
+        from .presence_log import presence_log
+
+        presence_log(hass).expect_source("app")  # the Rooms API is the Smart Lighting App's
+    if plan["apply"] == "live" and coordinator.async_apply_presence(plan["_new_config"], options=plan["_new_options"]):
         pass
     elif plan["apply"] != "none":
         hass.config_entries.async_update_entry(entry, options=plan["_new_options"])

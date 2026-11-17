@@ -62,6 +62,7 @@ from .occupancy import (
 from .curtains.manager import CurtainManager
 from .forecast import ForecastManager
 from .occupancy_manager import OccupancyManager
+from .presence_log import record_config_change, record_transition
 from .problems import ProblemTracker
 from .supervision import effective_mode
 from .validation import ENTITY_PROBLEM_CODES, Problem, validate, validate_daylight, validate_lighting
@@ -275,6 +276,7 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         )
         self.config = IntegrationConfig.from_dict(dict(entry.options))
         self.occupancy = OccupancyManager(hass, self.config)
+        self.occupancy.on_transition = self._log_transition
         self.lighting = LightingController(hass, self)
         # Occupancy forecast (0.5.0): observation only, it never controls anything.
         self.forecast = ForecastManager(hass, self)
@@ -399,7 +401,12 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         )
 
     @callback
-    def async_apply_presence(self, config: IntegrationConfig) -> bool:
+    def _log_transition(self, area_id: str, previous, result, now: datetime) -> None:
+        if previous is not None:  # the first evaluation after a start is the restored state, not a decision
+            record_transition(self.hass, area_id, previous, result, now)
+
+    @callback
+    def async_apply_presence(self, config: IntegrationConfig, options: dict[str, Any] | None = None) -> bool:
         """Save changed presence settings and apply them at once, without reloading (0.3.8).
 
         Only for signals that are already assigned (enabled / excluded) and
@@ -411,7 +418,9 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         """
         if not self.occupancy.same_signals(config):
             return False
-        options = config.as_dict()
+        # ``options``: the exact options to store (0.6.10: keeps keys the typed configuration does not know).
+        options = dict(options) if options is not None else config.as_dict()
+        record_config_change(self.hass, self.config, config, applied="live")
         self.config = config
         self.occupancy.async_reconfigure(config)
         # The update listener may run during async_update_entry (eagerly): count it before.

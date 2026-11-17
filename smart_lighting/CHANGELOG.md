@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.3.0
+
+Phase A3.1: Presence configuration and live occupancy debugger. Needs Smart
+Occupancy & Lighting 0.6.10 for the Presence pages (older versions: Presence
+asks for the update; Rooms and the floor plan work as before). The occupancy
+engine stays in the integration; nothing is migrated automatically.
+
+- **Presence dashboard:** every configured room with the engine's state,
+  confidence (evidence quality, not a probability), sensors and their live
+  readings, availability, time since the last activity, the engine's own
+  confirmation or vacancy countdown, timing (global or overrides), Automatic
+  lighting, warnings. Filters (occupied, possible, vacant, uncertain,
+  unavailable sensors, problems) and search. Live: the page refreshes when a
+  room's state entity or a sensor changes, never on a timer.
+- **Room Presence workspace:** sensors (assigned, available in the area, add
+  any other sensor through the search) · the decision (state machine with the
+  latest transition, the engine's reason, confirmation and vacancy progress,
+  what happens next and when, evidence grouped by what it contributes, the
+  current visit step by step, lighting and radar distance zones with the
+  configured band and the measured distance) · inspector (live value,
+  engine status and deadlines, type with Home Assistant's suggestion, role
+  with what it does, inverted, included, device, availability, advanced).
+  Tabs: Live, Timeline, Timing, Diagnostics. Fast room switching.
+- **Timing:** the engine's seven parameters with readable units, global
+  defaults (Presence → Global timing) and room overrides (inherited / room
+  value, *Use global*, *Use global for all*), client-side checks matching the
+  integration's; global defaults can be loaded from a backup into the editor.
+- **Review and save** through the integration's presence API: changes, rooms
+  affected, the decision right after saving (computed by the integration on a
+  copy of each engine), consequences; confirmations for Automatic rooms and
+  for decisions that change at once. Stale writes are refused (room revision,
+  or the global defaults' own revision, so different rooms and the defaults
+  can be edited at the same time); a configuration changed elsewhere is
+  reported and re-reviewed. A backup of the room configuration (now with the
+  global defaults) is stored before each save.
+- **Timeline:** Recorder history (15 min to 24 h, read on request, cached
+  30 s, at most 40 entities and 2000 changes each) merged with the
+  integration's presence log and live changes: lanes per sensor and the room,
+  events with details (reason, evidence, required quiet time, confidence),
+  filters by type and sensor; 24-hour times in Home Assistant's time zone.
+- **Diagnostics** (Presence → Diagnostics and per room): the integration's
+  measured and heuristic findings plus the App's (device offline, sensor in
+  another area, type differs from Home Assistant's classification), each with
+  its basis and a link to the setting. Nothing is changed automatically.
+- **Floor plan:** Live mode → *Presence overlay*: room decisions and
+  countdowns, presence sensors as the engine sees them, warnings; sensor →
+  its Presence inspector, room → its Presence workspace. No coverage,
+  direction or person positions are drawn.
+- Rooms editor: the Presence tab links to the workspace and its timing.
+- Migration: Presence is configured in the App (interface migrated); stored in
+  and run by the integration.
+- Safety: new allowlisted commands `smart_occupancy/presence/get`, `review`,
+  `history/history_during_period` (reads) and `smart_occupancy/presence/set`
+  (the only new write). No service call, no device control, no engine.
+- Version 0.3.0; App tests 140 (backend) + 45 (frontend unit); end-to-end
+  `tests/e2e/presence_checks.py` (with `--phase restart-check`).
+
 ## 0.2.1
 
 Phase A2.1: Floor plan. Optional: everything else works without a floor plan.

@@ -819,13 +819,15 @@ export class SlRoomEditor extends StoreElement {
             })} />${a.name}${ws.other_rooms[a.id]?.enabled ? nothing : html`<span class="muted small"> · not observed</span>`}</label>`)}
         </fieldset>
       </section>
-      <section class="card">
-        <header class="card-head">${icon("history")}<h3>Presence timing</h3>${chip("neutral", "Read-only")}</header>
-        ${this.laterModule("Presence timing", "the Smart Room Lighting card (Presence tab) or Configure → Occupancy timing")}
+      <section class="card" data-testid="rooms-presence-link">
+        <header class="card-head">${icon("history")}<h3>Presence timing and live detection</h3></header>
+        <p class="muted small">Occupancy timing (global defaults and this room's overrides), the live occupancy decision, its timeline and diagnostics are in the Presence workspace. It edits the same sensor configuration as this tab, through the same review.</p>
         <div class="table-wrap"><table class="plain-table">
           <thead><tr><th scope="col">Setting</th><th scope="col">Global</th><th scope="col">This room</th></tr></thead>
           <tbody>${Object.entries(timing).map(([k, v]) => html`<tr><td>${k.replace(/_/g, " ")}</td><td>${v} s</td><td>${k in roomTiming ? html`<strong>${roomTiming[k]} s</strong>` : html`<span class="muted">global</span>`}</td></tr>`)}</tbody>
         </table></div>
+        <div class="row-actions"><a class="btn btn-primary" data-testid="open-presence-workspace" href=${`#/presence/${encodeURIComponent(ws.area.id)}`}>${icon("motion-sensor", 18)}Open the Presence workspace</a>
+          <a class="btn" href=${`#/presence/${encodeURIComponent(ws.area.id)}?tab=timing`}>${icon("tune", 18)}Edit timing</a></div>
       </section>
     </div>`;
   }
