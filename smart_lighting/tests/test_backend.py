@@ -12,7 +12,14 @@ import pytest
 
 from smart_lighting.const import APP_VERSION
 from smart_lighting.core import AppCore
-from smart_lighting.ha import CONFIG_WRITE_COMMANDS, READ_ONLY_COMMANDS, HomeAssistantClient, ReadOnlyViolation
+from smart_lighting.ha import (
+    CONFIG_WRITE_COMMANDS,
+    ENGINE_COMMANDS,
+    READ_ONLY_COMMANDS,
+    SUBSCRIPTION_COMMANDS,
+    HomeAssistantClient,
+    ReadOnlyViolation,
+)
 from smart_lighting.logbuffer import setup_logging
 from smart_lighting.web import CORE_KEY, build_app
 
@@ -83,7 +90,8 @@ async def test_only_read_only_commands_are_sent(app_client: Any, fake_ha: FakeHo
     await app_client.get("/api/rooms")
     await app_client.get("/api/rooms/kamar_nordur")
     sent = {c["type"] for c in fake_ha.commands}
-    assert sent <= READ_ONLY_COMMANDS  # reading never sends a configuration command
+    # Reading never sends a configuration command (the occupancy bridge session is opened at start, Phase A3.2).
+    assert sent <= READ_ONLY_COMMANDS | SUBSCRIPTION_COMMANDS
     assert "call_service" not in sent
     subscriptions = [c for c in fake_ha.commands if c["type"] == "subscribe_events"]
     assert [c["event_type"] for c in subscriptions] == [
@@ -134,14 +142,19 @@ def test_client_has_no_device_api() -> None:
     names = {n for n in dir(HomeAssistantClient) if not n.startswith("__")}
     assert not {n for n in names if re.search(r"service|turn_on|turn_off|set_state|fire|update_entry", n)}
     assert {n for n in names if "write" in n} == {"config_write", "config_writes_sent"}
+    assert {n for n in names if "engine" in n or n == "subscribe"} == {"engine_command", "subscribe"}
     assert READ_ONLY_COMMANDS == {
         "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "config_entries/subscribe",
         "manifest/get", "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
         "config/floor_registry/list", "config/auth/list", "smart_occupancy/rooms/get", "smart_occupancy/rooms/review",
         "smart_occupancy/rooms/restore/review", "smart_occupancy/presence/get", "smart_occupancy/presence/review",
-        "history/history_during_period",
+        "history/history_during_period", "smart_occupancy/engine/status",
     }
-    # The only commands that change anything: the integration's validated room and presence configuration commands.
+    # Phase A3.2: the occupancy bridge (ownership and the App's published occupancy results; no device control).
+    assert ENGINE_COMMANDS == {"smart_occupancy/engine/claim", "smart_occupancy/engine/publish",
+                               "smart_occupancy/engine/heartbeat", "smart_occupancy/engine/release"}
+    assert SUBSCRIPTION_COMMANDS == {"smart_occupancy/engine/subscribe"}
+    # The only commands that change configuration: the integration's validated room and presence configuration commands.
     assert CONFIG_WRITE_COMMANDS == {"smart_occupancy/rooms/set", "smart_occupancy/rooms/restore",
                                      "smart_occupancy/presence/set"}
 

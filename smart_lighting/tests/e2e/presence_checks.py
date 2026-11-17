@@ -136,7 +136,7 @@ def phase_all(args: argparse.Namespace, out: Path, errors: list[str]) -> None:
     data = presence(args)
     base_timing = dict(data["rooms"][KAMAR]["timing_overrides"])
     base_global = dict(data["global"]["timing"])
-    check("integration 0.6.10 presence API answers", data["integration_version"] == "0.6.10" and data["writable"],
+    check("integration presence API answers", data["integration_version"] == "0.7.0" and data["writable"],
           data["integration_version"])
     set_person(args, False)
     wait_state(args, "vacant", 900)  # a previous run may have left the room occupied

@@ -11,6 +11,7 @@ token. The backend forwards a small, read-only stream:
   editor or by a restore), with its new revision
 * ``registries``: Home Assistant's area, device, entity or floor registry changed
 * ``floorplan``: the stored floor plan changed (any browser session), with its new revision (Phase A2.1)
+* ``engine``: the occupancy engine's mode, acknowledged owner or bridge connection changed (Phase A3.2)
 
 The browser may send ``ping`` and ``{"type": "watch", "entities": [...]}``
 (entity ids only, at most 2000). Nothing it sends can change anything.
@@ -83,6 +84,8 @@ class LiveHub:
         self.core.add_rooms_listener(self._on_rooms)
         if self.core.floorplan is not None:
             self.core.floorplan.add_listener(self._on_floorplan)
+        if self.core.occupancy is not None:
+            self.core.occupancy.add_listener(self._on_engine)
         self._tasks = [
             asyncio.create_task(self._flush_loop(), name="live-flush"),
             asyncio.create_task(self._heartbeat_loop(), name="live-heartbeat"),
@@ -110,6 +113,12 @@ class LiveHub:
     def _on_floorplan(self, revision: str) -> None:
         if self.clients:
             self._schedule(self._broadcast({"type": "floorplan", "revision": revision}))
+
+    def _on_engine(self, kind: str) -> None:
+        if self.clients and self.core.occupancy is not None:
+            rt = self.core.occupancy
+            self._schedule(self._broadcast({"type": "engine", "mode": rt.mode, "bridge": rt.bridge,
+                                            "owner": self.core.occupancy_owner()}))
 
     def _on_ha(self, kind: str, payload: Any) -> None:
         if kind == "state":

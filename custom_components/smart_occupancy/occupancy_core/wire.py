@@ -147,7 +147,8 @@ def result_to_wire(result: RoomResult, visit_confirmed: bool) -> dict[str, Any]:
         "confidence": {"score": c.score, "evidence": c.evidence, "coverage": c.coverage, "basis": c.basis},
         "usable": result.usable,
         "last_activity": iso(result.last_activity),
-        "last_activity_source": result.last_activity_source,
+        "last_activity_source": (result.last_activity_source[:MAX_REASON_LENGTH]
+                                 if result.last_activity_source else result.last_activity_source),
         "quiet_since": iso(result.quiet_since),
         "vacancy_at": iso(result.vacancy_at),
         "required_quiet": result.required_quiet,
@@ -158,7 +159,8 @@ def result_to_wire(result: RoomResult, visit_confirmed: bool) -> dict[str, Any]:
         "signals": [
             {
                 "entity_id": v.track.entity_id,
-                "name": v.track.name,
+                # Names come from Home Assistant (any length): bounded like every text on the bridge.
+                "name": v.track.name[:MAX_REASON_LENGTH] if v.track.name else v.track.name,
                 "value": v.track.value.value,
                 "status": v.status.value,
                 "since": iso(v.track.since),

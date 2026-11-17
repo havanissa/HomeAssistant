@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from smart_lighting.ha import CONFIG_WRITE_COMMANDS, READ_ONLY_COMMANDS
+from smart_lighting.ha import CONFIG_WRITE_COMMANDS, READ_ONLY_COMMANDS, SUBSCRIPTION_COMMANDS
 from smart_lighting.presence import MAX_POINTS_PER_ENTITY, PresenceService, parse_history
 
 from .conftest import ADMIN_HEADERS, USER_ID, FakeHomeAssistant, revision_of, wait_for
@@ -193,5 +193,5 @@ async def test_no_service_call_and_no_token_in_any_answer(app_client: Any, fake_
         texts.append(await (await app_client.get(path)).text())
     assert all(TOKEN not in t for t in texts)
     kinds = {c["type"] for c in fake_ha.commands}
-    assert kinds <= READ_ONLY_COMMANDS | CONFIG_WRITE_COMMANDS
+    assert kinds <= READ_ONLY_COMMANDS | CONFIG_WRITE_COMMANDS | SUBSCRIPTION_COMMANDS
     assert not any("call_service" in k for k in kinds)

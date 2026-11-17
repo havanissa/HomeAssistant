@@ -18,7 +18,7 @@ import pytest
 from smart_lighting import floorplan_model as fm
 from smart_lighting.core import AppCore
 from smart_lighting.floorplan import FloorPlanService
-from smart_lighting.ha import READ_ONLY_COMMANDS
+from smart_lighting.ha import READ_ONLY_COMMANDS, SUBSCRIPTION_COMMANDS
 from smart_lighting.rooms import live_attributes
 from smart_lighting.web import build_app
 
@@ -585,7 +585,7 @@ async def test_floor_plan_never_changes_home_assistant(app_client: Any, fake_ha:
     await save(app_client, moved, saved["revision"])
     await app_client.get("/api/floorplan/export")
     sent = {c["type"] for c in fake_ha.commands}
-    assert sent <= READ_ONLY_COMMANDS  # reads only: no service call, no registry change, no room write
+    assert sent <= READ_ONLY_COMMANDS | SUBSCRIPTION_COMMANDS  # reads only: no service call, no registry change, no room write
     assert not [c for c in fake_ha.commands if c["type"].startswith("smart_occupancy/rooms/set")]
     assert fake_ha.rooms_options == options
     assert app_client.core.safety()["service_calls_sent"] == 0

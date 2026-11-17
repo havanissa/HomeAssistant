@@ -16,6 +16,7 @@ import "./pages/floorplan";
 import "./pages/pending";
 import "./pages/presence";
 import "./pages/presence-room";
+import "./pages/presence-engine";
 import "./presence/components";
 import "./pages/room-editor";
 import "./pages/rooms";
@@ -40,7 +41,7 @@ export class SlApp extends StoreElement {
   /** Pages with unsaved edits: the room editor ("rooms/<area>"), presence editors and the floor plan (all its modes). */
   private editorKey(route: string, sub: string[]): string | null {
     if (route === "rooms" && sub[0]) return `rooms/${sub[0]}`;
-    if (route === "presence" && sub[0] && sub[0] !== "diagnostics") return `presence/${sub[0]}`;
+    if (route === "presence" && sub[0] && sub[0] !== "diagnostics" && sub[0] !== "engine") return `presence/${sub[0]}`;
     if (route === "floorplan") return "floorplan";
     return null;
   }
@@ -188,6 +189,7 @@ export class SlApp extends StoreElement {
       case "presence":
         if (this.sub[0] === "settings") return html`<sl-presence-settings></sl-presence-settings>`;
         if (this.sub[0] === "diagnostics") return html`<sl-presence-diagnostics></sl-presence-diagnostics>`;
+        if (this.sub[0] === "engine") return html`<sl-presence-engine></sl-presence-engine>`;
         return this.sub[0] ? html`<sl-presence-room .areaId=${this.sub[0]}></sl-presence-room>` : html`<sl-presence></sl-presence>`;
       case "rooms":
         return this.sub[0]

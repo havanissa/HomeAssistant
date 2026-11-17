@@ -135,6 +135,25 @@ The Smart Lighting App edits the same room settings as *Configure → Rooms*, th
 
 Only `enabled`, `sensors` (type, role, inverted, included), `lights`, `reference_occupancy_entity` and `adjacent_rooms` can be changed. A sensor that stays assigned keeps its role, inverted flag and Presence-tab exclusion; room timing overrides and every other option are kept as they are. A change that only includes or excludes assigned sensors is applied at once (like the Presence tab); any other change reloads the integration, exactly as after *Configure → Rooms*. The reload sends no light or cover command (lighting takes the current mood and occupancy as its baseline and applies nothing on start). Disabling or removing a room (its entities are removed), resuming a room with activated automatic lighting, changing assignments in a room with *Automatic* lighting, and removing sensors used by lighting zones need explicit confirmation. Writes are refused while the integration is not running.
 
+### Occupancy engine bridge for the Smart Lighting App (0.7.0)
+
+The occupancy engine is a shared package (`occupancy_core/`). The Smart Lighting App (0.4.0) runs a byte-identical copy. By default this integration decides room occupancy, exactly as before. The App compares its own engine with this one (shadow mode), and an administrator can hand occupancy over to it on the App's *Presence → Engine* page once its readiness checks pass.
+
+- **One authority.** The integration's ownership record (`.storage/smart_occupancy.engine_ownership`: owner, epoch, history) decides whether the room entities and every consumer (lighting, zones, curtains, forecasts) read this engine's results or the App's.
+- **Fenced.** The App's results are accepted only within its lease (30 s, renewed by heartbeats), on its own session, with the current epoch, increasing sequence numbers and the current configuration revision.
+- **Fallback.** This engine keeps running in the background. It takes over when the App stops answering, restarts or releases control: an occupied room stays occupied, a pending vacancy is never shortened, and nothing is switched because of the change.
+- **No automatic return.** A recovered App does not take control back.
+- **Rollback without the App.** The administrator-only action `smart_occupancy.engine_return_to_integration` returns control.
+- **`decided_by`.** The room reason entity's attribute `decided_by` says which engine decided.
+
+| Command (administrators only) | What it does |
+|---|---|
+| `smart_occupancy/engine/status` | The ownership record, lease, sessions, versions and engine fingerprint, accepted results, refusals, history. |
+| `smart_occupancy/engine/subscribe` | The App's bridge session: the engines' configuration, an exact copy of this engine's state, live results and inputs (possible-occupancy lighting signals, zone holds, wall-switch activity), ownership changes. |
+| `smart_occupancy/engine/claim` | A reviewed handover (the same engine fingerprint, configuration revision and readiness are required; compare-and-swap on the epoch). |
+| `smart_occupancy/engine/publish`, `engine/heartbeat` | The owner's results and lease renewal. |
+| `smart_occupancy/engine/release` | Return control to the integration. |
+
 ## Mood lighting (Phase 0.3)
 
 ### Moods: the three selectors

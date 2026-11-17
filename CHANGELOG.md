@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.7.0 — Occupancy engine bridge for the Smart Lighting App (App Phase A3.2)
+
+The integration stays the owner of room occupancy by default, also after this update. Nothing changes until an administrator performs a reviewed handover in the Smart Lighting App (0.4.0).
+
+### Added
+
+- `occupancy_core/`: the occupancy engine as a shared package without dependencies. The Smart Lighting App runs a byte-identical copy. It contains the 0.6.10 engine moved verbatim, plus:
+  - `house.py`: the Home Assistant independent part of `OccupancyManager` (routing, start-up resync, live reconfiguration, preliminary signals, zone holds, wall-switch activity, transitions);
+  - `wire.py`: validated JSON forms;
+  - `protocol.py`: the bridge protocol;
+  - `golden.py` with 20 golden scenarios recorded with the 0.6.10 engine;
+  - exact state transfer (`export_state` / `import_state`) and the conservative `adopt`.
+
+  `const.py`, `models.py` and `engine.py` re-export the same objects, so every consumer is unchanged. `CORE_VERSION` 1.0.0 and a SHA-256 fingerprint of the package identify the engine.
+- `engine_bridge.py`: the one authority over who publishes occupancy.
+  - The ownership record (`.storage/smart_occupancy.engine_ownership`) holds the owner, an increasing epoch, a bounded history and the last accepted decisions. Only a digest of the lease token is stored.
+  - Fencing: the owner's session and connection, the current epoch, the lease token (30 s, renewed by a publish or a heartbeat), strictly increasing sequence numbers and the configuration revision. Everything else is refused and changes nothing.
+  - Hot standby: the integration's engine keeps running.
+  - Fallback when the lease expires, when a new App instance connects, on release, or when the App does not resume within 120 s after a restart or reload. Equal decisions keep their timers. An occupied room stays occupied with a new quiet period, and only rooms whose published result changed are notified.
+  - Only the same App process may resume, by presenting its lease token. A recovered App never takes ownership back.
+- `engine_api.py`: administrator-only websocket commands `smart_occupancy/engine/status`, `subscribe` (the bridge session: hello with the spec, the engine state, inputs and results; then live results, inputs, spec and ownership events), `claim` (compare-and-swap on the epoch; the engine fingerprint, configuration revision and readiness must match), `publish`, `heartbeat` and `release`.
+- Service `smart_occupancy.engine_return_to_integration` (administrators only): rollback without the App.
+- The room reason entity has the attribute `decided_by` (`integration` or `app`). The presence API shows the published result, `decided_by` and the owner. Ownership changes are written to the presence log.
+- Tests:
+  - `tests/test_occupancy_core.py` (358): golden scenarios with the shared and the frozen 0.6.10 engine (`tests/legacy_engine_0610.py`), 300 randomised homes in lockstep, state transfer, adopt, wire validation, and the App copy byte-identical;
+  - `tests/test_engine_bridge.py` (19): fencing, concurrent claims, lease expiry during occupancy, possible occupancy and a vacancy countdown (no vacancy, no light command), App restart, resume and revoked resume, reload and restart, a damaged ownership record, the service, administrators only.
+
+### Changed
+
+- `OccupancyManager.result()` returns the published result: the App's accepted result while the App owns occupancy, otherwise the integration engine's. Transitions, the Recorder-based history, the presence log, the helper comparison and the listeners follow the published result. With the integration as owner, the behaviour is exactly that of 0.6.10.
+
+### Not changed
+
+- The occupancy rules, the start-up and reload behaviour, the entity ids and unique ids, `.storage/smart_occupancy.occupancy_state`, lighting, zones, switches, curtains and forecasts.
+
 ## 0.6.10 — Presence API for the Smart Lighting App (App Phase A3.1)
 
 ### Added

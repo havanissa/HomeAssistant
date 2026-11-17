@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from smart_lighting.core import AppCore
-from smart_lighting.ha import CONFIG_WRITE_COMMANDS, READ_ONLY_COMMANDS
+from smart_lighting.ha import CONFIG_WRITE_COMMANDS, READ_ONLY_COMMANDS, SUBSCRIPTION_COMMANDS
 from smart_lighting.rooms import classify
 from smart_lighting.web import build_app
 
@@ -130,7 +130,7 @@ async def test_review_and_save(app_client: Any, fake_ha: FakeHomeAssistant) -> N
     assert saved["result"]["backup"]
     assert len(sent(fake_ha, "smart_occupancy/rooms/set")) == 1
     assert "call_service" not in {c["type"] for c in fake_ha.commands}
-    assert {c["type"] for c in fake_ha.commands} <= READ_ONLY_COMMANDS | CONFIG_WRITE_COMMANDS
+    assert {c["type"] for c in fake_ha.commands} <= READ_ONLY_COMMANDS | CONFIG_WRITE_COMMANDS | SUBSCRIPTION_COMMANDS
     safety = (await (await app_client.get("/api/overview")).json())["safety"]
     assert safety["config_writes_sent"] == 1 and safety["service_calls_sent"] == 0
     assert safety["recent_config_writes"][-1]["result"] == "ok"

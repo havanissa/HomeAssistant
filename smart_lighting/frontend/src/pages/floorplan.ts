@@ -85,6 +85,7 @@ import { clock, clockOffset, countdown, type PresenceOverview } from "../presenc
 import { entityWarnings, overlayView, sensorIndex } from "../presence/overlay";
 import { stateChip } from "../presence/components";
 import { LiveReload } from "./presence";
+import type { EngineStatus } from "../presence/engine";
 
 const MODES: Array<{ key: Mode; title: string; icon: string; help: string }> = [
   { key: "build", title: "Build", icon: "rectangle", help: "Draw floors, rooms, doors and windows" },
@@ -163,6 +164,8 @@ export class SlFloorplan extends StoreElement {
     tool: { state: true },
     selection: { state: true },
     presence: { state: true },
+    shadow: { state: true },
+    shadowData: { state: true },
     presenceData: { state: true },
     presenceError: { state: true },
     leftOpen: { state: true },
@@ -219,6 +222,9 @@ export class SlFloorplan extends StoreElement {
   declare problemsOnly: boolean;
   /** Phase A3.1: the Presence overlay of the Live mode (the integration's presence view). */
   declare presence: boolean;
+  /** Phase A3.2: optional shadow comparison diagnostics on the presence overlay (the App's engine vs the integration's). */
+  declare shadow: boolean;
+  declare shadowData: EngineStatus | null;
   declare presenceData: PresenceOverview | null;
   declare presenceError: string | null;
   private presenceOffset = 0;
@@ -272,6 +278,8 @@ export class SlFloorplan extends StoreElement {
     this.chain = true;
     this.problemsOnly = false;
     this.presence = prefBool("presence", false);
+    this.shadow = prefBool("shadow", false);
+    this.shadowData = null;
     this.presenceData = null;
     this.presenceError = null;
     this.showDismissed = false;
@@ -313,6 +321,7 @@ export class SlFloorplan extends StoreElement {
       const data = await getRooms<PresenceOverview>("api/presence");
       this.presenceOffset = clockOffset(data.now);
       this.presenceData = data;
+      this.shadowData = this.shadow ? await getRooms<EngineStatus>("api/engine").catch(() => null) : null;
       this.presenceError = null;
       this.updateWatch();
     } catch (err) {
@@ -1054,7 +1063,9 @@ export class SlFloorplan extends StoreElement {
           // Presence overlay: the engine's countdown (only when it reports one) and the room's warnings.
           const cd = countdown(pr, this.presenceOffset);
           const warn = pr.counts.errors + pr.counts.warnings;
-          const extra = [cd ? `${cd.label} ${clock(cd.seconds)}` : `${pr.counts.active} of ${pr.counts.sensors} sensors active`, warn ? plural(warn, "warning", "warnings") : null].filter(Boolean).join(" · ");
+          const cmp = this.shadow ? this.shadowData?.comparison.rooms.find((r) => r.area_id === room.area_id) : undefined;
+          const extra = [cd ? `${cd.label} ${clock(cd.seconds)}` : `${pr.counts.active} of ${pr.counts.sensors} sensors active`, warn ? plural(warn, "warning", "warnings") : null,
+            cmp && cmp.status === "disagree" ? "engines differ" : null].filter(Boolean).join(" · ");
           out.set(room.id, { tone: l.tone, title, subtitle: l.label, detail: extra || null });
         } else {
           const extra = [l.lighting, l.overrides ? plural(l.overrides, "manual override", "manual overrides") : null].filter(Boolean).join(" · ");
@@ -1393,6 +1404,9 @@ export class SlFloorplan extends StoreElement {
         <label class="switch-row compact"><input type="checkbox" role="switch" data-testid="fp-presence-toggle" .checked=${this.presence} @change=${(e: Event) => this.setPresence((e.target as HTMLInputElement).checked)} />
           <span>Presence overlay<span class="small muted block">Occupancy decisions, sensors as the engine sees them, warnings</span></span></label>
         ${this.presence ? this.renderPresenceSummary(rooms.map((r) => r.area_id)) : nothing}
+        ${this.presence ? html`<label class="switch-row compact"><input type="checkbox" role="switch" data-testid="fp-shadow-toggle" .checked=${this.shadow}
+            @change=${(e: Event) => { this.shadow = (e.target as HTMLInputElement).checked; setPref("shadow", this.shadow ? "1" : "0"); void this.loadPresence(); }} />
+          <span>Engine comparison<span class="small muted block">Mark rooms where the App's engine and the integration's differ (diagnostics only)</span></span></label>` : nothing}
       </section>
       <section class="panel-section" data-testid="fp-live-summary">
         <h3 class="panel-title">${icon("eye", 18)}Now on ${floor?.name ?? "this floor"}</h3>
@@ -1452,11 +1466,22 @@ export class SlFloorplan extends StoreElement {
     return html`<section class="inspector-section" data-testid="fp-room-presence"><h4>Presence</h4>
       <p>${stateChip(pr.occupancy?.state, pr.occupancy?.state_label)} ${cd ? html`<span class="small">${cd.label} <strong class="mono">${clock(cd.seconds)}</strong></span>` : nothing}</p>
       ${pr.occupancy ? html`<p class="small">${pr.occupancy.reason}</p>` : nothing}
+      ${this.shadowRoom(areaId)}
       <p class="small muted">${pr.counts.active} of ${pr.counts.sensors} sensors active${pr.counts.unavailable ? ` · ${pr.counts.unavailable} unavailable` : ""}${pr.counts.errors + pr.counts.warnings ? ` · ${plural(pr.counts.errors + pr.counts.warnings, "warning", "warnings")}` : ""}</p>
       ${radar.length ? html`<h4 class="section-title">Radar distance zones</h4><ul class="plain-list small">${radar.map((z) => html`<li><strong>${z.name}</strong>: configured ${z.band}${z.live_radar ? ` · measured ${z.live_radar.distance_valid ? z.live_radar.distance_text : z.live_radar.distance_text ?? "no valid value"}` : ""} · ${z.active ? "active" : "inactive"}</li>`)}</ul>
         <p class="muted small">A radar reports a distance, not a direction: the band is every point at that distance it can see. Nothing is drawn for it on the plan.</p>` : nothing}
       <a class="btn btn-primary" data-testid="fp-open-presence" href=${`#/presence/${encodeURIComponent(areaId)}`}>${icon("motion-sensor", 16)}Open the Presence workspace</a>
     </section>`;
+  }
+
+  /** Phase A3.2: the shadow comparison of one room (only with the "Engine comparison" switch). */
+  private shadowRoom(areaId: string): unknown {
+    if (!this.shadow) return nothing;
+    const cmp = this.shadowData?.comparison.rooms.find((r) => r.area_id === areaId);
+    if (!cmp) return html`<p class="small muted" data-testid="fp-shadow">Engine comparison: not available for this room.</p>`;
+    const label = cmp.status === "agree" ? "both engines agree" : cmp.status === "disagree" ? `the engines differ (${cmp.open_for_s} s)` : cmp.status === "settling" ? "settling" : "not known yet";
+    return html`<p class="small" data-testid="fp-shadow">App engine: ${stateChip(cmp.app?.state)} <span class=${cmp.status === "disagree" ? "tone-error" : "muted"}>${label}</span>
+      <a class="text-link" href="#/presence/engine">Engine migration</a></p>`;
   }
 
   private presenceSensorSection(entityId: string): unknown {

@@ -375,6 +375,10 @@ class EngineBridge:
                 # The same App process is back (Home Assistant restarted, the integration reloaded, or the
                 # connection was interrupted): it keeps its reviewed ownership, in a new epoch.
                 lease_token = secrets.token_hex(16)
+                # The copy the App resumes from must keep what it had published: reconcile this (standby)
+                # engine with the accepted decisions first, as a fallback would (an occupied room stays occupied).
+                self.manager.async_reconcile_standby(
+                    {a: decision_of(acc.wire) for a, acc in self.accepted.items()}, now)
                 self._change_owner(P.OWNER_APP, P.REASON_RESUMED, now, session=session, token=lease_token,
                                    by=self.changed_by)
             else:
@@ -476,6 +480,12 @@ class EngineBridge:
                     raise BridgeError(P.REJECT_INVALID, f"{area_id}: {err}") from err
         except BridgeError as err:
             self._rejected(err, "publish")
+            if err.code == P.REJECT_INVALID and self.owner == P.OWNER_APP and \
+                    self.sessions.get(params.get("session_id")) is not None and \
+                    params.get("session_id") == self.owner_session:
+                # The owner sends results this integration cannot use: its published rooms would freeze while
+                # its heartbeats keep the lease. This engine takes over instead.
+                self.fallback(P.REASON_REVOKED, detail=f"the App sent invalid results ({err})")
             raise
         self._renew(params["seq"], now)
         self.accepted_total += 1
@@ -551,6 +561,8 @@ class EngineBridge:
         self.resume_pending = False
         self.changed_at = now
         self.changed_by = by
+        # Decisions of an earlier owner never come back (only the current owner's are restored after a restart).
+        self.decisions = {}
         if owner == P.OWNER_APP:
             assert session is not None and token is not None
             self.owner_instance = session.instance_id

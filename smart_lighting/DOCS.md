@@ -4,7 +4,50 @@ The **Smart Lighting** App is the new home of the Smart Occupancy & Lighting
 configuration. It replaces the integration's dashboard cards and options
 screens module by module, and only after you approve each step.
 
-## Phase A3.1: what this version does
+## Phase A3.2: the occupancy engine (this version)
+
+This version needs Smart Occupancy & Lighting **0.7.0**. The App runs the
+occupancy engine next to the integration's. Both engines run the very same
+code: a shared, versioned engine package, checked byte for byte.
+
+**Nothing changes until you decide.** After installing or updating, the
+integration still decides room occupancy, and the App's engine runs in
+**shadow mode**. It calculates every room's occupancy from the same events and
+compares its result with the integration's, but it publishes nothing and never
+switches a device.
+
+**Presence → Engine** shows:
+
+- **Who decides occupancy now.** This is read from the integration, which is
+  the only authority. It is never just the App's wish.
+- Connection, versions (the engine fingerprints must match), configuration sync
+  and the last result the integration accepted.
+- The **shadow comparison**. A difference that settles within 3 s counts as a
+  timing difference; a longer one is a disagreement. Each disagreement is
+  recorded together with the events around it.
+- **Readiness checks**, the ownership history, and two actions:
+  - **Review handover to the App…** is available only when every check
+    passes. That means 2 hours of uninterrupted comparison, 20 matched
+    transitions, no disagreement in that time, the same engine and the same
+    configuration. The first published decision is an exact copy of the
+    current one, so no room changes because of the handover.
+  - **Return control to integration** works at any time. An occupied room
+    stays occupied, and nothing is switched.
+
+**While the App decides**, the integration keeps publishing the same occupancy
+entities (same entity ids and history). Lighting, curtains, forecasts and your
+automations read them as before. The integration's own engine keeps running in
+the background. If the App stops, crashes or loses its connection for about
+30 seconds, the integration takes over by itself, without making rooms vacant.
+A restarted or updated App does **not** take control back: it returns to shadow
+mode until you hand over again. After a Home Assistant restart, the same App
+process resumes within 2 minutes; otherwise the integration takes over.
+
+If the App cannot be reached at all, Developer tools → Actions →
+`smart_occupancy.engine_return_to_integration` (administrators only) returns
+control without it.
+
+## Phase A3.1: Presence configuration
 
 - **Presence** shows every configured room's occupancy exactly as the Smart
   Occupancy integration decides it: the state (Vacant, Possible occupancy,
@@ -48,8 +91,8 @@ screens module by module, and only after you approve each step.
   with their configured band and the measured distance; no coverage or
   person position is drawn.
 
-The occupancy engine itself stays in the integration (Phase A3.2 may move it,
-only after you approve it).
+Since Phase A3.2 these views show the published occupancy, whichever engine
+decides it.
 
 ## Phase A2 and A2.1
 
@@ -233,10 +276,13 @@ a backup) and **Backups**.
 Modules move from the integration to the App one at a time, only after you
 approve each step. For each module the App reports where it is **configured**,
 where the configuration is **stored**, and which system **runs** it. In this
-version Rooms and Presence are configured in the App, stored in the
-integration and run by the integration (its occupancy engine decides
-occupancy); every other module is configured, stored and run in the
-integration. The integration and the App never control the same devices.
+version Rooms and Presence are configured in the App and stored in the
+integration. Room occupancy is decided by the integration's engine until you
+hand it over to the App on Presence → Engine; Presence then counts as migrated
+for as long as the integration acknowledges the App as the owner. Every other
+module is configured, stored and run in the integration. The App's engine never
+controls a device, and the integration and the App never control the same
+devices.
 
 ## Configuration
 
@@ -262,13 +308,26 @@ integration. The integration and the App never control the same devices.
   Assistant's Ingress reports). Requests must come from the App's own page.
 - The App backend sends only a fixed list of commands to Home Assistant: reads
   (including the Recorder history, for a bounded window when you open a
-  timeline), and the integration's own validated room and presence commands. It cannot call services,
-  write states or change registries. Its token never reaches the browser.
+  timeline), the integration's own validated room and presence commands, and
+  the integration's occupancy bridge. The bridge works only over Home
+  Assistant's own connection, is for administrators only, and is fenced:
+  stale, duplicated or malformed messages are refused. It cannot call
+  services, write states or change registries. Its token never reaches the
+  browser.
+- Handover and rollback need a Home Assistant administrator.
 - Floor plans and their images are stored in the App's data folder. Images are
   checked by their content (PNG, JPEG, WebP only; no SVG) and are only served
   through Home Assistant's Ingress, never from a public address.
 
-## Known limitations (Phase A3.1)
+## Known limitations (Phase A3.2)
+
+- The comparison thresholds (2 h, 20 transitions) are fixed. Development
+  setups can lower them with the environment variables
+  `SL_ENGINE_MIN_SHADOW_SECONDS` and `SL_ENGINE_MIN_TRANSITIONS` only.
+- The integration's own engine keeps running while the App decides (hot
+  standby). Removing it is a later, separately approved phase.
+- Lighting, curtains and the other modules are not migrated. They keep
+  reading the published occupancy.
 
 - Floor plan: no curved walls, wall thickness, stairs or furniture (it is not a
   CAD program); sensor coverage and sun analysis are not drawn (the
@@ -294,4 +353,6 @@ integration. The integration and the App never control the same devices.
   the devices of the open room. The Home Assistant lookup reads states when you
   open it.
 - Tested with a simulated Supervisor and Ingress against Home Assistant
-  2026.11.1; not yet on a real Home Assistant OS installation.
+  2026.11.1, including crashing and restarting the App container and
+  restarting Home Assistant. Not yet tested on a real Home Assistant OS
+  installation, so the handover has not been verified on real hardware.

@@ -15,8 +15,16 @@ import aiohttp
 from . import modules
 from .const import APP_NAME, APP_PHASE, APP_VERSION
 from .floorplan import FloorPlanService
-from .ha import ALLOWED_COMMANDS, CONFIG_WRITE_COMMANDS, READ_ONLY_COMMANDS, HomeAssistantClient, utcnow_iso
+from .ha import (
+    ALLOWED_COMMANDS,
+    CONFIG_WRITE_COMMANDS,
+    ENGINE_COMMANDS,
+    READ_ONLY_COMMANDS,
+    HomeAssistantClient,
+    utcnow_iso,
+)
 from .logbuffer import RingBufferHandler
+from .occupancy_runtime import OccupancyRuntime
 from .presence import PresenceService
 from .rooms import RoomsService
 from .settings import Settings
@@ -42,6 +50,7 @@ class AppCore:
         self.rooms: RoomsService | None = None
         self.floorplan: FloorPlanService | None = None
         self.presence: PresenceService | None = None
+        self.occupancy: OccupancyRuntime | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._rooms_timer: asyncio.TimerHandle | None = None
         self._rooms_listeners: list = []
@@ -54,6 +63,11 @@ class AppCore:
         self.floorplan = FloorPlanService(self.ha, self.rooms, self.settings.data_dir)
         self.presence = PresenceService(self.ha, self.rooms)
         self.floorplan.load()
+        # Phase A3.2: the shared occupancy engine (shadow until a reviewed handover; never controls a device).
+        self.occupancy = OccupancyRuntime(self.ha, self.settings.data_dir, app_version=APP_VERSION,
+                                          min_shadow_seconds=self.settings.engine_min_shadow_seconds,
+                                          min_transitions=self.settings.engine_min_transitions)
+        await self.occupancy.start()
         self.ha.add_listener(self._on_ha)
         await self.ha.start()
         self._tasks.append(asyncio.create_task(self._supervisor_loop(), name="supervisor-refresh"))
@@ -108,6 +122,8 @@ class AppCore:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks.clear()
+        if self.occupancy is not None:
+            await self.occupancy.stop()
         if self.ha is not None:
             await self.ha.stop()
         if self.session is not None:
@@ -126,10 +142,17 @@ class AppCore:
     def interface_present(self) -> bool:
         return (self.settings.static_dir / "index.html").is_file()
 
+    def occupancy_owner(self) -> str:
+        """Which engine publishes occupancy, as the integration acknowledges it (never just the App's wish)."""
+        if self.occupancy is None:
+            return "integration"
+        return {"app": "app", "resume_pending": "app"}.get(self.occupancy.integration.get("state"), "integration")
+
     def safety(self) -> dict[str, Any]:
         sent = dict(self.ha.commands_sent) if self.ha else {}
         other_commands = sum(n for cmd, n in sent.items() if cmd not in ALLOWED_COMMANDS)
         writes = sum(n for cmd, n in sent.items() if cmd in CONFIG_WRITE_COMMANDS)
+        engine = sum(n for cmd, n in sent.items() if cmd in ENGINE_COMMANDS)
         return {
             "read_only": False,
             "configuration_writes": True,
@@ -140,7 +163,10 @@ class AppCore:
             "recent_config_writes": list(self.ha.config_writes) if self.ha else [],
             "device_control": False,
             "automation_engine": False,
-            "occupancy_engine": "integration",
+            "occupancy_engine": self.occupancy_owner(),
+            "occupancy_engine_mode": self.occupancy.mode if self.occupancy else None,
+            "engine_commands_sent": engine,
+            "allowed_engine_commands": sorted(ENGINE_COMMANDS),
             "automatic_migration": False,
             "modifies_integration": writes > 0,
             "service_calls_sent": other_commands,  # always 0: the client cannot send them
@@ -241,6 +267,23 @@ class AppCore:
                                "detail": f"{s['floors']} floor(s), {s['rooms']} room(s), {s['placements']} device "
                                          "icon(s); stored in the App"})
 
+        if self.occupancy is not None:
+            rt = self.occupancy
+            detail = {
+                "authoritative": "The App's engine decides room occupancy (acknowledged by the integration)",
+                "shadow": "Shadow mode: the App's engine runs next to the integration's and is compared; the "
+                          "integration decides",
+                "standalone": "Runs on its own (the integration's occupancy bridge is not reachable); nothing is "
+                              "published",
+                "starting": "Starting",
+            }.get(rt.mode, rt.mode)
+            status = OK if rt.mode in ("shadow", "authoritative") else (WARNING if rt.bridge in (
+                "incompatible", "error") else INFO)
+            if rt.self_test and not rt.self_test["passed"]:
+                status, detail = ERROR, "The engine self-test failed"
+            checks.append({"key": "occupancy_engine", "title": "Occupancy engine", "status": status,
+                           "detail": detail})
+
         safety = self.safety()
         checks.append(
             {
@@ -248,7 +291,8 @@ class AppCore:
                 "title": "Safety",
                 "status": OK if safety["service_calls_sent"] == 0 else ERROR,
                 "detail": "No service calls and no device control. Configuration changes only through the "
-                          f"integration's room and presence commands ({safety['config_writes_sent']} so far).",
+                          f"integration's room and presence commands ({safety['config_writes_sent']} so far); "
+                          "occupancy results only through its fenced bridge.",
             }
         )
         return checks
@@ -291,8 +335,10 @@ class AppCore:
             "rooms": self.rooms.status() if self.rooms else None,
             "floorplan": self.floorplan.status() if self.floorplan else None,
             "presence": self.presence.status() if self.presence else None,
-            "modules": modules.modules(),
-            "migration": modules.migration(),
+            "modules": modules.modules(self.occupancy_owner()),
+            "migration": modules.migration(self.occupancy_owner()),
+            "engine": ({"mode": self.occupancy.mode, "owner": self.occupancy_owner(),
+                        "bridge": self.occupancy.bridge} if self.occupancy else None),
             "safety": self.safety(),
             "generated_at": utcnow_iso(),
         }

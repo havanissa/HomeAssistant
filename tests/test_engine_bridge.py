@@ -312,7 +312,6 @@ async def test_fencing_refuses_stale_duplicate_and_malformed(
         P.REJECT_LEASE: {"lease_token": secrets.token_hex(16)},
         P.REJECT_SEQUENCE: {"seq": 1},  # a duplicate (already used)
         P.REJECT_CONFIG: {"config_revision": "f" * 16},
-        P.REJECT_INVALID: {"results": {pilot.area: {**room, "state": "party"}}},
         P.REJECT_UNKNOWN_SESSION: {"session_id": secrets.token_hex(16)},
     }
     for code, override in bad_cases.items():
@@ -321,7 +320,6 @@ async def test_fencing_refuses_stale_duplicate_and_malformed(
         assert not reply["success"] and reply["error"]["code"] == code, (code, reply)
         assert manager.result(pilot.area) is before
     assert manager.bridge.accepted_total == accepted
-    assert (await fake.publish({"unknown_room": room}))["error"]["code"] == P.REJECT_INVALID
     # Out of order: a lower sequence after a higher one.
     assert (await fake.publish(good, seq=50))["success"]
     assert (await fake.publish(good, seq=49))["error"]["code"] == P.REJECT_SEQUENCE
@@ -333,6 +331,64 @@ async def test_fencing_refuses_stale_duplicate_and_malformed(
     assert (await other.publish(good))["error"]["code"] == P.REJECT_UNKNOWN_SESSION
     assert manager.bridge.owner == "app"
     assert manager.bridge.rejections[P.REJECT_SEQUENCE] >= 2
+
+
+async def test_invalid_results_from_the_owner_fall_back(
+    hass: HomeAssistant, pilot: Pilot, hass_ws_client, freezer, caplog
+) -> None:
+    """Results the integration cannot use would freeze the rooms while heartbeats keep the lease: take over."""
+    caplog.set_level(logging.CRITICAL, logger=WS_LOGGER)
+    entry = await setup_entry(hass, pilot_options(pilot))
+    manager = entry.runtime_data.occupancy
+    await occupied_room(hass, pilot, freezer)
+    fake = await handover(hass, hass_ws_client, entry, freezer)
+    good = fake.results()
+    reply = await fake.publish({pilot.area: {**good[pilot.area], "state": "party"}})
+    assert reply["error"]["code"] == P.REJECT_INVALID
+    assert manager.bridge.owner == "integration" and manager.bridge.history[-1]["reason"] == P.REASON_REVOKED
+    assert manager.result(pilot.area).occupied is True
+    assert (await fake.heartbeat())["error"]["code"] in (P.REJECT_NOT_OWNER, P.REJECT_STALE_EPOCH)
+    # Unknown rooms are invalid too (and a non-owner's invalid message changes nothing).
+    other = await handover(hass, hass_ws_client, entry, freezer)
+    assert (await other.publish({"unknown_room": good[pilot.area]}))["error"]["code"] == P.REJECT_INVALID
+    assert manager.bridge.owner == "integration"
+
+
+async def test_resume_keeps_what_the_app_published(hass: HomeAssistant, pilot: Pilot, hass_ws_client,
+                                                   freezer) -> None:
+    """The copy a resuming App starts from is reconciled with its accepted decisions (no vacancy by resuming)."""
+    entry = await setup_entry(hass, pilot_options(pilot))
+    manager = entry.runtime_data.occupancy
+    fake = await handover(hass, hass_ws_client, entry, freezer)
+    from homeassistant.util import dt as dt_util
+    now = dt_util.utcnow()
+    fake.house.observe(pilot.radar, Observation("on", now, pilot.radar), now)
+    fake.house.observe(pilot.pir, Observation("on", now, pilot.pir), now)
+    assert (await fake.publish())["success"]
+    assert manager.engines[pilot.area].occupied is False  # the standby did not see it
+    token, instance = fake.token, fake.instance
+    await fake.client.close()
+    await hass.async_block_till_done()
+    back = await app(hass, hass_ws_client, instance=instance)
+    hello = await back.connect(resume_token=token)
+    assert hello["ownership"]["owner"] == "app"
+    assert hello["state"][pilot.area]["occupied"] is True
+    assert back.house.engines[pilot.area].evaluate(dt_util.utcnow()).occupied is True
+    assert manager.result(pilot.area).occupied is True
+
+
+async def test_decisions_of_an_earlier_owner_are_dropped(hass: HomeAssistant, pilot: Pilot, hass_ws_client,
+                                                         freezer) -> None:
+    entry = await setup_entry(hass, pilot_options(pilot))
+    manager = entry.runtime_data.occupancy
+    fake = await handover(hass, hass_ws_client, entry, freezer)
+    from homeassistant.util import dt as dt_util
+    now = dt_util.utcnow()
+    fake.house.observe(pilot.radar, Observation("on", now, pilot.radar), now)
+    assert (await fake.publish())["success"]
+    assert manager.bridge.decisions
+    assert (await fake.release())["result"]["released"]
+    assert manager.bridge.decisions == {}
 
 
 async def test_exactly_one_authoritative_engine(hass: HomeAssistant, pilot: Pilot, hass_ws_client, freezer) -> None:

@@ -39,10 +39,12 @@ READ_ONLY = {
     "manifest/get", "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
     "config/floor_registry/list", "config/auth/list", "smart_occupancy/rooms/get", "smart_occupancy/rooms/review",
     "smart_occupancy/rooms/restore/review", "smart_occupancy/presence/get", "smart_occupancy/presence/review",
-    "history/history_during_period",
+    "history/history_during_period", "smart_occupancy/engine/status",
+    # Phase A3.2: the occupancy bridge session (shadow mode; it changes nothing by itself).
+    "smart_occupancy/engine/subscribe",
 }
-APP_VERSION = "0.3.0"
-INTEGRATION_VERSION = "0.6.10"
+APP_VERSION = "0.4.0"
+INTEGRATION_VERSION = "0.7.0"
 
 VIEWPORTS = {
     "phone-360": {"viewport": {"width": 360, "height": 740}, "is_mobile": True, "has_touch": True, "device_scale_factor": 3},

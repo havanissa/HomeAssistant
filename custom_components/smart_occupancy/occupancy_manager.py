@@ -365,6 +365,21 @@ class OccupancyManager:
             self._notify(area_id)
 
     @callback
+    def async_reconcile_standby(self, decisions: dict[str, dict[str, Any]], now: datetime) -> None:
+        """Before the App resumes: this engine adopts the App's accepted decisions (nothing is published by it)."""
+        for area_id, decision in decisions.items():
+            engine = self.engines.get(area_id)
+            if engine is None:
+                continue
+            try:
+                if engine.adopt(decision, now):
+                    self._mark_dirty()
+                    if self._running:
+                        self._evaluate(area_id, now, notify=False)
+            except StateError as err:
+                _LOGGER.warning("occupancy_adopt_refused area=%s error=%s", area_id, err)
+
+    @callback
     def async_take_over(self, decisions: dict[str, dict[str, Any]], before: dict[str, tuple[str, Any]],
                         now: datetime) -> None:
         """The integration's engine publishes again (fallback): reconcile, evaluate, notify changed rooms only."""
