@@ -1,0 +1,166 @@
+{
+ "name": "preliminary_lighting",
+ "description": "Signals that start possible occupancy lighting cannot confirm by themselves (a PIR held on for 60 s); another signal must agree.",
+ "rooms": {
+  "kamar": {
+   "sensors": [
+    {
+     "entity_id": "binary_sensor.pir",
+     "kind": "pir",
+     "role": "trigger"
+    },
+    {
+     "entity_id": "binary_sensor.radar",
+     "kind": "radar",
+     "role": "maintain"
+    }
+   ]
+  }
+ },
+ "initial": {
+  "binary_sensor.pir": "off",
+  "binary_sensor.radar": "off"
+ },
+ "events": [
+  {
+   "t": 0,
+   "preliminary": {
+    "kamar": [
+     "binary_sensor.pir"
+    ]
+   }
+  },
+  {
+   "t": 10,
+   "entity": "binary_sensor.pir",
+   "state": "on"
+  },
+  {
+   "t": 70,
+   "entity": "binary_sensor.pir",
+   "state": "off"
+  },
+  {
+   "t": 1000,
+   "entity": "binary_sensor.pir",
+   "state": "on"
+  },
+  {
+   "t": 1030,
+   "entity": "binary_sensor.radar",
+   "state": "on"
+  },
+  {
+   "t": 1060,
+   "entity": "binary_sensor.pir",
+   "state": "off"
+  },
+  {
+   "t": 1200,
+   "entity": "binary_sensor.radar",
+   "state": "off"
+  },
+  {
+   "t": 3000,
+   "preliminary": {}
+  },
+  {
+   "t": 3010,
+   "entity": "binary_sensor.pir",
+   "state": "on"
+  },
+  {
+   "t": 3070,
+   "entity": "binary_sensor.pir",
+   "state": "off"
+  }
+ ],
+ "until": 4000,
+ "expect": [
+  {
+   "t": 0.0,
+   "area": "kamar",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacant",
+   "start": true
+  },
+  {
+   "t": 10.0,
+   "area": "kamar",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 70.0,
+   "area": "kamar",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 370.0,
+   "area": "kamar",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  },
+  {
+   "t": 1000.0,
+   "area": "kamar",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 1030.0,
+   "area": "kamar",
+   "state": "confirmed_occupancy",
+   "occupied": true,
+   "reason_code": "occupied"
+  },
+  {
+   "t": 1230.0,
+   "area": "kamar",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 1800.0,
+   "area": "kamar",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  },
+  {
+   "t": 3010.0,
+   "area": "kamar",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 3020.0,
+   "area": "kamar",
+   "state": "confirmed_occupancy",
+   "occupied": true,
+   "reason_code": "occupied"
+  },
+  {
+   "t": 3070.0,
+   "area": "kamar",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 3670.0,
+   "area": "kamar",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  }
+ ]
+}

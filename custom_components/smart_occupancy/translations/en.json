@@ -478,5 +478,11 @@
         "name": "Re-check diagnostics"
       }
     }
+  },
+  "services": {
+    "engine_return_to_integration": {
+      "name": "Return occupancy control to the integration",
+      "description": "Makes the integration's own occupancy engine publish room occupancy again, when the Smart Lighting App owns it. The current occupancy is kept (an occupied room stays occupied). Administrators only. The App returns to comparing (shadow mode) until a new, reviewed handover."
+    }
   }
 }

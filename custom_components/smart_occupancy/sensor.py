@@ -460,7 +460,10 @@ class RoomReasonSensor(RoomOccupancyEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         result = self.result
-        return {"reason_code": result.reason_code} if result else None
+        if result is None:
+            return None
+        # Phase A3.2: which engine decided it ("integration" or "app"); changes only with the owner.
+        return {"reason_code": result.reason_code, "decided_by": self.coordinator.occupancy.published_by(self._area_id)}
 
 
 COMPARISON_OPTIONS = ["agree", "disagree", "unknown"]

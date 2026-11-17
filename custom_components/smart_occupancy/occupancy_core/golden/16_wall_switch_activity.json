@@ -1,0 +1,99 @@
+{
+ "name": "wall_switch_activity",
+ "description": "Wall-switch activity refreshes an occupied room's quiet period; it never occupies a vacant room.",
+ "rooms": {
+  "kamar": {
+   "sensors": [
+    {
+     "entity_id": "binary_sensor.pir",
+     "kind": "pir",
+     "role": "trigger"
+    },
+    {
+     "entity_id": "binary_sensor.radar",
+     "kind": "radar",
+     "role": "maintain"
+    }
+   ]
+  }
+ },
+ "initial": {
+  "binary_sensor.pir": "off",
+  "binary_sensor.radar": "off"
+ },
+ "events": [
+  {
+   "t": 0,
+   "activity": {
+    "area": "kamar",
+    "source": "wall switch Door"
+   }
+  },
+  {
+   "t": 10,
+   "entity": "binary_sensor.pir",
+   "state": "on"
+  },
+  {
+   "t": 12,
+   "entity": "binary_sensor.radar",
+   "state": "on"
+  },
+  {
+   "t": 70,
+   "entity": "binary_sensor.pir",
+   "state": "off"
+  },
+  {
+   "t": 100,
+   "entity": "binary_sensor.radar",
+   "state": "off"
+  },
+  {
+   "t": 500,
+   "activity": {
+    "area": "kamar",
+    "source": "wall switch Door"
+   }
+  }
+ ],
+ "until": 2000,
+ "expect": [
+  {
+   "t": 0.0,
+   "area": "kamar",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacant",
+   "start": true
+  },
+  {
+   "t": 10.0,
+   "area": "kamar",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 12.0,
+   "area": "kamar",
+   "state": "confirmed_occupancy",
+   "occupied": true,
+   "reason_code": "occupied"
+  },
+  {
+   "t": 130.0,
+   "area": "kamar",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 1100.0,
+   "area": "kamar",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  }
+ ]
+}

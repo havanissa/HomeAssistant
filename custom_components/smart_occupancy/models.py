@@ -44,6 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .occupancy_core.types import OccupancyTiming, SensorAssignment, clean_timing  # noqa: F401
 from .const import (
     DaylightCondition,
     CONFIG_VERSION,
@@ -146,89 +147,8 @@ class LightCategory:
         return {"key": self.key, "name": self.name, "label_id": self.label_id, "kind": self.kind.value}
 
 
-@dataclass(frozen=True, slots=True)
-class SensorAssignment:
-    """A signal entity assigned to a room."""
-
-    entity_id: str
-    kind: SensorKind
-    role: SensorRole
-    # The signal means "active" when it is off (e.g. a "PC idle" sensor).
-    inverted: bool = False
-    # 0.3.8: False excludes the signal from this room's occupancy decisions (Presence tab). The assignment,
-    # its kind and role are kept, so enabling it again restores it exactly; the entity itself is untouched.
-    enabled: bool = True
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SensorAssignment:
-        kind = _enum_or(SensorKind, data.get("kind"), SensorKind.OTHER)
-        role = _enum_or(SensorRole, data.get("role"), DEFAULT_ROLE_FOR_KIND[kind])
-        enabled = data.get("enabled", True)
-        return cls(
-            entity_id=data["entity_id"], kind=kind, role=role,
-            inverted=bool(data.get("inverted", False)),
-            enabled=enabled if isinstance(enabled, bool) else True,
-        )
-
-    def as_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {
-            "entity_id": self.entity_id,
-            "kind": self.kind.value,
-            "role": self.role.value,
-            "inverted": self.inverted,
-        }
-        if not self.enabled:
-            # Only written when excluded: options saved before 0.3.8 keep their exact shape.
-            out["enabled"] = False
-        return out
-
-    @property
-    def participates(self) -> bool:
-        """Takes part in occupancy decisions: enabled and not set to Ignore."""
-        return self.enabled and self.role != SensorRole.IGNORE
-
-
-def _clean_timing(data: Any, *, fill_defaults: bool) -> dict[str, int]:
-    """Valid timing values only (unknown keys and bad values are dropped)."""
-    out: dict[str, int] = {}
-    data = data if isinstance(data, dict) else {}
-    for key, (default, low, high) in TIMING_PARAMETERS.items():
-        value = data.get(key)
-        if value is None or isinstance(value, bool):
-            if fill_defaults:
-                out[key] = default
-            continue
-        try:
-            number = int(value)
-        except (TypeError, ValueError):
-            if fill_defaults:
-                out[key] = default
-            continue
-        out[key] = min(max(number, low), high)
-    return out
-
-
-@dataclass(frozen=True, slots=True)
-class OccupancyTiming:
-    """Occupancy timing parameters, in seconds (see const.TIMING_PARAMETERS)."""
-
-    correlation_window: int = TIMING_PARAMETERS["correlation_window"][0]
-    exit_confirmation: int = TIMING_PARAMETERS["exit_confirmation"][0]
-    inactivity_timeout: int = TIMING_PARAMETERS["inactivity_timeout"][0]
-    dropout_grace: int = TIMING_PARAMETERS["dropout_grace"][0]
-    trigger_stuck_after: int = TIMING_PARAMETERS["trigger_stuck_after"][0]
-    presence_stuck_after: int = TIMING_PARAMETERS["presence_stuck_after"][0]
-    startup_hold: int = TIMING_PARAMETERS["startup_hold"][0]
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> OccupancyTiming:
-        return cls(**_clean_timing(data, fill_defaults=True))
-
-    def as_dict(self) -> dict[str, int]:
-        return {key: getattr(self, key) for key in TIMING_PARAMETERS}
-
-    def with_overrides(self, overrides: dict[str, int]) -> OccupancyTiming:
-        return replace(self, **_clean_timing(overrides, fill_defaults=False))
+# SensorAssignment and OccupancyTiming are the shared engine's own types (Phase A3.2), re-exported unchanged.
+_clean_timing = clean_timing
 
 
 def _number(value: Any) -> Any:

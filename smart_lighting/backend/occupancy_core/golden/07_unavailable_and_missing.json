@@ -1,0 +1,140 @@
+{
+ "name": "unavailable_and_missing",
+ "description": "A radar lost while reporting presence holds the room longer; a missing entity is unknown, never vacant.",
+ "rooms": {
+  "lounge": {
+   "sensors": [
+    {
+     "entity_id": "binary_sensor.pir",
+     "kind": "pir",
+     "role": "trigger"
+    },
+    {
+     "entity_id": "binary_sensor.radar",
+     "kind": "radar",
+     "role": "maintain"
+    }
+   ]
+  },
+  "store": {
+   "sensors": [
+    {
+     "entity_id": "binary_sensor.store_pir",
+     "kind": "pir",
+     "role": "trigger"
+    }
+   ]
+  }
+ },
+ "initial": {
+  "binary_sensor.pir": "off",
+  "binary_sensor.radar": "off"
+ },
+ "events": [
+  {
+   "t": 0,
+   "entity": "binary_sensor.pir",
+   "state": "on"
+  },
+  {
+   "t": 1,
+   "entity": "binary_sensor.radar",
+   "state": "on"
+  },
+  {
+   "t": 50,
+   "entity": "binary_sensor.pir",
+   "state": "off"
+  },
+  {
+   "t": 100,
+   "entity": "binary_sensor.radar",
+   "state": "unavailable"
+  },
+  {
+   "t": 10,
+   "entity": "binary_sensor.store_pir",
+   "state": "off"
+  },
+  {
+   "t": 2000,
+   "entity": "binary_sensor.radar",
+   "state": "off"
+  }
+ ],
+ "until": 3000,
+ "expect": [
+  {
+   "t": 0.0,
+   "area": "lounge",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacant",
+   "start": true
+  },
+  {
+   "t": 0.0,
+   "area": "store",
+   "state": "uncertain",
+   "occupied": null,
+   "reason_code": "all_signals_unknown",
+   "start": true
+  },
+  {
+   "t": 0.0,
+   "area": "lounge",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 1.0,
+   "area": "lounge",
+   "state": "confirmed_occupancy",
+   "occupied": true,
+   "reason_code": "occupied"
+  },
+  {
+   "t": 10.0,
+   "area": "store",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacant"
+  },
+  {
+   "t": 100.0,
+   "area": "lounge",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 1300.0,
+   "area": "lounge",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  },
+  {
+   "t": 2000.0,
+   "area": "lounge",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 2030.0,
+   "area": "lounge",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 2300.0,
+   "area": "lounge",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  }
+ ]
+}
