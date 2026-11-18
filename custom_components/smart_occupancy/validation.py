@@ -17,6 +17,7 @@ from homeassistant.util import dt as dt_util
 
 from . import lighting
 from .const import (
+    BUILTIN_MOOD_ENTITY,
     MOOD_ENTITY_DOMAINS,
     RGB_SUFFIX,
     CategoryKind,
@@ -244,6 +245,8 @@ def validate(
                 subject=label,
             ))
             continue
+        if mood.source == "builtin" and entity_id == BUILTIN_MOOD_ENTITY:
+            continue  # this integration's own selector (it may be added after the first check)
         if entity_id.split(".", 1)[0] not in MOOD_ENTITY_DOMAINS:
             add(Problem(
                 "mood_entity_wrong_domain", Severity.ERROR, CONFIG, "Mood helper has the wrong type",

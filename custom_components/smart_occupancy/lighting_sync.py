@@ -92,8 +92,21 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _normal(value: Any) -> Any:
+    """Equal configurations, equal text: tuples are lists and whole floats are ints (2.0 and 2 are one value)."""
+    if isinstance(value, bool) or value is None or isinstance(value, (int, str)):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else value
+    if isinstance(value, dict):
+        return {str(k): _normal(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normal(v) for v in value]
+    return value
+
+
 def canonical(doc: Any) -> str:
-    return json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return json.dumps(_normal(doc), sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
 
 
 def config_revision(doc: dict[str, Any]) -> str:

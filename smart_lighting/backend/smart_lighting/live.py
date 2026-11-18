@@ -86,6 +86,8 @@ class LiveHub:
             self.core.floorplan.add_listener(self._on_floorplan)
         if self.core.occupancy is not None:
             self.core.occupancy.add_listener(self._on_engine)
+        if self.core.lighting is not None:
+            self.core.lighting.add_listener(self._on_lighting)
         self._tasks = [
             asyncio.create_task(self._flush_loop(), name="live-flush"),
             asyncio.create_task(self._heartbeat_loop(), name="live-heartbeat"),
@@ -113,6 +115,13 @@ class LiveHub:
     def _on_floorplan(self, revision: str) -> None:
         if self.clients:
             self._schedule(self._broadcast({"type": "floorplan", "revision": revision}))
+
+    def _on_lighting(self, kind: str) -> None:
+        """Phase A4: the lighting runtime changed (mode, owner, bridge) or the lighting models did (refetch)."""
+        if self.clients and self.core.lighting is not None:
+            rt = self.core.lighting
+            self._schedule(self._broadcast({"type": "lighting", "what": kind, "mode": rt.mode, "bridge": rt.bridge,
+                                            "owner": self.core.lighting_owner()}))
 
     def _on_engine(self, kind: str) -> None:
         if self.clients and self.core.occupancy is not None:

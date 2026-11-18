@@ -19,10 +19,13 @@ from .ha import (
     ALLOWED_COMMANDS,
     CONFIG_WRITE_COMMANDS,
     ENGINE_COMMANDS,
+    LIGHTING_BRIDGE_COMMANDS,
     READ_ONLY_COMMANDS,
     HomeAssistantClient,
     utcnow_iso,
 )
+from .lighting_api import LightingApi
+from .lighting_runtime import LightingRuntime
 from .logbuffer import RingBufferHandler
 from .occupancy_runtime import OccupancyRuntime
 from .presence import PresenceService
@@ -51,6 +54,8 @@ class AppCore:
         self.floorplan: FloorPlanService | None = None
         self.presence: PresenceService | None = None
         self.occupancy: OccupancyRuntime | None = None
+        self.lighting: LightingRuntime | None = None
+        self.lighting_api: LightingApi | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._rooms_timer: asyncio.TimerHandle | None = None
         self._rooms_listeners: list = []
@@ -68,6 +73,13 @@ class AppCore:
                                           min_shadow_seconds=self.settings.engine_min_shadow_seconds,
                                           min_transitions=self.settings.engine_min_transitions)
         await self.occupancy.start()
+        # Phase A4: the integration's lighting runtime (shadow until a reviewed handover; then it commands lights
+        # only through the integration's fenced executor).
+        self.lighting = LightingRuntime(self.ha, self.occupancy, self.settings.data_dir, app_version=APP_VERSION,
+                                        min_shadow_seconds=self.settings.lighting_min_shadow_seconds,
+                                        min_commands=self.settings.lighting_min_commands)
+        await self.lighting.start()
+        self.lighting_api = LightingApi(self.ha, self.lighting)
         self.ha.add_listener(self._on_ha)
         await self.ha.start()
         self._tasks.append(asyncio.create_task(self._supervisor_loop(), name="supervisor-refresh"))
@@ -122,6 +134,8 @@ class AppCore:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks.clear()
+        if self.lighting is not None:
+            await self.lighting.stop()
         if self.occupancy is not None:
             await self.occupancy.stop()
         if self.ha is not None:
@@ -148,20 +162,36 @@ class AppCore:
             return "integration"
         return {"app": "app", "resume_pending": "app"}.get(self.occupancy.integration.get("state"), "integration")
 
+    def lighting_owner(self) -> str:
+        """Which controller commands lights, as the integration acknowledges it."""
+        if self.lighting is None:
+            return "integration"
+        return {"app": "app", "resume_pending": "app"}.get(self.lighting.integration.get("state"), "integration")
+
     def safety(self) -> dict[str, Any]:
         sent = dict(self.ha.commands_sent) if self.ha else {}
         other_commands = sum(n for cmd, n in sent.items() if cmd not in ALLOWED_COMMANDS)
         writes = sum(n for cmd, n in sent.items() if cmd in CONFIG_WRITE_COMMANDS)
         engine = sum(n for cmd, n in sent.items() if cmd in ENGINE_COMMANDS)
+        lighting_commands = sent.get("smart_occupancy/lighting/bridge/execute", 0)
+        owner = self.lighting_owner()
         return {
             "read_only": False,
             "configuration_writes": True,
             "write_scope": "Room and presence configuration of the existing integration (sensor and light "
-                           "assignments, sensor roles, occupancy timing), through its validated, administrator-only "
-                           "commands; floor plans in the App's own storage",
+                           "assignments, sensor roles, occupancy timing) and, while the integration controls "
+                           "lighting, its lighting configuration, through its validated, administrator-only "
+                           "commands; after the lighting handover the lighting configuration in the App's own "
+                           "storage (mirrored to the integration); floor plans in the App's own storage",
             "config_writes_sent": writes,
             "recent_config_writes": list(self.ha.config_writes) if self.ha else [],
-            "device_control": False,
+            # Phase A4: lights are commanded only after a reviewed handover, only through the integration's fenced
+            # executor (allowlisted services of configured targets).
+            "device_control": owner == "app",
+            "lighting_owner": owner,
+            "lighting_mode": self.lighting.mode if self.lighting else None,
+            "lighting_commands_sent": lighting_commands,
+            "allowed_lighting_bridge_commands": sorted(LIGHTING_BRIDGE_COMMANDS),
             "automation_engine": False,
             "occupancy_engine": self.occupancy_owner(),
             "occupancy_engine_mode": self.occupancy.mode if self.occupancy else None,
@@ -169,7 +199,7 @@ class AppCore:
             "allowed_engine_commands": sorted(ENGINE_COMMANDS),
             "automatic_migration": False,
             "modifies_integration": writes > 0,
-            "service_calls_sent": other_commands,  # always 0: the client cannot send them
+            "service_calls_sent": other_commands,  # always 0: the client cannot call a service directly
             "commands_sent": sent,
             "allowed_commands": sorted(READ_ONLY_COMMANDS),
             "allowed_write_commands": sorted(CONFIG_WRITE_COMMANDS),
@@ -284,15 +314,33 @@ class AppCore:
             checks.append({"key": "occupancy_engine", "title": "Occupancy engine", "status": status,
                            "detail": detail})
 
+        if self.lighting is not None:
+            rt = self.lighting
+            detail = {
+                "owner": "The App controls lighting (acknowledged by the integration, through its fenced executor)",
+                "shadow": "Shadow mode: the App's lighting runs next to the integration's and is compared; the "
+                          "integration controls the lights",
+                "standalone": "Waiting for the integration's lighting bridge",
+                "starting": "Starting",
+            }.get(rt.mode, rt.mode)
+            status = OK if rt.mode in ("shadow", "owner") else (WARNING if rt.bridge in (
+                "incompatible", "error") else INFO)
+            if rt.bridge in ("incompatible", "error", "unsupported") and rt.bridge_error:
+                detail = rt.bridge_error
+            checks.append({"key": "lighting_runtime", "title": "Lighting", "status": status, "detail": detail})
+
         safety = self.safety()
+        device = ("Lights only through the integration's fenced executor "
+                  f"({safety['lighting_commands_sent']} commands)" if safety["device_control"]
+                  else "No device control (the integration controls the lights)")
         checks.append(
             {
                 "key": "safety",
                 "title": "Safety",
                 "status": OK if safety["service_calls_sent"] == 0 else ERROR,
-                "detail": "No service calls and no device control. Configuration changes only through the "
-                          f"integration's room and presence commands ({safety['config_writes_sent']} so far); "
-                          "occupancy results only through its fenced bridge.",
+                "detail": f"No direct service calls. {device}. Configuration changes only through the integration's "
+                          f"validated commands ({safety['config_writes_sent']} so far); occupancy results only "
+                          "through its fenced bridge.",
             }
         )
         return checks
@@ -335,8 +383,10 @@ class AppCore:
             "rooms": self.rooms.status() if self.rooms else None,
             "floorplan": self.floorplan.status() if self.floorplan else None,
             "presence": self.presence.status() if self.presence else None,
-            "modules": modules.modules(self.occupancy_owner()),
-            "migration": modules.migration(self.occupancy_owner()),
+            "modules": modules.modules(self.occupancy_owner(), self.lighting_owner()),
+            "migration": modules.migration(self.occupancy_owner(), self.lighting_owner()),
+            "lighting": ({"mode": self.lighting.mode, "owner": self.lighting_owner(),
+                          "bridge": self.lighting.bridge} if self.lighting else None),
             "engine": ({"mode": self.occupancy.mode, "owner": self.occupancy_owner(),
                         "bridge": self.occupancy.bridge} if self.occupancy else None),
             "safety": self.safety(),

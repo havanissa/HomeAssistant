@@ -117,6 +117,9 @@ class FakeHomeAssistant:
         self.floors = [{"floor_id": "ground", "name": "Ground floor", "level": 0, "icon": None}]
         # Phase A3.2: the integration's occupancy bridge (tests/fake_engine.py); None = an older integration.
         self.engine: Any = None
+        # Phase A4: the integration's lighting bridge (tests/fake_lighting.py); None = an older integration.
+        self.lighting: Any = None
+        self.lighting_editor_calls: list[dict[str, Any]] = []
 
     # -- data ---------------------------------------------------------------
     def config(self) -> dict[str, Any]:
@@ -364,6 +367,8 @@ class FakeHomeAssistant:
             await result(self.devices())
         elif kind == "config/floor_registry/list":
             await result(self.floors)
+        elif kind == "config/label_registry/list":
+            await result([])
         elif kind == "config/auth/list":
             await result(self.users)
         elif kind == "config_entries/subscribe":
@@ -437,6 +442,17 @@ class FakeHomeAssistant:
                 await result({"applied": plan["apply"], "changes": plan["changes"], "revision": revision,
                               "rooms_revision": revision_of(self.rooms_options)})
                 await self.notify_entry_changed()
+        elif kind.startswith("smart_occupancy/lighting/bridge/"):
+            if self.lighting is None:
+                await error("unknown_command", f"Unknown command {kind}")
+            else:
+                await self.lighting.answer(ws, msg, result, error)
+        elif kind.startswith("smart_occupancy/lighting/") and self.lighting is not None:
+            # The integration's lighting editor commands (forwarded while it controls lighting).
+            self.lighting_editor_calls.append(msg)
+            await result({"handled_by": "integration", "type": kind})
+        elif kind in ("automation/config", "script/config"):
+            await error("not_found", "Entity not found")
         elif kind.startswith("smart_occupancy/engine/"):
             if self.engine is None:
                 await error("unknown_command", f"Unknown command {kind}")
@@ -469,6 +485,19 @@ class FakeHomeAssistant:
         self.states = [s for s in self.states if s["entity_id"] != entity_id] + ([new] if new else [])
         if self.engine is not None:
             await self.engine.on_state(entity_id, value, changed)
+        for ws, ids in list(self.subscriptions.items()):
+            for sub_id in ids:
+                await ws.send_json({"id": sub_id, "type": "event", "event": {"event_type": "state_changed",
+                                    "data": {"entity_id": entity_id, "old_state": None, "new_state": new}}})
+
+    async def emit_live_context(self, entity_id: str, value: str, attributes: dict[str, Any], context_id: str) -> None:
+        """A device reporting a command: the state with the command's context (a local device)."""
+        from datetime import UTC, datetime
+
+        changed = datetime.now(UTC).isoformat()
+        new = {"entity_id": entity_id, "state": value, "attributes": attributes, "last_changed": changed,
+               "last_updated": changed, "context": {"id": context_id, "parent_id": None, "user_id": None}}
+        self.states = [s for s in self.states if s["entity_id"] != entity_id] + [new]
         for ws, ids in list(self.subscriptions.items()):
             for sub_id in ids:
                 await ws.send_json({"id": sub_id, "type": "event", "event": {"event_type": "state_changed",

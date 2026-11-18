@@ -53,6 +53,7 @@ MIN_SHADOW_SECONDS = 2 * 3600
 MIN_COMMANDS = 10
 PUBLISH_DELAY = 2.0
 VIEW_DELAY = 2.0
+MODELS_DELAY = 0.5
 RESUBSCRIBE_DELAYS = (2, 5, 15, 30, 60)
 OWNERSHIP_LOG = 50
 BACKUPS = 20
@@ -120,6 +121,7 @@ class LightingRuntime:
         self._view_handle: asyncio.TimerHandle | None = None
         self._dirty: set[str] = set()
         self._last_view: dict[str, Any] | None = None
+        self._models_handle: asyncio.TimerHandle | None = None
         self._backlog: list[dict[str, Any]] | None = None  # events that arrive while a hello is processed
         self._switching = False
         self._attempt = 0
@@ -129,8 +131,6 @@ class LightingRuntime:
     async def start(self) -> None:
         self.fingerprint = await asyncio.to_thread(runtime_fingerprint)
         self.core_fingerprint = await asyncio.to_thread(core_fingerprint)
-        if self.dir is not None:
-            self.dir.mkdir(parents=True, exist_ok=True)
         self.mode = "standalone"
         self._unsubs.append(self.ha.add_listener(self._on_ha))
         self._unsubs.append(self.occupancy.add_result_listener(self._on_occupancy))
@@ -142,7 +142,7 @@ class LightingRuntime:
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
-        for handle in (self._publish_handle, self._view_handle):
+        for handle in (self._publish_handle, self._view_handle, self._models_handle):
             if handle:
                 handle.cancel()
         for task in (self._heartbeat, self._subscribe_task, *self._tasks):
@@ -160,6 +160,14 @@ class LightingRuntime:
                 listener(what)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Lighting listener failed")
+
+    def _models_changed(self) -> None:
+        if self._models_handle is None:
+            self._models_handle = asyncio.get_running_loop().call_later(MODELS_DELAY, self._models_fire)
+
+    def _models_fire(self) -> None:
+        self._models_handle = None
+        self._changed("models")
 
     def _spawn(self, coro: Any) -> asyncio.Task[Any]:
         task = asyncio.get_running_loop().create_task(coro)
@@ -426,8 +434,13 @@ class LightingRuntime:
         self._start_heartbeat()
 
     async def _run_instance(self, inst: LightingInstance, recent: Any) -> None:
+        from homeassistant.helpers.dispatcher import async_dispatcher_connect  # noqa: PLC0415
+        from smart_occupancy.const import SIGNAL_LIGHTING_UPDATED  # noqa: PLC0415
+
         self.instance = inst
         await inst.async_start()
+        # The interface refetches its models when the controller says something changed (throttled).
+        async_dispatcher_connect(inst.hass, SIGNAL_LIGHTING_UPDATED, self._models_changed)
         if recent:
             inst.controller.note_recent_commands(recent)
 

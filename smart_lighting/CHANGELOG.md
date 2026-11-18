@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0
+
+Phase A4: Lighting, Moods and Switches (work in progress).
+
 ## 0.4.0
 
 Phase A3.2: occupancy engine migration. Needs Smart Occupancy & Lighting
