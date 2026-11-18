@@ -170,7 +170,7 @@ export class SlPresenceEngine extends StoreElement {
           ["App", String(v.app ?? "—")],
           ["Integration", String(v.integration ?? "—")],
           ["Engine (App / integration)", `${v.core ?? "—"} / ${v.integration_core ?? "—"}`],
-          ["Same engine", sameEngine ? chip("ok", "Fingerprints match") : chip("error", "Different")],
+          ["Same engine", sameEngine ? chip("ok", "Match") : chip("error", "Different")],
           ["Bridge protocol", `${v.protocol} / ${v.integration_protocol ?? "—"}`],
         ])}</section>
       <section class="card" data-testid="engine-config"><header class="card-head">${icon("tune")}<h3>Configuration</h3></header>
@@ -185,14 +185,16 @@ export class SlPresenceEngine extends StoreElement {
           ["Last accepted from the App", fmt(integ?.last_accepted_at)],
           ["Accepted messages", integ ? String(integ.accepted_total) : "—"],
           ["Refused messages", rejections.length ? rejections.map(([k, n]) => `${k} ×${n}`).join(", ") : "none"],
-          ["Self-test", d.self_test ? (d.self_test.passed ? chip("ok", `${d.self_test.scenarios} scenarios, ${d.self_test.transitions} transitions reproduced`) : chip("error", "Failed")) : "—"],
+          ["Self-test", d.self_test ? html`${d.self_test.passed ? chip("ok", "Passed") : chip("error", "Failed")}<span class="block small muted">${d.self_test.scenarios} scenarios, ${d.self_test.transitions} transitions</span>` : "—"],
         ])}</section>`;
   }
 
   private readiness(d: EngineStatus): TemplateResult {
     const t = d.readiness.thresholds;
+    const appDecides = ownerInfo(d.acknowledged_owner).app;
     return html`<section class="card" data-testid="engine-readiness"><header class="card-head">${icon("ok")}<h3>Migration readiness</h3>
-        ${d.readiness.ready ? chip("ok", "Ready") : chip("warning", "Not ready")}</header>
+        ${appDecides ? chip("neutral", "Handed over") : d.readiness.ready ? chip("ok", "Ready") : chip("warning", "Not ready")}</header>
+      ${appDecides ? html`<p class="small">The App already decides occupancy. These checks apply before a handover; after a return of control they must pass again.</p>` : nothing}
       <p class="muted small">A handover needs ${duration(t.min_shadow_seconds)} of uninterrupted comparison, ${t.min_transitions} matched transitions and no disagreement in that time.</p>
       <ul class="checklist">${d.readiness.checks.map((c) => html`<li class="check check-${c.status}" data-check=${c.key}>
         <span class="tone-${c.status}">${icon(c.status === "ok" ? "ok" : c.status === "warning" ? "warning" : "error", 18)}</span>

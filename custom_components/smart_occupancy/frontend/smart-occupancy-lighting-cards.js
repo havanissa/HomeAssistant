@@ -103,7 +103,7 @@
  * reports a change.
  */
 
-const VERSION = "0.6.10";
+const VERSION = "0.7.0";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
