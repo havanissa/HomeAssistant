@@ -36,7 +36,10 @@ lights until an administrator performs a reviewed handover.
   the App's controller at once; a reconnect resumes with the lease token,
   restarts the controller from its own stored state (nothing applied) and
   applies entity renames made while it was away; a new App process never
-  resumes. A failed return leaves the App's controller working.
+  resumes. A failed return leaves the App's controller working. Connected
+  while Home Assistant is still starting (a Home Assistant restart with the
+  App running), the client re-reads the states once Home Assistant runs, so
+  the resumed controller knows every light.
 - **Host timing as in Home Assistant:** a timer started while an event is
   handled (a state change, a configuration change from the bridge, an occupancy
   result) counts from when the event fired in Home Assistant, not from when it
@@ -47,7 +50,10 @@ lights until an administrator performs a reviewed handover.
 - **Lighting**, **Moods** and **Switches** pages, on one command API: the
   integration's own 50 lighting editor commands, forwarded while the
   integration controls lighting and answered by the App's copy of the same
-  handlers afterwards.
+  handlers afterwards. A forwarded command that changes the controller's
+  runtime state (override cleared, profile test, switch learning, calibration
+  reset, Priority Inputs, supervisor check) also runs on the shadow's copy, so
+  the comparison stays meaningful.
 - **Universal moods**: one selector or the built-in mood selector instead of the
   three helpers.
 - Tests: 21 recorded scenarios replayed through the host (same commands, same

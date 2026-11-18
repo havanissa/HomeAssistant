@@ -146,6 +146,8 @@ ALLOWED_EVENT_TYPES: frozenset[str] = frozenset(
 REGISTRY_EVENTS = ("area_registry_updated", "device_registry_updated", "entity_registry_updated",
                    "floor_registry_updated", "label_registry_updated")
 OTHER_EVENTS = ("automation_reloaded", "script_reloaded", "homeassistant_started")
+#: Connected while Home Assistant starts: how often it is asked whether it runs (its start-up event may be missed).
+STARTUP_POLL_SECONDS = 5.0
 REGISTRY_DEBOUNCE = 2.0
 
 RECONNECT_DELAYS = (1, 2, 5, 10, 30)
@@ -224,6 +226,8 @@ class HomeAssistantClient:
         self.integration = IntegrationReport.unknown()
 
         self.commands_sent: Counter[str] = Counter()
+        self._started_seen = False
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self.config_writes: list[dict[str, Any]] = []  # last writes (type, time, result), for diagnostics
         self.events_total = 0
         self._registry_timer: asyncio.TimerHandle | None = None
@@ -520,6 +524,7 @@ class HomeAssistantClient:
 
             self._ws = ws
             self.ha_version = reply.get("ha_version")
+            self._started_seen = False
             reader = asyncio.create_task(self._reader(ws), name="ha-websocket-reader")
             helpers: list[asyncio.Task[None]] = []
             try:
@@ -540,6 +545,9 @@ class HomeAssistantClient:
                     asyncio.create_task(self._ping_loop(ws), name="ha-ping"),
                     asyncio.create_task(self._detection_loop(), name="ha-detection"),
                 ]
+                if (self.config.get("state") or "RUNNING") != "RUNNING":
+                    # Connected while Home Assistant starts: the snapshot is incomplete (see _resync_states).
+                    helpers.append(asyncio.create_task(self._startup_watch(), name="ha-startup"))
                 await reader
             finally:
                 for task in (*helpers, reader):
@@ -710,7 +718,67 @@ class HomeAssistantClient:
         self._notify("state", (entity_id, new_state))
 
     def _on_other_event(self, event: dict[str, Any]) -> None:
+        if event.get("event_type") == "homeassistant_started":
+            self._started_seen = True
+            self._background(self._after_started(event))
+            return
         self._notify("event", event)
+
+    def _background(self, coro: Any) -> None:
+        task = asyncio.get_running_loop().create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _after_started(self, event: dict[str, Any]) -> None:
+        await self._resync_states()
+        self._notify("event", event)
+
+    async def _resync_states(self) -> None:
+        """Home Assistant finished starting: the snapshot taken while it started (``get_states`` during start-up)
+        was incomplete, and entities that were already there do not send a state change. Re-read everything and
+        deliver what differs as state changes (as Home Assistant delivers appearing entities)."""
+        try:
+            self.config = await self.command("get_config") or self.config
+            states = await self.command("get_states") or []
+        except (HomeAssistantError, ConnectionError, TimeoutError) as err:
+            _LOGGER.warning("Could not re-read the states after Home Assistant started: %s", err)
+            return
+        changed: list[str] = []
+        for wire in states:
+            if not isinstance(wire, dict) or "entity_id" not in wire:
+                continue
+            entity_id = wire["entity_id"]
+            current = self.states.get(entity_id)
+            # (A state change delivered meanwhile is newer than the snapshot: it stays.)
+            if current == wire or (current is not None and (current.get("last_updated") or "") >
+                                   (wire.get("last_updated") or "")):
+                continue
+            self.states[entity_id] = wire
+            changed.append(entity_id)
+        for entity_id in changed:
+            if entity_id in self.integration.entity_set:
+                self._notify("entity", entity_summary(self.states[entity_id], entity_id))
+            self._notify("state", (entity_id, self.states[entity_id]))
+        _LOGGER.info("Re-read %d states after Home Assistant started (%d new or changed)", len(self.states),
+                     len(changed))
+
+    async def _startup_watch(self) -> None:
+        """Connected while Home Assistant was starting: until its start-up event arrives (or, if it was missed,
+        until it reports RUNNING), poll; then re-read the states once."""
+        for _ in range(120):
+            await asyncio.sleep(STARTUP_POLL_SECONDS)
+            if self._started_seen:
+                return
+            try:
+                config = await self.command("get_config") or {}
+            except (HomeAssistantError, ConnectionError, TimeoutError):
+                continue
+            if config.get("state") == "RUNNING":
+                if not self._started_seen:
+                    self._started_seen = True
+                    self.config = config
+                    await self._after_started({"event_type": "homeassistant_started", "data": {}})
+                return
 
     def _on_registry_event(self, event: dict[str, Any]) -> None:
         """Re-read the registries shortly after they change (bursts are coalesced)."""

@@ -237,3 +237,59 @@ async def test_bridge_events_start_timers_from_when_they_fired(lit_app: Any, fak
     assert seen == [datetime.fromisoformat(fired)] and inst.hass.event_time is None
     inst.config_changed(LightingConfig.from_dict(doc), "not a time")  # (unchanged: no listener; no crash)
     assert inst.hass.event_time is None
+
+
+async def test_shadow_mirrors_forwarded_state_changes(lit_app: Any, fake_ha: FakeHomeAssistant) -> None:
+    """``override/clear`` forwarded to the integration also runs on the shadow's copy (its state must keep
+    evolving as the integration's); a configuration change is not run twice (it arrives as a config event)."""
+    runtime = rt(lit_app)
+    await wait_for(lambda: runtime.mode == "shadow" and runtime.instance is not None and runtime.instance.started)
+    api = lit_app.core.lighting_api
+    mirrored: list[str] = []
+    original = api._local
+
+    async def spy(command: str, params: dict[str, Any], **kw: Any) -> Any:
+        mirrored.append(command)
+        return await original(command, params, **kw)
+
+    api._local = spy
+    for command, extra in (("override/clear", {"area_id": AREA}), ("settings/set", {"manual_override_minutes": 7})):
+        resp = await lit_app.post("/api/lighting/command", json={"type": f"smart_occupancy/lighting/{command}", **extra},
+                                  headers=ADMIN_HEADERS)
+        assert resp.status == 200 and (await resp.json())["handled_by"] == "integration", await resp.text()
+    assert mirrored == ["smart_occupancy/lighting/override/clear"]
+    assert [m["type"] for m in fake_ha.lighting_editor_calls][-2:] == [
+        "smart_occupancy/lighting/override/clear", "smart_occupancy/lighting/settings/set"]
+
+
+async def test_states_are_re_read_once_home_assistant_has_started(fake_ha: FakeHomeAssistant, aiohttp_client,
+                                                                   monkeypatch) -> None:
+    """Connected while Home Assistant starts (an HA restart with the App running): the snapshot is incomplete;
+    the states are re-read when the start-up event arrives, or when Home Assistant reports RUNNING."""
+    from smart_lighting import ha as ha_module
+
+    monkeypatch.setattr(ha_module, "STARTUP_POLL_SECONDS", 0.05)
+    fake_ha.lighting = FakeLighting(fake_ha)
+    fake_ha.engine = FakeEngine(fake_ha)
+    full = list(fake_ha.states)
+    fake_ha.core_state = "STARTING"
+    fake_ha.states = [s for s in full if s["entity_id"] != LAMP]
+    client = await start_app(fake_ha, aiohttp_client)
+    runtime = client.core.lighting
+    await wait_for(lambda: runtime.mode == "shadow" and runtime.instance is not None and runtime.instance.started)
+    ha = client.core.ha
+    assert LAMP not in ha.states and runtime.instance.hass.states.get(LAMP) is None
+    fake_ha.states = full
+    fake_ha.core_state = "RUNNING"
+    await fake_ha.emit_event("homeassistant_started")
+    await wait_for(lambda: LAMP in ha.states and runtime.instance.hass.states.get(LAMP) is not None)
+    assert ha.config["state"] == "RUNNING" and ha.info()["entity_count"] == len(full)
+    # The same without the event (missed): the poll notices RUNNING.
+    await fake_ha.drop_connections()
+    fake_ha.core_state = "STARTING"
+    fake_ha.states = [s for s in full if s["entity_id"] != LAMP]
+    await wait_for(lambda: ha.connected and LAMP not in ha.states, timeout=10)
+    fake_ha.states = full
+    fake_ha.core_state = "RUNNING"
+    await wait_for(lambda: LAMP in ha.states and ha.config["state"] == "RUNNING")
+    fake_ha.engine.stop()

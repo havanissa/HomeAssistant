@@ -51,8 +51,8 @@ READ_ONLY = {
     "smart_occupancy/lighting/zone/radar_test", "smart_occupancy/lighting/switch/candidates",
     "smart_occupancy/lighting/supervisor/room",
 }
-APP_VERSION = "0.4.0"
-INTEGRATION_VERSION = "0.7.0"
+APP_VERSION = "0.5.0"
+INTEGRATION_VERSION = "0.8.0"
 
 VIEWPORTS = {
     "phone-360": {"viewport": {"width": 360, "height": 740}, "is_mobile": True, "has_touch": True, "device_scale_factor": 3},
@@ -210,6 +210,11 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
         elif route == "presence":
             # Phase A3.1: the Presence interface is in the App; the integration keeps the engine.
             expect(frame.locator("[data-testid=presence-ownership]")).to_contain_text("Smart Occupancy integration")
+        elif route in ("lighting", "moods", "switches"):
+            # Phase A4: built pages; the banner says who controls the lights (the integration, by default).
+            banner = frame.locator(".lighting-banner").first
+            expect(banner).to_be_visible()
+            expect(banner).to_have_class(re.compile(r"lighting-banner-integration"))
         elif route not in ("dashboard", "diagnostics", "settings"):
             card = frame.locator(f"[data-testid=pending-{route}]")
             expect(card).to_be_visible()

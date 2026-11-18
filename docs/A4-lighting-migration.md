@@ -182,6 +182,15 @@ bridge connected, protocol supported, identical fingerprint, configuration revis
 equal, integration the owner, shadow running for at least 2 h with at least 10
 matched commands, no unexplained mismatch in that window.
 
+The shadow starts from a copy and then evolves on the same events as the integration's
+controller: Home Assistant's state changes, the integration's configuration changes
+(`config` events) and its published occupancy. An editor command that changes the
+controller's *runtime state* rather than its configuration (a manual override cleared, a
+profile test, switch learning, a daylight calibration reset, Priority Input claims and the
+lock, a supervisor check) is forwarded to the integration and then run on the shadow's copy
+too (`LightingApi.SHADOW_MIRRORED`); otherwise the shadow would, for example, keep a cleared
+override and skip what the integration applies (found by the end-to-end run).
+
 ### 2.6 Occupancy
 
 The App's controller consumes the published occupancy (the integration's engine or,
@@ -229,6 +238,12 @@ Default lighting owner is the integration; installing or upgrading never changes
   that start timers (a configuration change such as switching a room to Automatic, an occupancy
   result): they now carry a full-precision `fired` stamp and the shadow handles them at that
   instant.
+* **Found live (HA restart while the App owns lighting):** the App reconnects while Home
+  Assistant is still starting; `get_states` then returns an incomplete list, and entities that
+  were already there never send a state change, so the resumed controller knew no light states
+  and commanded nothing. The App's client now re-reads the states when Home Assistant's
+  start-up event arrives (or, if it was missed, when `get_config` reports RUNNING) and delivers
+  what differs as state changes, before the controller gets the start-up event.
 * **Bridge (integration):** fencing (epoch, lease, sequence, session), the allowlist, the
   mirror, inputs, options, handover with commands in flight, every way back (release, return,
   service, lease expiry, new App instance), restart and reload (dormant, resume, no resume),

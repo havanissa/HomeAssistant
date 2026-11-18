@@ -297,12 +297,16 @@ def phase_all(args: argparse.Namespace, out: Path) -> None:
     wait("readiness for the third handover", lambda: lighting()["readiness"]["ready"], 120, 3)
     status, _ = app_post_status("api/lighting/handover", {"confirm": True})
     check("third handover (left in place for the restart check)", status == 200 and integration(args)["owner"] == "app")
+    # (The App process was restarted during this phase: its command counters start from the restart.)
+    executed = integration(args)["executed"]
+    set_mood(args, "Nátt" if state(args, MAIN)["state"] != "Nátt" else "Kvøld")
+    wait("the App commanded the light after the third handover", lambda: integration(args)["executed"] > executed, 30)
     safety = app("api/diagnostics")["safety"]
     commands = safety["commands_sent"]
     check("the App never called a service directly",
           not any(c.startswith(("call_service", "execute_script", "fire_event")) for c in commands), sorted(commands))
     check("the App's device control went only through the bridge", safety["device_control"] and
-          safety["lighting_commands_sent"] >= 2, safety["lighting_commands_sent"])
+          safety["lighting_commands_sent"] >= 1, safety)
 
 
 def phase_restart(args: argparse.Namespace, out: Path) -> None:
@@ -312,8 +316,13 @@ def phase_restart(args: argparse.Namespace, out: Path) -> None:
     check("Home Assistant restart: the same App process resumed", own["owner"] == "app"
           and own["history"][0]["reason"] == "resumed", own["history"][:2])
     check("the integration's controller stayed dormant", own["controller"] == "dormant")
-    set_mood(args, "Nátt")
-    check("the resumed App controls the light", pct(args) == LEVELS["Nátt"] and data["acknowledged_owner"] in ("app", "resume_pending"))
+    # Home Assistant may still be starting: the App re-reads the states once it runs (nothing commands lights
+    # whose state it does not know).
+    wait("the App sees Home Assistant running with its entities", lambda: (i := app("api/overview")["home_assistant"]
+         ["info"]) and i["state"] == "RUNNING" and (i["entity_count"] or 0) > 10, 120, 2)
+    mood = "Nátt" if state(args, MAIN)["state"] != "Nátt" else "Kvøld"  # (a change: the demo light reset at the restart)
+    set_mood(args, mood)
+    check("the resumed App controls the light", pct(args) == LEVELS[mood] and data["acknowledged_owner"] in ("app", "resume_pending"))
 
 
 def phase_finish(args: argparse.Namespace, out: Path) -> None:

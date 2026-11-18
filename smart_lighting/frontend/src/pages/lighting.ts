@@ -193,7 +193,7 @@ export class SlLighting extends LightingElement {
     const filters: Array<[Filter, string]> = [["all", "All rooms"], ["automatic", "Automatic"], ["observing", "Observing"], ["attention", "Needs attention"]];
     return html`${header}${controlBanner(this.status)}
       ${this.error ? problemNotice(this.error) : nothing}
-      ${general.length ? html`<p class="notice notice-warning">${icon("warning", 20)}<span>${plural(general.length, "lighting problem")} that concern no single room: <a href="#/lighting/settings">Lighting settings</a>.</span></p>` : nothing}
+      ${general.length ? html`<p class="notice notice-warning">${icon("warning", 20)}<span>${plural(general.length, "lighting problem")} that concern no single room: <a class="btn btn-small" href="#/lighting/settings">Lighting settings</a>.</span></p>` : nothing}
       <div class="grid lp-grid">${this.totals()}</div>
       ${m.rooms.length ? html`
         <div class="toolbar lp-toolbar" role="group" aria-label="Show rooms">

@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 
 from . import lighting_parity as lp
 from .test_brightness import OUTDOOR, home, start  # noqa: F401
-from .test_lighting_parity import begin, devices, finish, ws_admin  # noqa: F401
+from .test_lighting_parity import START, begin, devices, finish, ws_admin  # noqa: F401
 from .test_phase48_runtime import SETTLE, cupboard, door
 
 
@@ -29,6 +29,7 @@ async def wait(hass, freezer, seconds: float, rec, sim) -> None:
 
 async def test_ambient_levels_and_matrix(hass: HomeAssistant, home, devices, freezer, hass_ws_client,
                                          hass_admin_user) -> None:
+    freezer.move_to(START)  # (the sun: the recording must not depend on the wall clock)
     entry, ctrl, sim = await start(hass, home, freezer, devices, outdoor_lux=1200)
     ws = await ws_admin(hass, hass_ws_client, hass_admin_user)
     rec = await begin(hass, freezer, entry, ws, devices, "ambient_matrix",
@@ -48,6 +49,7 @@ async def test_ambient_levels_and_matrix(hass: HomeAssistant, home, devices, fre
 
 
 async def test_priority_input(hass: HomeAssistant, home, devices, freezer, hass_ws_client, hass_admin_user) -> None:
+    freezer.move_to(START)  # (the sun: the recording must not depend on the wall clock)
     door(hass, "off")
     entry, ctrl, sim = await start(hass, home, freezer, devices, outdoor_lux=50000, zones=(),
                                    priority_inputs=(cupboard(home),))

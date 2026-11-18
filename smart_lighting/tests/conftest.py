@@ -60,6 +60,7 @@ class FakeHomeAssistant:
         self.commands: list[dict[str, Any]] = []
         self.connections: list[web.WebSocketResponse] = []
         self.subscriptions: dict[web.WebSocketResponse, list[int]] = {}
+        self.core_state = "RUNNING"  # what get_config reports (STARTING while Home Assistant starts)
         self.auth_attempts = 0
         self.integration_installed = True
         self.states = [
@@ -126,7 +127,7 @@ class FakeHomeAssistant:
         return {
             "location_name": "Heima",
             "version": HA_VERSION,
-            "state": "RUNNING",
+            "state": self.core_state,
             "time_zone": "Atlantic/Faroe",
             "country": "FO",
             "language": "en",
@@ -474,6 +475,13 @@ class FakeHomeAssistant:
                     {"id": sub_id, "type": "event", "event": {"event_type": "state_changed",
                      "data": {"entity_id": entity_id, "old_state": None, "new_state": new}}}
                 )
+
+    async def emit_event(self, event_type: str, data: dict[str, Any] | None = None) -> None:
+        """An event other than a state change (for example ``homeassistant_started``) to every subscription."""
+        for ws, ids in list(self.subscriptions.items()):
+            for sub_id in ids:
+                await ws.send_json({"id": sub_id, "type": "event", "event": {"event_type": event_type,
+                                    "data": data or {}}})
 
     async def emit_live(self, entity_id: str, value: str | None, name: str | None = None) -> None:
         """A state change happening now (last_changed = now), seen by the App and by the integration's engine."""

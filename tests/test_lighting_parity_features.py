@@ -102,6 +102,7 @@ async def test_switch_zigbee2mqtt(hass: HomeAssistant, mqtt, lit, devices, freez
 
 
 async def test_possible_occupancy(hass: HomeAssistant, lit, devices, freezer, hass_ws_client, hass_admin_user) -> None:
+    freezer.move_to(START)  # (the sun: the recording must not depend on the wall clock)
     entry, ctrl = await daylight_start(hass, lit, freezer, lux=10)
     ws = await ws_admin(hass, hass_ws_client, hass_admin_user)
     configure(ctrl, lit.area, preliminary=prelim(PreliminaryTarget(lit.lamp, 10, 2200, 0.5)))
@@ -121,6 +122,7 @@ async def test_possible_occupancy(hass: HomeAssistant, lit, devices, freezer, ha
 
 async def test_daylight_became_dark(hass: HomeAssistant, lit, devices, freezer, hass_ws_client,
                                     hass_admin_user) -> None:
+    freezer.move_to(START)  # (the sun: the recording must not depend on the wall clock)
     entry, ctrl = await daylight_start(hass, lit, freezer, lux=900,
                                        daylight=RoomDaylight(sensors=(IndoorSensor(LUX),), stable_seconds=5))
     ws = await ws_admin(hass, hass_ws_client, hass_admin_user)

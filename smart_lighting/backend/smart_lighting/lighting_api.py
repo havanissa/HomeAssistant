@@ -20,6 +20,7 @@ Nothing else is accepted: only commands of :data:`ha.LIGHTING_READ_COMMANDS` and
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -29,6 +30,7 @@ from homeassistant.exceptions import HomeAssistantError as HostError, Unauthoriz
 
 from .ha import LIGHTING_READ_COMMANDS, LIGHTING_WRITE_COMMANDS, HomeAssistantClient, HomeAssistantError
 
+_LOGGER = logging.getLogger(__name__)
 COMMAND_TIMEOUT = 30.0
 
 
@@ -72,6 +74,14 @@ class LightingApi:
     def is_write(command: str) -> bool:
         return command in LIGHTING_WRITE_COMMANDS
 
+    #: Forwarded commands that change the controller's runtime state (not only its configuration, which reaches
+    #: the shadow as a ``config`` event): a manual override cleared, a profile test, switch learning, a daylight
+    #: calibration reset, Priority Input claims and the lock, a supervisor check. The shadow runs the same handler
+    #: on its own copy, so it keeps evolving on the same events as the integration's controller.
+    SHADOW_MIRRORED: frozenset[str] = frozenset(f"smart_occupancy/lighting/{c}" for c in (
+        "override/clear", "profile/test", "switch/learn", "room/daylight", "priority/set", "priority/remove",
+        "priority/lock", "supervisor/room"))
+
     def where(self) -> str:
         """Where commands go: ``app`` (local handlers) or ``integration`` (forwarded)."""
         return "app" if self.runtime.mode == "owner" and self.runtime.controller is not None else "integration"
@@ -89,13 +99,20 @@ class LightingApi:
             return await self._local(command, params, user_id=user_id, is_admin=is_admin)
         try:
             if self.is_write(command):
-                return await self.ha.config_write(command, **params)
-            return await self.ha.command(command, **params)
+                result = await self.ha.config_write(command, **params)
+            else:
+                result = await self.ha.command(command, **params)
         except HomeAssistantError as err:
             raise LightingApiError(err.code, str(err).split(": ", 1)[-1], 409 if err.code == "managed_by_app" else 400) \
                 from err
         except (ConnectionError, TimeoutError) as err:
             raise LightingApiError("not_connected", "Home Assistant is not connected", 503) from err
+        if command in self.SHADOW_MIRRORED and self.runtime.mode == "shadow" and self.runtime.controller is not None:
+            try:
+                await self._local(command, params, user_id=user_id, is_admin=is_admin)
+            except LightingApiError as err:  # the integration's answer counts; the shadow is diagnostics
+                _LOGGER.debug("shadow did not mirror %s: %s", command, err)
+        return result
 
     async def _local(self, command: str, params: dict[str, Any], *, user_id: str | None, is_admin: bool) -> Any:
         """Run the integration's own handler against the App's controller (exactly the command's validation)."""

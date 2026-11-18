@@ -1075,7 +1075,7 @@
         <button type="button" class="icon-btn" aria-label="Refresh" title="Refresh" ?disabled=${this.loading} @click=${()=>void this.refreshAll()}>${x(`refresh`)}</button>
       </div>`),t=this.model;if(!t)return _`${e}${Wa(this.status)}${this.error?K(this.error):_`<div class="card loading" role="status"><span class="spinner"></span><span>Loading…</span></div>`}`;let n=t.rooms.filter(e=>{let t=this.rooms.get(e.area_id);return!t||this.shown(t)}),r=(t.problems??[]).filter(e=>!e.area_id);return _`${e}${Wa(this.status)}
       ${this.error?K(this.error):b}
-      ${r.length?_`<p class="notice notice-warning">${x(`warning`,20)}<span>${Y(r.length,`lighting problem`)} that concern no single room: <a href="#/lighting/settings">Lighting settings</a>.</span></p>`:b}
+      ${r.length?_`<p class="notice notice-warning">${x(`warning`,20)}<span>${Y(r.length,`lighting problem`)} that concern no single room: <a class="btn btn-small" href="#/lighting/settings">Lighting settings</a>.</span></p>`:b}
       <div class="grid lp-grid">${this.totals()}</div>
       ${t.rooms.length?_`
         <div class="toolbar lp-toolbar" role="group" aria-label="Show rooms">
