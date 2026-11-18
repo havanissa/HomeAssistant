@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.8.0 — Lighting bridge for the Smart Lighting App (App Phase A4)
+
+The integration keeps controlling the lights by default, also after this update. Nothing changes until an administrator performs a reviewed handover in the Smart Lighting App (0.5.0). No lighting rule changed.
+
+### Added
+
+- `runtime_manifest.py`: the lighting runtime shared with the App (49 modules: the controller and everything it uses, and the lighting websocket handlers). The App runs byte-identical copies (`scripts/sync_lighting_runtime.py`); `fingerprint()` identifies the code.
+- `lighting_sync.py`: the lighting bridge protocol (constants, configuration revision, the command allowlist, message validation), shared with the App.
+- `lighting_bridge.py`: the one authority over which controller commands the lights — every path (automatic lighting, vacancy, possible occupancy, wall switches, profile tests, Room Supervisor corrections, Priority Inputs, global adjustment).
+  - Ownership record `.storage/smart_occupancy.lighting_ownership` (owner, increasing epoch, hashed lease token, history); the App's published state in `.storage/smart_occupancy.lighting_mirror`.
+  - Handover: the integration's controller is fenced, its in-flight commands finish (bounded), its configuration and state are handed over and it stops (dormant: it cannot send and never saves). Nothing is switched.
+  - The App's commands are executed only from the owner's session and connection, with the current epoch, the lease token (30 s) and a strictly increasing sequence number, and only for light services of configured lights (managed room lights, group members, lights the configuration names), configured relays, and the scenes, scripts and selects of configured switch mappings, with allowlisted data; the App supplies the context, so attribution is unchanged.
+  - The App's configuration is mirrored into the lighting store (written only by the App while it controls lighting), its state into the mirror; its occupancy inputs (possible occupancy signals, zone holds, switch activity) reach the occupancy manager; its per-room view is shown by the room entities.
+  - Fallback (release, `return`, the service, lease expiry, a new App instance, no resume within 120 s after a restart or reload): the epoch increases first, in-flight App commands finish (as long as a command may take), then a new controller starts from the mirror (forecast decisions kept). Nothing is switched; manual overrides are kept. Only the same App process may resume. If that controller cannot be loaded, nothing commands lights, the status says so (`controller: failed`) and handovers are refused until a reload.
+  - Written for the independent review: the lighting store is locked while the App controls lighting (only the App's published copy is written to it, so an editor or options step started before the handover cannot change it behind the App's back); a failed claim (store error, session gone) leaves the integration in control, unfenced; a bridge that was stopped never saves again (a reload cannot overwrite the next bridge's record); a session whose connection closes while it is opened is not kept; entity ids renamed while the App owns lighting but is away are kept and given to it when it resumes (or applied at a fallback); a `fired` stamp on the `config` and occupancy `result` events lets the App start its timers at the same instant as the integration.
+- `lighting_bridge_api.py`: administrator-only commands `smart_occupancy/lighting/bridge/status|subscribe|claim|execute|heartbeat|publish|inputs|options|release|return`; service `smart_occupancy.lighting_return_to_integration`.
+- While the App controls lighting, the lighting editors (cards, websocket commands, options flow steps) are read-only (`managed_by_app`; the cards say so and link to the App); reading and previews keep working.
+- Universal moods: the mood source can be the three helpers, one existing `select` / `input_select` (no Auto/Manual helper needed, no problem reported), the **built-in mood selector** (`select.smart_lighting_mood` with moods you define, plus the Manual option; its selection survives restarts), or none. Command `smart_occupancy/lighting/mood_source/set`; the config flow no longer requires mood helpers. A global mood switch action uses the single selector when there is no Manual Mood helper.
+- Tests: `tests/test_lighting_bridge.py` (19), `tests/test_universal_moods.py` (4), `tests/test_lighting_runtime_copy.py` (2), and 21 recorded parity scenarios (`tests/test_lighting_parity*.py`, recorder `tests/lighting_parity.py`) that the App replays.
+
+### Changed
+
+- The lighting websocket handlers moved from `websocket.py` to `lighting_websocket.py` (unchanged); `websocket.py` registers every command. `presence.py` and `health.py` no longer import the config flow / coordinator at runtime (`timing_validation.py`).
+- Every lighting command goes through `LightingController.async_call_service` (fencing, in-flight tracking, an optional observer); the decision log and the runtime state have optional observers. Without a lighting bridge session they do nothing new. `export_state()` no longer counts as a save (a reload shortly after an App session opened could lose a manual override).
+
 ## 0.7.0 — Occupancy engine bridge for the Smart Lighting App (App Phase A3.2)
 
 The integration stays the owner of room occupancy by default, also after this update. Nothing changes until an administrator performs a reviewed handover in the Smart Lighting App (0.4.0).

@@ -4,9 +4,83 @@ The **Smart Lighting** App is the new home of the Smart Occupancy & Lighting
 configuration. It replaces the integration's dashboard cards and options
 screens module by module, and only after you approve each step.
 
-## Phase A3.2: the occupancy engine (this version)
+## Phase A4: Lighting, Moods and Switches (this version)
 
-This version needs Smart Occupancy & Lighting **0.7.0**. The App runs the
+This version needs Smart Occupancy & Lighting **0.8.0**. The App runs the
+integration's own lighting code: every rule (moods and their Occupied and
+Vacant profiles, possible occupancy, vacancy, daylight, ambient light levels
+and brightness rules, zones and shared spaces, the Room Supervisor, wall
+switches and remotes, Priority Inputs, manual overrides) is the same code,
+copied byte for byte and checked.
+
+**Nothing changes until you decide.** After installing or updating, the
+integration still controls the lights, and the App's lighting runs in
+**shadow mode**: it receives the same events, decides the same way and records
+what it would send, but sends nothing.
+
+The new pages:
+
+- **Lighting** — every room's automatic lighting, live decisions and warnings;
+  a room's workspace (lights, Automatic or Observing, vacancy, daylight,
+  possible occupancy, ambient levels and brightness rules, zones, the Room
+  Supervisor, the decision log); global settings; **Lighting → Control**.
+- **Moods** — where the mood comes from (the three helpers, one existing
+  selector, or the built-in mood selector with moods you define), mood
+  inheritance and fallback, light types, Occupied and Vacant profiles with
+  previews and explicit tests.
+- **Switches** — wall switches and remotes (Home Assistant event entities,
+  MQTT device triggers, Zigbee2MQTT through Home Assistant's MQTT), button
+  actions, Observing or Active, manual overrides with "Resume automatic
+  lighting", and Priority Inputs.
+
+Until the handover, changes you make on these pages are saved in the
+integration (the App sends the integration's own commands), so its dashboard
+cards and the App show the same configuration.
+
+**Lighting → Control** shows who controls the lights (read from the
+integration, the only authority), the shadow comparison (a command matches
+when the same service, targets and data appear on both sides within 3 s;
+every mismatch is kept with both sides' commands), the readiness checks, the
+ownership history, an export of the lighting configuration and state, and:
+
+- **Review handover to the App…** — available when every check passes: 2 hours
+  of comparison, 10 matching commands, no mismatch, the same lighting code and
+  the same configuration. The integration stops its lighting controller after
+  the commands it is sending have finished and hands its configuration and
+  state over; the App starts from exactly that copy. Manual overrides are kept,
+  rooms keep their Automatic or Observing choice, and nothing is switched by
+  the handover. The configuration then lives in the App; the integration
+  keeps a mirror of it, and its dashboard cards and options steps for
+  lighting are read-only and say so.
+- **Return control to the integration** — works at any time: the App stops at
+  once and hands its final configuration and state back; the integration
+  starts from them, keeps manual overrides and switches nothing.
+
+**While the App controls the lights**, it sends every command through the
+integration, which accepts it only from the App session that holds the
+current lease, and only for light services of lights in the lighting
+configuration, configured relays, and the scenes, scripts and WLED presets
+your switch buttons use. If the App stops or loses its connection for about
+30 seconds, the integration takes the lights back by itself, from the App's
+last configuration and state, without switching anything. A restarted or
+updated App does **not** take control back: hand over again when you are
+ready. After a Home Assistant restart, the same App process resumes within
+2 minutes; otherwise the integration takes over.
+
+If the App cannot be reached at all, Developer tools → Actions →
+`smart_occupancy.lighting_return_to_integration` (administrators only) returns
+control without it.
+
+**Moods without helpers.** Moods are names. Besides the three-helper scheme,
+the mood can come from one existing `select` / `input_select`, or from the
+**built-in mood selector**: define your moods on Moods → Mood source and the
+integration creates `select.smart_lighting_mood` (with the Manual option, which
+pauses automatic lighting). Automations, dashboards and voice assistants change
+it like any select. A new installation needs no helper.
+
+## Phase A3.2: the occupancy engine
+
+Needs Smart Occupancy & Lighting **0.7.0** or later. The App runs the
 occupancy engine next to the integration's. Both engines run the very same
 code: a shared, versioned engine package, checked byte for byte.
 
@@ -279,10 +353,12 @@ where the configuration is **stored**, and which system **runs** it. In this
 version Rooms and Presence are configured in the App and stored in the
 integration. Room occupancy is decided by the integration's engine until you
 hand it over to the App on Presence → Engine; Presence then counts as migrated
-for as long as the integration acknowledges the App as the owner. Every other
-module is configured, stored and run in the integration. The App's engine never
-controls a device, and the integration and the App never control the same
-devices.
+for as long as the integration acknowledges the App as the owner. Lighting,
+Moods and Switches are configured in the App; they are stored in and run by the
+integration until you hand lighting over on Lighting → Control, and in and by
+the App afterwards (the three move together: one lighting controller, one
+configuration). Curtains and Predictions stay in the integration. Exactly one
+controller commands the lights at any time.
 
 ## Configuration
 
@@ -308,8 +384,11 @@ devices.
   Assistant's Ingress reports). Requests must come from the App's own page.
 - The App backend sends only a fixed list of commands to Home Assistant: reads
   (including the Recorder history, for a bounded window when you open a
-  timeline), the integration's own validated room and presence commands, and
-  the integration's occupancy bridge. The bridge works only over Home
+  timeline), the integration's own validated room, presence and lighting
+  commands, the integration's occupancy bridge and its lighting bridge. It has
+  no command to call a service: after a lighting handover its light commands go
+  through the lighting bridge, where the integration checks the lease, the
+  service and the target of each one. The bridge works only over Home
   Assistant's own connection, is for administrators only, and is fenced:
   stale, duplicated or malformed messages are refused. It cannot call
   services, write states or change registries. Its token never reaches the
@@ -319,6 +398,21 @@ devices.
   checked by their content (PNG, JPEG, WebP only; no SVG) and are only served
   through Home Assistant's Ingress, never from a public address.
 
+## Known limitations (Phase A4)
+
+- The lighting comparison thresholds (2 h, 10 commands) are fixed. Development
+  setups can lower them with `SL_LIGHTING_MIN_SHADOW_SECONDS` and
+  `SL_LIGHTING_MIN_COMMANDS` only.
+- Rooms, their sensors and lights, light types and the mood source stay in the
+  integration's options (edited from the App through its validated commands);
+  moving them into the App is a later phase.
+- While the App controls lighting, the integration still executes its light
+  commands (after checking them) and still decides occupancy unless that was
+  handed over too; it also provides the room entities and the built-in mood
+  selector.
+- After the handover the integration's room lighting entities show what the
+  App publishes (every 2 s at most).
+
 ## Known limitations (Phase A3.2)
 
 - The comparison thresholds (2 h, 20 transitions) are fixed. Development
@@ -326,8 +420,8 @@ devices.
   `SL_ENGINE_MIN_SHADOW_SECONDS` and `SL_ENGINE_MIN_TRANSITIONS` only.
 - The integration's own engine keeps running while the App decides (hot
   standby). Removing it is a later, separately approved phase.
-- Lighting, curtains and the other modules are not migrated. They keep
-  reading the published occupancy.
+- Curtains and forecasts are not migrated. They keep reading the published
+  occupancy.
 
 - Floor plan: no curved walls, wall thickness, stairs or furniture (it is not a
   CAD program); sensor coverage and sun analysis are not drawn (the
@@ -339,9 +433,8 @@ devices.
   older history comes from the Recorder (room state, reason and sensors), so
   decisions before the last restart show the state and reason only.
 - Confidence is the integration's evidence-quality score, not a probability.
-- Only rooms, presence sensors and occupancy timing are edited here. Lighting
-  behaviour, moods, switches, curtains and forecasts are configured in the
-  integration's dashboard cards as before.
+- Curtains and forecasts are configured in the integration's dashboard cards as
+  before.
 - Saving needs the integration to be running; while it is not, rooms are shown
   from its stored configuration.
 - The theme follows your device (or your choice in Settings), not the Home

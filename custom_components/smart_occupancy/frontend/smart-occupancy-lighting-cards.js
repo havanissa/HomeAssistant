@@ -103,7 +103,7 @@
  * reports a change.
  */
 
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 const MOOD_CARD = "smart-occupancy-mood-editor-card";
 const ROOM_CARD = "smart-occupancy-room-lighting-card";
 const WS = "smart_occupancy/lighting";
@@ -581,6 +581,15 @@ class SoLightingBase extends HTMLElement {
 
   get _canEdit() { return !!this._model?.can_edit; }
 
+  // Phase A4: while the Smart Lighting App controls lighting, it owns the configuration: this card is read-only.
+  _managedHtml() {
+    if (!this._model?.managed_by_app) return "";
+    return `<div class="pad warn" role="status"><b>Managed by the Smart Lighting App.</b> Lighting, moods and switches
+      are configured in the App (sidebar: Smart Lighting → Lighting, Moods, Switches); this card is read-only until
+      lighting control is returned to the integration.
+      <a href="/hassio/ingress/smart_lighting" target="_top">Open the Smart Lighting App</a></div>`;
+  }
+
   // ------------------------------------------------- focused profile editor
   // ctx: {scope, mood, target, area_id, own, inherited, effective, caps, title, lightsText, rgbToggle}
   _editorHtml(key, ctx) {
@@ -926,7 +935,7 @@ class SoLightingBase extends HTMLElement {
     const focusSel = active && active.dataset ? Object.entries(active.dataset).map(([k, v]) => `[data-${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}="${CSS.escape(v)}"]`).join("") : "";
     const typing = active && active.tagName === "INPUT" && ["text", "number"].includes(active.type) ? active.value : null;
     this._editorCtx = {};
-    this.shadowRoot.innerHTML = `${STYLE}<ha-card>${this._body()}</ha-card>`;
+    this.shadowRoot.innerHTML = `${STYLE}<ha-card>${this._managedHtml()}${this._body()}</ha-card>`;
     if (focusSel) {
       const el = this.shadowRoot.querySelector(`${active.tagName.toLowerCase()}${focusSel}`);
       if (el) { if (typing !== null) el.value = typing; el.focus({ preventScroll: true }); }

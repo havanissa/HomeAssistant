@@ -65,6 +65,8 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - shows a time in 12-hour notation (0.6.3)
 - moves a cover because a Global Modes card was selected or a mapping was saved; an Automatic window whose current target changes is moved only after the change was reviewed and confirmed, and then only through its normal safety checks (0.6.4)
 
+> **New in 0.8.0: lighting moves to the Smart Lighting App (App Phase A4).** The App (0.5.0) runs this integration's own lighting code (a byte-identical copy) in shadow mode and compares every command it would send. After a reviewed handover on *Lighting → Control* the App controls every lighting path and owns the lighting configuration; this integration's controller stops, its lighting cards become read-only, and every App command still passes this integration's fenced, allowlisted executor. The integration takes the lights back by itself if the App stops, and `smart_occupancy.lighting_return_to_integration` returns control without the App. Nothing changes until you hand over. Moods no longer need helpers: one selector or the built-in mood selector are enough. Details: [smart_lighting/DOCS.md](smart_lighting/DOCS.md), design: [docs/A4-lighting-migration.md](docs/A4-lighting-migration.md).
+
 ## Requirements
 
 - Home Assistant 2026.10 or newer. Tested against **2026.11.1** (with its frontend build 20261028.5) and 2026.10.4.
@@ -90,7 +92,7 @@ Updating from 0.1.x or 0.2.x keeps your configuration. See [Upgrading](#upgradin
 
 ### Initial setup
 
-1. **Mood system.** Select Auto Mood, Manual Mood and Main Mood. `input_select.auto_mood`, `input_select.mood` and `input_select.main_mood` are pre-filled if they exist. Set the Manual Mood option that means "Auto" (default `Auto`). Set the mismatch grace period (default 30 s) to cover the time your automations need to copy the mood.
+1. **Mood system** (all optional since 0.8.0). Select Auto Mood, Manual Mood and Main Mood for the three-helper scheme, only Main Mood for a single mood selector, or nothing and define moods later in the Smart Lighting App (the built-in mood selector `select.smart_lighting_mood`). `input_select.auto_mood`, `input_select.mood` and `input_select.main_mood` are pre-filled if they exist. Set the Manual Mood option that means "Auto" (default `Auto`). Set the mismatch grace period (default 30 s) to cover the time your automations need to copy the mood.
 2. **Light categories.** Map each of the seven initial categories to a Home Assistant label. An existing label with the same name as the category is pre-selected. Tick *Create labels for categories left empty* to create the missing labels. This only creates the labels; you apply them to lights yourself.
 3. **Rooms.** Select the areas to enable. An area named **Kamar Norður** is pre-selected as the pilot room.
 4. **Per room: assign signals and lights.** Fields are pre-filled from the devices discovered in the area, using device class, never names:

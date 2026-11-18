@@ -522,6 +522,9 @@ class LightingController:
         self.dormant = False
         # Called after every command with what was sent (the App's comparison of both controllers).
         self.command_observer: Callable[[dict[str, Any]], None] | None = None
+        # Called when the runtime state changed (the App mirrors its state to the integration without waiting
+        # for the delayed save).
+        self.state_observer: Callable[[], None] | None = None
         self._inflight = 0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -702,8 +705,10 @@ class LightingController:
 
     # ------------------------------------------------- lighting ownership (A4)
     def export_state(self) -> dict[str, Any]:
-        """The runtime state exactly as the state store keeps it (a handover starts the next controller from it)."""
-        return self._state_data()
+        """The runtime state exactly as the state store keeps it (a handover starts the next controller from it).
+
+        Leaves the pending save alone: an export is not a save."""
+        return self._snapshot()
 
     async def async_drain(self, timeout: float) -> bool:
         """Wait until no command is being sent (after fencing). Returns False when the timeout expired first."""
@@ -3402,9 +3407,17 @@ class LightingController:
         self._dirty = True
         if not self.dormant:
             self._state_store.async_delay_save(self._state_data, LIGHTING_STATE_SAVE_DELAY_SECONDS)
+        if self.state_observer is not None:
+            try:
+                self.state_observer()
+            except Exception:  # noqa: BLE001 - an observer never breaks the controller
+                _LOGGER.debug("state_observer_failed", exc_info=True)
 
     def _state_data(self) -> dict[str, Any]:
         self._dirty = False
+        return self._snapshot()
+
+    def _snapshot(self) -> dict[str, Any]:
         return {"rooms": {a: rt.persist() for a, rt in self.runtime.items()}, "adaptive": self.adaptive.persist(),
                 "daylight": self.daylight.persist(), "switches": self.switch_inputs.persist(),
                 "decisions": self.decisions.persist(), "zones": self.zones.persist(), "ambient": self.ambient.persist(),

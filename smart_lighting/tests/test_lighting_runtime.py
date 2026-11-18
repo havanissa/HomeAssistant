@@ -77,9 +77,10 @@ async def test_handover_then_commands_only_through_execute(lit_app: Any, fake_ha
     runtime = rt(lit_app)
     result = await handover(lit_app)
     assert result["copy"]["identical"] and runtime.mode == "owner" and fake_ha.lighting.owner == S.OWNER_APP
-    await wait_for(lambda: fake_ha.lighting.published)  # configuration and state mirrored at once
-    first = fake_ha.lighting.published[0]
-    assert first["config_revision"] == S.config_revision(first["config"])
+    # Configuration and state mirrored at once (each on its own: a refused configuration never holds back the state)
+    await wait_for(lambda: {k for p in fake_ha.lighting.published for k in p} >= {"config", "state"})
+    first = next(p for p in fake_ha.lighting.published if "config" in p)
+    assert first["config_revision"] == S.config_revision(first["config"]) and "state" not in first
     await occupy(lit_app, fake_ha)  # a visit: the App's controller switches the lamp on (Dagur, 60 %)
     await wait_for(lambda: fake_ha.lighting.executed, timeout=8)
     assert fake_ha.lighting.executed[-1]["data"]["brightness_pct"] == 60
@@ -127,6 +128,18 @@ async def test_release_hands_back_the_final_state(lit_app: Any, fake_ha: FakeHom
                    and runtime.instance.role == "shadow")
     backups = runtime.backups()
     assert any("release" in b["id"] for b in backups) and any("handover" in b["id"] for b in backups)
+
+
+async def test_return_as_owner_hands_back_the_final_state(lit_app: Any, fake_ha: FakeHomeAssistant) -> None:
+    """"Return" while the App controls lighting is a release: the last seconds of state are not lost."""
+    runtime = rt(lit_app)
+    await handover(lit_app)
+    resp = await lit_app.post("/api/lighting/release", json={"mode": "return"}, headers=ADMIN_HEADERS)
+    assert resp.status == 200, await resp.text()
+    assert fake_ha.lighting.released == 1 and fake_ha.lighting.owner == S.OWNER_INTEGRATION
+    await wait_for(lambda: runtime.mode == "shadow" and runtime.instance is not None
+                   and runtime.instance.role == "shadow")
+    assert [e["event"] for e in runtime.ownership_log].count("lost") == 0
 
 
 async def test_return_control_from_shadow_mode(lit_app: Any, fake_ha: FakeHomeAssistant) -> None:
@@ -204,3 +217,23 @@ def test_settings_thresholds(fake_ha: FakeHomeAssistant) -> None:
     settings = make_settings(fake_ha, SL_LIGHTING_MIN_SHADOW_SECONDS="60", SL_LIGHTING_MIN_COMMANDS="3")
     assert (settings.lighting_min_shadow_seconds, settings.lighting_min_commands) == (60, 3)
     assert ADMIN_ID
+
+
+async def test_bridge_events_start_timers_from_when_they_fired(lit_app: Any, fake_ha: FakeHomeAssistant) -> None:
+    """A configuration change (or occupancy result) that reached the App late: its timers count from when it
+    fired in Home Assistant, as state events do (otherwise the shadow plans after the integration's reaction)."""
+    from datetime import datetime
+    from smart_occupancy.lighting_config import LightingConfig
+
+    runtime = rt(lit_app)
+    await wait_for(lambda: runtime.mode == "shadow" and runtime.instance is not None and runtime.instance.started)
+    inst = runtime.instance
+    seen: list[Any] = []
+    inst.controller.store.async_add_listener(lambda _o, _n: seen.append(inst.hass.event_time))
+    doc = inst.controller.lighting.as_dict()
+    doc["manual_override_minutes"] = (doc.get("manual_override_minutes") or 0) + 1
+    fired = "2026-06-15T10:00:00.250000+00:00"
+    inst.config_changed(LightingConfig.from_dict(doc), fired)
+    assert seen == [datetime.fromisoformat(fired)] and inst.hass.event_time is None
+    inst.config_changed(LightingConfig.from_dict(doc), "not a time")  # (unchanged: no listener; no crash)
+    assert inst.hass.event_time is None

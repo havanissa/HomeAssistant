@@ -120,6 +120,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
         await entry.runtime_data.tracker.async_flush()
         await entry.runtime_data.occupancy.async_flush()
         await entry.runtime_data.lighting.async_flush()
+        # Stopped first: nothing is saved by this bridge after its final write (the next one loads it).
+        entry.runtime_data.lighting_bridge.async_stop()
         await entry.runtime_data.lighting_bridge.async_flush()
         await entry.runtime_data.forecast.async_flush()
         await entry.runtime_data.curtains.async_flush()
@@ -214,7 +216,9 @@ def _rename_listener(hass: HomeAssistant, entry: SmartOccupancyConfigEntry):
         entry.runtime_data.curtains.rename_entity(old, new)
         store = entry.runtime_data.lighting.store
         if entry.runtime_data.lighting_bridge.app_owns:
-            pass  # the Smart Lighting App owns the lighting configuration and follows the rename itself
+            # The Smart Lighting App owns the lighting configuration and follows the rename itself; one made
+            # while it is away is handed to it when it resumes (or applied when the integration takes over).
+            entry.runtime_data.lighting_bridge.note_rename(old, new)
         elif (lighting := rename_entity(store.config, old, new)) is not None:
             _LOGGER.info("entity_renamed old=%s new=%s (lighting configuration updated)", old, new)
             store.async_set(lighting)

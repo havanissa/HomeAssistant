@@ -131,10 +131,24 @@ async def ws_subscribe(hass: HomeAssistant, connection: websocket_api.ActiveConn
     def send(payload: dict[str, Any]) -> None:
         connection.send_message(websocket_api.event_message(msg_id, payload))
 
+    closed = False
+
+    @callback
+    def closed_early() -> None:
+        nonlocal closed
+        closed = True
+
+    # Opening may wait (a fallback): a connection closed meanwhile must not leave its session behind.
+    connection.subscriptions[msg_id] = closed_early
     try:
         session, hello = await bridge.async_open_session(connection, send, msg)
     except BridgeError as err:
-        connection.send_error(msg_id, err.code, str(err))
+        connection.subscriptions.pop(msg_id, None)
+        if not closed:
+            connection.send_error(msg_id, err.code, str(err))
+        return
+    if closed:
+        bridge.close_session(session.session_id)
         return
 
     @callback

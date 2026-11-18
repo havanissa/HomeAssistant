@@ -138,6 +138,7 @@ import logging
 from typing import Any
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 
 from .const import (
@@ -1046,6 +1047,9 @@ class LightingStore:
         self.seeded = False
         self._listeners: list[Callable[[LightingConfig, LightingConfig], None]] = []
         self._dirty = False
+        # Phase A4: read only while the Smart Lighting App owns the configuration (only the bridge writes the
+        # App's published copy, through ``async_set_mirrored``).
+        self.locked = False
 
     async def async_load(self, options: IntegrationConfig) -> None:
         data = await self._store.async_load()
@@ -1075,6 +1079,8 @@ class LightingStore:
     @callback
     def async_set(self, config: LightingConfig) -> bool:
         """Replace the configuration. Saved shortly after; listeners run now."""
+        if self.locked:
+            raise HomeAssistantError("the lighting configuration is managed by the Smart Lighting App")
         if config == self.config:
             return False
         old, self.config = self.config, config
@@ -1084,6 +1090,15 @@ class LightingStore:
         for listener in list(self._listeners):
             listener(old, config)
         return True
+
+    @callback
+    def async_set_mirrored(self, config: LightingConfig) -> bool:
+        """The App's published configuration into a locked (mirror) store."""
+        locked, self.locked = self.locked, False
+        try:
+            return self.async_set(config)
+        finally:
+            self.locked = locked
 
     def _data(self) -> dict[str, Any]:
         self._dirty = False

@@ -17,7 +17,7 @@ from .occupancy_core.types import (  # noqa: F401
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
 PHASE: Final = "0.6.8"
-VERSION: Final = "0.7.0"
+VERSION: Final = "0.8.0"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).

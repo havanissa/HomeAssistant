@@ -90,9 +90,22 @@ def async_track_point_in_time(hass: HomeAssistant, action: Callable[[datetime], 
     return async_track_point_in_utc_time(hass, action, point_in_time)
 
 
+# The most an event's delivery to the App is made up for (larger: the clocks disagree; count from now).
+MAX_EVENT_LAG = timedelta(seconds=2)
+
+
+def _timer_base(hass: HomeAssistant) -> datetime:
+    """Now, or - while an event from Home Assistant is dispatched - when it fired there (its delivery lag)."""
+    now = dt_util.utcnow()
+    fired = getattr(hass, "event_time", None)
+    if fired is not None and timedelta(0) < now - fired <= MAX_EVENT_LAG:
+        return fired
+    return now
+
+
 def async_call_later(hass: HomeAssistant, delay: float | timedelta, action: Callable[[datetime], Any]) -> CALLBACK_TYPE:
     seconds = delay.total_seconds() if isinstance(delay, timedelta) else float(delay)
-    return async_track_point_in_utc_time(hass, action, dt_util.utcnow() + timedelta(seconds=seconds))
+    return async_track_point_in_utc_time(hass, action, _timer_base(hass) + timedelta(seconds=seconds))
 
 
 def async_track_time_interval(hass: HomeAssistant, action: Callable[[datetime], Any],

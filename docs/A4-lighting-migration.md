@@ -134,16 +134,26 @@ Handover (reviewed, administrator, compare-and-swap on the epoch):
    as after a Home Assistant restart. Manual overrides, preliminary stages, zone
    ownership, temporary room moods and priority claims are part of the state.
 
-While the App owns lighting it pushes its configuration (on every change) and its
-runtime state (whenever it saves) to the integration's mirror
-(`.storage/smart_occupancy.lighting_mirror`).
+While the App owns lighting it pushes its configuration and its runtime state to the
+integration's mirror (`.storage/smart_occupancy.lighting_mirror`) about two seconds after
+every change (configuration and state separately: a refused configuration never holds
+back the state). The integration's copy of the configuration is locked meanwhile: only
+the App's published copy is written to it, so an editor or options step that started
+before the handover cannot change it behind the App's back.
 
 Rollback (`release` from the App, or the admin service
 `smart_occupancy.lighting_return_to_integration`), lease expiry, a new App instance,
 or no resume after an HA restart: the integration bumps the epoch first (every later
-execute is refused), the App (if alive) stops and pushes its final state, and the
-integration starts a new controller from the mirror (its own forecast entries in the
-decision log are kept). Again nothing is applied at the switch. A recovered App never
+execute is refused) and starts a new controller from the mirror (its own forecast entries
+in the decision log are kept). A return from the App's interface while it controls
+lighting is a `release`: the App fences its controller, waits for its commands and hands
+over its final configuration and state with the release. When the App is gone (lease
+expiry, a new App process) the mirror is at most about two seconds old. Again nothing is
+applied at the switch. If the new controller cannot be loaded, nothing commands lights,
+the status says so (`controller: failed`) and handovers are refused until the integration
+is reloaded. Entity ids renamed while the App owns lighting but is not connected are kept
+in the mirror and given to the App when it resumes (or applied when the integration takes
+over); a connected App follows renames itself. A recovered App never
 takes ownership back by itself; only the same App process may resume within the
 grace period after an HA restart or integration reload.
 
@@ -193,6 +203,80 @@ Every lighting rule of 0.7.0; start-up settling; nothing applied on start, upgra
 handover; manual overrides; existing room Automatic/Observing choices; entity ids.
 Default lighting owner is the integration; installing or upgrading never changes it.
 
-## 4. Remaining legacy dependencies (A5/A6)
+## 4. Verification
 
-See the end of the phase report (README of the App and CHANGELOG).
+* **Behavioural parity.** 21 scenarios recorded from the integration's own controller in a
+  real (test) Home Assistant with simulated Zigbee2MQTT-like devices (PIR and radar visits,
+  possible occupancy, vacancy and Vacant profiles, mood changes, Manual mood, manual and
+  unattributed changes and their expiry, offline and failing lights, daylight, ambient
+  levels and brightness matrices, zones, relays and shared spaces, Supervisor corrections,
+  Priority Inputs, global brightness, event-entity and Zigbee2MQTT switches, conflicting
+  automations, five randomized sequences). The App replays each through its host in virtual
+  time and must send the same commands (with the same outcomes) at the same instants, make the
+  same decisions and answer the read-only editor commands the same way. Items of one instant
+  are compared as a set: timers of the integration's occupancy engine and of the App's
+  lighting run in two processes.
+* **Fidelity issues the replay found and fixed:** Home Assistant queues events fired during
+  another event's dispatch (the host does too); tasks start eagerly; a start-up event must not
+  be fired for a controller started on a running Home Assistant; the extended registry entries
+  (device classes) are needed; equal configurations must have equal revisions (2 and 2.0).
+* **Found live (end-to-end, App container):** events reach the App a little after they fired in
+  Home Assistant (Home Assistant also coalesces websocket messages). A debounce started from the
+  event's arrival could end after the integration's reaction to the same event had already
+  arrived, so the shadow saw the light at its new level and sent nothing (a command mismatch).
+  The host now starts such timers from the event's time in Home Assistant (at most two seconds
+  earlier; otherwise from now), as Home Assistant does. The same held for the bridge's own events
+  that start timers (a configuration change such as switching a room to Automatic, an occupancy
+  result): they now carry a full-precision `fired` stamp and the shadow handles them at that
+  instant.
+* **Bridge (integration):** fencing (epoch, lease, sequence, session), the allowlist, the
+  mirror, inputs, options, handover with commands in flight, every way back (release, return,
+  service, lease expiry, new App instance), restart and reload (dormant, resume, no resume),
+  read-only editors, administrators only.
+* **Runtime (App):** shadow, handover, commands only through `execute`, losing control,
+  release, return, reconnect and resume, the command router in both modes.
+* **Live, on a throwaway Home Assistant 2026.11.1:** shadow comparison on real events (commands
+  and decisions matched), a handover, the App switching `light.bed_light` through the
+  integration, and the end-to-end suite `smart_lighting/tests/e2e/lighting_checks.py` with the
+  real App image. **Not verified on a real Home Assistant OS installation.**
+
+## 5. Remaining legacy dependencies (A5/A6)
+
+While the App controls lighting, the integration still provides:
+
+1. **The fenced executor** (`lighting/bridge/execute`): every light, relay, scene, script and
+   select command of the App. Once the legacy controller is removed, ownership checks and the
+   allowlist can stay in a minimal companion integration, or the App can call services
+   directly.
+2. **The ownership record and the mirror** (rollback target). They become unnecessary when the
+   legacy controller is removed.
+3. **Occupancy**: the occupancy engine (unless handed over in A3.2) and the published results;
+   the occupancy manager also receives the App's lighting inputs (possible occupancy signals,
+   zone holds, switch activity) and forwards them to the App's engine.
+4. **Configuration entry options**: rooms, their sensors and lights, occupancy timing, light
+   types (categories) and the mood source are still stored in the integration's options and
+   edited through its validated commands (`rooms/*`, `presence/*`, `category/*`,
+   `mood_source/set` → `lighting/bridge/options`). Moving them into App storage is the main A5
+   item.
+5. **Native entities**: the room sensors (occupancy, lighting state, daylight) and the
+   built-in mood selector `select.smart_lighting_mood`; the lighting state sensor shows the
+   App's published view. A minimal companion integration needs these (an App cannot create
+   entities).
+6. **The integration's own problem list** (validation of rooms, sensors and mood helpers, the
+   problem history) and room health; the App's lighting pages show the lighting problems from
+   its own copy of the validation, the Presence pages the occupancy ones.
+7. **Curtains and forecasts** (not migrated). Forecasts log into the dormant controller's
+   decision log; the log is merged at a return of control. The dormant controller never saves,
+   so forecast entries logged while the App controls lighting are lost when Home Assistant
+   restarts in that time (the decision log only; nothing that commands lights).
+8. Legacy dashboard cards (read-only while the App controls lighting) and the options flow.
+
+**Known limits (accepted for A4):**
+
+* The execute allowlist is derived from the configuration the owner App publishes. A switch
+  mapping can therefore name any existing `script.*`/`scene.*` and any `switch.*` relay. Both
+  sides are administrator-only, so this is no privilege escalation, but the allowlist does not
+  contain a compromised App. Pinning relays and scripts to an integration-approved set is an A5
+  item.
+* A command the integration's controller tries to send during the (at most ten second) fence of
+  a handover is refused and not retried; the light follows at the next trigger.

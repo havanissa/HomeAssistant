@@ -25,8 +25,9 @@ host (``backend/homeassistant``):
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 import contextlib
+from datetime import datetime
 import json
 import logging
 from pathlib import Path
@@ -337,9 +338,28 @@ class LightingInstance:
     def mqtt_changed(self, connected: bool) -> None:
         mqtt_component.async_connection_changed(self.hass, connected)
 
-    def occupancy_changed(self, area_id: str) -> None:
+    def occupancy_changed(self, area_id: str, fired: Any = None) -> None:
         if self.controller is not None and self.started:
-            self.occupancy.notify(area_id)
+            with self.at_event_time(fired):
+                self.occupancy.notify(area_id)
+
+    def config_changed(self, config: Any, fired: Any = None) -> None:
+        if self.controller is not None:
+            with self.at_event_time(fired):
+                self.controller.store.async_set(config)
+
+    @contextlib.contextmanager
+    def at_event_time(self, fired: Any) -> Iterator[None]:
+        """Timers started inside count from when the event fired in Home Assistant (``helpers.event``), as for
+        state events; ``fired`` is an ISO time or None."""
+        try:
+            self.hass.event_time = datetime.fromisoformat(fired) if isinstance(fired, str) else None
+        except ValueError:
+            self.hass.event_time = None
+        try:
+            yield
+        finally:
+            self.hass.event_time = None
 
     # -------------------------------------------------------------- lifecycle
     async def async_start(self) -> None:

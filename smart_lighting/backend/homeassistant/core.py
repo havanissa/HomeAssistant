@@ -268,8 +268,13 @@ class EventBus:
                 self._dispatch(self._queue.popleft())
         finally:
             self._dispatching = False
+            self._hass.event_time = None
 
     def _dispatch(self, event: Event) -> None:
+        # Timers started by the listeners count from when the event fired in Home Assistant, not from when it
+        # reached the App (``helpers.event.async_call_later``): a debounce then ends at the same instant as in the
+        # integration, before the integration's reaction (sent after its debounce) can reach the App.
+        self._hass.event_time = event.time_fired
         for key in (event.event_type, MATCH_ALL):
             for listener, event_filter in list(self._listeners.get(key, ())):
                 if event_filter is not None:
@@ -409,6 +414,8 @@ class HomeAssistant:
         self.backend = backend
         self.states = StateMachine()
         self.bus = EventBus(self)
+        # When the event being dispatched fired in Home Assistant (see EventBus._dispatch).
+        self.event_time: datetime | None = None
         self.services = ServiceRegistry(self)
         self.config = Config()
         self.config_entries = ConfigEntries(self)

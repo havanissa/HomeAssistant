@@ -212,7 +212,8 @@ class LightingRuntime:
 
     def _on_occupancy(self, area_id: str) -> None:
         if self.instance is not None:
-            self.instance.occupancy_changed(area_id)
+            fired = getattr(self.occupancy, "result_fired", {}).get(area_id)
+            self.instance.occupancy_changed(area_id, fired)
 
     def _on_registry_event(self, event: dict[str, Any]) -> None:
         data = event.get("data") or {}
@@ -361,6 +362,7 @@ class LightingRuntime:
             self.mode = "owner"
             self._log("resumed", epoch=self.epoch)
             await self._start_owner(config=None, state=None, recent=None)
+            self._apply_renames(hello.get("renames"))
         else:
             if self.mode == "owner":
                 self._log("lost", reason="the integration did not keep the App's control")
@@ -370,6 +372,17 @@ class LightingRuntime:
             await self._start_shadow(hello)
         self._changed()
 
+    def _apply_renames(self, renames: Any) -> None:
+        """Entity ids renamed while the App was away (the integration kept them for it)."""
+        from smart_occupancy.lighting_config import rename_entity  # noqa: PLC0415
+
+        ctrl = self.instance.controller if self.instance is not None else None
+        for item in renames if isinstance(renames, list) and ctrl is not None else ():
+            if isinstance(item, list) and len(item) == 2 and all(isinstance(e, str) for e in item) and \
+                    (lighting := rename_entity(ctrl.store.config, item[0], item[1])) is not None:
+                _LOGGER.info("entity_renamed old=%s new=%s (while the App was away)", item[0], item[1])
+                ctrl.store.async_set(lighting)
+
     def _on_config(self, event: dict[str, Any]) -> None:
         self.integration_revision = event.get("config_revision")
         inst = self.instance
@@ -377,7 +390,7 @@ class LightingRuntime:
             return
         from smart_occupancy.lighting_config import LightingConfig  # noqa: PLC0415
 
-        inst.controller.store.async_set(LightingConfig.from_dict(event.get("config") or {}))
+        inst.config_changed(LightingConfig.from_dict(event.get("config") or {}), event.get("fired"))
 
     def _on_options(self, event: dict[str, Any]) -> None:
         self.options = dict(event.get("options") or {})
@@ -423,6 +436,8 @@ class LightingRuntime:
                                 scripts=self.scripts)
         await self._run_instance(inst, recent)
         self.comparator.stop()
+        inst.controller.state_observer = lambda: self._mark_publish("state")
+        inst.controller.store.async_add_listener(lambda _old, _new: self._mark_publish("config"))
         inst.occupancy.resend()
         self._dirty.update({"config", "state"})
         self._schedule_publish(0)
@@ -507,6 +522,11 @@ class LightingRuntime:
             return
         self._schedule_publish(PUBLISH_DELAY)
 
+    def _mark_publish(self, part: str) -> None:
+        if self.mode == "owner":
+            self._dirty.add(part)
+            self._schedule_publish(PUBLISH_DELAY)
+
     def _schedule_publish(self, delay: float) -> None:
         if self._publish_handle is None:
             self._publish_handle = asyncio.get_running_loop().call_later(
@@ -526,21 +546,23 @@ class LightingRuntime:
         if self.mode != "owner" or inst is None or inst.controller is None or not self._dirty:
             return
         dirty, self._dirty = self._dirty, set()
-        params: dict[str, Any] = {}
-        if "config" in dirty:
-            doc = inst.controller.lighting.as_dict()
-            params.update(config=doc, config_revision=S.config_revision(doc))
-        if "state" in dirty:
-            params["state"] = inst.controller.export_state()
-        try:
-            await self._owner_command("smart_occupancy/lighting/bridge/publish", **params)
-            self.counters["publishes"] += 1
-        except (LightingError, HomeAssistantError, ConnectionError, TimeoutError) as err:
-            self._dirty |= dirty
-            self.last_error = {"at": iso(utcnow()), "code": getattr(err, "code", type(err).__name__),
-                               "detail": str(err)}
-            if self.mode == "owner":
-                self._schedule_publish(10)
+        for part in ("state", "config"):
+            if part not in dirty or self.mode != "owner" or self.instance is not inst:
+                continue
+            if part == "config":
+                doc = inst.controller.lighting.as_dict()
+                params: dict[str, Any] = {"config": doc, "config_revision": S.config_revision(doc)}
+            else:
+                params = {"state": inst.controller.export_state()}
+            try:
+                await self._owner_command("smart_occupancy/lighting/bridge/publish", **params)
+                self.counters["publishes"] += 1
+            except (LightingError, HomeAssistantError, ConnectionError, TimeoutError) as err:
+                self._dirty.add(part)
+                self.last_error = {"at": iso(utcnow()), "code": getattr(err, "code", type(err).__name__),
+                                   "detail": str(err)}
+                if self.mode == "owner":
+                    self._schedule_publish(10)
 
     def room_views(self) -> dict[str, Any]:
         inst = self.instance
@@ -594,8 +616,8 @@ class LightingRuntime:
 
     async def _lose(self, why: str) -> None:
         """No longer the owner: stop at once (nothing more is sent), then shadow again from a fresh copy."""
-        if self.mode != "owner":
-            return
+        if self.mode != "owner" or self._switching:
+            return  # (a release in progress ends the ownership itself)
         _LOGGER.warning("The App no longer controls lighting (%s); back to shadow mode", why)
         self._log("lost", reason=why)
         self.mode = "shadow"
@@ -730,6 +752,7 @@ class LightingRuntime:
         if self._switching:
             raise LightingError("busy", "A change of control is in progress")
         self._switching = True
+        lost = False
         try:
             inst = self.instance
             ctrl = inst.controller
@@ -741,9 +764,10 @@ class LightingRuntime:
                       "state": final["state"], "rooms": {}, "detail": "returned from the App"}
             try:
                 reply = await self._owner_command("smart_occupancy/lighting/bridge/release", **params)
-            except (LightingError, HomeAssistantError) as err:
-                ctrl.fenced = False
-                raise LightingError(getattr(err, "code", "failed"), _detail(err)) from err
+            except (LightingError, HomeAssistantError, ConnectionError, TimeoutError) as err:
+                ctrl.fenced = False  # still the owner unless the integration says otherwise (then _lose below)
+                lost = getattr(err, "code", None) in S.LOST_CODES
+                raise LightingError(getattr(err, "code", None) or "not_connected", _detail(err)) from err
             self.mode = "shadow"
             self._token, self.epoch = None, None
             if self._heartbeat:
@@ -754,21 +778,34 @@ class LightingRuntime:
             self._log("released", by=user_id)
         finally:
             self._switching = False
+            if lost:
+                self._spawn(self._lose("release refused"))
         await self._resubscribe()
         self._changed()
         return {"ownership": self.integration}
 
     async def return_control(self, user_id: str | None) -> dict[str, Any]:
         """Any time: the integration takes lighting back from its mirror (also when the App is not the owner)."""
-        if self.mode == "owner" and self.instance is not None:
-            self.instance.controller.fenced = True
-            await self.instance.controller.async_drain(S.DRAIN_SECONDS)
+        if self.mode == "owner" and self.instance is not None and not self._switching:
+            try:
+                # The owner hands back its final configuration and state (nothing of the last seconds is lost).
+                return await self.release(user_id)
+            except LightingError as err:
+                _LOGGER.warning("Release refused (%s); returning control without the final state", err)
+        ctrl = self.instance.controller if self.mode == "owner" and self.instance is not None else None
+        if ctrl is not None:
+            ctrl.fenced = True
+            await ctrl.async_drain(S.DRAIN_SECONDS)
         try:
             reply = await self.ha.lighting_command("smart_occupancy/lighting/bridge/return",
                                                    reason="returned from the App")
         except HomeAssistantError as err:
+            if ctrl is not None and self.mode == "owner" and err.code not in S.LOST_CODES:
+                ctrl.fenced = False  # nothing changed: the App still controls lighting
             raise LightingError(err.code, _detail(err)) from err
         except (ConnectionError, TimeoutError) as err:
+            if ctrl is not None and self.mode == "owner":
+                ctrl.fenced = False
             raise LightingError("not_connected", "Home Assistant is not connected", 503) from err
         self._log("returned", by=user_id)
         if self.mode == "owner":

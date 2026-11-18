@@ -676,6 +676,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
         if not self._config.categories:
             return self.async_abort(reason="no_categories")
         if user_input is not None:
+            if self._app_owns_lighting():
+                return self.async_abort(reason="managed_by_app")
             remove = set(user_input.get(CONF_CATEGORIES) or [])
             self._config = _without_categories(self._config, remove)
             if (store := self._lighting_store()) is not None:
@@ -775,6 +777,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
 
     def _store_profile(self, setting: ProfileSetting | None) -> ConfigFlowResult:
         """Save the entry in the lighting store, without reloading the integration."""
+        if self._app_owns_lighting():
+            return self.async_abort(reason="managed_by_app")
         store = self.config_entry.runtime_data.lighting.store
         store.async_set(set_profile(store.config, self._scope, self._mood, self._target, setting, self._profile_area))
         # Unchanged options: the integration is not reloaded.

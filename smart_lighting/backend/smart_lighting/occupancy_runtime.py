@@ -121,6 +121,7 @@ class OccupancyRuntime:
         self.sub_id: int | None = None
         self.integration: dict[str, Any] = {}  # the integration's ownership record, as last reported
         self.integration_results: dict[str, dict[str, Any]] = {}
+        self.result_fired: dict[str, Any] = {}  # when the integration's result fired (ISO), per room
         self.results: dict[str, dict[str, Any]] = {}
         self.epoch: int | None = None
         self._token: str | None = None
@@ -436,6 +437,7 @@ class OccupancyRuntime:
         self.counters["sessions"] += 1
         self.results = {}
         self.integration_results = dict(hello.get("results") or {})
+        self.result_fired = {}
         now = utcnow()
         lease = hello.get("lease_token")
         if lease and P.valid_id(lease):
@@ -469,6 +471,7 @@ class OccupancyRuntime:
         if not isinstance(wire, dict):
             raise ValueError("result must be an object")
         self.integration_results[area_id] = wire
+        self.result_fired[area_id] = event.get("fired")
         self.comparator.update(area_id, "integration", wire, utcnow())
         self._compare_soon()
         if self.mode != "authoritative":

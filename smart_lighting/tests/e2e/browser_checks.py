@@ -42,6 +42,14 @@ READ_ONLY = {
     "history/history_during_period", "smart_occupancy/engine/status",
     # Phase A3.2: the occupancy bridge session (shadow mode; it changes nothing by itself).
     "smart_occupancy/engine/subscribe",
+    # Phase A4: what the lighting runtime reads in shadow mode, its bridge session and the lighting pages' reads.
+    "config/label_registry/list", "config/entity_registry/get_entries", "automation/config", "script/config",
+    "device_automation/trigger/list", "validate_config", "unsubscribe_events", "subscribe_trigger", "mqtt/subscribe",
+    "smart_occupancy/lighting/bridge/subscribe", "smart_occupancy/lighting/bridge/status",
+    "smart_occupancy/lighting/editor", "smart_occupancy/lighting/preview", "smart_occupancy/lighting/room/activation",
+    "smart_occupancy/lighting/brightness/preview", "smart_occupancy/lighting/priority/preview",
+    "smart_occupancy/lighting/zone/radar_test", "smart_occupancy/lighting/switch/candidates",
+    "smart_occupancy/lighting/supervisor/room",
 }
 APP_VERSION = "0.4.0"
 INTEGRATION_VERSION = "0.7.0"

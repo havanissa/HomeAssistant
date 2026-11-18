@@ -32,7 +32,7 @@ fi
 : "${HA_TOKEN:?set HA_TOKEN (long-lived access token of that Home Assistant)}"
 
 down
-docker build -q --build-arg BUILD_VERSION=0.4.0 --build-arg BUILD_ARCH=amd64 -t "$IMAGE" "$APP_DIR" >/dev/null
+docker build -q --build-arg BUILD_VERSION=0.5.0 --build-arg BUILD_ARCH=amd64 -t "$IMAGE" "$APP_DIR" >/dev/null
 docker network inspect "$NET" >/dev/null 2>&1 \
   || docker network create --driver bridge --subnet 172.30.32.0/23 --gateway 172.30.32.1 "$NET" >/dev/null
 
@@ -44,11 +44,14 @@ docker run -d --name sl-test-supervisor --network "$NET" --ip 172.30.32.2 --netw
 
 mkdir -p "$DATA_DIR"
 echo '{"log_level": "info"}' > "$DATA_DIR/options.json"
-# ENGINE_MIN_SHADOW_SECONDS / ENGINE_MIN_TRANSITIONS: lower handover thresholds for the engine checks only.
+# ENGINE_MIN_SHADOW_SECONDS / ENGINE_MIN_TRANSITIONS: lower handover thresholds for the engine checks only;
+# LIGHTING_MIN_SHADOW_SECONDS / LIGHTING_MIN_COMMANDS: the same for the lighting checks (Phase A4).
 docker run -d --name sl-test-app --network "$NET" -v "$DATA_DIR:/data" \
   -e SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" \
   ${ENGINE_MIN_SHADOW_SECONDS:+-e SL_ENGINE_MIN_SHADOW_SECONDS=$ENGINE_MIN_SHADOW_SECONDS} \
   ${ENGINE_MIN_TRANSITIONS:+-e SL_ENGINE_MIN_TRANSITIONS=$ENGINE_MIN_TRANSITIONS} \
+  ${LIGHTING_MIN_SHADOW_SECONDS:+-e SL_LIGHTING_MIN_SHADOW_SECONDS=$LIGHTING_MIN_SHADOW_SECONDS} \
+  ${LIGHTING_MIN_COMMANDS:+-e SL_LIGHTING_MIN_COMMANDS=$LIGHTING_MIN_COMMANDS} \
   "$IMAGE" >/dev/null
 
 for _ in $(seq 1 60); do

@@ -136,6 +136,27 @@ async def test_state_tracking_and_states_from_the_websocket() -> None:
     assert [s.entity_id for s in hass.states.async_all("light")] == ["light.lamp", "light.other"]
 
 
+async def test_timers_count_from_when_the_event_fired_in_home_assistant() -> None:
+    """A debounce started by an event that reached the App late ends when it would have in Home Assistant."""
+    hass = HomeAssistant(HostBackend())
+    fired: list[Any] = []
+    loop = asyncio.get_running_loop()
+    async_track_state_change_event(hass, ["light.lamp"], callback(
+        lambda e: async_call_later(hass, 0.5, callback(lambda now: fired.append(loop.time())))))
+    for lag, entity in ((0.4, "light.lamp"), (30.0, "light.lamp")):
+        start = loop.time()
+        fired.clear()
+        then = (dt_util.utcnow() - timedelta(seconds=lag)).isoformat()
+        hass.async_state_changed(entity, State.from_wire({
+            "entity_id": entity, "state": "on" if lag < 1 else "off", "attributes": {}, "last_changed": then,
+            "last_updated": then, "context": {"id": ulid_now(), "parent_id": None, "user_id": None}}))
+        assert hass.event_time is None  # only while the event is dispatched
+        await asyncio.sleep(0.6)
+        assert len(fired) == 1
+        # 0.4 s late: fires after about 0.1 s; a clock that disagrees by 30 s: counts from now (0.5 s).
+        assert (fired[0] - start < 0.3) if lag < 1 else (fired[0] - start >= 0.45)
+
+
 def test_contexts_are_ulids() -> None:
     ids = {Context().id for _ in range(50)} | {ulid_now()}
     assert len(ids) == 51 and all(len(i) == 26 and i.isupper() for i in ids)

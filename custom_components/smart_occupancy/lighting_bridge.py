@@ -76,6 +76,7 @@ OWNERSHIP_STORE_KEY = f"{DOMAIN}.lighting_ownership"
 MIRROR_STORE_KEY = f"{DOMAIN}.lighting_mirror"
 STORE_VERSION = 1
 SAVE_DELAY_SECONDS = 5
+MAX_RENAMES = 50
 MAX_SESSIONS = 4
 RECENT_COMMANDS = 50
 #: Lighting websocket commands that keep answering while the App owns lighting: they only read or simulate.
@@ -177,6 +178,8 @@ class LightingBridge:
         self._timer: CALLBACK_TYPE | None = None
         self._unsubs: list[CALLBACK_TYPE] = []
         self._running = False
+        self._stopped = False
+        self.fallback_error: str | None = None
 
     # ------------------------------------------------------------ lifecycle
     @property
@@ -256,6 +259,7 @@ class LightingBridge:
     @callback
     def async_stop(self) -> None:
         self._running = False
+        self._stopped = True  # a later (delayed) save could overwrite the next bridge's record
         if self._timer:
             self._timer()
             self._timer = None
@@ -281,11 +285,13 @@ class LightingBridge:
 
     @callback
     def _save(self) -> None:
-        self._store.async_delay_save(self._data, SAVE_DELAY_SECONDS)
+        if not self._stopped:
+            self._store.async_delay_save(self._data, SAVE_DELAY_SECONDS)
 
     @callback
     def _save_mirror(self) -> None:
-        self._mirror_store.async_delay_save(lambda: self.mirror, SAVE_DELAY_SECONDS)
+        if not self._stopped:
+            self._mirror_store.async_delay_save(lambda: self.mirror, SAVE_DELAY_SECONDS)
 
     # ------------------------------------------------- the running controller
     @callback
@@ -306,6 +312,7 @@ class LightingBridge:
     def _make_dormant(ctrl: LightingController) -> None:
         ctrl.fenced = True
         ctrl.dormant = True
+        ctrl.store.locked = True  # edits go to the App; only the App's published copy is written here
         ctrl.command_observer = None
         ctrl.decisions.observer = None
 
@@ -323,7 +330,9 @@ class LightingBridge:
     def _on_config(self, _old: LightingConfig, new: LightingConfig) -> None:
         if self.sessions:
             doc = new.as_dict()
-            self._broadcast({"type": "config", "config": doc, "config_revision": S.config_revision(doc)})
+            # fired: full precision, so the App's shadow starts its timers from this instant (as for state events).
+            self._broadcast({"type": "config", "config": doc, "config_revision": S.config_revision(doc),
+                             "fired": dt_util.utcnow().isoformat()})
 
     # ------------------------------------------------------------- reading
     def config_doc(self) -> dict[str, Any]:
@@ -349,7 +358,8 @@ class LightingBridge:
             "lease_seconds": S.LEASE_SECONDS, "heartbeat_seconds": S.HEARTBEAT_SECONDS,
             "resume_grace_seconds": S.RESUME_GRACE_SECONDS, "changed_at": _iso(self.changed_at),
             "changed_by": self.changed_by, "last_seq": self.last_seq, "config_revision": self.config_revision(),
-            "controller": "dormant" if self.ctrl.dormant else "running",
+            "controller": "failed" if self.fallback_error else "dormant" if self.ctrl.dormant else "running",
+            "error": self.fallback_error,
             "sessions": [s.as_dict(self.owner_session) for s in self.sessions.values()],
             "executed": self.executed, "execute_errors": self.execute_errors, "last_execute": self.last_execute,
             "mirror_at": self.mirror.get("state_at"), "rejections": dict(self.rejections),
@@ -365,6 +375,8 @@ class LightingBridge:
             "options": dict(entry.options) if entry is not None else {},
             "config": self.config_doc(), "config_revision": self.config_revision(), "lease_token": lease_token,
         }
+        if lease_token is not None:
+            hello["renames"] = self._take_renames()
         if not self.app_owns:
             # The shadow starts from an exact copy of the running controller.
             hello["state"] = ctrl.export_state()
@@ -466,6 +478,8 @@ class LightingBridge:
         session = self._session(params["session_id"], connection)
         if self.owner != S.OWNER_INTEGRATION or self._busy:
             raise BridgeError(S.REJECT_BUSY, "the App already controls lighting (or a change is in progress)")
+        if self.fallback_error:
+            raise BridgeError(S.REJECT_BUSY, self.fallback_error)
         if params["expected_epoch"] != self.epoch:
             raise BridgeError(S.REJECT_BUSY, f"the ownership changed (epoch {self.epoch})")
         if session.fingerprint != self.fingerprint or session.core_fingerprint != self.core_fingerprint:
@@ -480,13 +494,15 @@ class LightingBridge:
         self._busy = True
         try:
             ctrl.fenced = True
-            if not await ctrl.async_drain(S.DRAIN_SECONDS):
-                ctrl.fenced = False
-                raise BridgeError(S.REJECT_BUSY, "lighting commands are still being sent; try again")
-            if self.sessions.get(session.session_id) is not session:
-                ctrl.fenced = False
-                raise BridgeError(S.REJECT_UNKNOWN_SESSION, "the bridge session ended during the handover")
-            await ctrl.async_flush()
+            try:
+                if not await ctrl.async_drain(S.DRAIN_SECONDS):
+                    raise BridgeError(S.REJECT_BUSY, "lighting commands are still being sent; try again")
+                await ctrl.async_flush()
+                if self.sessions.get(session.session_id) is not session or not self._running:
+                    raise BridgeError(S.REJECT_UNKNOWN_SESSION, "the bridge session ended during the handover")
+            except BaseException:
+                ctrl.fenced = False  # the integration keeps control
+                raise
             # From here on nothing awaits: no edit or command can come between the copy and the switch.
             doc = ctrl.lighting.as_dict()
             state = ctrl.export_state()
@@ -521,7 +537,8 @@ class LightingBridge:
         mood = self.coordinator.config.mood
         try:
             if domain in ("input_select", "select") and service == "select_option" and \
-                    data.get("entity_id") in {mood.manual_mood_entity, mood.main_mood_entity} - {None}:
+                    isinstance(data.get("entity_id"), str) and \
+                    data["entity_id"] in {mood.manual_mood_entity, mood.main_mood_entity} - {None}:
                 ids = [data["entity_id"]]
                 if set(data) - {"entity_id", "option"} or not isinstance(data.get("option"), str):
                     raise S.ProtocolError(S.REJECT_NOT_ALLOWED, "invalid mood selection")
@@ -603,7 +620,7 @@ class LightingBridge:
         now = dt_util.utcnow()
         if config is not None and config != self.ctrl.lighting:
             ctrl = self.ctrl
-            ctrl.store.async_set(config)  # the dormant controller's store: no listener runs; saved shortly
+            ctrl.store.async_set_mirrored(config)  # the dormant controller's store: saved shortly
             ctrl.async_config_mirrored()
         if state is not None:
             self.mirror = {**self.mirror, "state": state, "state_at": _iso(now), "epoch": self.epoch}
@@ -689,26 +706,37 @@ class LightingBridge:
         self._busy = True
         try:
             try:
-                async with asyncio.timeout(S.DRAIN_SECONDS):
+                # An App command already accepted runs until it ends or times out (COMMAND_TIMEOUT_SECONDS).
+                async with asyncio.timeout(max(S.DRAIN_SECONDS, COMMAND_TIMEOUT_SECONDS + 1)):
                     await self._idle.wait()
             except TimeoutError:
                 _LOGGER.warning("lighting_fallback_drain_timeout: App commands still running")
             old = self.ctrl
-            state = self.mirror.get("state")
-            if isinstance(state, dict):
-                merged = S.merge_decisions(state, old.decisions.persist())
-                await old._state_store.async_save(merged)  # noqa: SLF001 - the next controller loads it
-            await old.store.async_flush()
+            try:
+                self._apply_renames(old)
+                state = self.mirror.get("state")
+                if isinstance(state, dict):
+                    merged = S.merge_decisions(state, old.decisions.persist())
+                    await old._state_store.async_save(merged)  # noqa: SLF001 - the next controller loads it
+                await old.store.async_flush()
+            except Exception:
+                # Lighting must run again: the next controller loads what the stores hold.
+                _LOGGER.exception("lighting_fallback_mirror_failed (the integration starts from its stored copy)")
             old.dormant = False
             old.async_stop()
             new = LightingController(self.hass, self.coordinator)
-            await new.async_load()
+            try:
+                await new.async_load()
+            except Exception:
+                _LOGGER.exception("lighting_fallback_load_failed: lighting does not run; reload the integration")
+                self._failed_fallback(old, new)
+                return
             now = time.monotonic()
             new.note_recent_commands({"contexts": [c for t, c in self._recent if now - t <= S.OWN_CONTEXT_SECONDS]})
             self.coordinator.lighting = new
             new.async_start()
             self.attach(new)
-            self.mirror = {**self.mirror, "rooms": {}, "returned_at": _iso(dt_util.utcnow())}
+            self.mirror = {**self.mirror, "rooms": {}, "renames": [], "returned_at": _iso(dt_util.utcnow())}
             self._save_mirror()
         finally:
             self._busy = False
@@ -716,6 +744,40 @@ class LightingBridge:
         async_dispatcher_send(self.hass, SIGNAL_LIGHTING_UPDATED)
         level = logging.INFO if reason in (S.REASON_RELEASE, S.REASON_SERVICE) else logging.WARNING
         _LOGGER.log(level, "lighting_fallback reason=%s epoch=%d", reason, self.epoch)
+
+    @callback
+    def _failed_fallback(self, old: LightingController, new: LightingController) -> None:
+        """The next controller could not load: nothing commands lights; the status says so (a reload retries)."""
+        old.fenced = True
+        self.fallback_error = "the lighting controller could not be started; reload the integration"
+        self.coordinator.async_schedule_refresh()
+        async_dispatcher_send(self.hass, SIGNAL_LIGHTING_UPDATED)
+
+    # -------------------------------------------------------------- renames
+    @callback
+    def note_rename(self, old: str, new: str) -> None:
+        """An entity id renamed while the App owns lighting but is not connected: given to it when it resumes
+        (or applied here when the integration takes lighting back). A connected App follows renames itself."""
+        if not self.app_owns or (self.owner_session is not None and self.owner_session in self.sessions):
+            return
+        renames = [*(self.mirror.get("renames") or []), [old, new]][-MAX_RENAMES:]
+        self.mirror = {**self.mirror, "renames": renames}
+        self._save_mirror()
+
+    def _take_renames(self) -> list[list[str]]:
+        renames = [r for r in self.mirror.get("renames") or [] if isinstance(r, list) and len(r) == 2]
+        if renames:
+            self.mirror = {**self.mirror, "renames": []}
+            self._save_mirror()
+        return renames
+
+    def _apply_renames(self, ctrl: LightingController) -> None:
+        from .lighting_config import rename_entity  # noqa: PLC0415 - import cycle
+
+        for old, new in self._take_renames():
+            if (lighting := rename_entity(ctrl.store.config, old, new)) is not None:
+                _LOGGER.info("entity_renamed old=%s new=%s (while the App was away)", old, new)
+                ctrl.store.async_set_mirrored(lighting)
 
     def _change_owner(self, owner: str, reason: str, now: datetime, *, session: Session | None = None,
                       token: str | None = None, by: str | None = None, detail: str | None = None,

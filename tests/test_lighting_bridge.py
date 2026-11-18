@@ -479,3 +479,83 @@ async def test_non_admins_cannot_use_the_bridge(hass: HomeAssistant, lit, device
                                        context=Context(user_id=hass_read_only_user.id))
     assert bridge_of(entry).owner == S.OWNER_INTEGRATION
 
+
+
+# ------------------------------------------------------------------ review fixes (failure paths)
+async def test_a_failed_claim_leaves_the_integration_in_control(hass: HomeAssistant, lit, devices, freezer,
+                                                                hass_ws_client, hass_admin_user, caplog) -> None:
+    entry = await started(hass, lit, freezer)
+    ctrl = entry.runtime_data.lighting
+
+    async def broken_flush() -> None:
+        raise OSError("disk full")
+
+    ctrl.async_flush = broken_flush
+    app = FakeApp(hass, await admin_client(hass, hass_ws_client, hass_admin_user))
+    await app.connect()
+    assert not (await app.claim())["success"]
+    assert not ctrl.fenced and not ctrl.dormant and bridge_of(entry).owner == S.OWNER_INTEGRATION
+    del ctrl.async_flush
+    await occupy(hass, lit, freezer)
+    assert devices.calls  # it still controls lighting
+    caplog.clear()  # (the store error was logged, as it should be)
+
+
+async def test_the_mirror_is_read_only_and_an_export_is_not_a_save(hass: HomeAssistant, lit, devices, freezer,
+                                                                   hass_ws_client, hass_admin_user) -> None:
+    from homeassistant.exceptions import HomeAssistantError
+
+    entry = await started(hass, lit, freezer)
+    ctrl = entry.runtime_data.lighting
+    ctrl._mark_dirty()  # noqa: SLF001
+    ctrl.export_state()
+    assert ctrl._dirty  # noqa: SLF001 - still saved at unload
+    app = FakeApp(hass, await admin_client(hass, hass_ws_client, hass_admin_user))
+    await app.connect()
+    grant = (await app.claim())["result"]
+    with pytest.raises(HomeAssistantError, match="managed by the Smart Lighting App"):
+        ctrl.store.async_set(ctrl.with_room(lit.area, manual_override_minutes=3))
+    doc = dict(grant["config"])
+    doc["manual_override_minutes"] = 33
+    assert (await app.publish(config=doc, config_revision=S.config_revision(doc)))["success"]
+    assert ctrl.lighting.manual_override_minutes == 33 and ctrl.store.locked
+
+
+async def test_renames_while_the_app_is_away_reach_it(hass: HomeAssistant, lit, devices, freezer, hass_ws_client,
+                                                      hass_admin_user) -> None:
+    entry = await started(hass, lit, freezer)
+    bridge = bridge_of(entry)
+    app = FakeApp(hass, await admin_client(hass, hass_ws_client, hass_admin_user))
+    await app.connect()
+    assert (await app.claim())["success"]
+    bridge.note_rename("light.a", "light.b")  # the App is connected: it follows renames itself
+    assert not bridge.mirror.get("renames")
+    await app.client.close()
+    await hass.async_block_till_done()
+    bridge.note_rename("light.a", "light.b")
+    again = FakeApp(hass, await admin_client(hass, hass_ws_client, hass_admin_user), instance=app.instance)
+    hello = await again.connect(resume_token=app.token)
+    assert hello["lease_token"] and hello["renames"] == [["light.a", "light.b"]] and not bridge.mirror["renames"]
+
+
+async def test_a_failed_fallback_is_reported_and_blocks_a_handover(hass: HomeAssistant, lit, devices, freezer,
+                                                                   hass_ws_client, hass_admin_user,
+                                                                   monkeypatch, caplog) -> None:
+    from custom_components.smart_occupancy import controller as controller_module
+
+    entry = await started(hass, lit, freezer)
+    app = FakeApp(hass, await admin_client(hass, hass_ws_client, hass_admin_user))
+    await app.connect()
+    assert (await app.claim())["success"]
+
+    async def broken_load(self) -> None:
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(controller_module.LightingController, "async_load", broken_load)
+    reply = await app.send(type="smart_occupancy/lighting/bridge/return", reason="test")
+    assert reply["success"]
+    status = bridge_of(entry).status()
+    assert status["owner"] == S.OWNER_INTEGRATION and status["controller"] == "failed" and status["error"]
+    assert entry.runtime_data.lighting.fenced  # nothing commands lights
+    assert (await app.claim())["error"]["code"] in (S.REJECT_BUSY, S.REJECT_CONFIG)
+    caplog.clear()  # (the failure was logged, as it should be)

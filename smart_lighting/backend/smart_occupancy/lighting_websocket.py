@@ -360,11 +360,18 @@ def editor_model(hass: HomeAssistant, ctrl: LightingController, mood: str | None
             and (area_id is None or p.area_id in (None, area_id))
         ]
 
+    # Phase A4: while the Smart Lighting App controls lighting, the integration's editors are read-only (the App runs
+    # these handlers itself with its own controller, where there is no lighting bridge: never "managed").
+    bridge = getattr(ctrl.coordinator, "lighting_bridge", None)
+    managed = bool(bridge is not None and bridge.app_owns)
     model: dict[str, Any] = {
         "version": VERSION,
         "revision": ctrl.store.revision,
-        "can_edit": is_admin,
+        "can_edit": is_admin and not managed,
+        "managed_by_app": managed,
         "mood": status.as_dict(),
+        # Where moods come from (the mood source editor): helpers, one selector, the built-in list or none.
+        "mood_source": ctrl.config.mood.as_dict() | {"source": ctrl.config.mood.source},
         "moods": moods,
         "selected_mood": selected,
         # Which profile the light-type and single-light entries below belong to (0.4.0).
