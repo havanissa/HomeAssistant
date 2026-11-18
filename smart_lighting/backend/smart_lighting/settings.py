@@ -45,6 +45,10 @@ class Settings:
     static_dir: Path
     dev_mode: bool
     data_dir: Path | None = None
+    # Phase A3.2: shadow comparison required before a handover. Only tests and development lower them
+    # (SL_ENGINE_MIN_SHADOW_SECONDS, SL_ENGINE_MIN_TRANSITIONS); they are not App options.
+    engine_min_shadow_seconds: int = 7200
+    engine_min_transitions: int = 20
 
     @property
     def token_present(self) -> bool:
@@ -75,6 +79,8 @@ class Settings:
             "token": "present (hidden)" if self.token else "missing",
             "development_mode": self.dev_mode,
             "data_dir": str(self.data_dir) if self.data_dir else None,
+            "engine_min_shadow_seconds": self.engine_min_shadow_seconds,
+            "engine_min_transitions": self.engine_min_transitions,
         }
 
 
@@ -124,4 +130,14 @@ def load_settings(
         static_dir=static_dir,
         dev_mode=bool(env.get("SL_DEV")),
         data_dir=Path(env.get("SL_DATA_DIR", DATA_DIR)) if env.get("SL_DATA_DIR", DATA_DIR) else None,
+        engine_min_shadow_seconds=_positive(env.get("SL_ENGINE_MIN_SHADOW_SECONDS"), 7200),
+        engine_min_transitions=_positive(env.get("SL_ENGINE_MIN_TRANSITIONS"), 20),
     )
+
+
+def _positive(value: str | None, default: int) -> int:
+    try:
+        number = int(value) if value is not None else default
+    except ValueError:
+        return default
+    return number if number >= 0 else default

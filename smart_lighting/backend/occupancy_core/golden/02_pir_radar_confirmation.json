@@ -1,0 +1,85 @@
+{
+ "name": "pir_radar_confirmation",
+ "description": "PIR and radar within the correlation window confirm at once; the radar holds the room; dropout grace, then the inactivity timeout.",
+ "rooms": {
+  "kamar": {
+   "sensors": [
+    {
+     "entity_id": "binary_sensor.pir",
+     "kind": "pir",
+     "role": "trigger"
+    },
+    {
+     "entity_id": "binary_sensor.radar",
+     "kind": "radar",
+     "role": "maintain"
+    }
+   ]
+  }
+ },
+ "initial": {
+  "binary_sensor.pir": "off",
+  "binary_sensor.radar": "off"
+ },
+ "events": [
+  {
+   "t": 0,
+   "entity": "binary_sensor.pir",
+   "state": "on"
+  },
+  {
+   "t": 2,
+   "entity": "binary_sensor.radar",
+   "state": "on"
+  },
+  {
+   "t": 60,
+   "entity": "binary_sensor.pir",
+   "state": "off"
+  },
+  {
+   "t": 600,
+   "entity": "binary_sensor.radar",
+   "state": "off"
+  }
+ ],
+ "until": 1300,
+ "expect": [
+  {
+   "t": 0.0,
+   "area": "kamar",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacant",
+   "start": true
+  },
+  {
+   "t": 0.0,
+   "area": "kamar",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 2.0,
+   "area": "kamar",
+   "state": "confirmed_occupancy",
+   "occupied": true,
+   "reason_code": "occupied"
+  },
+  {
+   "t": 630.0,
+   "area": "kamar",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 1200.0,
+   "area": "kamar",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  }
+ ]
+}

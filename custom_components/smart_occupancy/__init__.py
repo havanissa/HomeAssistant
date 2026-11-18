@@ -53,9 +53,12 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Serve the dashboard cards and register the websocket API (once per run)."""
+    from .engine_api import async_register_engine_service
     from .websocket import async_register_websocket_commands
 
     async_register_websocket_commands(hass)
+    # Phase A3.2: return occupancy control to the integration's engine without the App (administrators only).
+    async_register_engine_service(hass)
     await async_register_card(hass)
     return True
 

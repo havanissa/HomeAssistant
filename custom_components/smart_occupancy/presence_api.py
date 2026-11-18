@@ -552,7 +552,8 @@ def room_view(hass: HomeAssistant, coordinator: SmartOccupancyCoordinator, area_
     room = config.room(area_id)
     enabled = area_id in config.enabled_rooms
     engine = coordinator.occupancy.engines.get(area_id)
-    result = engine.result if engine else None
+    # The published result (Phase A3.2: the App's when it owns occupancy); the signal history is the engine's own.
+    result = coordinator.occupancy.result(area_id) if engine else None
     # The room's occupancy problems from the integration's own checks: about its sensors or reference helper, or
     # about the room's occupancy as a whole (lighting problems belong to the lighting views).
     signals = {s.entity_id for s in room.sensors} | ({room.reference_occupancy_entity}
@@ -598,6 +599,7 @@ def room_view(hass: HomeAssistant, coordinator: SmartOccupancyCoordinator, area_
         "starting_up": result.starting_up,
         "preliminary_signals": sorted(engine.preliminary),
         "zone_holds": sorted(engine.external_hold),
+        "decided_by": coordinator.occupancy.published_by(area_id),
     }
     view["explain"] = explain(engine, result, now)
     view["health"] = room_health(coordinator.data, area_id, result)
@@ -645,6 +647,9 @@ def presence_get(hass: HomeAssistant, area_id: str | None = None) -> dict[str, A
         "rooms": rooms,
         "log": log.view(area_id, limit=400 if area_id else 150),
         "log_seq": log.seq,
+        # Phase A3.2: which engine publishes occupancy (the integration's ownership record).
+        "engine": ({"owner": coordinator.occupancy.bridge.owner, "state": coordinator.occupancy.bridge.state(),
+                    "epoch": coordinator.occupancy.bridge.epoch} if coordinator is not None else None),
     }
 
 

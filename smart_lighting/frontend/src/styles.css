@@ -4881,3 +4881,121 @@ sl-plan-canvas {
     padding-left: 0.75rem;
   }
 }
+
+/* Presence → Engine migration (Phase A3.2). */
+.engine-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-left: 4px solid var(--sl-info);
+}
+
+.engine-hero.engine-app {
+  border-left-color: var(--sl-ok);
+}
+
+.engine-hero-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.engine-hero-main p {
+  margin: 0.15rem 0;
+}
+
+.engine-hero-icon {
+  display: inline-flex;
+  padding: 0.6rem;
+  border-radius: 12px;
+  background: var(--sl-info-bg);
+  color: var(--sl-info);
+}
+
+.engine-app .engine-hero-icon {
+  background: var(--sl-ok-bg);
+  color: var(--sl-ok);
+}
+
+.engine-owner {
+  margin: 0.1rem 0;
+  font-size: 1.5rem;
+  font-weight: 500;
+}
+
+.engine-hero-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.35rem;
+}
+
+.btn-large {
+  padding: 0.75rem 1.25rem;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.engine-hero .btn-danger.btn-large {
+  color: var(--sl-on-primary);
+  background: var(--sl-error);
+  border-color: var(--sl-error);
+}
+
+.checklist,
+.engine-records,
+.record-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.check {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+}
+
+.engine-record {
+  border: 1px solid var(--sl-divider);
+  border-radius: 10px;
+}
+
+.record-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.6rem;
+  align-items: center;
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.record-body {
+  padding: 0 0.75rem 0.75rem 2.6rem;
+}
+
+.record-events li {
+  font-size: 0.875rem;
+}
+
+.engine-rooms td {
+  vertical-align: middle;
+}
+
+@media (max-width: 40rem) {
+  .engine-hero-actions {
+    align-items: stretch;
+    width: 100%;
+  }
+}

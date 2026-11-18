@@ -5,7 +5,7 @@
 // /api/hassio_ingress/<token>/ as well as at "/" during development.
 // The browser only ever talks to the App backend, never to Home Assistant.
 
-import type { EntitySummary, LiveMessage, LiveState, Overview } from "./types";
+import type { EngineBrief, EntitySummary, LiveMessage, LiveState, Overview } from "./types";
 
 export type LinkState = "connecting" | "live" | "polling" | "offline";
 
@@ -35,6 +35,9 @@ class Store {
   /** Revision of the stored floor plan, as last announced by the backend (any session). */
   floorplanRevision: string | null = null;
   floorplanVersion = 0;
+  /** Phase A3.2: the occupancy engine's mode and acknowledged owner (live), and a counter of its changes. */
+  engine: EngineBrief | null = null;
+  engineVersion = 0;
   private listeners = new Set<Listener>();
 
   subscribe(listener: Listener): () => void {
@@ -55,6 +58,7 @@ class Store {
 
   setOverview(overview: Overview): void {
     this.overview = overview;
+    if (overview.engine) this.engine = overview.engine;
     this.lastUpdate = new Date();
     this.emit();
   }
@@ -86,6 +90,10 @@ class Store {
       case "floorplan":
         this.floorplanRevision = message.revision;
         this.floorplanVersion += 1;
+        break;
+      case "engine":
+        this.engine = { mode: message.mode, owner: message.owner, bridge: message.bridge };
+        this.engineVersion += 1;
         break;
       case "entities": {
         if (!this.overview) return;

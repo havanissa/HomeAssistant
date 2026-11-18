@@ -14,6 +14,14 @@ Engine state (occupied, state, last activity) and comparison counters are
 kept in ``.storage/smart_occupancy.occupancy_state``, written only on
 occupancy transitions and counter changes, coalesced by a delay. Nothing is
 written to the Recorder directly.
+
+Published result (Phase A3.2): ``result()`` is the one occupancy-result
+interface of every consumer. It returns the integration engine's result,
+unless the Smart Lighting App owns occupancy (``engine_bridge``) and has
+published the room: then it is the App's accepted result. Transitions, the
+history, the presence log, the helper comparison and the listeners follow the
+published result. The integration's engine keeps running in every case (hot
+standby), so a fallback is continuous.
 """
 
 from __future__ import annotations
@@ -34,8 +42,11 @@ from .const import (
     OCCUPANCY_STORE_KEY,
     OCCUPANCY_STORE_VERSION,
 )
-from .engine import RoomEngine, RoomResult, Value, interpret
+from .engine import RoomEngine, RoomResult, StateError, Value, interpret
+from .engine_bridge import EngineBridge
 from .models import IntegrationConfig
+from .occupancy_core.house import House, HouseSpec, Observation, RoomSpec
+from .occupancy_core.wire import result_to_wire
 from .occupancy import friendly_name
 from .prediction import NullHistory, OccupancyHistory
 
@@ -47,6 +58,14 @@ def _reference_value(state: State | None) -> bool | None:
     return None if value == Value.UNKNOWN else value == Value.ACTIVE
 
 
+def house_spec(config: IntegrationConfig) -> HouseSpec:
+    """The engines' configuration: every enabled room's signals, effective timing and adjacent rooms."""
+    return HouseSpec(tuple(
+        RoomSpec(area_id, room.sensors, config.timing_for(area_id), room.adjacent_rooms)
+        for area_id, room in config.enabled_rooms.items()
+    ))
+
+
 class OccupancyManager:
     """Owns the room engines, their timers and their persisted state."""
 
@@ -56,11 +75,11 @@ class OccupancyManager:
         self.hass = hass
         self.config = config
         self.history: OccupancyHistory = history or NullHistory()
-        self.engines: dict[str, RoomEngine] = {}
+        # The engines and the routing between them: the shared engine package (Phase A3.2).
+        self.house = House(house_spec(config))
+        self.engines: dict[str, RoomEngine] = self.house.engines
         self.comparisons: dict[str, ComparisonTracker] = {}
-        self._entity_rooms: dict[str, list[str]] = {}
         self._reference_rooms: dict[str, list[str]] = {}
-        self._neighbours_of: dict[str, list[str]] = {}  # area -> rooms that list it as adjacent
         self._listeners: dict[str, list[Callable[[], None]]] = {}
         self._timers: dict[str, CALLBACK_TYPE] = {}
         self._unsub: CALLBACK_TYPE | None = None
@@ -69,50 +88,50 @@ class OccupancyManager:
         self._running = False
         # Called with (area_id, previous, result, now) on every occupancy transition (0.6.10: presence log).
         self.on_transition: Callable[[str, RoomResult | None, RoomResult, datetime], None] | None = None
+        # The last published result of each room (transitions are detected on it).
+        self._published: dict[str, RoomResult] = {}
+        self.spec_revision = self.house.spec.revision()
+        # Who publishes occupancy, and the App's bridge sessions (Phase A3.2).
+        self.bridge = EngineBridge(hass, self)
 
         for area_id, room in config.enabled_rooms.items():
-            sensors = room.sensors
-            engine = RoomEngine(area_id, sensors, config.timing_for(area_id), adjacent=room.adjacent_rooms)
-            self.engines[area_id] = engine
-            for s in sensors:
-                self._entity_rooms.setdefault(s.entity_id, []).append(area_id)
-            for neighbour in room.adjacent_rooms:
-                self._neighbours_of.setdefault(neighbour, []).append(area_id)
             if room.reference_occupancy_entity:
+                engine = self.engines[area_id]
                 self.comparisons[area_id] = ComparisonTracker(grace_seconds=engine.timing.correlation_window)
                 self._reference_rooms.setdefault(room.reference_occupancy_entity, []).append(area_id)
 
     # ------------------------------------------------------------ lifecycle
     @property
     def tracked_entities(self) -> list[str]:
-        return sorted(set(self._entity_rooms) | set(self._reference_rooms))
+        return sorted(set(self.house.signal_entities) | set(self._reference_rooms))
 
     async def async_load(self) -> None:
         """Restore the previous decisions and read the current signal states."""
         data = await self._store.async_load() or {}
         stored = data.get("rooms") if isinstance(data.get("rooms"), dict) else {}
         now = dt_util.utcnow()
+        self.house.load(
+            {a: d["engine"] for a, d in stored.items() if isinstance(d, dict) and isinstance(d.get("engine"), dict)},
+            now, self._lookup, lambda entity_id: friendly_name(self.hass, entity_id),
+        )
         for area_id, engine in self.engines.items():
-            room_data = stored.get(area_id) or {}
-            if isinstance(room_data.get("engine"), dict):
-                engine.restore(room_data["engine"], now)
-            else:
-                engine.start(now)
             if area_id in self.comparisons:
                 self.comparisons[area_id] = ComparisonTracker.restore(
-                    room_data.get("comparison"), engine.timing.correlation_window
+                    (stored.get(area_id) or {}).get("comparison"), engine.timing.correlation_window
                 )
-            for entity_id, track in engine.tracks.items():
-                state = self.hass.states.get(entity_id)
-                track.name = friendly_name(self.hass, entity_id)
-                at = min(state.last_changed, now) if state else now
-                engine.observe(
-                    entity_id, interpret(state.state if state else None, inverted=track.assignment.inverted), at
-                )
+        await self.bridge.async_load()
+        self.bridge.restore_decisions(now)
+
+    def _lookup(self, entity_id: str) -> Observation | None:
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return None
+        return Observation(state.state, state.last_changed, state.attributes.get("friendly_name"))
 
     @callback
     def async_start(self) -> None:
         self._running = True
+        self.bridge.async_start()
         if tracked := self.tracked_entities:
             self._unsub = async_track_state_change_event(self.hass, tracked, self._on_state_event)
         # The states were read in async_load, before this subscription existed: a signal that changed in
@@ -127,18 +146,7 @@ class OccupancyManager:
     @callback
     def _resync(self) -> None:
         """Read the current state of every signal again (observations that are not newer are ignored)."""
-        now = dt_util.utcnow()
-        for engine in self.engines.values():
-            for entity_id, track in engine.tracks.items():
-                state = self.hass.states.get(entity_id)
-                value = interpret(state.state if state else None, inverted=track.assignment.inverted)
-                if value == track.value:
-                    continue
-                at = min(state.last_changed, now) if state else now
-                if track.since is not None and at < track.since:
-                    at = now  # the current state is newer than what the engine holds, whatever its timestamp
-                name = state.attributes.get("friendly_name") if state else None
-                engine.observe(entity_id, value, at, name)
+        self.house.resync(dt_util.utcnow(), self._lookup)
 
     @callback
     def async_reconfigure(self, config: IntegrationConfig) -> None:
@@ -149,9 +157,10 @@ class OccupancyManager:
         integration). Every room is evaluated again at once.
         """
         self.config = config
+        self.house.reconfigure(house_spec(config))
+        self.spec_revision = self.house.spec.revision()
+        self.bridge.spec_changed()
         for area_id, engine in self.engines.items():
-            room = config.room(area_id)
-            engine.reconfigure(room.sensors, config.timing_for(area_id))
             if (tracker := self.comparisons.get(area_id)) is not None:
                 tracker.grace_seconds = engine.timing.correlation_window
         self._resync()
@@ -168,41 +177,32 @@ class OccupancyManager:
         engine's rules unchanged). A change is evaluated at once.
         """
         now = dt_util.utcnow()
-        for area_id, engine in self.engines.items():
-            wanted = frozenset(signals.get(area_id, frozenset()))
-            if wanted == engine.preliminary:
-                continue
-            engine.preliminary = wanted
-            _LOGGER.debug("occupancy_preliminary_signals area=%s signals=%s", area_id, ",".join(sorted(wanted)))
+        self.bridge.input_preliminary(signals, now)
+        for area_id in self.house.set_preliminary(signals):
+            _LOGGER.debug("occupancy_preliminary_signals area=%s signals=%s", area_id,
+                          ",".join(sorted(self.engines[area_id].preliminary)))
             if self._running:
                 self._evaluate(area_id, now)
 
     @callback
     def async_set_holds(self, area_id: str, names: frozenset[str]) -> None:
         """Occupied zones that keep a room occupied (0.6.0). A change is evaluated at once."""
-        engine = self.engines.get(area_id)
-        if engine is None:
-            return
         now = dt_util.utcnow()
-        if engine.set_hold(names, now):
+        if area_id in self.engines:
+            self.bridge.input_hold(area_id, frozenset(names), now)
+        if self.house.set_holds(area_id, names, now):
             _LOGGER.debug("occupancy_zone_hold area=%s zones=%s", area_id, ",".join(sorted(names)))
             if self._running:
                 self._evaluate(area_id, now)
 
     def same_signals(self, config: IntegrationConfig) -> bool:
         """The rooms and assigned signals of ``config`` are the ones this manager runs."""
-        if set(config.enabled_rooms) != set(self.engines):
-            return False
-        return all(
-            [s.entity_id for s in config.room(a).sensors] == list(engine.tracks)
-            and [(s.entity_id, s.kind) for s in config.room(a).sensors]
-            == [(t.entity_id, t.kind) for t in engine.tracks.values()]
-            for a, engine in self.engines.items()
-        )
+        return self.house.spec.same_signals(house_spec(config))
 
     @callback
     def async_stop(self) -> None:
         self._running = False
+        self.bridge.async_stop()
         if self._unsub:
             self._unsub()
             self._unsub = None
@@ -214,9 +214,11 @@ class OccupancyManager:
     async def async_flush(self) -> None:
         if self._dirty:
             await self._store.async_save(self._data())
+        await self.bridge.async_flush()
 
     async def async_remove(self) -> None:
         await self._store.async_remove()
+        await self.bridge.async_remove()
 
     # ------------------------------------------------------------ listeners
     @callback
@@ -234,17 +236,38 @@ class OccupancyManager:
     @callback
     def async_note_activity(self, area_id: str, source: str) -> bool:
         """Refresh the activity of an occupied room (optional wall switch evidence). Never occupies a room."""
-        engine = self.engines.get(area_id)
-        if engine is None or not self._running:
+        if area_id not in self.engines or not self._running:
             return False
-        if not engine.note_activity_evidence(dt_util.utcnow(), source):
+        self.bridge.input_activity(area_id, source, dt_util.utcnow())
+        if not self.house.note_activity(area_id, dt_util.utcnow(), source):
             return False
         self._evaluate(area_id, dt_util.utcnow())
         return True
 
     def result(self, area_id: str) -> RoomResult | None:
+        """The published occupancy of a room (see the module docstring)."""
+        if (accepted := self.bridge.published(area_id)) is not None:
+            return accepted.result
         engine = self.engines.get(area_id)
         return engine.result if engine else None
+
+    def published_by(self, area_id: str) -> str:
+        """Which engine decided the published result: "integration" or "app"."""
+        return self.bridge.published_by(area_id)
+
+    def local_wires(self) -> dict[str, dict[str, Any]]:
+        """The integration engine's current results in their JSON form (for the bridge)."""
+        return {a: result_to_wire(e.result, e.visit_confirmed) for a, e in self.engines.items() if e.result}
+
+    def published_wire(self, area_id: str) -> dict[str, Any] | None:
+        if (accepted := self.bridge.published(area_id)) is not None:
+            return accepted.wire
+        engine = self.engines.get(area_id)
+        return result_to_wire(engine.result, engine.visit_confirmed) if engine and engine.result else None
+
+    def published_key(self, area_id: str) -> tuple[str, dict[str, Any] | None]:
+        """What the listeners see: the publisher and the published result (a change of either is notified)."""
+        return self.published_by(area_id), self.published_wire(area_id)
 
     def comparison(self, area_id: str) -> ComparisonTracker | None:
         return self.comparisons.get(area_id)
@@ -255,25 +278,9 @@ class OccupancyManager:
         entity_id = event.data["entity_id"]
         new_state = event.data["new_state"]
         now = dt_util.utcnow()
-        at = min(new_state.last_changed, now) if new_state else now
-        name = new_state.attributes.get("friendly_name") if new_state else None
-        affected: dict[str, None] = {}
-        for area_id in self._entity_rooms.get(entity_id, ()):
-            engine = self.engines[area_id]
-            track = engine.tracks[entity_id]
-            before = track.active_start
-            value = interpret(new_state.state if new_state else None, inverted=track.assignment.inverted)
-            if not engine.observe(entity_id, value, at, name):
-                if name and track.name != name:
-                    track.name = name
-                    affected[area_id] = None
-                continue
-            affected[area_id] = None
-            if track.capable and track.active_start is not None and track.active_start != before:
-                for other in self._neighbours_of.get(area_id, ()):
-                    if other in self.engines:
-                        self.engines[other].note_neighbour_motion(area_id, at)
-                        affected[other] = None
+        obs = (Observation(new_state.state, new_state.last_changed, new_state.attributes.get("friendly_name"))
+               if new_state else None)
+        affected = dict.fromkeys(self.house.observe(entity_id, obs, now))
         for area_id in self._reference_rooms.get(entity_id, ()):
             affected[area_id] = None
         for area_id in affected:
@@ -292,32 +299,107 @@ class OccupancyManager:
     # ------------------------------------------------------------- evaluate
     @callback
     def _evaluate(self, area_id: str, now: datetime, *, notify: bool = True) -> None:
-        engine = self.engines[area_id]
-        previous = engine.result
-        result = engine.evaluate(now)
-        if previous is None or (previous.state, previous.occupied) != (result.state, result.occupied):
+        evaluation = self.house.evaluate(area_id, now)
+        result = evaluation.result
+        if evaluation.transition:
             _LOGGER.debug(
                 "occupancy_transition area=%s state=%s occupied=%s reason=%s",
                 area_id, result.state, result.occupied, result.reason_code,
             )
-            self.history.record(area_id, result.state, result.occupied, now)
             self._mark_dirty()
+        self.bridge.local_evaluated(area_id, now)
+        app_published = self.bridge.published(area_id) is not None
+        if app_published:
+            self._compare(area_id, now, self.result(area_id))
+        else:
+            self._on_published(area_id, now)
+        self._reschedule(area_id, now)
+        if notify and not app_published:
+            self._notify(area_id)
+
+    @callback
+    def _on_published(self, area_id: str, now: datetime) -> None:
+        """The published result may have changed: transitions, history, presence log, helper comparison."""
+        result = self.result(area_id)
+        if result is None:
+            return
+        previous = self._published.get(area_id)
+        self._published[area_id] = result
+        if previous is None or (previous.state, previous.occupied) != (result.state, result.occupied):
+            self.history.record(area_id, result.state, result.occupied, now)
             if self.on_transition is not None:
                 try:
                     self.on_transition(area_id, previous, result, now)
                 except Exception:  # noqa: BLE001 - the log must never break occupancy
                     _LOGGER.exception("Presence log failed")
-        if (tracker := self.comparisons.get(area_id)) is not None:
-            room = self.config.rooms[area_id]
-            helper = _reference_value(self.hass.states.get(room.reference_occupancy_entity or ""))
-            if tracker.update(now, result.occupied, helper, result.last_activity):
-                self._mark_dirty()
-        deadlines = [d for d in (engine.next_deadline(now), tracker.next_deadline() if tracker else None)
+        self._compare(area_id, now, result)
+
+    @callback
+    def _compare(self, area_id: str, now: datetime, result: RoomResult | None) -> None:
+        if (tracker := self.comparisons.get(area_id)) is None or result is None:
+            return
+        room = self.config.rooms[area_id]
+        helper = _reference_value(self.hass.states.get(room.reference_occupancy_entity or ""))
+        if tracker.update(now, result.occupied, helper, result.last_activity):
+            self._mark_dirty()
+
+    @callback
+    def _reschedule(self, area_id: str, now: datetime) -> None:
+        tracker = self.comparisons.get(area_id)
+        deadlines = [d for d in (self.engines[area_id].next_deadline(now), tracker.next_deadline() if tracker else None)
                      if d is not None and d > now]
         self._schedule(area_id, min(deadlines) if deadlines else None)
-        if notify:
-            for update in list(self._listeners.get(area_id, ())):
-                update()
+
+    @callback
+    def _notify(self, area_id: str) -> None:
+        for update in list(self._listeners.get(area_id, ())):
+            update()
+
+    # ------------------------------------------------------- bridge (A3.2)
+    @callback
+    def async_published_changed(self, area_id: str, now: datetime, before: tuple[str, Any]) -> None:
+        """The App's accepted result of a room changed (the bridge calls this)."""
+        self._on_published(area_id, now)
+        self._reschedule(area_id, now)
+        if self.published_key(area_id) != before:
+            self._notify(area_id)
+
+    @callback
+    def async_reconcile_standby(self, decisions: dict[str, dict[str, Any]], now: datetime) -> None:
+        """Before the App resumes: this engine adopts the App's accepted decisions (nothing is published by it)."""
+        for area_id, decision in decisions.items():
+            engine = self.engines.get(area_id)
+            if engine is None:
+                continue
+            try:
+                if engine.adopt(decision, now):
+                    self._mark_dirty()
+                    if self._running:
+                        self._evaluate(area_id, now, notify=False)
+            except StateError as err:
+                _LOGGER.warning("occupancy_adopt_refused area=%s error=%s", area_id, err)
+
+    @callback
+    def async_take_over(self, decisions: dict[str, dict[str, Any]], before: dict[str, tuple[str, Any]],
+                        now: datetime) -> None:
+        """The integration's engine publishes again (fallback): reconcile, evaluate, notify changed rooms only."""
+        for area_id, decision in decisions.items():
+            engine = self.engines.get(area_id)
+            if engine is None:
+                continue
+            try:
+                if engine.adopt(decision, now):
+                    _LOGGER.info("occupancy_adopted area=%s state=%s occupied=%s (the App's last decision)",
+                                 area_id, decision.get("state"), decision.get("occupied"))
+                    self._mark_dirty()
+            except StateError as err:
+                _LOGGER.warning("occupancy_adopt_refused area=%s error=%s", area_id, err)
+        if not self._running:
+            return
+        for area_id in self.engines:
+            self._evaluate(area_id, now, notify=False)
+            if self.published_key(area_id) != before.get(area_id):
+                self._notify(area_id)
 
     @callback
     def _schedule(self, area_id: str, when: datetime | None) -> None:
@@ -361,5 +443,6 @@ class OccupancyManager:
                 "next_deadline": (d.isoformat() if (d := engine.next_deadline(now)) else None),
                 "timer_scheduled": area_id in self._timers,
                 "comparison": c.as_dict() if (c := self.comparisons.get(area_id)) else None,
+                "published_by": self.published_by(area_id),
             }
         return out

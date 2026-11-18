@@ -156,7 +156,15 @@ export interface Overview {
   migration: Migration;
   safety: Safety;
   rooms?: Record<string, unknown> | null;
+  /** Phase A3.2: the occupancy engine (owner as the integration acknowledges it). */
+  engine?: EngineBrief | null;
   generated_at: string;
+}
+
+export interface EngineBrief {
+  mode: string;
+  owner: string;
+  bridge: string;
 }
 
 export interface LogEntry {
@@ -186,6 +194,7 @@ export type LiveMessage =
   | { type: "rooms"; status: Record<string, unknown> | null }
   | { type: "registries" }
   | { type: "floorplan"; revision: string }
+  | { type: "engine"; mode: string; owner: string; bridge: string }
   | { type: "pong" };
 
 export interface LiveState {

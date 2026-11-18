@@ -1,0 +1,70 @@
+{
+ "name": "no_usable_sensors",
+ "description": "Rooms without an occupancy-capable signal (only a door, only ignored signals, none) stay uncertain; no floor plan or sensor type is assumed.",
+ "rooms": {
+  "porch": {
+   "sensors": [
+    {
+     "entity_id": "binary_sensor.porch_door",
+     "kind": "door",
+     "role": "trigger"
+    }
+   ]
+  },
+  "attic": {
+   "sensors": [
+    {
+     "entity_id": "sensor.attic_temp",
+     "kind": "other",
+     "role": "ignore"
+    }
+   ]
+  },
+  "empty": {
+   "sensors": []
+  }
+ },
+ "initial": {
+  "binary_sensor.porch_door": "off",
+  "sensor.attic_temp": "12.5"
+ },
+ "events": [
+  {
+   "t": 10,
+   "entity": "binary_sensor.porch_door",
+   "state": "on"
+  },
+  {
+   "t": 20,
+   "entity": "binary_sensor.porch_door",
+   "state": "off"
+  }
+ ],
+ "until": 100,
+ "expect": [
+  {
+   "t": 0.0,
+   "area": "porch",
+   "state": "uncertain",
+   "occupied": null,
+   "reason_code": "no_signals",
+   "start": true
+  },
+  {
+   "t": 0.0,
+   "area": "attic",
+   "state": "uncertain",
+   "occupied": null,
+   "reason_code": "no_signals",
+   "start": true
+  },
+  {
+   "t": 0.0,
+   "area": "empty",
+   "state": "uncertain",
+   "occupied": null,
+   "reason_code": "no_signals",
+   "start": true
+  }
+ ]
+}

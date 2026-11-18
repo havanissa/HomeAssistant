@@ -1,0 +1,100 @@
+{
+ "name": "pir_only",
+ "description": "PIR-only room: an unconfirmed blip vacates on the fast path; a sustained movement confirms and vacates after the inactivity timeout.",
+ "rooms": {
+  "office": {
+   "sensors": [
+    {
+     "entity_id": "binary_sensor.pir",
+     "kind": "pir",
+     "role": "trigger"
+    }
+   ]
+  }
+ },
+ "initial": {
+  "binary_sensor.pir": "off"
+ },
+ "events": [
+  {
+   "t": 0,
+   "entity": "binary_sensor.pir",
+   "state": "on"
+  },
+  {
+   "t": 3,
+   "entity": "binary_sensor.pir",
+   "state": "off"
+  },
+  {
+   "t": 1000,
+   "entity": "binary_sensor.pir",
+   "state": "on"
+  },
+  {
+   "t": 1060,
+   "entity": "binary_sensor.pir",
+   "state": "off"
+  }
+ ],
+ "until": 2000,
+ "expect": [
+  {
+   "t": 0.0,
+   "area": "office",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacant",
+   "start": true
+  },
+  {
+   "t": 0.0,
+   "area": "office",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 3.0,
+   "area": "office",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 303.0,
+   "area": "office",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  },
+  {
+   "t": 1000.0,
+   "area": "office",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 1010.0,
+   "area": "office",
+   "state": "confirmed_occupancy",
+   "occupied": true,
+   "reason_code": "occupied"
+  },
+  {
+   "t": 1060.0,
+   "area": "office",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 1660.0,
+   "area": "office",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  }
+ ]
+}

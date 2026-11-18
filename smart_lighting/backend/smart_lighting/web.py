@@ -27,6 +27,12 @@ Phase A3.1 adds the presence API (``/api/presence/...``): the integration's
 live occupancy view, a bounded Recorder timeline, diagnostics, and reviewed
 changes of sensors and occupancy timing (``review`` / ``save``, with the same
 administrator and CSRF checks; saved through ``smart_occupancy/presence/set``).
+
+Phase A3.2 adds the engine API (``/api/engine...``): the App's occupancy engine,
+the integration's acknowledged owner, the shadow comparison and its readiness
+checks (reads), and two administrator requests with the same checks: a reviewed
+handover (``handover``, needs ``"confirm": true`` and every readiness check)
+and ``release`` (return control to the integration).
 """
 
 from __future__ import annotations
@@ -42,6 +48,8 @@ from aiohttp import web
 from .const import APP_VERSION
 from .core import AppCore
 from .floorplan import FloorPlanError
+from .ha import HomeAssistantError
+from .occupancy_runtime import EngineError
 from .live import LiveHub, origin_allowed
 from .rooms import RoomsError
 from .settings import Settings
@@ -428,6 +436,64 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         result = await service.save(scope(body), body.get("change"), body.get("revision"), body.get("confirmed"))
         return _json({"result": result})
 
+    # ------------------------------------------------------------ engine
+    def engine_runtime(request: web.Request):
+        core: AppCore = request.app[CORE_KEY]
+        if core.occupancy is None:
+            raise RoomsError("not_connected", "The App is starting", 503)
+        return core.occupancy
+
+    def engine_error(err: EngineError) -> web.Response:
+        return _json({"error": str(err), "code": err.code}, status=err.status)
+
+    @rooms_handler
+    async def engine_status(request: web.Request) -> web.Response:
+        core: AppCore = request.app[CORE_KEY]
+        runtime = engine_runtime(request)
+        acknowledged = None
+        if core.ha is not None and core.ha.connected:
+            try:
+                acknowledged = await core.ha.command("smart_occupancy/engine/status")
+            except (HomeAssistantError, ConnectionError, TimeoutError):
+                acknowledged = None
+        data = runtime.status()
+        if isinstance(acknowledged, dict):
+            # Read from the integration just now: the owner that really publishes occupancy.
+            data["acknowledged_owner"] = acknowledged.get("state")
+            data["epoch"] = acknowledged.get("epoch")
+            data["lease_until"] = acknowledged.get("lease_until")
+        data["integration_status"] = acknowledged
+        data["area_names"] = {a.get("area_id"): a.get("name") for a in (core.ha.areas if core.ha else [])}
+        return _json(data)
+
+    @rooms_handler
+    async def engine_comparison(request: web.Request) -> web.Response:
+        try:
+            limit = max(1, min(200, int(request.query.get("limit", "200"))))
+        except ValueError:
+            limit = 200
+        return _json({"records": engine_runtime(request).comparator.records(limit)})
+
+    @rooms_handler
+    async def engine_handover(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        if body.get("confirm") is not True:
+            raise RoomsError("confirmation_required", "Confirm the handover after reviewing the readiness checks")
+        try:
+            result = await engine_runtime(request).handover(request.headers.get("X-Remote-User-Id"))
+        except EngineError as err:
+            return engine_error(err)
+        return _json({"result": result})
+
+    @rooms_handler
+    async def engine_release(request: web.Request) -> web.Response:
+        await write_guard(request)
+        try:
+            result = await engine_runtime(request).release(request.headers.get("X-Remote-User-Id"))
+        except EngineError as err:
+            return engine_error(err)
+        return _json({"result": result})
+
     async def live(request: web.Request) -> web.StreamResponse:
         return await request.app[HUB_KEY].handle(request)
 
@@ -470,6 +536,10 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     app.router.add_post("/api/presence/save", presence_save)
     app.router.add_get("/api/presence/rooms/{area_id}", presence_room)
     app.router.add_get("/api/presence/rooms/{area_id}/timeline", presence_timeline)
+    app.router.add_get("/api/engine", engine_status)
+    app.router.add_get("/api/engine/comparison", engine_comparison)
+    app.router.add_post("/api/engine/handover", engine_handover)
+    app.router.add_post("/api/engine/release", engine_release)
     app.router.add_route("*", "/api/{tail:.*}", api_not_found)
     assets = settings.static_dir / "assets"
     if assets.is_dir():

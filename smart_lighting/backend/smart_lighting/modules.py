@@ -19,12 +19,18 @@ assignments) to the App. Phase A3.1 moves the Presence interface: occupancy
 sensors and their roles, occupancy timing, the live occupancy debugger and
 presence diagnostics. Room occupancy itself (the engine and its entities),
 lighting, switches, curtains and predictions keep running in the integration,
-unchanged; Phase A3.2 may move the occupancy engine, only after approval.
+unchanged.
+
+Phase A3.2 adds the occupancy engine to the App: it runs in shadow mode next to
+the integration's, and decides room occupancy only after a reviewed handover
+that the integration acknowledges. ``modules()`` and ``migration()`` take that
+acknowledged owner, so Presence counts as migrated only while the App's engine
+really publishes occupancy.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 AVAILABLE = "available"  # the App is in control (automation migrated)
 GUI = "gui"  # the configuration interface is in the App; the integration still executes everything
@@ -91,9 +97,10 @@ MODULES: tuple[Module, ...] = (
         "This App (Presence). The integration's room card (Presence tab) and options flow keep working on the same "
         "configuration. Lighting zones and radar distance zones are still edited in the Smart Room Lighting card.",
         scope="Presence configuration: sensor roles, inverted and included signals, global occupancy timing and "
-              "room overrides; live engine view, timeline and diagnostics. Stored in the integration; the "
-              "integration's occupancy engine keeps deciding occupancy (it moves only in Phase A3.2, after approval).",
-        phase="A3.1",
+              "room overrides; live engine view, timeline and diagnostics; the occupancy engine (Phase A3.2: shadow "
+              "comparison, reviewed handover and rollback). Stored in the integration; the integration publishes "
+              "the room occupancy entities.",
+        phase="A3.2",
     ),
     Module(
         "lighting", "Lighting", "lightbulb-group", "feature", PENDING,
@@ -131,21 +138,28 @@ MODULES: tuple[Module, ...] = (
 )
 
 
-def modules() -> list[dict[str, str | None]]:
-    return [m.as_dict() for m in MODULES]
+def _current(occupancy_owner: str) -> tuple[Module, ...]:
+    """The modules with Presence's automation owner as the integration acknowledges it."""
+    owner = APP if occupancy_owner == APP else INTEGRATION
+    return tuple(replace(m, automation_owner=owner, controlled_by=owner) if m.key == "presence" else m
+                 for m in MODULES)
 
 
-def migration() -> dict[str, object]:
+def modules(occupancy_owner: str = INTEGRATION) -> list[dict[str, str | None]]:
+    return [m.as_dict() for m in _current(occupancy_owner)]
+
+
+def migration(occupancy_owner: str = INTEGRATION) -> dict[str, object]:
     """Migration progress. Only completed work counts; nothing is estimated.
 
     ``modules_migrated`` counts modules whose *automation* runs in the App (none
     yet); ``interfaces_migrated`` counts modules configured in the App.
     """
-    features = [m for m in MODULES if m.kind == "feature"]
+    features = [m for m in _current(occupancy_owner) if m.kind == "feature"]
     migrated = [m for m in features if m.automation_owner == APP]
     interfaces = [m for m in features if m.gui_owner == APP]
     return {
-        "current_phase": "A3.1",
+        "current_phase": "A3.2",
         "foundation_complete": True,
         "modules_total": len(features),
         "modules_migrated": len(migrated),

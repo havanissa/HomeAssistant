@@ -1,0 +1,86 @@
+{
+ "name": "pc_activity_inverted",
+ "description": "An inverted PC-idle sensor (Maintain) holds the room while the radar clears.",
+ "rooms": {
+  "study": {
+   "sensors": [
+    {
+     "entity_id": "binary_sensor.radar",
+     "kind": "radar",
+     "role": "maintain"
+    },
+    {
+     "entity_id": "binary_sensor.pc_idle",
+     "kind": "pc_activity",
+     "role": "maintain",
+     "inverted": true
+    }
+   ]
+  }
+ },
+ "initial": {
+  "binary_sensor.radar": "off",
+  "binary_sensor.pc_idle": "on"
+ },
+ "events": [
+  {
+   "t": 0,
+   "entity": "binary_sensor.radar",
+   "state": "on"
+  },
+  {
+   "t": 5,
+   "entity": "binary_sensor.pc_idle",
+   "state": "off"
+  },
+  {
+   "t": 100,
+   "entity": "binary_sensor.radar",
+   "state": "off"
+  },
+  {
+   "t": 1000,
+   "entity": "binary_sensor.pc_idle",
+   "state": "on"
+  }
+ ],
+ "until": 2000,
+ "expect": [
+  {
+   "t": 0.0,
+   "area": "study",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacant",
+   "start": true
+  },
+  {
+   "t": 0.0,
+   "area": "study",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 5.0,
+   "area": "study",
+   "state": "confirmed_occupancy",
+   "occupied": true,
+   "reason_code": "occupied"
+  },
+  {
+   "t": 1030.0,
+   "area": "study",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 1600.0,
+   "area": "study",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  }
+ ]
+}

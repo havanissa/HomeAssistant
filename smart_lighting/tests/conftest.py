@@ -115,6 +115,8 @@ class FakeHomeAssistant:
                                           {"s": "on", "lu": 1794900062.0}],
         }
         self.floors = [{"floor_id": "ground", "name": "Ground floor", "level": 0, "icon": None}]
+        # Phase A3.2: the integration's occupancy bridge (tests/fake_engine.py); None = an older integration.
+        self.engine: Any = None
 
     # -- data ---------------------------------------------------------------
     def config(self) -> dict[str, Any]:
@@ -316,6 +318,12 @@ class FakeHomeAssistant:
             self.connections.remove(ws)
             self.subscriptions.pop(ws, None)
             self.entry_subscriptions.pop(ws, None)
+            if self.engine is not None:
+                for session, item in list(self.engine.sessions.items()):
+                    if item[0] is ws:
+                        self.engine.sessions.pop(session)
+                        if session == self.engine.owner_session:
+                            self.engine.owner_session = None
         return ws
 
     async def _answer(self, ws: web.WebSocketResponse, msg: dict[str, Any]) -> None:
@@ -429,6 +437,11 @@ class FakeHomeAssistant:
                 await result({"applied": plan["apply"], "changes": plan["changes"], "revision": revision,
                               "rooms_revision": revision_of(self.rooms_options)})
                 await self.notify_entry_changed()
+        elif kind.startswith("smart_occupancy/engine/"):
+            if self.engine is None:
+                await error("unknown_command", f"Unknown command {kind}")
+            else:
+                await self.engine.answer(ws, msg, result, error)
         elif kind == "history/history_during_period":
             self.history_calls.append(msg)
             await result({e: self.history[e] for e in msg["entity_ids"] if e in self.history})
@@ -443,6 +456,23 @@ class FakeHomeAssistant:
                     {"id": sub_id, "type": "event", "event": {"event_type": "state_changed",
                      "data": {"entity_id": entity_id, "old_state": None, "new_state": new}}}
                 )
+
+    async def emit_live(self, entity_id: str, value: str | None, name: str | None = None) -> None:
+        """A state change happening now (last_changed = now), seen by the App and by the integration's engine."""
+        from datetime import UTC, datetime
+
+        changed = datetime.now(UTC)
+        new = None
+        if value is not None:
+            new = {**state(entity_id, value, name or entity_id), "last_changed": changed.isoformat(),
+                   "last_updated": changed.isoformat()}
+        self.states = [s for s in self.states if s["entity_id"] != entity_id] + ([new] if new else [])
+        if self.engine is not None:
+            await self.engine.on_state(entity_id, value, changed)
+        for ws, ids in list(self.subscriptions.items()):
+            for sub_id in ids:
+                await ws.send_json({"id": sub_id, "type": "event", "event": {"event_type": "state_changed",
+                                    "data": {"entity_id": entity_id, "old_state": None, "new_state": new}}})
 
     async def drop_connections(self) -> None:
         for ws in list(self.connections):

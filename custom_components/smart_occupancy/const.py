@@ -5,10 +5,19 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Final
 
+# The occupancy engine's types live in the shared engine package (Phase A3.2); re-exported unchanged.
+from .occupancy_core.types import (  # noqa: F401
+    DEFAULT_ROLE_FOR_KIND,
+    TIMING_PARAMETERS,
+    OccupancyState,
+    SensorKind,
+    SensorRole,
+)
+
 DOMAIN: Final = "smart_occupancy"
 NAME: Final = "Smart Occupancy & Lighting"
 PHASE: Final = "0.6.8"
-VERSION: Final = "0.6.10"
+VERSION: Final = "0.7.0"
 
 # Version of the options payload stored in the config entry.
 # 1: Phase 0.1 / 0.1.1. 2: Phase 0.2 (occupancy timing, adjacency, inverted signals).
@@ -40,26 +49,6 @@ class OperatingMode(StrEnum):
     OBSERVE = "observe"
     SUPERVISE = "supervise"
     FULL_CONTROL = "full_control"
-
-
-class SensorKind(StrEnum):
-    """What a room signal physically is."""
-
-    PIR = "pir"
-    RADAR = "radar"
-    DOOR = "door"
-    PC_ACTIVITY = "pc_activity"
-    BED = "bed"
-    OTHER = "other"
-
-
-class SensorRole(StrEnum):
-    """How a room signal contributes to occupancy."""
-
-    TRIGGER = "trigger"
-    MAINTAIN = "maintain"
-    CONFIRM_VACANCY = "confirm_vacancy"
-    IGNORE = "ignore"
 
 
 class LightAction(StrEnum):
@@ -130,15 +119,6 @@ PROBLEM_STORE_VERSION: Final = 1
 PROBLEM_STORE_KEY: Final = "smart_occupancy.problem_history"
 
 
-DEFAULT_ROLE_FOR_KIND: Final[dict[SensorKind, SensorRole]] = {
-    SensorKind.PIR: SensorRole.TRIGGER,
-    SensorKind.RADAR: SensorRole.MAINTAIN,
-    SensorKind.DOOR: SensorRole.TRIGGER,
-    SensorKind.PC_ACTIVITY: SensorRole.MAINTAIN,
-    SensorKind.BED: SensorRole.MAINTAIN,
-    SensorKind.OTHER: SensorRole.IGNORE,
-}
-
 class CategoryKind(StrEnum):
     """What a light category label describes (Phase 0.3.1).
 
@@ -182,33 +162,13 @@ TRANSITION_MIN: Final = 0.0
 TRANSITION_MAX: Final = 300.0
 
 
-class OccupancyState(StrEnum):
-    """Internal occupancy state of a room (see engine.py for transitions)."""
-
-    VACANT = "vacant"
-    POSSIBLE_OCCUPANCY = "possible_occupancy"
-    CONFIRMED_OCCUPANCY = "confirmed_occupancy"
-    POSSIBLE_VACANCY = "possible_vacancy"
-    UNCERTAIN = "uncertain"
-
-
-# Occupancy timing parameters: key -> (default seconds, min, max).
-# All are configurable globally (Configure -> Occupancy timing) and can be
-# overridden per room. A value of 0 disables the two "stuck" detections.
-TIMING_PARAMETERS: Final[dict[str, tuple[int, int, int]]] = {
-    "correlation_window": (10, 1, 120),
-    "exit_confirmation": (300, 0, 3600),
-    "inactivity_timeout": (600, 30, 14400),
-    "dropout_grace": (30, 0, 600),
-    "trigger_stuck_after": (1800, 0, 86400),
-    "presence_stuck_after": (0, 0, 172800),
-    "startup_hold": (120, 0, 3600),
-}
-
 OCCUPANCY_STORE_VERSION: Final = 1
 OCCUPANCY_STORE_KEY: Final = "smart_occupancy.occupancy_state"
 # Engine state is written on occupancy transitions only, coalesced this long.
 OCCUPANCY_SAVE_DELAY_SECONDS: Final = 15
+# Who publishes occupancy: the integration or the Smart Lighting App (Phase A3.2, engine_bridge.py).
+ENGINE_STORE_VERSION: Final = 1
+ENGINE_STORE_KEY: Final = "smart_occupancy.engine_ownership"
 
 # Dashboard cards served by this integration.
 CARD_URL_BASE: Final = "/smart_occupancy_static"

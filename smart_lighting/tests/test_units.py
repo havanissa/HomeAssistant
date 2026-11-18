@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from smart_lighting import integration
-from smart_lighting.modules import AVAILABLE, GUI, MODULES, PENDING, migration
+from smart_lighting.modules import AVAILABLE, GUI, MODULES, PENDING, migration, modules
 from smart_lighting.settings import load_settings
 
 
@@ -84,8 +84,8 @@ def test_modules_and_migration() -> None:
     assert len(keys) == len(set(keys)) == 11
     features = [m for m in MODULES if m.kind == "feature"]
     assert [m.key for m in features] == ["rooms", "presence", "lighting", "moods", "switches", "curtains", "predictions"]
-    # Phases A2 and A3.1: Rooms and Presence have their configuration interface in the App; the rest is pending.
-    assert [(m.key, m.phase) for m in features if m.status == GUI] == [("rooms", "A2"), ("presence", "A3.1")]
+    # Phases A2 and A3.1/A3.2: Rooms and Presence have their interface in the App; the rest is pending.
+    assert [(m.key, m.phase) for m in features if m.status == GUI] == [("rooms", "A2"), ("presence", "A3.2")]
     assert all(m.status == PENDING and m.handled_by for m in features if m.key not in ("rooms", "presence"))
     assert all(m.status == AVAILABLE for m in MODULES if m.kind == "foundation")
     # Phase A2.1: the floor plan is an App tool; it migrates no module and counts in no migration figure.
@@ -93,12 +93,18 @@ def test_modules_and_migration() -> None:
     assert [(m.key, m.status, m.controlled_by, m.automation_owner) for m in tools] == [
         ("floorplan", AVAILABLE, None, None)]
     m = migration()
-    assert m["current_phase"] == "A3.1"
-    assert m["modules_migrated"] == 0 and m["percent"] == 0  # no automation has moved (occupancy included)
+    assert m["current_phase"] == "A3.2"
+    assert m["modules_migrated"] == 0 and m["percent"] == 0  # by default no automation has moved (occupancy too)
     assert m["interfaces_migrated"] == 2
     presence = next(i for i in m["items"] if i["key"] == "presence")
     assert (presence["gui_owner"], presence["config_source"], presence["automation_owner"], presence["phase"]) == (
-        "app", "integration", "integration", "A3.1")
+        "app", "integration", "integration", "A3.2")
+    # Phase A3.2: Presence counts as migrated only while the integration acknowledges the App as the owner.
+    owned = migration("app")
+    assert owned["modules_migrated"] == 1 and owned["controlled_by_app"] == 1
+    assert next(i for i in owned["items"] if i["key"] == "presence")["automation_owner"] == "app"
+    assert next(x for x in modules("app") if x["key"] == "lighting")["automation_owner"] == "integration"
+    assert next(x for x in modules() if x["key"] == "presence")["controlled_by"] == "integration"
     assert m["automatic_migration"] is False
     assert m["items"][0]["key"] == "foundation" and m["items"][0]["status"] == "done"
 
@@ -107,7 +113,7 @@ def test_one_system_in_control_per_module() -> None:
     from smart_lighting.modules import APP, INTEGRATION
 
     features = [m for m in MODULES if m.kind == "feature"]
-    # Phase A3.1: the integration still executes every automation (occupancy too); the App controls nothing.
+    # By default the integration executes every automation (occupancy too); the App controls nothing.
     assert {m.controlled_by for m in features} == {INTEGRATION}
     assert {m.automation_owner for m in features} == {INTEGRATION}
     assert {m.config_source for m in features} == {INTEGRATION}  # one authoritative configuration

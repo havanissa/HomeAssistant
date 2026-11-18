@@ -182,13 +182,19 @@ export class SlPresence extends StoreElement {
 
   protected render(): unknown {
     const data = this.data;
-    const header = pageHeader("Presence", "Occupancy of every room, as the Smart Occupancy integration decides it.", html`<div class="page-actions">
+    const engine = store.engine ?? store.overview?.engine ?? null;
+    const appDecides = engine?.owner === "app";
+    const header = pageHeader("Presence", appDecides ? "Occupancy of every room, as the App's occupancy engine decides it."
+      : "Occupancy of every room, as the Smart Occupancy integration decides it.", html`<div class="page-actions">
+      <a class="btn" href="#/presence/engine" data-testid="presence-engine-link">${icon("swap", 20)}Engine ${chip(appDecides ? "ok" : "info", appDecides ? "App" : "Integration")}</a>
       <a class="btn" href="#/presence/diagnostics" data-testid="presence-diagnostics-link">${icon("stethoscope", 20)}Diagnostics${data ? html` ${chip(data.counts.problems ? "warning" : "ok", String(data.counts.problems))}` : nothing}</a>
       <a class="btn" href="#/presence/settings" data-testid="presence-settings-link">${icon("tune", 20)}Global timing</a></div>`);
     if (!data) return html`${header}${this.error ? apiProblem(this.error.message, this.error.code) : html`<div class="card loading" role="status"><span class="spinner"></span><span>Loading presence…</span></div>`}`;
     const rooms = data.rooms.filter((r) => matches(r, this.filter, this.query));
     return html`${header}
-      <p class="notice notice-info ownership" data-testid="presence-ownership">${icon("info", 20)}<span>The occupancy engine runs in the <strong>Smart Occupancy integration</strong> (version ${data.integration_version}), unchanged. Here you see and configure it; settings are stored in the integration.
+      <p class="notice notice-info ownership" data-testid="presence-ownership">${icon("info", 20)}<span>${appDecides
+        ? html`Room occupancy is decided by the <strong>App's occupancy engine</strong>; the Smart Occupancy integration (version ${data.integration_version}) publishes it and keeps its own engine ready to take over. Settings are stored in the integration. <a class="text-link" href="#/presence/engine">Engine migration</a>`
+        : html`The occupancy engine runs in the <strong>Smart Occupancy integration</strong> (version ${data.integration_version})${engine?.mode === "shadow" ? html`; the App's engine runs next to it in shadow mode (<a class="text-link" href="#/presence/engine">compare</a>)` : nothing}. Here you see and configure it; settings are stored in the integration.`}
         ${data.loaded ? nothing : html`<strong class="tone-warning"> The integration is not running.</strong>`}</span></p>
       <div class="toolbar presence-toolbar">
         <div class="chip-choices filter-chips" role="group" aria-label="Filter rooms">

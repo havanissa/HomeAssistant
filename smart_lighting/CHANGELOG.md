@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.4.0
+
+Phase A3.2: occupancy engine migration. Needs Smart Occupancy & Lighting
+0.7.0. With older versions the App's engine runs on its own, without
+comparison, and a handover is not possible. Nothing is migrated automatically:
+the integration still decides occupancy until an administrator performs a
+reviewed handover.
+
+- **Occupancy engine in the App:** the shared engine package (a byte-identical
+  copy of the integration's) runs event driven on Home Assistant's state
+  changes and timers. Its configuration and its inputs that are not sensors
+  (possible-occupancy lighting signals, zone holds, wall-switch activity) come
+  from the integration. Every bridge session starts from an exact copy of the
+  integration engine's state. A golden-scenario self-test runs at start-up.
+  The state is stored in `/data/occupancy` (versioned, with a backup); an
+  incompatible file is not used.
+- **Shadow mode** by default: both engines are compared per room (state,
+  occupied, reason code; vacancy deadlines), with timing differences,
+  disagreements and their events in a bounded history.
+- **Presence → Engine:**
+  - the acknowledged owner, connection, versions and fingerprints,
+    configuration sync, last accepted result, self-test;
+  - comparison statistics, per-room comparison and discrepancies;
+  - readiness checks and ownership history;
+  - **Review handover to the App…** and **Return control to integration**.
+
+  The Presence dashboard shows who decides. The floor plan's Presence overlay
+  can mark rooms where the engines differ (*Engine comparison*).
+- **Handover and fallback:** the App publishes only with the integration's
+  lease (epoch, token, sequence numbers, configuration revision), and goes back
+  to shadow mode as soon as the integration refuses it. A new App process is
+  a new instance and never resumes an old ownership.
+- The App's engine never controls a device: the Home Assistant client still
+  has no command that could. Its bridge commands are a separate allowlist.
+
 ## 0.3.0
 
 Phase A3.1: Presence configuration and live occupancy debugger. Needs Smart

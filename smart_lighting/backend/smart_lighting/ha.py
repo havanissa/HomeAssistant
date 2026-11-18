@@ -9,6 +9,11 @@ before anything is sent:
   validated room configuration commands, sent only with :meth:`config_write`.
   They change the integration's room assignments and nothing else. Phase A3.1
   adds its validated presence command (sensors and occupancy timing).
+* :data:`ENGINE_COMMANDS` (Phase A3.2) - the integration's occupancy bridge,
+  sent only with :meth:`engine_command` (claim, publish, heartbeat, release:
+  they change which engine publishes occupancy and the App's published results,
+  nothing else), and :data:`SUBSCRIPTION_COMMANDS`, opened only with
+  :meth:`subscribe` (the bridge session).
 
 There is no way to call a service, write a state, fire an event or change a
 Home Assistant registry through this client. Any other command raises
@@ -57,6 +62,8 @@ READ_ONLY_COMMANDS: frozenset[str] = frozenset(
         "smart_occupancy/presence/review",
         # The Recorder's history (bounded windows, on request only) for the presence timeline.
         "history/history_during_period",
+        # Phase A3.2: the occupancy ownership record (integration 0.7.0).
+        "smart_occupancy/engine/status",
     }
 )
 #: The only commands that change anything: the existing integration's validated, administrator-only room and
@@ -69,7 +76,19 @@ CONFIG_WRITE_COMMANDS: frozenset[str] = frozenset(
         "smart_occupancy/presence/set",
     }
 )
-ALLOWED_COMMANDS: frozenset[str] = READ_ONLY_COMMANDS | CONFIG_WRITE_COMMANDS
+#: Phase A3.2: the integration's occupancy bridge. They change which engine publishes room occupancy and the
+#: App's published occupancy results; none of them can call a service or control a device.
+ENGINE_COMMANDS: frozenset[str] = frozenset(
+    {
+        "smart_occupancy/engine/claim",
+        "smart_occupancy/engine/publish",
+        "smart_occupancy/engine/heartbeat",
+        "smart_occupancy/engine/release",
+    }
+)
+#: Subscriptions other than subscribe_events (opened only with subscribe()).
+SUBSCRIPTION_COMMANDS: frozenset[str] = frozenset({"smart_occupancy/engine/subscribe"})
+ALLOWED_COMMANDS: frozenset[str] = READ_ONLY_COMMANDS | CONFIG_WRITE_COMMANDS | ENGINE_COMMANDS | SUBSCRIPTION_COMMANDS
 #: Event types the App may subscribe to.
 ALLOWED_EVENT_TYPES: frozenset[str] = frozenset(
     {"state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated",
@@ -296,6 +315,8 @@ class HomeAssistantClient:
         """Send one read-only command and return its result."""
         if command_type in CONFIG_WRITE_COMMANDS:
             raise ReadOnlyViolation(f"{command_type!r} changes configuration; use config_write()")
+        if command_type in ENGINE_COMMANDS or command_type in SUBSCRIPTION_COMMANDS:
+            raise ReadOnlyViolation(f"{command_type!r} is an occupancy bridge command; use engine_command()")
         _, future = await self._send(command_type, params)
         return await asyncio.wait_for(future, COMMAND_TIMEOUT)
 
@@ -317,6 +338,19 @@ class HomeAssistantClient:
             raise
         record["result"] = "ok"
         return result
+
+    async def engine_command(self, command_type: str, **params: Any) -> Any:
+        """Send one of the integration's occupancy bridge commands (ENGINE_COMMANDS only)."""
+        if command_type not in ENGINE_COMMANDS:
+            raise ReadOnlyViolation(f"{command_type!r} is not an occupancy bridge command")
+        _, future = await self._send(command_type, params)
+        return await asyncio.wait_for(future, COMMAND_TIMEOUT)
+
+    async def subscribe(self, command_type: str, handler: Callable[[Any], None], **params: Any) -> int:
+        """Open an allowlisted subscription (SUBSCRIPTION_COMMANDS). It ends when the connection does."""
+        if command_type not in SUBSCRIPTION_COMMANDS:
+            raise ReadOnlyViolation(f"Subscribing with {command_type!r} is not allowed")
+        return await self._subscribe_command(command_type, params, handler)
 
     def config_writes_sent(self) -> int:
         return sum(n for cmd, n in self.commands_sent.items() if cmd in CONFIG_WRITE_COMMANDS)
@@ -361,7 +395,7 @@ class HomeAssistantClient:
         await self._subscribe_command("subscribe_events", {"event_type": event_type}, handler)
 
     async def _subscribe_command(self, command_type: str, params: dict[str, Any],
-                                 handler: Callable[[Any], None]) -> None:
+                                 handler: Callable[[Any], None]) -> int:
         msg_id, future = await self._send(command_type, params)
         self._subscriptions[msg_id] = handler
         try:
@@ -369,6 +403,7 @@ class HomeAssistantClient:
         except Exception:
             self._subscriptions.pop(msg_id, None)
             raise
+        return msg_id
 
     async def _run(self) -> None:
         attempt = 0
