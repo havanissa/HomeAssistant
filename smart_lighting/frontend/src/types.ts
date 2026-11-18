@@ -195,6 +195,7 @@ export type LiveMessage =
   | { type: "registries" }
   | { type: "floorplan"; revision: string }
   | { type: "engine"; mode: string; owner: string; bridge: string }
+  | { type: "lighting"; what: string; mode: string; owner: string; bridge: string }
   | { type: "pong" };
 
 export interface LiveState {

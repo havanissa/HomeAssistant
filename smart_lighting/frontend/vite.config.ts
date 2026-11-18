@@ -15,7 +15,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api": { target: "http://127.0.0.1:8099", ws: true },
+      // SL_DEV_BACKEND: another App backend (e.g. one running against a test Home Assistant).
+      "/api": { target: process.env.SL_DEV_BACKEND ?? "http://127.0.0.1:8099", ws: true },
     },
   },
 });

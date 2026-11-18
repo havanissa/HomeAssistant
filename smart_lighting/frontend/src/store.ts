@@ -38,6 +38,10 @@ class Store {
   /** Phase A3.2: the occupancy engine's mode and acknowledged owner (live), and a counter of its changes. */
   engine: EngineBrief | null = null;
   engineVersion = 0;
+  /** Phase A4: the lighting runtime's mode and acknowledged owner (live); models change counter (refetch). */
+  lighting: EngineBrief | null = null;
+  lightingVersion = 0;
+  lightingModelsVersion = 0;
   private listeners = new Set<Listener>();
 
   subscribe(listener: Listener): () => void {
@@ -94,6 +98,11 @@ class Store {
       case "engine":
         this.engine = { mode: message.mode, owner: message.owner, bridge: message.bridge };
         this.engineVersion += 1;
+        break;
+      case "lighting":
+        this.lighting = { mode: message.mode, owner: message.owner, bridge: message.bridge };
+        if (message.what === "models") this.lightingModelsVersion += 1;
+        else this.lightingVersion += 1;
         break;
       case "entities": {
         if (!this.overview) return;
