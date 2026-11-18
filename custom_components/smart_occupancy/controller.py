@@ -515,6 +515,16 @@ class LightingController:
         self.supervisor = Supervisor(hass, self)
         # Priority Inputs (0.6.8).
         self.priority = PriorityInputs(hass, self)
+        # Lighting ownership (Phase A4, ``lighting_bridge.py``). Nothing changes while these keep their defaults.
+        # fenced: no new command may be sent (a handover or fallback is in progress). dormant: loaded but not
+        # running because the Smart Lighting App controls lighting; it never saves its state.
+        self.fenced = False
+        self.dormant = False
+        # Called after every command with what was sent (the App's comparison of both controllers).
+        self.command_observer: Callable[[dict[str, Any]], None] | None = None
+        self._inflight = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
 
     # ------------------------------------------------------------ properties
     @property
@@ -687,8 +697,74 @@ class LightingController:
 
     async def async_flush(self) -> None:
         await self.store.async_flush()
-        if self._dirty:
+        if self._dirty and not self.dormant:
             await self._state_store.async_save(self._state_data())
+
+    # ------------------------------------------------- lighting ownership (A4)
+    def export_state(self) -> dict[str, Any]:
+        """The runtime state exactly as the state store keeps it (a handover starts the next controller from it)."""
+        return self._state_data()
+
+    async def async_drain(self, timeout: float) -> bool:
+        """Wait until no command is being sent (after fencing). Returns False when the timeout expired first."""
+        try:
+            async with asyncio.timeout(timeout):
+                await self._idle.wait()
+        except TimeoutError:
+            return False
+        return True
+
+    def recent_commands(self) -> dict[str, Any]:
+        """Contexts and expected reports of the last commands (the next owner attributes their reports as ours)."""
+        now = time.monotonic()
+        return {
+            "contexts": sorted({*self._own_contexts, *self._switch_commands}),
+            "switch_contexts": sorted(self._switch_commands),
+            "expected": {e: [round(until - now, 3), service] for e, (until, service) in self._expected.items()
+                         if until > now},
+        }
+
+    @callback
+    def note_recent_commands(self, data: Any) -> None:
+        """Remember another controller's last commands as our own (see ``recent_commands``)."""
+        if not isinstance(data, dict):
+            return
+        now = time.monotonic()
+        switch = set(data.get("switch_contexts") or ())
+        for context_id in data.get("contexts") or ():
+            if isinstance(context_id, str):
+                (self._switch_commands if context_id in switch else self._own_contexts)[context_id] = now
+        for entity_id, item in (data.get("expected") or {}).items():
+            if isinstance(entity_id, str) and isinstance(item, list) and len(item) == 2 and \
+                    isinstance(item[0], (int, float)) and 0 < item[0] <= 600 and isinstance(item[1], str):
+                self._expected[entity_id] = (now + float(item[0]), item[1])
+
+    async def async_call_service(self, domain: str, service: str, data: dict[str, Any], context: Context, *,
+                                 area_id: str | None, purpose: str) -> None:
+        """Every lighting command is sent here: refused while fenced, counted while in flight, observed."""
+        if self.fenced:
+            raise HomeAssistantError("lighting control is moving to another controller")
+        self._inflight += 1
+        self._idle.clear()
+        error: str | None = None
+        try:
+            await self.hass.services.async_call(domain, service, data, blocking=True, context=context)
+        except BaseException as err:
+            error = (str(err) or type(err).__name__) if not isinstance(err, TimeoutError) else "timeout"
+            raise
+        finally:
+            self._inflight -= 1
+            if self._inflight <= 0:
+                self._inflight = 0
+                self._idle.set()
+            if self.command_observer is not None:
+                try:
+                    self.command_observer({
+                        "at": _iso(dt_util.utcnow()), "area_id": area_id, "purpose": purpose, "domain": domain,
+                        "service": service, "data": data, "context_id": context.id, "error": error,
+                    })
+                except Exception:  # noqa: BLE001 - observation never affects a command
+                    _LOGGER.debug("command_observer_failed", exc_info=True)
 
     async def async_remove(self) -> None:
         await self.store.async_remove()
@@ -702,10 +778,20 @@ class LightingController:
         self._managed = None
         self._conflicts = None
         self._adaptive_conflicts = None
+        if self._stopped or self.dormant:
+            return  # (a dormant controller only answers questions about its configuration)
         self._resubscribe()
         self.daylight.async_config_changed()
         self.switch_inputs.async_registry_changed()
         self._notify()
+
+    @callback
+    def async_config_mirrored(self) -> None:
+        """A dormant controller's configuration was replaced by the Smart Lighting App's (A4): drop caches."""
+        self._index = None
+        self._managed = None
+        self._conflicts = None
+        self._adaptive_conflicts = None
 
     def _invalidate_managed(self) -> None:
         self._managed = None
@@ -830,6 +916,8 @@ class LightingController:
 
         main, auto, manual = (options(mood_cfg.main_mood_entity), options(mood_cfg.auto_mood_entity),
                               options(mood_cfg.manual_mood_entity))
+        if mood_cfg.builtin is not None and not main:
+            main = list(mood_cfg.builtin)  # the built-in selector (Phase A4), also before its entity exists
         names: dict[str, str] = {}
         for name in (*main, *auto, *manual, *self.lighting.global_profiles, *self.lighting.parents):
             # Neither Auto nor Manual is a mood; "*" holds the entries for every mood.
@@ -1816,6 +1904,8 @@ class LightingController:
     @callback
     def async_presence_changed(self) -> None:
         """Presence settings changed live (signals enabled or excluded, timing); occupancy was re-evaluated."""
+        if self._stopped or self.dormant:
+            return  # (the Smart Lighting App's controller gets the change over the lighting bridge)
         self._sync_preliminary_signals()
         self.zones.async_config_changed()  # zones use the room's signals and timing
         self._notify()
@@ -2886,7 +2976,8 @@ class LightingController:
             data = {**payload, "entity_id": entity_ids}
             try:
                 async with asyncio.timeout(COMMAND_TIMEOUT_SECONDS):
-                    await self.hass.services.async_call(target_domain, service, data, blocking=True, context=context)
+                    await self.async_call_service(target_domain, service, data, context, area_id=area_id,
+                                                  purpose=purpose)
             except TimeoutError:
                 errors.update({e: "no response within timeout" for e in entity_ids})
             except (HomeAssistantError, ValueError) as err:
@@ -3309,7 +3400,8 @@ class LightingController:
     @callback
     def _mark_dirty(self) -> None:
         self._dirty = True
-        self._state_store.async_delay_save(self._state_data, LIGHTING_STATE_SAVE_DELAY_SECONDS)
+        if not self.dormant:
+            self._state_store.async_delay_save(self._state_data, LIGHTING_STATE_SAVE_DELAY_SECONDS)
 
     def _state_data(self) -> dict[str, Any]:
         self._dirty = False
@@ -3380,10 +3472,10 @@ class LightingController:
         Observing mode nor paused by Manual mood: it is a person's request.
         """
         assert_switch_control_permitted(self.switch_active(area_id, switch_id), area_id, switch_id)
-        return await self._send_for_person(area_id, service, data_by_entity, context)
+        return await self._send_for_person(area_id, service, data_by_entity, context, purpose="switch")
 
     async def _send_for_person(self, area_id: str, service: str, data_by_entity: dict[str, dict[str, Any]],
-                               context: Context) -> dict[str, str]:
+                               context: Context, *, purpose: str = "switch") -> dict[str, str]:
         """Send a person's explicit light command (wall switch, profile test). Returns {entity: error}.
 
         The caller registers the manual override itself; the lights' own reports of it are not new overrides.
@@ -3409,8 +3501,8 @@ class LightingController:
                 call = payload if target_domain == "light" else {}
                 try:
                     async with asyncio.timeout(COMMAND_TIMEOUT_SECONDS):
-                        await self.hass.services.async_call(
-                            target_domain, service, {**call, "entity_id": ids}, blocking=True, context=context)
+                        await self.async_call_service(target_domain, service, {**call, "entity_id": ids}, context,
+                                                      area_id=area_id, purpose=purpose)
                 except TimeoutError:
                     errors.update({e: "no response within timeout" for e in ids})
                 except (HomeAssistantError, ValueError) as err:
@@ -3455,7 +3547,7 @@ class LightingController:
                 by_service.setdefault(item.service or "", {})[item.entity_id] = item.data
             errors: dict[str, str] = {}
             for service, data in by_service.items():
-                errors |= await self._send_for_person(area_id, service, data, context)
+                errors |= await self._send_for_person(area_id, service, data, context, purpose="test")
             ok = [i for i in changes if i.entity_id not in errors]
             minutes = self.lighting.override_minutes(area_id)
             rt = self.runtime_for(area_id)

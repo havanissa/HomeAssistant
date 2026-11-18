@@ -193,7 +193,7 @@ def ws_profile_copy(hass: HomeAssistant, connection: websocket_api.ActiveConnect
 def copied_entries(ctrl: LightingController, area_id: str | None, src: Profile, mood: str, dst: Profile,
                    ) -> tuple[dict[str, Any], dict[str, Any]]:
     """What a copy writes: per light type the source's values (global and room together), plus single lights."""
-    from .websocket import _target_keys, _targets_for
+    from .lighting_websocket import _target_keys, _targets_for
 
     lighting = ctrl.lighting
     index = ctrl.index

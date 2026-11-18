@@ -48,6 +48,7 @@ from .const import (
     Severity,
 )
 from .controller import LightingController
+from .lighting_bridge import LightingBridge, LightingView
 from .models import IntegrationConfig
 from .occupancy import (
     AVAILABLE,
@@ -278,6 +279,9 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         self.occupancy = OccupancyManager(hass, self.config)
         self.occupancy.on_transition = self._log_transition
         self.lighting = LightingController(hass, self)
+        # Phase A4: who controls lighting (this controller or the Smart Lighting App's), and what entities show.
+        self.lighting_bridge = LightingBridge(hass, self)
+        self.lighting_view = LightingView(self)
         # Occupancy forecast (0.5.0): observation only, it never controls anything.
         self.forecast = ForecastManager(hass, self)
         # Curtains: windows, presets, confirmed manual control (0.6.1) and per-window Automatic (0.6.2).
@@ -429,6 +433,7 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         if not self.hass.config_entries.async_update_entry(self.config_entry, options=options):
             self._live_pending -= 1  # nothing changed: no listener call to absorb
         self.lighting.async_presence_changed()
+        self.lighting_bridge.options_changed(options)
         self.async_schedule_refresh()
         _LOGGER.info("presence_settings_applied rooms=%d (no reload)", len(config.enabled_rooms))
         return True

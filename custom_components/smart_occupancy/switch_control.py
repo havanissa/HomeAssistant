@@ -610,7 +610,11 @@ class SwitchControl:
         ctrl = self.ctrl
         auto = mapping.action == ButtonAction.MOOD_AUTO
         if mapping.scope == "global":
-            helper = ctrl.config.mood.manual_mood_entity
+            # The Manual Mood helper of the three-helper scheme; with a single mood selector (Phase A4: no
+            # Auto/Manual helpers), that selector itself.
+            helper = ctrl.config.mood.manual_mood_entity or ctrl.config.mood.main_mood_entity
+            if auto and not ctrl.config.mood.manual_mood_entity:
+                return _Result("Automatic mood selection needs the Manual Mood helper", False)
             state = self.hass.states.get(helper) if helper else None
             if state is None:
                 return _Result("The mood selector (Manual Mood) is not available", False)
@@ -703,7 +707,7 @@ class SwitchControl:
     async def _call(self, domain: str, service: str, data: dict[str, Any], context: Context) -> None:
         try:
             async with asyncio.timeout(COMMAND_TIMEOUT_SECONDS):
-                await self.hass.services.async_call(domain, service, data, blocking=True, context=context)
+                await self.ctrl.async_call_service(domain, service, data, context, area_id=None, purpose="switch")
         except TimeoutError as err:
             raise HomeAssistantError("no response within timeout") from err
         _LOGGER.debug("switch_command service=%s.%s data=%s", domain, service, json.dumps(data))

@@ -41,6 +41,11 @@ DEFAULT_MISMATCH_GRACE_SECONDS: Final = 30
 PILOT_AREA_NAME: Final = "Kamar Norður"
 
 MOOD_ENTITY_DOMAINS: Final = ["input_select", "select"]
+# Phase A4: the built-in mood selector (a select entity of this integration whose options are moods defined in the
+# Smart Lighting App), for installations without mood helpers.
+BUILTIN_MOOD_ENTITY: Final = "select.smart_lighting_mood"
+BUILTIN_MOODS_MAX: Final = 50
+MOOD_NAME_MAX: Final = 64
 
 
 class OperatingMode(StrEnum):
