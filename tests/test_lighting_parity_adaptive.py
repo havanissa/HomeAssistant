@@ -28,4 +28,4 @@ async def test_global_adjustment(hass: HomeAssistant, home, devices, freezer, ha
         hass.states.async_set(BRIGHT, str(brightness), {"unit_of_measurement": "%"})
         hass.states.async_set(CT, str(kelvin), {"unit_of_measurement": "K"})
         await lp.advance(hass, freezer, 70, rec, step=2)
-    finish(rec)
+    await finish(rec)

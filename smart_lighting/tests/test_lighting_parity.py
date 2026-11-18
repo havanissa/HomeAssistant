@@ -114,6 +114,7 @@ class Replay:
         self.unexpected: list[dict[str, Any]] = []
         self.inst: LightingInstance | None = None
         self.mqtt: list[tuple[str, Any]] = []
+        self.models: list[dict[str, Any]] = []
         self.occ = FakeOccupancy(self.start)
 
     # ------------------------------------------------------------- commands
@@ -227,7 +228,30 @@ class Replay:
                 else:
                     self.apply(event)
                 await self.settle()
+            for j in deferred:
+                if j not in self.consumed and j not in self.preset:
+                    self.apply(self.events[j])
+            await self.settle()
+            await self.answer_models()
             await inst.async_stop(flush=False)
+
+    async def answer_models(self) -> None:
+        """The App's own handlers answer the same editor commands the integration answered at the end."""
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        from smart_lighting.lighting_api import LightingApi, LightingApiError  # noqa: PLC0415
+
+        api = LightingApi(None, SimpleNamespace(mode="owner", instance=self.inst, controller=self.inst.controller,
+                                                _switching=False))
+        self.models = []
+        for item in self.data["expected"].get("models", []):
+            request = item["request"]
+            try:
+                result = await api.call(dict(request), user_id="u", is_admin=True)
+                reply = {"success": True, "result": result}
+            except LightingApiError as err:
+                reply = {"success": False, "error": {"code": err.code}}
+            self.models.append({"request": request, "reply": json.loads(json.dumps(reply, default=str))})
 
 
 def _clean(value: Any) -> Any:
@@ -236,6 +260,38 @@ def _clean(value: Any) -> Any:
     if isinstance(value, list):
         return [_clean(v) for v in value]
     return value
+
+
+# The editor model's parts that only the integration has (its own pages in the App show them): presence and
+# forecasts, the room's occupancy health, and the problem list of the integration's full validation.
+INTEGRATION_ONLY = ("presence", "forecast", "health", "problems")
+UNORDERED = ("covered_by_group", "members", "opaque_groups")
+
+
+def model_view(reply: dict[str, Any]) -> Any:
+    if not reply.get("success"):
+        return {"success": False, "code": (reply.get("error") or {}).get("code")}
+
+    def strip(value: Any) -> Any:
+        if isinstance(value, dict):
+            out = {k: strip(v) for k, v in value.items() if k not in INTEGRATION_ONLY}
+            if {"sensors", "state", "reason", "occupied"} <= set(out) and out.get("occupied") is False:
+                # A vacant zone's text says which evaluation came last; a room timer (integration) and a zone timer
+                # (App) due in the same step run in two processes. Its state is compared.
+                out.pop("reason")
+            for key in UNORDERED:
+                if isinstance(out.get(key), list):  # built from sets: their order is the process's hash order
+                    out[key] = sorted(out[key], key=lambda v: json.dumps(v, sort_keys=True))
+            if isinstance(out.get("entries"), list) and all(isinstance(e, dict) and "kind" in e for e in out["entries"]):
+                # A decision log: decisions of the same instant may be in either order (two processes' timers).
+                out["entries"] = sorted(out["entries"], key=lambda e: (e.get("at") or "", json.dumps(e, sort_keys=True)))
+                out.pop("latest", None)
+            return out
+        if isinstance(value, list):
+            return [strip(v) for v in value]
+        return value
+
+    return _clean(strip(reply.get("result")))
 
 
 def by_instant(items: list[dict[str, Any]], key: str) -> list[list[str]]:
@@ -260,6 +316,10 @@ async def test_replay_matches_the_integration(path: Path) -> None:
         "the App's commands differ from the integration's"
     assert by_instant(replay.decisions, "t") == by_instant(data["expected"]["decisions"], "t"), \
         "the decisions differ"
+    expected_models = data["expected"].get("models", [])
+    assert len(replay.models) == len(expected_models) >= 1
+    for theirs, ours in zip(expected_models, replay.models, strict=True):
+        assert model_view(ours["reply"]) == model_view(theirs["reply"]), f"{theirs['request']}: the answers differ"
 
 
 def test_there_are_scenarios() -> None:

@@ -368,11 +368,11 @@ class LightingInstance:
         await ctrl.async_load()
         ctrl.async_start()
         self.started = True
-        if hass.state is not CoreState.running:
-            return
-        hass.bus.async_fire_internal(Event(EVENT_HOMEASSISTANT_STARTED))
-        self.coordinator.settled = True
-        self.coordinator.async_schedule_refresh()
+        if hass.state is CoreState.running:
+            # Home Assistant already runs: like the integration's controller after a reload, nothing waits for
+            # (and nothing gets) a start-up event. While it is starting, ha_started() delivers the real one.
+            self.coordinator.settled = True
+            self.coordinator.async_schedule_refresh()
 
     def ha_started(self) -> None:
         if self.hass.state is not CoreState.running:

@@ -19,6 +19,7 @@ event sequences.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import random
 from typing import Any
 
@@ -46,8 +47,12 @@ def devices(hass: HomeAssistant) -> lp.Devices:
 
 
 async def ws_admin(hass, hass_ws_client, hass_admin_user):
-    return await hass_ws_client(hass, access_token=hass.auth.async_create_access_token(
-        await hass.auth.async_create_refresh_token(hass_admin_user, "https://example.com/")))
+    async def connect():
+        return await hass_ws_client(hass, access_token=hass.auth.async_create_access_token(
+            await hass.auth.async_create_refresh_token(hass_admin_user, "https://example.com/")))
+
+    hass.data["parity_ws"] = connect  # the capture at the end opens a new one (long time jumps end connections)
+    return await connect()
 
 
 def configure(ctrl, area: str, **changes: Any) -> None:
@@ -67,13 +72,20 @@ async def begin(hass, freezer, entry, ws, devices, name: str, description: str) 
     return rec
 
 
-def finish(rec: lp.Recorder) -> dict[str, Any]:
+async def finish(rec: lp.Recorder) -> dict[str, Any]:
+    rec.ws = await rec.hass.data["parity_ws"]()
+    await rec.async_capture_models()
     data = rec.finish()
     path = lp.path_of(data["name"])
     if RECORD or not path.exists():
         lp.write(data)
         return data
     stored = lp.read(data["name"])
+    if lp.comparable(data) != lp.comparable(stored) and os.environ.get("LIGHTING_DIFF_DIR"):
+        import gzip, json  # noqa: E401, PLC0415
+
+        (Path(os.environ["LIGHTING_DIFF_DIR"]) / f"{data['name']}.json.gz").write_bytes(
+            gzip.compress(json.dumps(data).encode()))
     assert lp.comparable(data) == lp.comparable(stored), (
         f"{data['name']}: the integration no longer does what the fixture records; if intended, re-record with "
         "LIGHTING_RECORD=1 and review the difference")
@@ -105,7 +117,7 @@ async def test_occupancy_moods_and_vacancy(hass: HomeAssistant, lit, devices, fr
     hass.states.async_set(lit.pir, "off")
     hass.states.async_set(lit.radar, "off")
     await lp.advance(hass, freezer, 150, rec, step=2)
-    finish(rec)
+    await finish(rec)
 
 
 async def test_manual_override_and_expiry(hass: HomeAssistant, lit, devices, freezer, hass_ws_client,
@@ -130,7 +142,7 @@ async def test_manual_override_and_expiry(hass: HomeAssistant, lit, devices, fre
     await lp.advance(hass, freezer, 5, rec)
     hass.states.async_set(lit.desk, "on", {"brightness": 200}, context=Context())  # unattributed change
     await lp.advance(hass, freezer, 3, rec)
-    finish(rec)
+    await finish(rec)
 
 
 async def test_offline_failing_and_reconnect(hass: HomeAssistant, lit, devices, freezer, hass_ws_client,
@@ -153,7 +165,7 @@ async def test_offline_failing_and_reconnect(hass: HomeAssistant, lit, devices, 
     devices.fail.clear()
     set_moods(hass, "Hygge", "Auto", "Hygge")
     await lp.advance(hass, freezer, 8, rec)
-    finish(rec)
+    await finish(rec)
 
 
 async def test_zones_and_relay(hass: HomeAssistant, home, devices, freezer, hass_ws_client, hass_admin_user) -> None:
@@ -181,7 +193,7 @@ async def test_zones_and_relay(hass: HomeAssistant, home, devices, freezer, hass
     await lp.advance(hass, freezer, 15, rec)
     hass.states.async_set(home.k_pir, "off")
     await lp.advance(hass, freezer, 120, rec, step=2)
-    finish(rec)
+    await finish(rec)
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3, 4, 5])
@@ -222,4 +234,4 @@ async def test_randomized(hass: HomeAssistant, lit, devices, freezer, hass_ws_cl
             hass.states.async_set(rnd.choice(lights), "unavailable", {})
         await lp.advance(hass, freezer, rnd.choice([1, 2, 3, 5, 8, 13, 30, 60]), rec)
     await lp.advance(hass, freezer, 200, rec, step=2)
-    finish(rec)
+    await finish(rec)

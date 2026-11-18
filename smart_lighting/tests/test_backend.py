@@ -158,7 +158,8 @@ def test_client_has_no_device_api() -> None:
         "smart_occupancy/rooms/restore/review", "smart_occupancy/presence/get", "smart_occupancy/presence/review",
         "history/history_during_period", "smart_occupancy/engine/status",
         # Phase A4 (lighting runtime reads):
-        "config/label_registry/list", "automation/config", "script/config", "device_automation/trigger/list",
+        "config/label_registry/list", "config/entity_registry/get_entries", "automation/config", "script/config",
+        "device_automation/trigger/list",
         "validate_config", "unsubscribe_events", "smart_occupancy/lighting/bridge/status",
     }
     # Phase A3.2: the occupancy bridge (ownership and the App's published occupancy results; no device control).

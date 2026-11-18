@@ -75,7 +75,7 @@ async def test_switch_event_entity(hass: HomeAssistant, lit, devices, freezer, h
         await lp.advance(hass, freezer, 3, rec)
     set_moods(hass, "Nátt", "Auto", "Nátt")
     await lp.advance(hass, freezer, 5, rec)
-    finish(rec)
+    await finish(rec)
 
 
 async def test_switch_zigbee2mqtt(hass: HomeAssistant, mqtt, lit, devices, freezer, hass_ws_client,
@@ -98,7 +98,7 @@ async def test_switch_zigbee2mqtt(hass: HomeAssistant, mqtt, lit, devices, freez
     for action in ("on_left", "on_right", "on_right", "off_left"):
         async_fire_mqtt_message(hass, TOPIC, f'{{"action": "{action}", "battery": 100}}')
         await lp.advance(hass, freezer, 3, rec)
-    finish(rec)
+    await finish(rec)
 
 
 async def test_possible_occupancy(hass: HomeAssistant, lit, devices, freezer, hass_ws_client, hass_admin_user) -> None:
@@ -116,7 +116,7 @@ async def test_possible_occupancy(hass: HomeAssistant, lit, devices, freezer, ha
     await lp.advance(hass, freezer, 3, rec)
     hass.states.async_set(lit.radar, "on")
     await lp.advance(hass, freezer, 25, rec)
-    finish(rec)
+    await finish(rec)
 
 
 async def test_daylight_became_dark(hass: HomeAssistant, lit, devices, freezer, hass_ws_client,
@@ -133,7 +133,7 @@ async def test_daylight_became_dark(hass: HomeAssistant, lit, devices, freezer, 
         set_lux(hass, lux)
         await lp.advance(hass, freezer, 15, rec)
     await lp.advance(hass, freezer, 30, rec)
-    finish(rec)
+    await finish(rec)
 
 
 async def test_vacant_profile(hass: HomeAssistant, lit, devices, freezer, hass_ws_client, hass_admin_user) -> None:
@@ -158,7 +158,7 @@ async def test_vacant_profile(hass: HomeAssistant, lit, devices, freezer, hass_w
     hass.states.async_set(lit.pir, "on")
     hass.states.async_set(lit.radar, "on")
     await lp.advance(hass, freezer, 15, rec)
-    finish(rec)
+    await finish(rec)
 
 
 async def test_manual_mood_pauses(hass: HomeAssistant, lit, devices, freezer, hass_ws_client,
@@ -179,7 +179,7 @@ async def test_manual_mood_pauses(hass: HomeAssistant, lit, devices, freezer, ha
     await lp.advance(hass, freezer, 15, rec)
     set_moods(hass, "Dagur", "Hygge", "Hygge", main_opts=opts, manual_opts=opts)
     await lp.advance(hass, freezer, 8, rec)
-    finish(rec)
+    await finish(rec)
 
 
 async def test_automation_conflict(hass: HomeAssistant, lit, devices, freezer, hass_ws_client,
@@ -207,4 +207,4 @@ async def test_automation_conflict(hass: HomeAssistant, lit, devices, freezer, h
     await lp.advance(hass, freezer, 15, rec)
     set_moods(hass, "Hygge", "Auto", "Hygge")
     await lp.advance(hass, freezer, 6, rec)
-    finish(rec)
+    await finish(rec)

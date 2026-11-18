@@ -101,6 +101,7 @@ class Recorder:
     _calls: int = 0
     _reports: dict[str, str] = field(default_factory=dict)  # context of a state set during it -> that command
     _patch: Any = None
+    models: list[dict[str, Any]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     commands: list[dict[str, Any]] = field(default_factory=list)
     decisions: list[dict[str, Any]] = field(default_factory=list)
@@ -157,7 +158,8 @@ class Recorder:
             "ha_config": await self._ws("get_config"),
             "states": [s.as_dict() for s in hass.states.async_all()],
             # What the config component's list commands send (the same serializations).
-            "entity_registry": [json.loads(e.partial_json_repr) for e in er.async_get(hass).entities.values()
+            # The list plus the extended entries (config/entity_registry/get_entries), as the App reads them.
+            "entity_registry": [_json(e.extended_dict) for e in er.async_get(hass).entities.values()
                                 if e.partial_json_repr is not None],
             "device_registry": [json.loads(d.json_repr) for d in dr.async_get(hass).devices
                                 if d.json_repr is not None],
@@ -263,6 +265,23 @@ class Recorder:
         """A note in the timeline (shown when a replay differs)."""
         self.events.append({"t": _iso(dt_util.utcnow()), "type": "note", "text": text})
 
+    async def async_capture_models(self) -> None:
+        """The integration's answers to the read-only editor commands (the App's handlers must give the same)."""
+        rooms = sorted(self.entry.runtime_data.config.enabled_rooms)
+        requests: list[dict[str, Any]] = [{"type": "smart_occupancy/lighting/editor"}]
+        for area_id in rooms:
+            requests += [{"type": "smart_occupancy/lighting/editor", "area_id": area_id},
+                         {"type": "smart_occupancy/lighting/editor", "area_id": area_id, "profile": "vacant"},
+                         {"type": "smart_occupancy/lighting/room/activation", "area_id": area_id},
+                         {"type": "smart_occupancy/lighting/supervisor/room", "area_id": area_id},
+                         {"type": "smart_occupancy/lighting/preview", "area_id": area_id}]
+        self.models = []
+        for request in requests:
+            self._msg_id += 1
+            await self.ws.send_json({"id": self._msg_id, **request})
+            reply = await self.ws.receive_json()
+            self.models.append({"request": request, "reply": _json(reply)})
+
     def finish(self) -> dict[str, Any]:
         if self._patch is not None:
             self._patch.stop()
@@ -275,7 +294,7 @@ class Recorder:
         ctrl.decisions.observer = None
         return {"schema": 1, "name": self.name, "description": self.description, "start": self.start,
                 "events": self.events, "end": _iso(dt_util.utcnow()), "expected": {
-                    "commands": self.commands, "decisions": self.decisions}}
+                    "commands": self.commands, "decisions": self.decisions, "models": self.models}}
 
 
 async def advance(hass: HomeAssistant, freezer, seconds: float, rec: Recorder | None = None,
@@ -301,7 +320,8 @@ def path_of(name: str) -> Path:
 
 def write(data: dict[str, Any]) -> None:
     SCENARIO_DIR.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(data, sort_keys=True, separators=(",", ":"))
+    # (Key order kept: the bridge's JSON keeps it too, and the order of e.g. a switch's buttons matters.)
+    text = json.dumps(data, separators=(",", ":"))
     path_of(data["name"]).write_bytes(gzip.compress(text.encode(), mtime=0))
 
 
@@ -313,9 +333,16 @@ def comparable(data: dict[str, Any]) -> Any:
     """What must stay the same between two recordings of a scenario (context ids and decision ids are random)."""
     def clean(value: Any) -> Any:
         if isinstance(value, dict):
-            return {k: clean(v) for k, v in value.items() if k not in ("context_id", "id", "context", "first_at",
-                                                                        "call")}
+            # (lights_off_since can come from a state some fixtures set before the clock was frozen: wall-clock.)
+            out = {k: clean(v) for k, v in value.items() if k not in ("context_id", "id", "context", "first_at",
+                                                                       "call", "lights_off_since")}
+            for key in ("covered_by_group", "members", "opaque_groups"):  # built from sets (hash order)
+                if isinstance(out.get(key), list):
+                    out[key] = sorted(out[key], key=lambda v: json.dumps(v, sort_keys=True))
+            return out
         if isinstance(value, list):
             return [clean(v) for v in value]
         return value
-    return clean(data["expected"])
+    # The editor models carry fixture details (registry ids, times of states set before the clock was frozen); the
+    # App's replay compares them exactly with the same recording. Between two recordings: the behaviour.
+    return clean({k: v for k, v in data["expected"].items() if k != "models"})

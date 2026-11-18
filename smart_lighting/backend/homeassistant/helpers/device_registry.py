@@ -37,6 +37,11 @@ class DeviceEntry:
     via_device_id: str | None = None
     sw_version: str | None = None
     hw_version: str | None = None
+    serial_number: str | None = None
+    configuration_url: str | None = None
+    suggested_area: str | None = None
+    created_at: str | None = None
+    modified_at: str | None = None
 
     @property
     def disabled(self) -> bool:
@@ -52,7 +57,9 @@ class DeviceEntry:
             primary_config_entry=data.get("primary_config_entry"), disabled_by=data.get("disabled_by"),
             entry_type=data.get("entry_type"), labels=frozenset(data.get("labels") or ()),
             via_device_id=data.get("via_device_id"), sw_version=data.get("sw_version"),
-            hw_version=data.get("hw_version"),
+            hw_version=data.get("hw_version"), serial_number=data.get("serial_number"),
+            configuration_url=data.get("configuration_url"), created_at=data.get("created_at"),
+            modified_at=data.get("modified_at"),
         )
 
 

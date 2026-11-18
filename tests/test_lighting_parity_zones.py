@@ -49,7 +49,7 @@ async def test_shared_space(hass: HomeAssistant, home, devices, freezer, hass_ws
     await lp.advance(hass, freezer, 120, rec, step=2)
     hass.states.async_set(home.s_pir, "off")
     await lp.advance(hass, freezer, 120, rec, step=2)
-    finish(rec)
+    await finish(rec)
 
 
 async def test_supervisor_corrections(hass: HomeAssistant, home, devices, freezer, hass_ws_client,
@@ -69,4 +69,4 @@ async def test_supervisor_corrections(hass: HomeAssistant, home, devices, freeze
     await lp.advance(hass, freezer, 40, rec)
     devices.report(home.down, True, 10, context=Context(parent_id=Context().id))
     await lp.advance(hass, freezer, 80, rec, step=2)
-    finish(rec)
+    await finish(rec)

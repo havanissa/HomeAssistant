@@ -74,6 +74,7 @@ READ_ONLY_COMMANDS: frozenset[str] = frozenset(
         # Phase A4: what the lighting runtime reads (labels, automation and script configurations for conflict
         # detection, MQTT device triggers of wall switches, trigger validation) and the lighting ownership record.
         "config/label_registry/list",
+        "config/entity_registry/get_entries",
         "automation/config",
         "script/config",
         "device_automation/trigger/list",
@@ -587,6 +588,8 @@ class HomeAssistantClient:
         areas = await self._read_registry("config/area_registry/list")
         devices = await self._read_registry("config/device_registry/list")
         registry = await self._read_registry("config/entity_registry/list")
+        if registry:
+            registry = await self._extended_entries(registry)
         floors = await self._read_registry("config/floor_registry/list")
         labels = await self._read_registry("config/label_registry/list")
         self.labels = labels or []
@@ -613,6 +616,20 @@ class HomeAssistantClient:
         if report != self.integration:
             self.integration = report
             self._notify("integration", report)
+
+    async def _extended_entries(self, registry: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Phase A4: device classes, capabilities and icons of every entry (the lighting runtime reads them)."""
+        ids = [e["entity_id"] for e in registry if isinstance(e.get("entity_id"), str)]
+        extended: dict[str, Any] = {}
+        for start in range(0, len(ids), 500):
+            try:
+                found = await self.command("config/entity_registry/get_entries", entity_ids=ids[start:start + 500])
+            except HomeAssistantError as err:
+                _LOGGER.debug("Extended registry entries not readable: %s", err)
+                return registry
+            if isinstance(found, dict):
+                extended.update({k: v for k, v in found.items() if isinstance(v, dict)})
+        return [{**e, **extended.get(e.get("entity_id"), {})} for e in registry]
 
     async def _detection_loop(self) -> None:
         while True:

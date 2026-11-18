@@ -48,8 +48,15 @@ def command_key(record: dict[str, Any]) -> str:
     return json.dumps([record.get("domain"), record.get("service"), entities, data], sort_keys=True, default=str)
 
 
+# A sent command is "dispatched" until its device reports and "executed" after; when the report is seen differs
+# between the integration (often inside the command) and the App (over the websocket). The decision log groups them
+# the same way (decisions._GROUPS).
+_STATUS_GROUPS = {"executed": "sent", "dispatched": "sent"}
+
+
 def decision_key(subject: str, decision: dict[str, Any]) -> str:
-    return json.dumps([subject, decision.get("kind"), decision.get("trigger"), decision.get("status"),
+    status = decision.get("status")
+    return json.dumps([subject, decision.get("kind"), decision.get("trigger"), _STATUS_GROUPS.get(status, status),
                        decision.get("target")], default=str)
 
 

@@ -30,11 +30,24 @@ class RegistryEntry:
     has_entity_name: bool = False
     translation_key: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    aliases: frozenset[str] = field(default_factory=frozenset)
+    categories: dict[str, str] = field(default_factory=dict)
+    config_subentry_id: str | None = None
+    created_at: str | None = None
+    modified_at: str | None = None
+    previous_unique_id: str | None = None
+    suggested_object_id: str | None = None
     # Not part of Home Assistant's registry list: the runtime falls back to the state's attributes.
     device_class: str | None = None
     original_device_class: str | None = None
+    original_icon: str | None = None
     capabilities: dict[str, Any] | None = None
     supported_features: int = 0
+    unit_of_measurement: str | None = None
+
+    @property
+    def hidden(self) -> bool:
+        return self.hidden_by is not None
 
     @property
     def domain(self) -> str:
@@ -55,6 +68,14 @@ class RegistryEntry:
             original_name=data.get("original_name"), icon=data.get("icon"),
             has_entity_name=bool(data.get("has_entity_name")), translation_key=data.get("translation_key"),
             options=data.get("options") if isinstance(data.get("options"), dict) else {},
+            categories=data.get("categories") if isinstance(data.get("categories"), dict) else {},
+            config_subentry_id=data.get("config_subentry_id"), created_at=data.get("created_at"),
+            modified_at=data.get("modified_at"),
+            # From the extended entries (config/entity_registry/get_entries), when read.
+            device_class=data.get("device_class"), original_device_class=data.get("original_device_class"),
+            original_icon=data.get("original_icon"),
+            capabilities=data.get("capabilities") if isinstance(data.get("capabilities"), dict) else None,
+            aliases=frozenset(a for a in data.get("aliases") or () if isinstance(a, str)),
         )
 
 

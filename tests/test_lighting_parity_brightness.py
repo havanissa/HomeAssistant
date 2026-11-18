@@ -44,7 +44,7 @@ async def test_ambient_levels_and_matrix(hass: HomeAssistant, home, devices, fre
         await wait(hass, freezer, 90, rec, sim)
     hass.states.async_set(home.desk, "off")
     await wait(hass, freezer, 40, rec, sim)
-    finish(rec)
+    await finish(rec)
 
 
 async def test_priority_input(hass: HomeAssistant, home, devices, freezer, hass_ws_client, hass_admin_user) -> None:
@@ -69,4 +69,4 @@ async def test_priority_input(hass: HomeAssistant, home, devices, freezer, hass_
     await wait(hass, freezer, 4, rec, sim)
     door(hass, "off")
     await wait(hass, freezer, 6, rec, sim)
-    finish(rec)
+    await finish(rec)

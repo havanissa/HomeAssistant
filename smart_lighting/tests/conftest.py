@@ -369,6 +369,8 @@ class FakeHomeAssistant:
             await result(self.floors)
         elif kind == "config/label_registry/list":
             await result([])
+        elif kind == "config/entity_registry/get_entries":
+            await result({e: None for e in msg["entity_ids"]})
         elif kind == "config/auth/list":
             await result(self.users)
         elif kind == "config_entries/subscribe":
