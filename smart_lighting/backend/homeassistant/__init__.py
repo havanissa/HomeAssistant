@@ -20,7 +20,10 @@ Module                          Provided by
 ``components.mqtt``             ``mqtt/subscribe`` through Home Assistant (no broker access)
 ``components.device_automation`` ``device_automation/trigger/list``
 ``components.websocket_api``    decorators and a connection object for the App's command router
+``components.cover``            cover entity features (Phase A5)
+``components.recorder``         a placeholder that refuses: the App reads history through the API
 ``util.dt``                     time zone of Home Assistant; parsing
+``util.unit_conversion``        temperature conversion (Phase A5)
 =============================== ==============================================================
 
 This is not Home Assistant and does not try to be one: anything outside this

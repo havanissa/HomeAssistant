@@ -21,12 +21,21 @@ window's manual change and becomes a manual hold for the automatic rules.
 Our own commands are recognised by the covers being busy in an operation, plus
 a settle window for late device reports, so they are never mistaken for
 manual changes.
+
+Phase A5 (the Smart Lighting App): the manager can be *fenced* (no command
+leaves it; an operation that would start is prevented and reported) and
+*dormant* (stopped, keeping its configuration for read access while the App
+commands the covers; its store takes only the App's published copy). Optional
+observers see every command sent, every automatic decision, every configuration
+change and every state save, so the App's shadow runtime can compare itself
+with this manager and the owner can mirror its state. Without a bridge session
+none of this changes anything.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 import logging
 from typing import Any
@@ -98,6 +107,18 @@ class CurtainManager:
         self._dirty = False
         self._state_dirty = False
         self._started = False
+        # Phase A5: ownership (curtain_bridge.py). Fenced: no cover command leaves this manager. Dormant: stopped
+        # and kept for read access while the Smart Lighting App commands the covers. Locked: the configuration
+        # store takes only the App's published copy (async_set_mirrored).
+        self.fenced = False
+        self.dormant = False
+        self.locked = False
+        self.command_observer: Callable[[dict[str, Any]], None] | None = None
+        self.decision_observer: Callable[[str, dict[str, Any]], None] | None = None
+        self.config_observer: Callable[[CurtainConfig], None] | None = None
+        self.state_observer: Callable[[], None] | None = None
+        self._idle = asyncio.Event()
+        self._idle.set()
         self.auto = AutoCurtains(self, occupancy)
 
     # -------------------------------------------------------------- storage
@@ -168,7 +189,49 @@ class CurtainManager:
 
     def _save_state(self) -> None:
         self._state_dirty = True
+        if self.dormant:
+            return  # a dormant manager never saves: the store holds the App's published copy
         self._state_store.async_delay_save(self._state_data, SAVE_DELAY_SECONDS)
+        if self.state_observer is not None:
+            try:
+                self.state_observer()
+            except Exception:  # noqa: BLE001 - observation never affects curtains
+                _LOGGER.debug("curtain_state_observer_failed", exc_info=True)
+
+    def export_state(self) -> dict[str, Any]:
+        """The runtime state as the state store holds it (an exact copy for the App; not a save)."""
+        dirty = self._state_dirty
+        try:
+            return self._state_data()
+        finally:
+            self._state_dirty = dirty
+
+    async def async_import_state(self, state: Mapping[str, Any]) -> None:
+        """Replace the stored runtime state (before a load; used when control changes owner)."""
+        await self._state_store.async_save(dict(state))
+        self._state_dirty = False
+
+    async def async_drain(self, timeout: float) -> bool:
+        """Wait until no operation is running (no cover of a window is being moved). False on timeout."""
+        try:
+            async with asyncio.timeout(timeout):
+                await self._idle.wait()
+        except TimeoutError:
+            return False
+        return not self._running
+
+    @callback
+    def async_set_mirrored(self, config: CurtainConfig) -> bool:
+        """The App's published configuration (only while dormant / locked): stored, nothing evaluated."""
+        if config == self.config:
+            return False
+        self.config = config
+        self.revision += 1
+        self._dirty = True
+        self._store.async_delay_save(self._config_data, SAVE_DELAY_SECONDS)
+        self._automations = None
+        self.notify()
+        return True
 
     async def async_flush(self) -> None:
         if self._dirty:
@@ -185,6 +248,9 @@ class CurtainManager:
         """Replace the configuration (saved shortly after). Never moves a cover."""
         if config == self.config:
             return False
+        if self.locked:
+            raise CurtainConfigError("managed_by_app", "Curtains are managed by the Smart Lighting App: change them "
+                                     "there. This editor is read-only until control is returned to the integration.")
         self.config = config
         self.revision += 1
         self._dirty = True
@@ -198,6 +264,11 @@ class CurtainManager:
         if self._started:
             self._track()
         self._automations = None
+        if self.config_observer is not None:
+            try:
+                self.config_observer(config)
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("curtain_config_observer_failed", exc_info=True)
         self.auto.reconfigure()
         self.notify()
         return True
@@ -244,6 +315,7 @@ class CurtainManager:
             op = self._running.pop(window_id)
             self._interrupt(op)
             self._save_state()
+        self._idle.set()
         for cancel in self._timers.values():
             cancel()
         self._timers.clear()
@@ -399,6 +471,8 @@ class CurtainManager:
                                          "The preset changed after it was confirmed: review the targets and confirm again")
         if window_id in self._running:
             raise CurtainConfigError("busy", "A preset is still being applied to this window")
+        if self.fenced:
+            raise CurtainConfigError("busy", "Curtain control is changing owner; try again in a moment")
         self.manual.pop(window_id, None)  # the person chose this preset: a previous manual change is superseded
         op, moves, context = self.begin(window, preset, origin, user_id=user_id)
         if origin == CurtainOrigin.MANUAL_CONFIRMED:
@@ -432,6 +506,7 @@ class CurtainManager:
             for e in members(self.hass, item["entity_id"]) | {item["entity_id"]}:
                 self._busy[e] = op_id
         self._running[window_id] = op
+        self._idle.clear()
         self.last[window_id] = op
         self.history[window_id] = [op, *self.history.get(window_id, [])][:HISTORY_LENGTH]
         op["explanation"] = explain("running", items, preset.name)
@@ -443,17 +518,33 @@ class CurtainManager:
 
     async def async_run(self, op: dict[str, Any], moves: list[dict[str, Any]], context: Context) -> None:
         window_id = op["window_id"]
-        await asyncio.gather(*(self._send(item, context) for item in moves))
+        await asyncio.gather(*(self._send(item, context, op) for item in moves))
         if window_id in self._running and self._running[window_id] is op:
             self._verify(op)
         if op["status"] == "running":
             self._timers[op["op_id"]] = async_call_later(self.hass, self.config.settings.verify_timeout,
                                                          callback(lambda _now: self._timeout(op)))
 
-    async def _send(self, item: dict[str, Any], context: Context) -> None:
+    async def _send(self, item: dict[str, Any], context: Context, op: Mapping[str, Any] | None = None) -> None:
         data: dict[str, Any] = {"entity_id": item["entity_id"]}
         if item["service"] == "set_cover_position":
             data["position"] = item["target"]
+        if self.fenced:
+            # Control is changing owner: nothing leaves this manager (the next owner re-evaluates the window).
+            item["status"] = "failed"
+            item["detail"] = "Not sent: curtain control was changing owner"
+            self._release(item)
+            return
+        if self.command_observer is not None:
+            try:
+                self.command_observer({"domain": "cover", "service": item["service"], "data": dict(data),
+                                       "context_id": context.id, "entity_id": item["entity_id"],
+                                       "target": item["target"], "layer_id": item["layer_id"],
+                                       "window_id": op.get("window_id") if op else None,
+                                       "purpose": op.get("origin") if op else None,
+                                       "at": _iso(_now())})
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("curtain_command_observer_failed", exc_info=True)
         try:
             async with asyncio.timeout(SERVICE_CALL_TIMEOUT):
                 await self.hass.services.async_call("cover", item["service"], data, blocking=True, context=context)
@@ -528,6 +619,8 @@ class CurtainManager:
         op["finished"] = _iso(_now())
         op["explanation"] = explain(op["status"], op["items"], op["preset_name"])
         self._running.pop(op["window_id"], None)
+        if not self._running:
+            self._idle.set()
         for item in op["items"]:
             if self._busy.get(item["entity_id"]) == op["op_id"]:
                 self._release(item)
@@ -575,4 +668,6 @@ class CurtainManager:
             "sun": self.sun().as_dict(),
             "sun_angle_calibration": calibrate(self.samples),
             "automatic": self.auto.diagnostics(),
+            "fenced": self.fenced,
+            "dormant": self.dormant,
         }

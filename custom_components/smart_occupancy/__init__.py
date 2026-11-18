@@ -53,7 +53,9 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Serve the dashboard cards and register the websocket API (once per run)."""
+    from .curtain_bridge_api import async_register_curtain_service
     from .engine_api import async_register_engine_service
+    from .forecast_bridge_api import async_register_forecast_service
     from .lighting_bridge_api import async_register_lighting_service
     from .websocket import async_register_websocket_commands
 
@@ -62,6 +64,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async_register_engine_service(hass)
     # Phase A4: return lighting control to the integration without the App (administrators only).
     async_register_lighting_service(hass)
+    # Phase A5: return curtain control and forecast production to the integration without the App.
+    async_register_curtain_service(hass)
+    async_register_forecast_service(hass)
     await async_register_card(hass)
     return True
 
@@ -85,21 +90,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntr
     await coordinator.forecast.async_load()
     # Curtains (0.6.1): windows, presets and the last results. Loading never moves a cover.
     await coordinator.curtains.async_load()
+    # Phase A5: who produces the forecasts and who commands the covers. While the App does, the integration's
+    # manager stays dormant (it shows the App's published forecasts; it never sends a cover command).
+    await coordinator.forecast_bridge.async_load()
+    coordinator.forecast_bridge.async_prepare_manager()
+    await coordinator.curtain_bridge.async_load()
+    coordinator.curtain_bridge.async_prepare_manager()
     await coordinator.async_config_entry_first_refresh()
     coordinator.async_start()
     coordinator.occupancy.async_start()
     if not coordinator.lighting_bridge.app_owns:
         coordinator.lighting.async_start()
     coordinator.lighting_bridge.async_start()
-    coordinator.forecast.async_start()
-    coordinator.curtains.async_start()
+    if not coordinator.forecast_bridge.app_owns:
+        coordinator.forecast.async_start()
+    coordinator.forecast_bridge.async_start()
+    if not coordinator.curtain_bridge.app_owns:
+        coordinator.curtains.async_start()
+    coordinator.curtain_bridge.async_start()
     entry.async_on_unload(coordinator.async_stop)
     entry.async_on_unload(coordinator.occupancy.async_stop)
-    # (The bridge may replace the controller: stop whichever one is current.)
+    # (The bridges may replace the controller / manager: stop whichever one is current.)
     entry.async_on_unload(lambda: coordinator.lighting.async_stop())
     entry.async_on_unload(coordinator.lighting_bridge.async_stop)
-    entry.async_on_unload(coordinator.forecast.async_stop)
-    entry.async_on_unload(coordinator.curtains.async_stop)
+    entry.async_on_unload(lambda: coordinator.forecast.async_stop())
+    entry.async_on_unload(coordinator.forecast_bridge.async_stop)
+    entry.async_on_unload(lambda: coordinator.curtains.async_stop())
+    entry.async_on_unload(coordinator.curtain_bridge.async_stop)
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     entry.async_on_unload(
@@ -125,6 +142,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
         await entry.runtime_data.lighting_bridge.async_flush()
         await entry.runtime_data.forecast.async_flush()
         await entry.runtime_data.curtains.async_flush()
+        entry.runtime_data.forecast_bridge.async_stop()
+        await entry.runtime_data.forecast_bridge.async_flush()
+        entry.runtime_data.curtain_bridge.async_stop()
+        await entry.runtime_data.curtain_bridge.async_flush()
     return unloaded
 
 
@@ -132,7 +153,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
     """Delete this integration's own stored data when it is removed."""
     from homeassistant.helpers.storage import Store
 
+    from .curtain_bridge import MIRROR_STORE_KEY as CURTAINS_MIRROR_KEY, OWNERSHIP_STORE_KEY as CURTAINS_OWNERSHIP_KEY
     from .curtains.manager import CurtainManager
+    from .forecast_bridge import MIRROR_STORE_KEY as FORECAST_MIRROR_KEY, OWNERSHIP_STORE_KEY as FORECAST_OWNERSHIP_KEY
     from .const import (
         FORECAST_DAYS_STORE_KEY,
         FORECAST_DAYS_STORE_VERSION,
@@ -152,6 +175,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
     await Store(hass, FORECAST_SETTINGS_STORE_VERSION, FORECAST_SETTINGS_STORE_KEY).async_remove()
     await Store(hass, FORECAST_DAYS_STORE_VERSION, FORECAST_DAYS_STORE_KEY).async_remove()
     await CurtainManager(hass).async_remove()
+    for key in (CURTAINS_OWNERSHIP_KEY, CURTAINS_MIRROR_KEY, FORECAST_OWNERSHIP_KEY, FORECAST_MIRROR_KEY):
+        await Store(hass, 1, key).async_remove()
     _LOGGER.debug("removed_storage keys=%s,%s", LIGHTING_STORE_KEY, LIGHTING_STATE_STORE_KEY)
 
 
@@ -213,7 +238,11 @@ def _rename_listener(hass: HomeAssistant, entry: SmartOccupancyConfigEntry):
         if data["action"] != "update" or "old_entity_id" not in data:
             return
         old, new = data["old_entity_id"], data["entity_id"]
-        entry.runtime_data.curtains.rename_entity(old, new)
+        if entry.runtime_data.curtain_bridge.app_owns:
+            # The App owns the curtain configuration and follows the rename itself (kept for it while it is away).
+            entry.runtime_data.curtain_bridge.note_rename(old, new)
+        else:
+            entry.runtime_data.curtains.rename_entity(old, new)
         store = entry.runtime_data.lighting.store
         if entry.runtime_data.lighting_bridge.app_owns:
             # The Smart Lighting App owns the lighting configuration and follows the rename itself; one made

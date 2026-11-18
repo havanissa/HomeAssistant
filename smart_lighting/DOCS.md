@@ -4,9 +4,94 @@ The **Smart Lighting** App is the new home of the Smart Occupancy & Lighting
 configuration. It replaces the integration's dashboard cards and options
 screens module by module, and only after you approve each step.
 
-## Phase A4: Lighting, Moods and Switches (this version)
+## Phase A5: Curtains and Predictions (this version)
 
-This version needs Smart Occupancy & Lighting **0.8.0**. The App runs the
+This version needs Smart Occupancy & Lighting **0.9.0**. The last two
+automation subsystems move into the App the way lighting did: the App runs the
+integration's own curtain and forecast code (byte-identical copies, checked by
+both test suites and by the bridges), in **shadow mode** until you hand each one
+over on its Control page. Nothing changes until you decide.
+
+**Curtains** (Overview, Windows, Global Modes, Global Schedule, Environment,
+Diagnostics, one window workspace, Control): every window and cover with its
+position, Automatic / Observing / Off, the current and desired preset, the
+automatic condition and its explanation, the next expected action, warnings,
+unavailable covers, manual changes and holds; window creation and discovery,
+rooms, orientation, cover layers and their capabilities (a cover that cannot set a
+position gets only open / closed targets), individual and whole-window presets,
+manual-move policies, safety settings; the Global Modes assignment matrix per
+window and cover with a review of what would move; the Global Schedule timeline,
+phases, workdays and days off, sunset and daylight conditions and the next
+transition; the environment: indoor and outdoor temperatures, light, sun
+direction and elevation, exposure, weather, glare, thermal protection, sensor
+quality and fallbacks; diagnostics: the last movement, requested and reached
+positions, failed and interrupted operations, manual interventions, safety
+blocks, competing automations, the decision and operation history, export and a
+reviewed import. Until the handover every change is saved in the integration
+(its own commands are forwarded), so the Smart Curtains card and the App show the
+same configuration.
+
+**Curtains → Control**: who commands the covers (read from the integration, the
+only authority), the shadow comparison (cover commands: same service, cover and
+position within 3 s; window decisions within 10 s), readiness (2 h, 5 matched
+decisions, no command mismatch, no cover moving, the same code and
+configuration), the ownership history, backups and:
+
+- **Review handover to the App…**: the integration fences its manager, lets a
+  running movement finish (and **refuses the handover while a cover is still
+  moving**), hands its configuration and runtime state over (manual holds,
+  applied presets, move budgets, deferred changes, calibration, history) and
+  stops. The App starts from exactly that copy; nothing moves because of the
+  handover, and the start-up settle period passes before any rule may send.
+  Afterwards the App moves a cover only through the integration's fenced
+  executor, which accepts a command only from the App session that holds the
+  lease, for `set_cover_position`, `open_cover` or `close_cover` of one
+  configured cover, with the App's own context. The configuration lives in the
+  App and is mirrored to the integration; the curtain card is read-only.
+- **Return control to the integration**: the App stops at once (a running
+  movement is first allowed to finish) and hands its final configuration and
+  state back; nothing moves. If the App stops answering for about 30 s, the
+  integration takes the curtains back by itself from the mirror: an operation the
+  App left running is marked interrupted and never replayed, the covers' late
+  reports are not taken for manual changes, and the windows are evaluated again
+  only after the settle period. A restarted or updated App does **not** take
+  control back. Without the App: Developer tools → Actions →
+  `smart_occupancy.curtains_return_to_integration`.
+
+**Predictions** (House, Patterns, Accuracy, Settings, one room workspace,
+Control): the prediction status, learning progress and history coverage, the
+predicted next room, every room's probability over 5 / 15 / 30 / 60 minutes, the
+probability of entering within a horizon, likely arrival periods, confidence with
+its reasons (probability and confidence are different things and are shown as
+such; with insufficient data the pages say so instead of showing numbers),
+plain-language explanations and factors; hourly, weekly, workday / day-off and
+movement patterns, observed against learned; accuracy with Brier scores against
+the schedule and persistence baselines, calibration and daily history; settings
+(global defaults, room overrides, learning window, decay, minimum data,
+probability and confidence thresholds, context entities, workday source, room
+connections, learn now and rebuild), export and import. Forecasts are
+observation only: nothing on either side ever commands a device.
+
+**Predictions → Control**: who produces the forecasts, the comparison (both
+sides' predictions per room; agreement when status and prediction match and the
+probabilities are within 2 points), readiness (1 h, 10 agreements, same code,
+settings and learned days), history, backups and the handover: the integration
+exports everything it learned (validated and verified against the same model
+code), stops learning and shows the App's published forecasts on its unchanged
+entities (`sensor.smart_occupancy_<room>_forecast` and the others). The App reads
+history through Home Assistant's API (`history/history_during_period`), never from
+the database, and never re-fetches the days it received. Return control, the
+automatic fallback and `smart_occupancy.forecast_return_to_integration` give the
+learned data back; nothing is retrained.
+
+**Floor plan**: a drawn window can be linked to a curtain window; the plan can
+suggest the window's orientation from its wall and north, applied only after
+review; Live mode shows cover positions, modes, holds, sun protection and
+warnings. A 2D plan gives direction only, not sun exposure or obstructions.
+
+## Phase A4: Lighting, Moods and Switches
+
+Needs Smart Occupancy & Lighting **0.8.0** or later. The App runs the
 integration's own lighting code: every rule (moods and their Occupied and
 Vacant profiles, possible occupancy, vacancy, daylight, ambient light levels
 and brightness rules, zones and shared spaces, the Room Supervisor, wall
@@ -357,8 +442,11 @@ for as long as the integration acknowledges the App as the owner. Lighting,
 Moods and Switches are configured in the App; they are stored in and run by the
 integration until you hand lighting over on Lighting → Control, and in and by
 the App afterwards (the three move together: one lighting controller, one
-configuration). Curtains and Predictions stay in the integration. Exactly one
-controller commands the lights at any time.
+configuration). Curtains and Predictions (Phase A5) each have their own
+ownership: configured in the App, stored in and run by the integration until
+their handover on Curtains → Control / Predictions → Control, and in and by the
+App afterwards. Exactly one manager commands the covers at any time, and exactly
+one side produces the forecasts.
 
 ## Configuration
 
@@ -398,6 +486,28 @@ controller commands the lights at any time.
   checked by their content (PNG, JPEG, WebP only; no SVG) and are only served
   through Home Assistant's Ingress, never from a public address.
 
+## Known limitations (Phase A5)
+
+- The curtain comparison thresholds (2 h, 5 matched window decisions) and the
+  forecast ones (1 h, 10 agreements) are fixed; development setups lower them with
+  `SL_CURTAINS_MIN_SHADOW_SECONDS`, `SL_CURTAINS_MIN_DECISIONS`,
+  `SL_FORECAST_MIN_SHADOW_SECONDS`, `SL_FORECAST_MIN_MATCHES` only. Cover
+  commands are rare (a few a day), so the readiness counts matched decisions and
+  requires zero command mismatches.
+- While the App controls the curtains the integration still executes its cover
+  commands (after checking them), publishes the occupancy the rules read, and
+  keeps the mirror for a return of control. While the App produces the forecasts
+  the integration still provides the forecast entities and the Recorder's oldest
+  timestamp (there is no websocket API for it).
+- The App's forecast observations (predicted, confirmed, missed, pattern
+  changed) go to the App's own log while it produces the forecasts, not to the
+  integration's lighting decision log.
+- Rooms, their sensors and lights, light types and the mood source stay in the
+  integration's options; moving them into the App is Phase A6, together with the
+  minimal companion integration and the retirement of the legacy runtimes.
+- Not verified on a real Home Assistant OS installation (tested with the real App
+  image against a throwaway Home Assistant).
+
 ## Known limitations (Phase A4)
 
 - The lighting comparison thresholds (2 h, 10 commands) are fixed. Development
@@ -433,8 +543,6 @@ controller commands the lights at any time.
   older history comes from the Recorder (room state, reason and sensors), so
   decisions before the last restart show the state and reason only.
 - Confidence is the integration's evidence-quality score, not a probability.
-- Curtains and forecasts are configured in the integration's dashboard cards as
-  before.
 - Saving needs the integration to be running; while it is not, rooms are shown
   from its stored configuration.
 - The theme follows your device (or your choice in Settings), not the Home

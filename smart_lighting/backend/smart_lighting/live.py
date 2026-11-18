@@ -12,6 +12,7 @@ token. The backend forwards a small, read-only stream:
 * ``registries``: Home Assistant's area, device, entity or floor registry changed
 * ``floorplan``: the stored floor plan changed (any browser session), with its new revision (Phase A2.1)
 * ``engine``: the occupancy engine's mode, acknowledged owner or bridge connection changed (Phase A3.2)
+* ``lighting`` / ``curtains`` / ``predictions``: that runtime's mode, owner or bridge changed, or its models did
 
 The browser may send ``ping`` and ``{"type": "watch", "entities": [...]}``
 (entity ids only, at most 2000). Nothing it sends can change anything.
@@ -88,6 +89,10 @@ class LiveHub:
             self.core.occupancy.add_listener(self._on_engine)
         if self.core.lighting is not None:
             self.core.lighting.add_listener(self._on_lighting)
+        if self.core.curtains is not None:
+            self.core.curtains.add_listener(self._on_curtains)
+        if self.core.forecast is not None:
+            self.core.forecast.add_listener(self._on_forecast)
         self._tasks = [
             asyncio.create_task(self._flush_loop(), name="live-flush"),
             asyncio.create_task(self._heartbeat_loop(), name="live-heartbeat"),
@@ -122,6 +127,20 @@ class LiveHub:
             rt = self.core.lighting
             self._schedule(self._broadcast({"type": "lighting", "what": kind, "mode": rt.mode, "bridge": rt.bridge,
                                             "owner": self.core.lighting_owner()}))
+
+    def _on_curtains(self, kind: str) -> None:
+        """Phase A5: the curtain runtime changed (mode, owner, bridge) or its models did (refetch)."""
+        if self.clients and self.core.curtains is not None:
+            rt = self.core.curtains
+            self._schedule(self._broadcast({"type": "curtains", "what": kind, "mode": rt.mode, "bridge": rt.bridge,
+                                            "owner": self.core.curtains_owner()}))
+
+    def _on_forecast(self, kind: str) -> None:
+        """Phase A5: the forecast runtime changed (mode, owner, bridge) or its models did (refetch)."""
+        if self.clients and self.core.forecast is not None:
+            rt = self.core.forecast
+            self._schedule(self._broadcast({"type": "predictions", "what": kind, "mode": rt.mode,
+                                            "bridge": rt.bridge, "owner": self.core.forecast_owner()}))
 
     def _on_engine(self, kind: str) -> None:
         if self.clients and self.core.occupancy is not None:

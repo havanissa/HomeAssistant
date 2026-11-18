@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.0 — Curtain and forecast bridges for the Smart Lighting App (App Phase A5)
+
+The integration keeps controlling the curtains and producing the occupancy forecasts by default, also after this update. Nothing changes until an administrator performs a reviewed handover in the Smart Lighting App (0.6.0). No curtain rule and no forecast rule changed.
+
+### Added
+
+- `runtime_manifest.py` now lists the curtain package (`curtains/`), the forecast modules and the three bridge protocols (74 shared files, `RUNTIME_VERSION` 1.1.0); the App runs byte-identical copies, checked by both test suites and the bridges' fingerprint.
+- `curtain_sync.py`: the curtain bridge protocol (constants, configuration revision, the cover command allowlist: `cover.set_cover_position` with a whole-number position, `cover.open_cover`, `cover.close_cover`, one configured cover per command; state validation).
+- `curtain_bridge.py` + `curtain_bridge_api.py`: the one authority over cover commands, with its own ownership record (`.storage/smart_occupancy.curtains_ownership`) and mirror (`.storage/smart_occupancy.curtains_mirror`), independent of lighting.
+  - Handover: the manager is fenced, running movements get up to 10 s to finish and **a claim is refused while a cover is still moving** (never contradicted or replayed); configuration and runtime state (manual holds, applied presets, move budgets, deferred changes, calibration, history) are handed over; the manager stops (dormant, store locked). Nothing moves.
+  - The App's commands run only from the owner's session with the current epoch, the lease token (30 s) and an increasing sequence number, for an allowlisted cover service of a configured cover, with the App's context.
+  - Fallback (release, `return`, service `smart_occupancy.curtains_return_to_integration`, lease expiry, a new App instance, no resume within 120 s after a restart): the epoch increases first, then a new manager starts from the mirror; an operation left running is interrupted, its covers' late reports stay "ours", and the start-up settle period passes before any rule may send.
+  - Websocket commands `smart_occupancy/curtains/bridge/status|subscribe|claim|execute|heartbeat|publish|release|return`. While the App owns the curtains the curtain editors refuse with `managed_by_app` (reads, previews and simulations keep answering).
+- `forecast_sync.py`, `forecast_bridge.py` + `forecast_bridge_api.py`: who learns and publishes the forecasts (record `.storage/smart_occupancy.forecast_ownership`, mirror `.storage/smart_occupancy.forecast_mirror`). A session's `hello` carries the complete learned data (a validated export); after a handover the integration's manager is dormant and shows the App's published forecasts on the same entities; the App's learned data is adopted and is the rollback copy (nothing is retrained). Commands `smart_occupancy/forecast/bridge/status|subscribe|claim|heartbeat|publish|release|return`; service `smart_occupancy.forecast_return_to_integration`. No bridge message can reach a device.
+- `CurtainManager`: `fenced`, `dormant`, `locked`, observers for commands / decisions / configuration / state, `export_state`, `async_import_state`, `async_drain`, `async_set_mirrored`. `AutoCurtains` reports "prevented while control changes owner" instead of sending while fenced. `ForecastManager`: `dormant`, `export_learning`, `async_import_learning`, `view`, `apply_published`, `RoomForecast.from_dict`, observers and a decision sink. Without a bridge session none of this changes anything.
+- Tests: `tests/test_curtain_bridge.py`, `tests/test_forecast_bridge.py`, curtain parity recordings (`tests/test_curtains_parity.py`, recorder `tests/curtains_parity.py`) that the App replays.
+
+### Changed
+
+- `websocket.py` registers the curtain and forecast editors behind the read-only guards; `diagnostics` include both ownership records; the unload path stops whichever manager is current.
+
 ## 0.8.0 — Lighting bridge for the Smart Lighting App (App Phase A4)
 
 The integration keeps controlling the lights by default, also after this update. Nothing changes until an administrator performs a reviewed handover in the Smart Lighting App (0.5.0). No lighting rule changed.

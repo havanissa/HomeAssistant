@@ -492,7 +492,7 @@ export function addOpening(floor: Floor, wallId: string, type: OpeningType, offs
   const w = Math.min(width, length);
   if (w < 0.1) return fail("This wall is too short.");
   const next = cloneFloor(floor);
-  const opening: Opening = { id: newId("op"), type, wall_id: wallId, offset: clampOffset(offset, w, length), width: round(w), swing: type === "door" ? "left" : null };
+  const opening: Opening = { id: newId("op"), type, wall_id: wallId, offset: clampOffset(offset, w, length), width: round(w), swing: type === "door" ? "left" : null, curtain_window_id: null };
   next.openings.push(opening);
   return ok({ floor: next, openingId: opening.id });
 }
@@ -509,6 +509,9 @@ export function updateOpening(floor: Floor, openingId: string, patch: Partial<Op
   o.offset = clampOffset(o.offset, o.width, length);
   if (o.type !== "door") o.swing = null;
   else if (!o.swing) o.swing = "left";
+  // Only a window can show a curtain window (the backend drops the link on other types too).
+  if (o.type !== "window") o.curtain_window_id = null;
+  else if (o.curtain_window_id === undefined) o.curtain_window_id = null;
   return ok(next);
 }
 

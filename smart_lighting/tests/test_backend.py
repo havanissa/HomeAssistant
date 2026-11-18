@@ -14,7 +14,13 @@ from smart_lighting.const import APP_VERSION
 from smart_lighting.core import AppCore
 from smart_lighting.ha import (
     CONFIG_WRITE_COMMANDS,
+    CURTAIN_BRIDGE_COMMANDS,
+    CURTAIN_READ_COMMANDS,
+    CURTAIN_WRITE_COMMANDS,
     ENGINE_COMMANDS,
+    FORECAST_BRIDGE_COMMANDS,
+    FORECAST_READ_COMMANDS,
+    FORECAST_WRITE_COMMANDS,
     LIGHTING_BRIDGE_COMMANDS,
     LIGHTING_READ_COMMANDS,
     LIGHTING_WRITE_COMMANDS,
@@ -67,8 +73,8 @@ async def test_overview_reads_home_assistant_and_detects_integration(app_client:
     assert overview["supervisor"]["available"] is True
     assert "options" not in overview["supervisor"]["app"]  # only whitelisted fields
     assert overview["migration"]["modules_migrated"] == 0  # no automation runs in the App
-    # The Rooms, Presence, Lighting, Moods and Switches interfaces (Phase A4).
-    assert overview["migration"]["interfaces_migrated"] == 5
+    # The Rooms, Presence, Lighting, Moods, Switches, Curtains and Predictions interfaces (Phase A5).
+    assert overview["migration"]["interfaces_migrated"] == 7
     assert overview["migration"]["modules_total"] == 7
     assert overview["safety"]["service_calls_sent"] == 0
 
@@ -149,8 +155,10 @@ def test_client_has_no_device_api() -> None:
     assert not {n for n in names if re.search(r"service|turn_on|turn_off|set_state|fire|update_entry", n)}
     assert {n for n in names if "write" in n} == {"config_write", "config_writes_sent"}
     assert {n for n in names if "engine" in n or n == "subscribe"} == {"engine_command", "subscribe"}
-    # Phase A4: the only way towards a device is the integration's fenced lighting bridge.
+    # Phase A4 / A5: the only ways towards a device are the integration's fenced lighting and curtain bridges.
     assert {n for n in names if "lighting" in n} == {"lighting_command"}
+    assert {n for n in names if "curtain" in n} == {"curtains_command"}
+    assert {n for n in names if "forecast" in n} == {"forecast_command"}
     assert READ_ONLY_COMMANDS == {
         "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "config_entries/subscribe",
         "manifest/get", "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
@@ -161,6 +169,8 @@ def test_client_has_no_device_api() -> None:
         "config/label_registry/list", "config/entity_registry/get_entries", "automation/config", "script/config",
         "device_automation/trigger/list",
         "validate_config", "unsubscribe_events", "smart_occupancy/lighting/bridge/status",
+        # Phase A5: the curtain and forecast ownership records.
+        "smart_occupancy/curtains/bridge/status", "smart_occupancy/forecast/bridge/status",
     }
     # Phase A3.2: the occupancy bridge (ownership and the App's published occupancy results; no device control).
     assert ENGINE_COMMANDS == {"smart_occupancy/engine/claim", "smart_occupancy/engine/publish",
@@ -169,12 +179,27 @@ def test_client_has_no_device_api() -> None:
     assert LIGHTING_BRIDGE_COMMANDS == {f"smart_occupancy/lighting/bridge/{c}" for c in (
         "claim", "execute", "heartbeat", "publish", "inputs", "options", "release", "return")}
     assert SUBSCRIPTION_COMMANDS == {"smart_occupancy/engine/subscribe", "smart_occupancy/lighting/bridge/subscribe",
-                                     "smart_occupancy/lighting/subscribe", "subscribe_trigger", "mqtt/subscribe"}
-    # The commands that change configuration: the integration's validated room, presence and lighting commands.
+                                     "smart_occupancy/lighting/subscribe", "subscribe_trigger", "mqtt/subscribe",
+                                     "smart_occupancy/curtains/bridge/subscribe",
+                                     "smart_occupancy/forecast/bridge/subscribe", "smart_occupancy/curtains/subscribe"}
+    # Phase A5: the curtain bridge (its execute is fenced and allowlisted by the integration) and the forecast bridge
+    # (no device command at all).
+    assert CURTAIN_BRIDGE_COMMANDS == {f"smart_occupancy/curtains/bridge/{c}" for c in (
+        "claim", "execute", "heartbeat", "publish", "release", "return")}
+    assert FORECAST_BRIDGE_COMMANDS == {f"smart_occupancy/forecast/bridge/{c}" for c in (
+        "claim", "heartbeat", "publish", "release", "return")}
+    assert not any("execute" in c for c in FORECAST_BRIDGE_COMMANDS)
+    # The commands that change configuration: the integration's validated room, presence, lighting, curtain and
+    # forecast commands.
     assert CONFIG_WRITE_COMMANDS == {"smart_occupancy/rooms/set", "smart_occupancy/rooms/restore",
-                                     "smart_occupancy/presence/set"} | LIGHTING_WRITE_COMMANDS
+                                     "smart_occupancy/presence/set"} | LIGHTING_WRITE_COMMANDS | CURTAIN_WRITE_COMMANDS \
+        | FORECAST_WRITE_COMMANDS
     assert all(c.startswith("smart_occupancy/lighting/") for c in LIGHTING_WRITE_COMMANDS | LIGHTING_READ_COMMANDS)
     assert not (LIGHTING_WRITE_COMMANDS | LIGHTING_READ_COMMANDS) & LIGHTING_BRIDGE_COMMANDS
+    assert all(c.startswith("smart_occupancy/curtains/") and "/bridge/" not in c
+               for c in CURTAIN_WRITE_COMMANDS | CURTAIN_READ_COMMANDS)
+    assert all(c.startswith("smart_occupancy/forecast/") and "/bridge/" not in c
+               for c in FORECAST_WRITE_COMMANDS | FORECAST_READ_COMMANDS)
 
 
 async def test_token_never_reaches_the_browser(app_client: Any) -> None:

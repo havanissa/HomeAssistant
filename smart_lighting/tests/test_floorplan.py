@@ -177,7 +177,8 @@ def test_validation_accepts_the_synthetic_homes() -> None:
         plan = fm.validate(build())
         assert fm.validate(plan) == plan  # stable: a validated plan validates to itself
     assert fm.summary(fm.validate(multi_floor_house())) == {
-        "floors": 2, "rooms": 5, "linked_rooms": 3, "openings": 0, "placements": 0, "backgrounds": 0}
+        "floors": 2, "rooms": 5, "linked_rooms": 3, "openings": 0, "linked_windows": 0, "placements": 0,
+        "backgrounds": 0}
 
 
 @pytest.mark.parametrize(("mutate", "code"), [
@@ -229,6 +230,48 @@ def test_openings_stay_on_a_shortened_wall() -> None:
     plan["floors"][0]["openings"][1]["offset"] = 40  # beyond the 5 m wall
     clean = fm.validate(plan)
     assert clean["floors"][0]["openings"][1]["offset"] == pytest.approx(5 - 0.6)
+
+
+# Phase A5: a window opening may be linked to a curtain window (the floor plan is the only place the link lives).
+def test_curtain_window_link_is_validated() -> None:
+    plan = small_apartment()
+    window = plan["floors"][0]["openings"][1]
+    assert window["type"] == "window" and "curtain_window_id" not in window
+    clean = fm.validate(plan)
+    assert clean["floors"][0]["openings"][1]["curtain_window_id"] is None  # a missing field is null
+    assert clean["floors"][0]["openings"][0]["curtain_window_id"] is None
+    assert fm.summary(clean)["linked_windows"] == 0
+    for value in ("win_stova_1", "a-B_9", "x" * 64):
+        window["curtain_window_id"] = value
+        clean = fm.validate(plan)
+        assert clean["floors"][0]["openings"][1]["curtain_window_id"] == value
+        assert fm.validate(clean) == clean
+    assert fm.summary(clean)["linked_windows"] == 1
+    # Dangling links are allowed: the curtain configuration is not part of the plan, the editor shows them.
+    window["curtain_window_id"] = "deleted_window"
+    assert fm.validate(plan)["floors"][0]["openings"][1]["curtain_window_id"] == "deleted_window"
+    for value in (None, ""):
+        window["curtain_window_id"] = value
+        assert fm.validate(plan)["floors"][0]["openings"][1]["curtain_window_id"] is None
+    for bad in ("a b", "x" * 65, "../x", "win.1", 7, ["win"], "ünicode"):
+        window["curtain_window_id"] = bad
+        with pytest.raises(fm.PlanError) as err:
+            fm.validate(plan)
+        assert err.value.code == "invalid_curtain_window", bad
+        assert err.value.path == "floors[0].openings[1].curtain_window_id"
+    # Only a window carries the link: on a door it is dropped, like a window's door swing.
+    plan["floors"][0]["openings"][0]["curtain_window_id"] = "win_stova_1"
+    window["curtain_window_id"] = None
+    clean = fm.validate(plan)
+    assert clean["floors"][0]["openings"][0]["curtain_window_id"] is None
+    assert fm.summary(clean)["linked_windows"] == 0
+
+
+def test_curtain_window_link_changes_the_revision() -> None:
+    plan = fm.validate(small_apartment())
+    linked = copy.deepcopy(plan)
+    linked["floors"][0]["openings"][1]["curtain_window_id"] = "win_1"
+    assert fm.revision_of(linked) != fm.revision_of(plan)
 
 
 def test_unused_corners_are_dropped() -> None:
@@ -538,6 +581,40 @@ async def test_export_import_roundtrip(app_client: Any, fake_ha: FakeHomeAssista
                                                                          "floors": "x"}}, "text"):
         status, body = await post(fresh, "/api/floorplan/import/review", {"file": junk})
         assert status == 400
+
+
+async def test_curtain_window_link_survives_save_export_and_import(app_client: Any, fake_ha: FakeHomeAssistant,
+                                                                     aiohttp_client: Any, tmp_path: Path) -> None:
+    plan = small_apartment()
+    plan["floors"][0]["openings"][1]["curtain_window_id"] = "win_stova_south"
+    commands_before = len(fake_ha.commands)
+    status, saved = await save(app_client, plan)
+    assert status == 200
+    doc = await (await app_client.get("/api/floorplan")).json()
+    window = doc["plan"]["floors"][0]["openings"][1]
+    assert window["type"] == "window" and window["curtain_window_id"] == "win_stova_south"
+    assert doc["status"]["summary"]["linked_windows"] == 1
+    on_disk = json.loads((stored(fake_ha) / "plan.json").read_text())
+    assert on_disk["floors"][0]["openings"][1]["curtain_window_id"] == "win_stova_south"
+    # Linking changes nothing in the curtain subsystem or Home Assistant: no curtain command, no service call.
+    assert not [c for c in fake_ha.commands[commands_before:] if "curtains" in c["type"]]
+    assert app_client.core.safety()["service_calls_sent"] == 0
+
+    exported = await (await app_client.get("/api/floorplan/export")).json()
+    assert exported["plan"]["floors"][0]["openings"][1]["curtain_window_id"] == "win_stova_south"
+    other = await start_app(fake_ha, aiohttp_client, tmp_path / "other-data")
+    status, review = await post(other, "/api/floorplan/import/review", {"file": exported})
+    assert status == 200 and review["summary"]["linked_windows"] == 1 and review["current"]["linked_windows"] == 0
+    status, imported = await post(other, "/api/floorplan/import", {"file": exported, "revision": review["revision"]})
+    assert status == 200 and imported["revision"] == saved["revision"]
+    doc = await (await other.get("/api/floorplan")).json()
+    assert doc["plan"]["floors"][0]["openings"][1]["curtain_window_id"] == "win_stova_south"
+    # An invalid link in a file is refused with its location, like any other field.
+    bad = copy.deepcopy(exported)
+    bad["plan"]["floors"][0]["openings"][1]["curtain_window_id"] = "not valid!"
+    status, body = await post(other, "/api/floorplan/import/review", {"file": bad})
+    assert status == 400 and body["code"] == "invalid_curtain_window"
+    assert body["path"] == "floors[0].openings[1].curtain_window_id"
 
 
 # ------------------------------------------------------ Home Assistant side

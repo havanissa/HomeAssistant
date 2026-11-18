@@ -43,8 +43,11 @@ import {
   zoomAt,
 } from "../src/floorplan/geometry";
 import { History } from "../src/floorplan/history";
-import { duplicateAreaLinks, emptyPlan, newFloor, samePlan, type Floor, type Plan } from "../src/floorplan/model";
+import { clonePlan, duplicateAreaLinks, emptyPlan, newFloor, samePlan, type Floor, type Plan } from "../src/floorplan/model";
 import { suggest, windowDirections } from "../src/floorplan/suggestions";
+import { updateOpening } from "../src/floorplan/edit";
+import { bearingDifference, bearingText, openingOrientation, outwardNormal, wallOutwardBearing } from "../src/floorplan/orientation";
+import { coverView, curtainSummary, groupedWindows, layerText, linkedWindows, windowAttention, type CurtainModel, type CurtainWindow } from "../src/floorplan/curtains";
 
 function must<T>(r: { ok: true; value: T } | { ok: false; error: string }): T {
   if (!r.ok) throw new Error(r.error);
@@ -430,5 +433,142 @@ describe("overlap", () => {
     const corner = floor.vertices.find((v) => v.x === 4 && v.y === 0)!;
     expect(moveVertex(floor, corner.id, { x: 6, y: 0 }).ok).toBe(false);
     expect(moveVertex(floor, corner.id, { x: 4.5, y: 0 }).ok).toBe(true);
+  });
+});
+
+// ------------------------------------------------------- curtains (Phase A5)
+describe("window orientation", () => {
+  const square = [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 4, y: 3 }, { x: 0, y: 3 }];
+
+  it("points the outward normal away from the room", () => {
+    expect(outwardNormal({ x: 0, y: 0 }, { x: 4, y: 0 }, square)!.y).toBeCloseTo(-1); // top wall: up (-y)
+    expect(outwardNormal({ x: 4, y: 0 }, { x: 4, y: 3 }, square)!.x).toBeCloseTo(1); // right wall: right
+    expect(outwardNormal({ x: 4, y: 3 }, { x: 0, y: 3 }, square)!.y).toBeCloseTo(1); // bottom wall: down
+    expect(outwardNormal({ x: 0, y: 3 }, { x: 0, y: 0 }, square)!.x).toBeCloseTo(-1); // left wall: left
+    // The wall's direction does not matter, only the room's side.
+    expect(outwardNormal({ x: 4, y: 0 }, { x: 0, y: 0 }, square)!.y).toBeCloseTo(-1);
+    expect(outwardNormal({ x: 1, y: 1 }, { x: 1, y: 1 }, square)).toBeNull();
+  });
+
+  it("turns the normal into a compass bearing with the plan's north", () => {
+    expect(wallOutwardBearing({ x: 0, y: 0 }, { x: 4, y: 0 }, [square], 0)).toBe(0); // top of the plan is north
+    expect(wallOutwardBearing({ x: 4, y: 0 }, { x: 4, y: 3 }, [square], 0)).toBe(90);
+    expect(wallOutwardBearing({ x: 4, y: 3 }, { x: 0, y: 3 }, [square], 0)).toBe(180);
+    expect(wallOutwardBearing({ x: 0, y: 3 }, { x: 0, y: 0 }, [square], 0)).toBe(270);
+    expect(wallOutwardBearing({ x: 0, y: 0 }, { x: 4, y: 0 }, [square], 90)).toBe(90); // the top of the plan is east
+    expect(wallOutwardBearing({ x: 0, y: 3 }, { x: 0, y: 0 }, [square], 135)).toBe(45); // wraps around
+    // A diagonal wall of a triangle.
+    const tri = [{ x: 0, y: 0 }, { x: 4, y: 0 }, { x: 0, y: 4 }];
+    expect(wallOutwardBearing({ x: 4, y: 0 }, { x: 0, y: 4 }, [tri], 0)).toBe(135); // faces south-east
+    // No north, a shared wall (two rooms) or no room: no suggestion.
+    expect(wallOutwardBearing({ x: 0, y: 0 }, { x: 4, y: 0 }, [square], null)).toBeNull();
+    expect(wallOutwardBearing({ x: 4, y: 0 }, { x: 4, y: 3 }, [square, [{ x: 4, y: 0 }, { x: 7, y: 0 }, { x: 7, y: 3 }, { x: 4, y: 3 }]], 0)).toBeNull();
+    expect(wallOutwardBearing({ x: 0, y: 0 }, { x: 4, y: 0 }, [], 0)).toBeNull();
+  });
+
+  it("suggests an orientation for a window on an outside wall only", () => {
+    const { floor } = rooms(newFloor("G", 0), [[0, 0, 4, 3, "Kitchen"], [4, 0, 7, 3, "Hall"]]);
+    let f = must(addOpening(floor, wallBetween(floor, [0, 0], [4, 0]).id, "window", 2)).floor;
+    f = must(addOpening(f, wallBetween(f, [4, 0], [4, 3]).id, "window", 1.5)).floor; // on the shared wall
+    f = must(addOpening(f, wallBetween(f, [0, 3], [4, 3]).id, "door", 2)).floor;
+    const [top, shared, door] = f.openings;
+    expect(openingOrientation(f, top, 0)).toMatchObject({ status: "ok", bearing: 0, compass: "N" });
+    expect(openingOrientation(f, top, 90)).toMatchObject({ status: "ok", bearing: 90, compass: "E" });
+    expect(openingOrientation(f, top, null)).toMatchObject({ status: "no_north", bearing: null });
+    const amb = openingOrientation(f, shared, 0);
+    expect(amb.status).toBe("shared_wall");
+    expect(amb.rooms).toHaveLength(2);
+    expect(openingOrientation(f, door, 0).status).toBe("not_window");
+    expect(openingOrientation(f, { ...top, wall_id: "w_gone" }, 0).status).toBe("no_room");
+  });
+
+  it("formats and compares bearings", () => {
+    expect(bearingText(135)).toBe("135° (SE)");
+    expect(bearingText(359.6, "N")).toBe("360° (N)");
+    expect(bearingText(null)).toBe("Not set");
+    expect(bearingDifference(10, 350)).toBe(20);
+    expect(bearingDifference(90, 90)).toBe(0);
+    expect(bearingDifference(0, 180)).toBe(180);
+  });
+});
+
+function curtainWindow(over: Partial<CurtainWindow> = {}): CurtainWindow {
+  return {
+    window_id: "win_1", name: "Kitchen south", area_id: "kitchen", area_name: "Kitchen", direction: "S", bearing: null,
+    effective_bearing: 180, compass: "S", mode: "automatic",
+    layers: [{ layer_id: "l1", entity_id: "cover.a", kind: "curtain", name: "Curtain", state: "open", available: true, missing: false, moving: false, position: 70 }],
+    current: { status: "preset", preset_id: "p1", text: "Half shade" }, selected_preset: "p1", presets: [], manual: null, last: null, running: false,
+    problems: [], exposure: { status: "exposed", text: "In the sun", exposed: true },
+    auto: { status: { action: "applied", word: "Applied", text: "Half shade", condition: "day" }, hold: null, decision: null, environment: { sun: { status: "exposed", text: "In the sun", exposed: true }, glare: { enabled: true, active: false } }, next_evaluation: null },
+    ...over,
+  };
+}
+
+describe("curtain windows on the plan", () => {
+  it("keeps the curtain link through clone, sameness, edits and a type change", () => {
+    const { floor } = rooms(newFloor("G", 0), [[0, 0, 4, 3]]);
+    const f = must(addOpening(floor, wallBetween(floor, [0, 0], [4, 0]).id, "window", 2)).floor;
+    expect(f.openings[0].curtain_window_id).toBeNull();
+    const linked = must(updateOpening(f, f.openings[0].id, { curtain_window_id: "win_1" }));
+    expect(linked.openings[0].curtain_window_id).toBe("win_1");
+    expect(f.openings[0].curtain_window_id).toBeNull(); // the original floor is untouched (undo keeps it)
+    const plan = planWith(linked);
+    const copy = clonePlan(plan);
+    expect(copy.floors[0].openings[0].curtain_window_id).toBe("win_1");
+    expect(samePlan(plan, copy)).toBe(true);
+    expect(samePlan(plan, planWith(f))).toBe(false); // the link is part of the plan's content (unsaved-changes guard)
+    const h = new History();
+    h.push(planWith(f), "Link curtain window");
+    expect(h.undo(plan)!.floors[0].openings[0].curtain_window_id).toBeNull();
+    // Moving the window keeps the link; the wall moving keeps it too.
+    expect(must(updateOpening(linked, linked.openings[0].id, { offset: 3 })).openings[0].curtain_window_id).toBe("win_1");
+    const movedWall = must(moveWall(linked, linked.openings[0].wall_id, { x: 0, y: -0.5 }));
+    expect(movedWall.openings[0].curtain_window_id).toBe("win_1");
+    // Only a window carries the link: changing it to a door drops it, like the backend.
+    expect(must(updateOpening(linked, linked.openings[0].id, { type: "door" })).openings[0].curtain_window_id).toBeNull();
+  });
+
+  it("reads cover positions, preferring live states, and marks unknown or unavailable covers", () => {
+    const w = curtainWindow();
+    expect(coverView(w)).toEqual({ tone: "ok", position: 70, text: "70 % open" });
+    const states = new Map([["cover.a", { entity_id: "cover.a", state: "closed", availability: "ok", last_changed: "", last_updated: "", attrs: { current_position: 0 } }]]) as never;
+    expect(coverView(w, states)).toEqual({ tone: "ok", position: 0, text: "Closed" });
+    expect(layerText(w.layers[0], states)).toEqual({ text: "Closed", tone: "ok" });
+    const two = curtainWindow({ layers: [w.layers[0], { ...w.layers[0], layer_id: "l2", entity_id: "cover.b", position: 30 }] });
+    expect(coverView(two).position).toBe(50);
+    expect(coverView(curtainWindow({ layers: [{ ...w.layers[0], moving: true, state: "closing" }] }))).toMatchObject({ tone: "moving", position: 70 });
+    expect(coverView(curtainWindow({ layers: [{ ...w.layers[0], available: false, state: "unavailable" }] }))).toMatchObject({ tone: "unavailable", position: null, text: "Unavailable" });
+    expect(coverView(curtainWindow({ layers: [{ ...w.layers[0], position: null }] }))).toMatchObject({ tone: "unknown", position: null });
+    expect(coverView(curtainWindow({ layers: [] }))).toMatchObject({ tone: "none" });
+    expect(layerText({ ...w.layers[0], missing: true }).tone).toBe("unavailable");
+  });
+
+  it("resolves links on a floor, including dangling ones, and summarises them", () => {
+    const { floor } = rooms(newFloor("G", 0), [[0, 0, 4, 3]]);
+    let f = must(addOpening(floor, wallBetween(floor, [0, 0], [4, 0]).id, "window", 2)).floor;
+    f = must(addOpening(f, wallBetween(f, [4, 0], [4, 3]).id, "window", 1.5)).floor;
+    f = must(addOpening(f, wallBetween(f, [0, 3], [4, 3]).id, "window", 2)).floor;
+    f = must(addOpening(f, wallBetween(f, [0, 0], [0, 3]).id, "door", 1.5)).floor;
+    f = must(updateOpening(f, f.openings[0].id, { curtain_window_id: "win_1" }));
+    f = must(updateOpening(f, f.openings[1].id, { curtain_window_id: "win_gone" }));
+    const held = curtainWindow({ window_id: "win_2", name: "Held", mode: "observing", auto: { ...curtainWindow().auto!, hold: { policy_word: "Until evening", reason: "Moved by hand" } } });
+    const model: CurtainModel = { can_edit: true, windows: [curtainWindow(), held], rooms: [{ area_id: "kitchen", name: "Kitchen", windows: ["win_1"] }, { area_id: null, name: "No room", windows: ["win_2"] }] };
+    expect(linkedWindows(f, null).map((l) => [l.window, l.dangling])).toEqual([[null, false], [null, false], [null, false]]); // not loaded: nothing dangles yet
+    const links = linkedWindows(f, model);
+    expect(links).toHaveLength(3); // the door is not a window
+    expect(links[0].window?.window_id).toBe("win_1");
+    expect(links[1]).toMatchObject({ window: null, dangling: true });
+    expect(links[2]).toMatchObject({ window: null, dangling: false });
+    const s = curtainSummary(links);
+    expect(s).toMatchObject({ linked: 1, automatic: 1, holds: 0, moving: 0, unavailable: 0, dangling: 1 });
+    expect(s.attention.map((a) => a.reasons[0])).toEqual(["Linked curtain window no longer exists"]);
+    f = must(updateOpening(f, f.openings[2].id, { curtain_window_id: "win_2" }));
+    const s2 = curtainSummary(linkedWindows(f, model));
+    expect(s2).toMatchObject({ linked: 2, automatic: 1, observing: 1, holds: 1 });
+    expect(s2.attention.find((a) => a.window?.window_id === "win_2")!.reasons).toEqual(["Manual hold"]);
+    expect(windowAttention(curtainWindow({ problems: [{ severity: "warning", text: "cover.a is unavailable." }, { severity: "info", text: "No covers yet" }], exposure: { status: "no_direction", text: "", exposed: false } }))).toEqual(["cover.a is unavailable.", "No orientation set"]);
+    // Grouping for the picker: the rooms of the wall first.
+    expect(groupedWindows(model, []).map((g) => g.name)).toEqual(["Kitchen", "No room"]);
+    expect(groupedWindows(model, ["kitchen"]).map((g) => g.name)).toEqual(["Kitchen", "No room"]);
   });
 });

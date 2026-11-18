@@ -21,8 +21,10 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         return
     hass.data[_REGISTERED] = True
     from .brightness_websocket import BRIGHTNESS_HANDLERS
+    from .curtain_bridge_api import CURTAIN_BRIDGE_HANDLERS, curtain_managed_guard
     from .curtains.websocket import CURTAIN_HANDLERS
     from .engine_api import ENGINE_HANDLERS
+    from .forecast_bridge_api import FORECAST_BRIDGE_HANDLERS, forecast_managed_guard
     from .forecast_websocket import FORECAST_HANDLERS
     from .lighting_bridge_api import LIGHTING_BRIDGE_HANDLERS, managed_guard
     from .preliminary_websocket import PRELIMINARY_HANDLERS
@@ -34,9 +36,14 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     from .switch_websocket import SWITCH_HANDLERS
     from .zone_websocket import ZONE_HANDLERS
 
-    for handler in (*PRESENCE_HANDLERS, *FORECAST_HANDLERS, *CURTAIN_HANDLERS, *ROOMS_HANDLERS,
-                    *PRESENCE_API_HANDLERS, *ENGINE_HANDLERS, *LIGHTING_BRIDGE_HANDLERS):
+    for handler in (*PRESENCE_HANDLERS, *ROOMS_HANDLERS, *PRESENCE_API_HANDLERS, *ENGINE_HANDLERS,
+                    *LIGHTING_BRIDGE_HANDLERS, *CURTAIN_BRIDGE_HANDLERS, *FORECAST_BRIDGE_HANDLERS):
         websocket_api.async_register_command(hass, handler)
+    # Curtain and forecast editors (Phase A5): read-only while the Smart Lighting App owns them.
+    for handler in CURTAIN_HANDLERS:
+        websocket_api.async_register_command(hass, curtain_managed_guard(handler))
+    for handler in FORECAST_HANDLERS:
+        websocket_api.async_register_command(hass, forecast_managed_guard(handler))
     # Lighting editors (Phase A4): read-only while the Smart Lighting App controls lighting.
     for handler in (*LIGHTING_HANDLERS, *SWITCH_HANDLERS, *PRELIMINARY_HANDLERS, *PROFILE_HANDLERS, *ZONE_HANDLERS,
                     *BRIGHTNESS_HANDLERS, *PRIORITY_HANDLERS):

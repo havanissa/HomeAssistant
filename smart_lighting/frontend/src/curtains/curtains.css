@@ -1,0 +1,692 @@
+/* Phase A5: the Curtains pages. Builds on styles.css and lighting-pages.css (lp-* form, card grid and tab classes);
+   every class here starts with cu-. Desktop and landscape tablets first; narrow widths stack the panels. */
+
+/* ---------------------------------------------------------------- cover position bars */
+.cu-bar {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 0.6rem;
+  border-radius: 999px;
+  background: var(--sl-surface-2);
+  border: 1px solid var(--sl-divider);
+  overflow: visible;
+}
+
+.cu-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--sl-primary-soft), var(--sl-primary));
+  transition: width 0.4s ease;
+}
+
+.cu-bar-unknown {
+  background: repeating-linear-gradient(135deg, var(--sl-surface-2) 0 6px, var(--sl-divider) 6px 8px);
+}
+
+.cu-bar-moving .cu-bar-fill {
+  animation: cu-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes cu-pulse {
+  50% { opacity: 0.55; }
+}
+
+.cu-bar-target {
+  position: absolute;
+  top: -0.3rem;
+  bottom: -0.3rem;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--sl-warning);
+}
+
+.cu-bar-note {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  font-size: 0.68rem;
+  color: var(--sl-text-2);
+}
+
+.cu-cover-row {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1fr) auto;
+  gap: 0.25rem 0.6rem;
+  align-items: center;
+  padding: 0.35rem 0;
+}
+
+.cu-cover-row .cu-bar {
+  margin-top: 0.3rem;
+}
+
+.cu-cover-row > .icon {
+  color: var(--sl-text-2);
+}
+
+.cu-cover-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-cover-val {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- window cards (overview) */
+.cu-window-card {
+  border-left-color: var(--sl-divider);
+}
+
+.cu-window-card.cu-mode-automatic {
+  border-left-color: var(--sl-ok);
+}
+
+.cu-window-card.cu-mode-observing {
+  border-left-color: var(--sl-info);
+}
+
+.cu-window-card.cu-attention {
+  border-left-color: var(--sl-warning);
+}
+
+.cu-auto {
+  display: grid;
+  grid-template-columns: 1.6rem minmax(0, 1fr);
+  gap: 0.25rem 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  background: var(--sl-surface-2);
+}
+
+.cu-auto > .icon {
+  color: var(--sl-text-2);
+}
+
+.cu-auto-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.cu-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.cu-summary-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.25rem;
+}
+
+.cu-house {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 14rem;
+}
+
+.cu-house .icon {
+  color: var(--sl-primary-strong);
+}
+
+.cu-big {
+  display: block;
+  font-size: 1.35rem;
+  font-weight: 600;
+}
+
+.cu-mode-chip .icon,
+.cu-cond-chip .icon {
+  margin-right: 0.15rem;
+}
+
+/* ---------------------------------------------------------------- lists */
+.cu-plan,
+.cu-issues,
+.cu-transitions,
+.cu-impact,
+.cu-readings,
+.cu-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cu-plan-row,
+.cu-reading,
+.cu-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.25rem 0.6rem;
+  align-items: center;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--sl-divider);
+}
+
+.cu-plan-row {
+  grid-template-columns: 1.5rem minmax(0, 1fr) auto;
+}
+
+.cu-plan-row:last-child,
+.cu-reading:last-child,
+.cu-row:last-child,
+.cu-impact-row:last-child {
+  border-bottom: 0;
+}
+
+.cu-plan-icon {
+  color: var(--sl-text-2);
+}
+
+.cu-plan-main,
+.cu-reading-main,
+.cu-row-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.cu-issue {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+}
+
+.cu-transitions li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0;
+}
+
+.cu-transitions .icon {
+  color: var(--sl-text-2);
+}
+
+.cu-impact-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--sl-divider);
+}
+
+.cu-impact-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cu-two {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 1rem;
+}
+
+.cu-radios,
+.cu-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.cu-checks {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+}
+
+.cu-time {
+  width: 6rem;
+}
+
+.cu-days button {
+  min-width: 3rem;
+}
+
+.cu-rule[data-own="1"] > .lp-label {
+  color: var(--sl-primary-strong);
+}
+
+.cu-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cu-log li {
+  display: grid;
+  grid-template-columns: 6.5rem minmax(0, 1fr);
+  gap: 0.25rem 0.75rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--sl-divider);
+}
+
+.cu-log li:last-child {
+  border-bottom: 0;
+}
+
+.cu-log time {
+  color: var(--sl-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- Global Modes matrix */
+.cu-matrix-wrap {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.cu-matrix {
+  border-collapse: separate;
+  border-spacing: 0;
+  min-width: 100%;
+  font-size: 0.9rem;
+}
+
+.cu-matrix th,
+.cu-matrix td {
+  padding: 0.35rem 0.4rem;
+  border-bottom: 1px solid var(--sl-divider);
+  vertical-align: middle;
+  text-align: left;
+}
+
+.cu-matrix thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--sl-surface);
+  text-align: center;
+  font-weight: 500;
+  color: var(--sl-text-2);
+  white-space: nowrap;
+}
+
+.cu-matrix thead th .icon {
+  display: block;
+  margin: 0 auto 0.15rem;
+}
+
+.cu-matrix th[scope="row"] {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  min-width: 11rem;
+  max-width: 16rem;
+  background: var(--sl-surface);
+  font-weight: 500;
+}
+
+.cu-matrix tr.cu-room th {
+  background: var(--sl-surface-2);
+  color: var(--sl-text-2);
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.03em;
+}
+
+.cu-matrix tr.cu-cover th[scope="row"] {
+  padding-left: 1.5rem;
+  font-weight: 400;
+}
+
+.cu-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 9rem;
+}
+
+.cu-cell select {
+  width: 100%;
+  min-height: 2.5rem;
+}
+
+.cu-cell[data-draft="1"] select {
+  border-color: var(--sl-warning);
+  background: var(--sl-warning-bg);
+}
+
+.cu-cell-text {
+  font-size: 0.72rem;
+  color: var(--sl-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cu-srctag {
+  display: inline-block;
+  min-width: 1.1rem;
+  padding: 0 0.25rem;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-align: center;
+  background: var(--sl-neutral-bg);
+  color: var(--sl-text-2);
+}
+
+.cu-srctag-info { background: var(--sl-info-bg); color: var(--sl-info); }
+.cu-srctag-warning { background: var(--sl-warning-bg); color: var(--sl-warning); }
+
+.cu-draftbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+  padding: 0.6rem 0.9rem;
+  border-radius: 10px;
+  background: var(--sl-warning-bg);
+  border: 1px solid color-mix(in srgb, var(--sl-warning) 40%, var(--sl-divider));
+}
+
+.cu-mode-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 11rem), 1fr));
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.cu-mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  min-height: var(--sl-touch);
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--sl-divider);
+  border-radius: 10px;
+  background: var(--sl-surface);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.cu-mode-card.on {
+  border-color: var(--sl-primary);
+  background: var(--sl-primary-soft);
+}
+
+.cu-mode-card .icon {
+  color: var(--sl-primary-strong);
+}
+
+.cu-cover-presets {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.cu-cover-preset {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 6rem auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+/* ---------------------------------------------------------------- Global Schedule timeline */
+.cu-timeline {
+  position: relative;
+  display: block;
+  height: 1.4rem;
+  margin: 0.75rem 0 0.25rem;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--sl-surface-2);
+}
+
+.cu-tl-seg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.cu-tl-now {
+  position: absolute;
+  top: -0.2rem;
+  bottom: -0.2rem;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--sl-text);
+}
+
+.cu-ph-night { background: color-mix(in srgb, var(--sl-text-2) 55%, var(--sl-surface)); }
+.cu-ph-morning { background: color-mix(in srgb, var(--sl-warning) 55%, var(--sl-surface)); }
+.cu-ph-day { background: color-mix(in srgb, var(--sl-ok) 55%, var(--sl-surface)); }
+.cu-ph-evening { background: color-mix(in srgb, var(--sl-info) 55%, var(--sl-surface)); }
+
+.cu-tl-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: var(--sl-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.cu-tl-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+}
+
+.cu-tl-legend i {
+  display: inline-block;
+  width: 0.9rem;
+  height: 0.9rem;
+  margin-right: 0.3rem;
+  border-radius: 3px;
+  vertical-align: -0.1rem;
+}
+
+.cu-phase {
+  border: 1px solid var(--sl-divider);
+  border-radius: 10px;
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+}
+
+.cu-phase.cu-now {
+  border-color: var(--sl-ok);
+}
+
+.cu-phase-head {
+  display: grid;
+  grid-template-columns: 1.6rem minmax(0, 1fr) auto auto;
+  gap: 0.6rem;
+  align-items: center;
+  width: 100%;
+  min-height: var(--sl-touch);
+  padding: 0.6rem 0.9rem;
+  border: 0;
+  background: var(--sl-surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cu-phase-head .icon {
+  color: var(--sl-text-2);
+}
+
+.cu-phase-rule {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sl-text-2);
+  font-size: 0.85rem;
+}
+
+.cu-phase-time {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.cu-phase-body {
+  padding: 0.5rem 0.9rem 0.9rem;
+  border-top: 1px solid var(--sl-divider);
+  background: var(--sl-surface-2);
+}
+
+.cu-dayplan input {
+  width: 5.5rem;
+}
+
+/* ---------------------------------------------------------------- environment */
+.cu-sun {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 0.9rem;
+  border-radius: 10px;
+  background: var(--sl-surface-2);
+}
+
+.cu-sun.cu-exposed {
+  background: var(--sl-warning-bg);
+}
+
+.cu-compass button {
+  min-width: 3rem;
+}
+
+.cu-obstruction {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  padding: 0.35rem 0;
+}
+
+.cu-obstruction input {
+  width: 5rem;
+}
+
+/* ---------------------------------------------------------------- window page */
+.cu-head-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.75rem;
+}
+
+.cu-preset {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.25rem 0.75rem;
+  align-items: center;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--sl-divider);
+  border-radius: 10px;
+}
+
+.cu-preset.cu-selected {
+  border-color: var(--sl-primary);
+  background: var(--sl-primary-soft);
+}
+
+.cu-preset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+.cu-preset-pos {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.25rem 0.75rem;
+  align-items: center;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--sl-divider);
+}
+
+.cu-preset-pos input[type="range"] {
+  width: 100%;
+  min-height: var(--sl-touch);
+  accent-color: var(--sl-primary);
+}
+
+.cu-preset-pos .lp-num {
+  width: 5rem;
+}
+
+.cu-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.cu-prec {
+  margin: 0.25rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.cu-prec li {
+  padding: 0.15rem 0;
+}
+
+.cu-apply-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.cu-apply-row select {
+  min-width: 12rem;
+  flex: 1 1 12rem;
+}
+
+/* ---------------------------------------------------------------- diagnostics */
+.cu-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.cu-diff-bad {
+  color: var(--sl-warning);
+  font-weight: 600;
+}
+
+@media (max-width: 600px) {
+  .cu-log li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cu-phase-head {
+    grid-template-columns: 1.6rem minmax(0, 1fr) auto;
+  }
+  .cu-phase-rule {
+    display: none;
+  }
+  .cu-cover-preset {
+    grid-template-columns: minmax(0, 1fr) 5rem;
+  }
+}

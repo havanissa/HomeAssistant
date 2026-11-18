@@ -1,3 +1,5 @@
-# Phase A3.2 / A4. Administrators only. Nothing else is offered as a service.
+# Phase A3.2 / A4 / A5. Administrators only. Nothing else is offered as a service.
 engine_return_to_integration: {}
 lighting_return_to_integration: {}
+curtains_return_to_integration: {}
+forecast_return_to_integration: {}

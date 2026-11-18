@@ -51,8 +51,8 @@ READ_ONLY = {
     "smart_occupancy/lighting/zone/radar_test", "smart_occupancy/lighting/switch/candidates",
     "smart_occupancy/lighting/supervisor/room",
 }
-APP_VERSION = "0.5.0"
-INTEGRATION_VERSION = "0.8.0"
+APP_VERSION = "0.6.0"
+INTEGRATION_VERSION = "0.9.0"
 
 VIEWPORTS = {
     "phone-360": {"viewport": {"width": 360, "height": 740}, "is_mobile": True, "has_touch": True, "device_scale_factor": 3},
@@ -215,6 +215,11 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
             banner = frame.locator(".lighting-banner").first
             expect(banner).to_be_visible()
             expect(banner).to_have_class(re.compile(r"lighting-banner-integration"))
+        elif route in ("curtains", "predictions"):
+            # Phase A5: built pages; the banner says who controls the curtains / produces the forecasts.
+            banner = frame.locator(f"[data-testid={route}-banner]").first
+            expect(banner).to_be_visible(timeout=20000)
+            expect(banner).to_contain_text("integration")
         elif route not in ("dashboard", "diagnostics", "settings"):
             card = frame.locator(f"[data-testid=pending-{route}]")
             expect(card).to_be_visible()

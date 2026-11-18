@@ -184,7 +184,7 @@ def phase_all(args: argparse.Namespace, out: Path) -> None:
     state: dict[str, Any] = {"timing": presence_room(args)["timing_overrides"]}
     (out / STATE_FILE).write_text(json.dumps(state))
     own = engine(args)
-    check("integration 0.8.0 is the owner by default", own["owner"] == "integration" and own["integration_version"] == "0.8.0",
+    check("integration 0.9.0 is the owner by default", own["owner"] == "integration" and own["integration_version"] == "0.9.0",
           own)
     data = wait("App in shadow mode", lambda: (d := app("api/engine"))["mode"] == "shadow" and d, 60)
     check("App: shadow mode, bridge connected, owner acknowledged", data["bridge"] == "connected"

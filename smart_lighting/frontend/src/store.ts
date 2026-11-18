@@ -42,6 +42,13 @@ class Store {
   lighting: EngineBrief | null = null;
   lightingVersion = 0;
   lightingModelsVersion = 0;
+  /** Phase A5: the curtain and prediction runtimes (mode, acknowledged owner, bridge) and their models counters. */
+  curtains: EngineBrief | null = null;
+  curtainsVersion = 0;
+  curtainsModelsVersion = 0;
+  predictions: EngineBrief | null = null;
+  predictionsVersion = 0;
+  predictionsModelsVersion = 0;
   private listeners = new Set<Listener>();
 
   subscribe(listener: Listener): () => void {
@@ -63,6 +70,9 @@ class Store {
   setOverview(overview: Overview): void {
     this.overview = overview;
     if (overview.engine) this.engine = overview.engine;
+    if (overview.lighting) this.lighting = overview.lighting;
+    if (overview.curtains) this.curtains = overview.curtains;
+    if (overview.predictions) this.predictions = overview.predictions;
     this.lastUpdate = new Date();
     this.emit();
   }
@@ -103,6 +113,16 @@ class Store {
         this.lighting = { mode: message.mode, owner: message.owner, bridge: message.bridge };
         if (message.what === "models") this.lightingModelsVersion += 1;
         else this.lightingVersion += 1;
+        break;
+      case "curtains":
+        this.curtains = { mode: message.mode, owner: message.owner, bridge: message.bridge };
+        if (message.what === "models") this.curtainsModelsVersion += 1;
+        else this.curtainsVersion += 1;
+        break;
+      case "predictions":
+        this.predictions = { mode: message.mode, owner: message.owner, bridge: message.bridge };
+        if (message.what === "models") this.predictionsModelsVersion += 1;
+        else this.predictionsVersion += 1;
         break;
       case "entities": {
         if (!this.overview) return;

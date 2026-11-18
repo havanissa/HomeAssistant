@@ -27,7 +27,7 @@ Shape of a plan (version 1)::
                  "vertices": [{"id", "x", "y"}],           # shared corners
                  "rooms": [{"id", "name", "area_id", "area_name", "shares_area", "vertices": [vertex ids]}],
                  "walls": [{"id", "a", "b"}],               # room edges, a stable id per vertex pair
-                 "openings": [{"id", "type", "wall_id", "offset", "width", "swing"}],
+                 "openings": [{"id", "type", "wall_id", "offset", "width", "swing", "curtain_window_id"}],
                  "placements": [{"id", "entity_id", "entity_uid", "device_id", "x", "y", "label"}],
                  "background": null | {"image_id", "width_px", "height_px", "x", "y", "scale",
                                        "rotation", "opacity", "visible", "locked"}}],
@@ -38,6 +38,12 @@ is only the name seen when it was linked, to notice renames); placements
 reference entities by ``entity_id`` plus the entity registry's stable ``id``
 (``entity_uid``), which survives an entity id rename. Nothing of the
 integration's configuration is copied here.
+
+Phase A5: a ``window`` opening may carry ``curtain_window_id``, the id of a
+window in the curtain subsystem. The floor plan is the only place this link
+lives; the curtain configuration itself (covers, presets, orientation) stays in
+the curtain subsystem. The id is not checked against it here (a link may
+dangle after the curtain window is deleted; the editor shows that).
 """
 
 from __future__ import annotations
@@ -61,6 +67,7 @@ AREA_ID = re.compile(r"^[\w\-]{1,255}$")
 FLOOR_ID = re.compile(r"^[\w\-]{1,255}$")
 ENTITY_ID = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 UID = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+CURTAIN_WINDOW_ID = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 SUGGESTION_KEY = re.compile(r"^[a-z_]{1,24}:[\w\-|.]{1,520}$")
 OPENING_TYPES = ("door", "window", "opening")
 SWINGS = (None, "left", "right")
@@ -348,10 +355,13 @@ def _floor(value: Any, path: str, seen: set[str]) -> dict[str, Any]:
         # ``offset``: distance of the opening's centre from the wall's corner ``a``. Kept on the wall: a wall
         # edited shorter clamps its openings instead of losing them.
         half = min(width, length) / 2
+        curtain = _opt(o.get("curtain_window_id"), CURTAIN_WINDOW_ID, f"{op}.curtain_window_id", "invalid_curtain_window")
         floor["openings"].append({
             "id": _id(o.get("id"), f"{op}.id", seen), "type": o["type"], "wall_id": o["wall_id"],
             "offset": round(min(max(offset, half), max(length - half, half)), 4),
             "width": round(width, 4), "swing": o.get("swing") if o["type"] == "door" else None,
+            # Only a window can be linked to a curtain window (Phase A5); a door or opening never carries the link.
+            "curtain_window_id": curtain if o["type"] == "window" else None,
         })
 
     floor["placements"] = []
@@ -430,6 +440,8 @@ def summary(plan: dict[str, Any]) -> dict[str, Any]:
         "rooms": sum(len(f.get("rooms") or []) for f in floors),
         "linked_rooms": sum(1 for f in floors for r in f.get("rooms") or [] if r.get("area_id")),
         "openings": sum(len(f.get("openings") or []) for f in floors),
+        "linked_windows": sum(1 for f in floors for o in f.get("openings") or []
+                              if o.get("type") == "window" and o.get("curtain_window_id")),
         "placements": sum(len(f.get("placements") or []) for f in floors),
         "backgrounds": sum(1 for f in floors if f.get("background")),
     }

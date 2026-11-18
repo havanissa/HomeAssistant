@@ -1,11 +1,17 @@
-"""The lighting runtime shared with the Smart Lighting App (Phase A4).
+"""The automation runtime shared with the Smart Lighting App (Phase A4 lighting, Phase A5 curtains and forecasts).
 
 The App runs these modules of this integration, byte-identical: the lighting
 controller and everything it needs (moods, profiles, planning, arbitration,
 daylight, ambient levels and brightness rules, zones, shared spaces, the Room
 Supervisor, switches, Priority Inputs, decisions, conflicts) and the lighting
 websocket handlers, so a room behaves the same whichever side controls it and
-the App validates edits with the same code.
+the App validates edits with the same code. Phase A5 adds the curtain package
+(``curtains/``: windows, presets, the executor, the automatic rules, Global
+Modes, the Global Schedule, the environment, solar geometry, conflicts,
+discovery and its websocket handlers) and the occupancy forecast (learning,
+model, history replay, settings and its websocket handlers), plus the bridge
+protocols both sides must agree on (``lighting_sync``, ``curtain_sync``,
+``forecast_sync``).
 
 ``scripts/sync_lighting_runtime.py`` copies them into
 ``smart_lighting/backend/smart_occupancy/`` (the App provides the Home Assistant
@@ -23,9 +29,9 @@ from pathlib import Path
 
 #: Bumped when the bridge contract of the shared runtime changes (not for every rule change: the
 #: fingerprint covers those).
-RUNTIME_VERSION = "1.0.0"
+RUNTIME_VERSION = "1.1.0"
 
-#: Every module of the shared lighting runtime (file names in this package).
+#: Every module of the shared runtime (paths relative to this package; ``curtains/`` is a sub-package).
 MODULES: tuple[str, ...] = (
     "adaptive.py",
     "ambient.py",
@@ -37,12 +43,36 @@ MODULES: tuple[str, ...] = (
     "conflicts.py",
     "const.py",
     "controller.py",
+    "curtain_sync.py",
+    "curtains/__init__.py",
+    "curtains/auto.py",
+    "curtains/config.py",
+    "curtains/conflicts.py",
+    "curtains/discovery.py",
+    "curtains/environment.py",
+    "curtains/executor.py",
+    "curtains/global_modes.py",
+    "curtains/logic.py",
+    "curtains/manager.py",
+    "curtains/migration.py",
+    "curtains/modes.py",
+    "curtains/rules.py",
+    "curtains/schedule.py",
+    "curtains/schedule_page.py",
+    "curtains/solar.py",
+    "curtains/websocket.py",
     "daylight.py",
     "daylight_monitor.py",
     "decisions.py",
     "discovery.py",
     "engine.py",
     "fixtures.py",
+    "forecast.py",
+    "forecast_history.py",
+    "forecast_model.py",
+    "forecast_settings.py",
+    "forecast_sync.py",
+    "forecast_websocket.py",
     "health.py",
     "lighting.py",
     "lighting_config.py",

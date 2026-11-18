@@ -11,7 +11,7 @@ export interface PlanStatus {
   revision: string;
   saved_at: string | null;
   notices: Array<{ code: string; message: string }>;
-  summary: { floors: number; rooms: number; linked_rooms: number; openings: number; placements: number; backgrounds: number };
+  summary: { floors: number; rooms: number; linked_rooms: number; openings: number; linked_windows: number; placements: number; backgrounds: number };
 }
 
 export interface PlanDocument {

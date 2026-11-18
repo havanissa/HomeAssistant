@@ -348,6 +348,19 @@ class ServiceRegistry:
         return True
 
 
+class UnitSystem:
+    """The unit system's units the runtime reads (``hass.config.units``), from ``get_config``'s ``unit_system``."""
+
+    def __init__(self, temperature_unit: str = "°C", length_unit: str = "km") -> None:
+        self.temperature_unit = temperature_unit
+        self.length_unit = length_unit
+
+    @classmethod
+    def from_wire(cls, data: Any) -> UnitSystem:
+        data = data if isinstance(data, dict) else {}
+        return cls(str(data.get("temperature") or "°C"), str(data.get("length") or "km"))
+
+
 class Config:
     """The parts of Home Assistant's configuration the runtime reads (from ``get_config``)."""
 
@@ -359,10 +372,12 @@ class Config:
         self.time_zone: str = "UTC"
         self.location_name: str = "Home"
         self.language: str = "en"
-        self.units: Any = None
+        self.units: UnitSystem = UnitSystem()
 
     def update_from_wire(self, data: dict[str, Any]) -> None:
         self.components = {str(c) for c in data.get("components") or ()}
+        if "unit_system" in data:
+            self.units = UnitSystem.from_wire(data.get("unit_system"))
         for key in ("latitude", "longitude"):
             if isinstance(data.get(key), (int, float)):
                 setattr(self, key, float(data[key]))
@@ -424,6 +439,14 @@ class HomeAssistant:
         self._tasks: set[asyncio.Task[Any]] = set()
         self.storage_dir: str | None = None
 
+    @property
+    def is_running(self) -> bool:
+        return self.state in (CoreState.starting, CoreState.running)
+
+    @property
+    def is_stopping(self) -> bool:
+        return self.state in (CoreState.stopping, CoreState.final_write, CoreState.stopped)
+
     def async_create_task(self, coro: Coroutine[Any, Any, _T], name: str | None = None,
                           eager_start: bool = True) -> asyncio.Task[_T]:
         """As in Home Assistant, a task starts eagerly: it runs now until its first suspension."""
@@ -454,6 +477,19 @@ class HomeAssistant:
         self.bus.async_fire_internal(Event(
             EVENT_STATE_CHANGED, {"entity_id": entity_id.lower(), "old_state": old, "new_state": new_state},
             time_fired=time_fired or (new_state.last_updated if new_state else None), context=context))
+
+    def async_state_reported(self, entity_id: str, reported: State) -> None:
+        """An unchanged report (Home Assistant's ``state_reported``: same state and attributes, only
+        ``last_reported`` moved). As in Home Assistant no ``state_changed`` is fired; the stored state is replaced
+        by one with the new ``last_reported`` (state objects stay immutable)."""
+        current = self.states.get(entity_id)
+        if current is None or current.state != reported.state or current.attributes != reported.attributes:
+            return
+        if reported.last_reported <= current.last_reported:
+            return
+        self.states.set_state(entity_id, State(
+            current.entity_id, current.state, current.attributes, last_changed=current.last_changed,
+            last_updated=current.last_updated, context=current.context, last_reported=reported.last_reported))
 
     async def async_cancel_tasks(self) -> None:
         tasks = [t for t in self._tasks if not t.done()]

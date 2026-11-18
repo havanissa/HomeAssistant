@@ -59,4 +59,7 @@ async def async_get_config_entry_diagnostics(
         "forecast": coordinator.forecast.diagnostics(),
         # Curtains (0.6.1): windows, presets, last results and manual changes.
         "curtains": coordinator.curtains.diagnostics(),
+        # Phase A5: who commands the covers and who produces the forecasts (ownership records).
+        "curtain_ownership": coordinator.curtain_bridge.status(),
+        "forecast_ownership": coordinator.forecast_bridge.status(),
     }

@@ -27,13 +27,23 @@ The live occupancy engines report every evaluation; arrivals (new activity
 in a room) and occupancy changes recalculate the forecasts at once, and a
 timer every ``FORECAST_TICK_MINUTES`` keeps them current. Entities write a
 new state only when the rounded forecast changes.
+
+Phase A5 (the Smart Lighting App)
+---------------------------------
+The App runs this same module. While the integration produces the forecasts
+(the default) the App's copy learns alongside it and compares. After a
+reviewed handover (``forecast_bridge.py``) this manager is *dormant*: stopped,
+it keeps the learned days and shows what the App publishes
+(:meth:`apply_published`) on the same entities, and the learned data moves
+with an explicit, validated export (:meth:`export_learning`). Forecasts never
+command anything on either side.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 import logging
@@ -164,6 +174,52 @@ class RoomForecast:
     def probability(self) -> float | None:
         return self.probabilities.get(self.horizon) if self.probabilities else None
 
+    @classmethod
+    def from_dict(cls, area_id: str, data: Any) -> RoomForecast | None:
+        """A published forecast (``as_dict``) back into the object the entities read (Phase A5)."""
+        if not isinstance(data, dict) or data.get("status") is None:
+            return None
+
+        def frac(d: Any) -> dict[int, float] | None:
+            if not isinstance(d, dict):
+                return None
+            out = {}
+            for h, v in d.items():
+                try:
+                    out[int(h)] = max(0.0, min(1.0, float(v) / 100))
+                except (TypeError, ValueError):
+                    continue
+            return out or None
+
+        conf = data.get("confidence")
+        confidence = None
+        if isinstance(conf, dict) and isinstance(conf.get("level"), str):
+            confidence = Confidence(conf["level"], int(conf.get("score") or 0),
+                                    [str(r) for r in conf.get("reasons") or []],
+                                    conf.get("components") if isinstance(conf.get("components"), dict) else {})
+        factors = [Factor(str(f.get("kind") or ""), str(f.get("text") or ""), float(f.get("impact") or 0),
+                          f.get("details") if isinstance(f.get("details"), dict) else {})
+                   for f in data.get("factors") or [] if isinstance(f, dict)]
+        try:
+            horizon = int(data.get("horizon") or 15)
+            threshold = int(data.get("threshold") or 60)
+        except (TypeError, ValueError):
+            return None
+        return cls(
+            area_id=area_id, status=str(data["status"]), horizon=horizon, threshold=threshold,
+            confidence_threshold=str(data.get("confidence_threshold") or "moderate"),
+            occupied=data.get("occupied") if isinstance(data.get("occupied"), bool) else None,
+            state=data.get("state") if isinstance(data.get("state"), str) else None,
+            probabilities=frac(data.get("probabilities")), entry=frac(data.get("entry")),
+            schedule=frac(data.get("schedule")),
+            predicted=data.get("predicted") if isinstance(data.get("predicted"), bool) else None,
+            confidence=confidence, explanation=str(data.get("explanation") or ""), factors=factors,
+            window=data.get("window") if isinstance(data.get("window"), dict) else None,
+            next_rooms=[(str(n["area_id"]), float(n.get("probability") or 0) / 100) for n in data.get("next_rooms")
+                        or [] if isinstance(n, dict) and isinstance(n.get("area_id"), str)],
+            updated=data.get("updated") if isinstance(data.get("updated"), str) else None,
+        )
+
     def fingerprint(self) -> tuple:
         rounded = tuple(sorted((h, round(p * 20)) for h, p in (self.probabilities or {}).items()))
         p = self.probability
@@ -246,6 +302,12 @@ class ForecastManager:
         self._spec: ReplaySpec | None = None
         self._days_dirty = False
         self._started_unsub: CALLBACK_TYPE | None = None
+        # Phase A5: dormant while the Smart Lighting App produces the forecasts (it shows what the App published);
+        # the observer sees every recomputed view (the App's shadow compares, the owner publishes).
+        self.dormant = False
+        self.view_observer: Callable[[dict[str, Any]], None] | None = None
+        self.settings_observer: Callable[[], None] | None = None
+        self.decision_sink: Callable[..., Any] | None = None
 
     # ------------------------------------------------------------ lifecycle
     async def async_load(self) -> None:
@@ -326,6 +388,11 @@ class ForecastManager:
         self.settings = settings
         self._spec = None
         await self._settings_store.async_save(settings.as_dict())
+        if self.settings_observer is not None:
+            try:
+                self.settings_observer()
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("forecast_settings_observer_failed", exc_info=True)
         if settings.defaults.refresh_minutes != old.defaults.refresh_minutes:
             self._schedule_learning_interval()
         if (settings.defaults.contexts, settings.defaults.workday_entity) != (
@@ -333,6 +400,73 @@ class ForecastManager:
             self._track_contexts()
         await self._async_build_model(log_changes=False)
         self._recompute()
+
+    # ----------------------------------------------------- ownership (A5)
+    def export_learning(self) -> dict[str, Any]:
+        """Everything learned, as a validated document the other side loads (settings, days, dates without data,
+        the Recorder bound and the last update). Observation data only; nothing here commands anything."""
+        from .forecast_sync import EXPORT_SCHEMA  # noqa: PLC0415
+
+        return {
+            "schema": EXPORT_SCHEMA, "settings": self.settings.as_dict(),
+            "days": {k: d.as_dict() for k, d in sorted(self.days.items())}, "no_data": sorted(self.no_data),
+            "recorder_oldest": self.status.recorder_oldest, "last_update": self.status.last_update,
+            "connections": [c.as_dict() for c in self.connections()],
+            "exported_at": dt_util.utcnow().isoformat(timespec="seconds"),
+        }
+
+    async def async_import_learning(self, data: Mapping[str, Any], *, save: bool = True) -> int:
+        """Load a learned-data export (settings and days). Every day is validated by the model; returns how
+        many were taken. Used when control changes owner; never while learning runs."""
+        async with self._lock:
+            settings = ForecastSettings.from_dict(data.get("settings"))
+            days: dict[str, HouseDay] = {}
+            for item in (data.get("days") or {}).values():
+                if (day := HouseDay.from_dict(item)) is not None:
+                    days[day.date] = day
+            self.settings = settings
+            self._spec = None
+            self.days = days
+            self.no_data = {d for d in data.get("no_data") or [] if isinstance(d, str)}
+            oldest = data.get("recorder_oldest")
+            self.status.recorder_oldest = oldest if isinstance(oldest, (int, float)) and not isinstance(oldest, bool) \
+                else None
+            last = data.get("last_update")
+            self.status.last_update = last if isinstance(last, str) else None
+            self.status.detail = f"{len(self.days)} days learned"
+            self._accuracy_cache.clear()
+            if save:
+                await self._settings_store.async_save(settings.as_dict())
+                await self._days_store.async_save(self._days_data())
+        return len(days)
+
+    def view(self) -> dict[str, Any]:
+        """The published view: every room's forecast, the predicted next room, the learning status."""
+        return {"rooms": {a: r.as_dict(self.name) for a, r in self.rooms.items()},
+                "next_room": dict(self.next_room) if self.next_room else None, "status": self.status.as_dict(),
+                "days_learned": len(self.days), "settings": self.settings.as_dict()}
+
+    @callback
+    def apply_published(self, view: Mapping[str, Any]) -> None:
+        """Dormant: show what the App's forecast runtime published (the entities and read-only views follow)."""
+        rooms: dict[str, RoomForecast] = {}
+        for area_id, item in (view.get("rooms") or {}).items():
+            if (rf := RoomForecast.from_dict(area_id, item)) is not None:
+                rooms[area_id] = rf
+        self.rooms = rooms
+        nr = view.get("next_room")
+        self.next_room = dict(nr) if isinstance(nr, dict) and isinstance(nr.get("area_id"), str) else None
+        status = view.get("status")
+        if isinstance(status, dict):
+            self.status.state = str(status.get("state") or self.status.state)
+            self.status.detail = str(status.get("detail") or "")
+            self.status.last_update = status.get("last_update") if isinstance(status.get("last_update"), str) \
+                else self.status.last_update
+            self.status.last_error = status.get("last_error") if isinstance(status.get("last_error"), str) else None
+        if isinstance(view.get("settings"), dict):
+            self.settings = ForecastSettings.from_dict(view["settings"])
+        async_dispatcher_send(self.hass, SIGNAL_FORECAST_UPDATED)
+        async_dispatcher_send(self.hass, SIGNAL_LIGHTING_UPDATED)
 
     async def async_rebuild(self) -> None:
         """Forget what was learned and learn again from the Recorder's history."""
@@ -496,7 +630,7 @@ class ForecastManager:
     # ------------------------------------------------------------ learning
     async def async_learn(self) -> None:
         """Bring the learned days up to date, re-read today and rebuild the model (see module docstring)."""
-        if self._lock.locked():
+        if self._lock.locked() or self.dormant:
             return
         async with self._lock:
             started = dt_util.utcnow()
@@ -770,7 +904,7 @@ class ForecastManager:
     @callback
     def _recompute(self) -> None:
         """Calculate every room's forecast from the live state; publish and log what changed."""
-        if self.hass.is_stopping:
+        if self.hass.is_stopping or self.dormant:
             return
         now_dt = dt_util.utcnow()
         now = now_dt.timestamp()
@@ -845,6 +979,11 @@ class ForecastManager:
         if fingerprint != self._published:
             self._published = fingerprint
             async_dispatcher_send(self.hass, SIGNAL_LIGHTING_UPDATED)
+        if self.view_observer is not None:
+            try:
+                self.view_observer(self.view())
+            except Exception:  # noqa: BLE001 - observation never affects a forecast
+                _LOGGER.debug("forecast_view_observer_failed", exc_info=True)
 
     def _connected_occupied(self, area_id: str) -> bool | None:
         others = [c.b if c.a == area_id else c.a for c in self.connections() if area_id in (c.a, c.b)]
@@ -934,6 +1073,10 @@ class ForecastManager:
     # ------------------------------------------------------------- logging
     def _decision(self, subj: str, kind: str, action: str, explanation: str, *, key: tuple, status: str = NOTED,
                   details: dict[str, Any] | None = None) -> None:
+        if self.decision_sink is not None:  # Phase A5: the App keeps its own forecast decision log
+            self.decision_sink(subj, module=MODULE_FORECAST, trigger="forecast", kind=kind, action=action,
+                               explanation=explanation, mode="observing", status=status, details=details, key=key)
+            return
         log = self.coordinator.lighting.decisions
         log.record(subj, module=MODULE_FORECAST, trigger="forecast", kind=kind, action=action,
                    explanation=explanation, mode="observing", status=status, details=details, key=key)
@@ -1029,6 +1172,7 @@ class ForecastManager:
             "connections": [c.as_dict() for c in self.connections()],
             "rooms": {a: r.as_dict() for a, r in self.rooms.items()},
             "next_room": self.next_room,
+            "dormant": self.dormant,
         }
 
 

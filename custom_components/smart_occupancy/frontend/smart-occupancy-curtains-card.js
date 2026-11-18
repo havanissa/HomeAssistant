@@ -44,7 +44,7 @@
  * times are 24-hour HH:mm in Home Assistant's time zone, also the time fields.
  */
 
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 const CARD = "smart-occupancy-curtains-card";
 const WS = "smart_occupancy/curtains";
 
@@ -302,6 +302,14 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
 
   get _canEdit() { return !!this._model?.can_edit; }
   get _ro() { return this._canEdit ? "" : "disabled"; }
+
+  // Phase A5: while the Smart Lighting App controls the curtains, it owns the configuration: this card is read-only.
+  _managedHtml() {
+    if (!this._model?.managed_by_app) return "";
+    return `<div class="pad warn" role="status"><b>Managed by the Smart Lighting App.</b> Curtains are configured in
+      the App (sidebar: Smart Lighting → Curtains); this card is read-only until curtain control is returned to the
+      integration. <a href="/hassio/ingress/smart_lighting" target="_top">Open the Smart Lighting App</a></div>`;
+  }
   _win(id) { return this._model?.windows.find((w) => w.window_id === id); }
   _windows() {
     const all = this._model?.windows || [];
@@ -326,7 +334,7 @@ class SmartOccupancyCurtainsCard extends HTMLElement {
     const name = this._pageName();
     const page = w ? this._windowView(w) : name === "modes" ? this._modesPage() : name === "schedule" ? this._schedulePage()
       : name === "windows" ? this._windowsPage() : name === "diagnostics" ? this._diagPage() : this._overview();
-    this.shadowRoot.innerHTML = `${STYLE}<ha-card>${page}</ha-card>`;
+    this.shadowRoot.innerHTML = `${STYLE}<ha-card>${this._managedHtml()}${page}</ha-card>`;
     if (focusSel) {
       const el = this.shadowRoot.querySelector(`${active.tagName.toLowerCase()}${focusSel}`);
       if (el) { if (typing !== null) el.value = typing; el.focus({ preventScroll: true }); }

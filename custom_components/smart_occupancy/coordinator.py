@@ -60,8 +60,10 @@ from .occupancy import (
     friendly_name,
     signal_health,
 )
+from .curtain_bridge import CurtainBridge
 from .curtains.manager import CurtainManager
 from .forecast import ForecastManager
+from .forecast_bridge import ForecastBridge
 from .occupancy_manager import OccupancyManager
 from .presence_log import record_config_change, record_transition
 from .problems import ProblemTracker
@@ -287,6 +289,9 @@ class SmartOccupancyCoordinator(DataUpdateCoordinator[Snapshot]):
         # Curtains: windows, presets, confirmed manual control (0.6.1) and per-window Automatic (0.6.2).
         # Occupancy is only read (for the "until the room has been empty" manual hold).
         self.curtains = CurtainManager(hass, self.occupancy)
+        # Phase A5: who produces the forecasts and who commands the covers (this integration or the App).
+        self.forecast_bridge = ForecastBridge(hass, self)
+        self.curtain_bridge = CurtainBridge(hass, self)
         self.tracker = ProblemTracker(hass)
         self._unsubs: list[CALLBACK_TYPE] = []
         self._started_unsub: CALLBACK_TYPE | None = None

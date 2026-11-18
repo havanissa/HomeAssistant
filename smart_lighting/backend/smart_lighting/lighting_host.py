@@ -323,6 +323,13 @@ class LightingInstance:
             return
         self.hass.async_state_changed(entity_id, State.from_wire(new_state) if new_state else None)
 
+    def state_reported(self, entity_id: str, wire: dict[str, Any] | None) -> None:
+        """An unchanged report: only ``last_reported`` moves (no event, as in Home Assistant)."""
+        if self.controller is None or not wire:
+            return
+        if (state := State.from_wire(wire)) is not None:
+            self.hass.async_state_reported(entity_id, state)
+
     def registries_changed(self) -> None:
         self.install_registries()
         self.install_entries()

@@ -254,9 +254,13 @@ def build_model(hass: HomeAssistant, mgr: CurtainManager, connection) -> dict[st
     sun = mgr.sun()
     cal = calibrate(mgr.samples)
     s = config.settings
+    # Phase A5: while the Smart Lighting App controls the curtains, the integration's editors are read-only (the App
+    # runs these handlers itself with its own manager, where there is no curtain bridge: never "managed").
+    managed = bool(mgr.dormant or mgr.locked)
     return {
         "version": VERSION,
-        "can_edit": bool(connection.user and connection.user.is_admin),
+        "can_edit": bool(connection.user and connection.user.is_admin) and not managed,
+        "managed_by_app": managed,
         "settings": s.as_dict(),
         "sun": {**sun.as_dict(), "calibration": {**cal, "text": relation_text(cal)},
                 "sources": {"azimuth": s.azimuth_entity, "elevation": s.elevation_entity,

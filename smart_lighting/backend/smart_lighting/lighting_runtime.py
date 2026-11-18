@@ -195,6 +195,9 @@ class LightingRuntime:
             if entity_id.startswith(("automation.", "script.")) and (new_state is None or
                                                                        entity_id not in self._known_scripts()):
                 self._spawn(self._load_automations())
+        elif kind == "reported":
+            if self.instance is not None:
+                self.instance.state_reported(*payload)
         elif kind == "registries":
             if self.instance is not None:
                 self.instance.registries_changed()
