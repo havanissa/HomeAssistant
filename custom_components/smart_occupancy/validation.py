@@ -17,6 +17,7 @@ from homeassistant.util import dt as dt_util
 
 from . import lighting
 from .const import (
+    BUILTIN_MOOD_ENTITY,
     MOOD_ENTITY_DOMAINS,
     RGB_SUFFIX,
     CategoryKind,
@@ -231,11 +232,11 @@ def validate(
 
     # Mood helpers ---------------------------------------------------------
     mood = config.mood
-    for label, entity_id in (
-        ("Auto Mood", mood.auto_mood_entity),
-        ("Manual Mood", mood.manual_mood_entity),
-        ("Main Mood", mood.main_mood_entity),
-    ):
+    # Phase A4: one selector (or the built-in one) is a complete mood source; the Auto / Manual helpers are
+    # needed only for the three-helper scheme.
+    scheme = (("Auto Mood", mood.auto_mood_entity), ("Manual Mood", mood.manual_mood_entity)) \
+        if mood.source == "helpers" else ()
+    for label, entity_id in (*scheme, ("Main Mood", mood.main_mood_entity)):
         if not entity_id:
             add(Problem(
                 "mood_entity_not_configured", Severity.ERROR, CONFIG, "Mood helper not configured",
@@ -244,6 +245,8 @@ def validate(
                 subject=label,
             ))
             continue
+        if mood.source == "builtin" and entity_id == BUILTIN_MOOD_ENTITY:
+            continue  # this integration's own selector (it may be added after the first check)
         if entity_id.split(".", 1)[0] not in MOOD_ENTITY_DOMAINS:
             add(Problem(
                 "mood_entity_wrong_domain", Severity.ERROR, CONFIG, "Mood helper has the wrong type",

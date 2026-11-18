@@ -9,14 +9,21 @@ before anything is sent:
   validated room configuration commands, sent only with :meth:`config_write`.
   They change the integration's room assignments and nothing else. Phase A3.1
   adds its validated presence command (sensors and occupancy timing).
+* :data:`LIGHTING_BRIDGE_COMMANDS` (Phase A4) - the integration's lighting bridge,
+  sent only with :meth:`lighting_command`. ``execute`` is the only path from the
+  App to a device: the integration accepts it only from the session that controls
+  lighting (epoch, lease, sequence) and only for an allowlisted service of a
+  configured lighting target. The lighting editors' commands are forwarded with
+  :meth:`command` (reads, :data:`LIGHTING_READ_COMMANDS`) and :meth:`config_write`
+  (changes, :data:`LIGHTING_WRITE_COMMANDS`) while the integration controls lighting.
 * :data:`ENGINE_COMMANDS` (Phase A3.2) - the integration's occupancy bridge,
   sent only with :meth:`engine_command` (claim, publish, heartbeat, release:
   they change which engine publishes occupancy and the App's published results,
   nothing else), and :data:`SUBSCRIPTION_COMMANDS`, opened only with
   :meth:`subscribe` (the bridge session).
 
-There is no way to call a service, write a state, fire an event or change a
-Home Assistant registry through this client. Any other command raises
+There is no way to call a service directly, write a state, fire an event or
+change a Home Assistant registry through this client. Any other command raises
 :class:`ReadOnlyViolation` before it is sent.
 """
 
@@ -64,7 +71,41 @@ READ_ONLY_COMMANDS: frozenset[str] = frozenset(
         "history/history_during_period",
         # Phase A3.2: the occupancy ownership record (integration 0.7.0).
         "smart_occupancy/engine/status",
+        # Phase A4: what the lighting runtime reads (labels, automation and script configurations for conflict
+        # detection, MQTT device triggers of wall switches, trigger validation) and the lighting ownership record.
+        "config/label_registry/list",
+        "config/entity_registry/get_entries",
+        "automation/config",
+        "script/config",
+        "device_automation/trigger/list",
+        "validate_config",
+        "unsubscribe_events",
+        "smart_occupancy/lighting/bridge/status",
     }
+)
+#: Phase A4: the integration's lighting editor commands that only read or simulate (forwarded while it controls
+#: lighting; answered by the App's own handlers after the handover).
+LIGHTING_READ_COMMANDS: frozenset[str] = frozenset(
+    f"smart_occupancy/lighting/{c}" for c in (
+        "editor", "preview", "room/activation", "brightness/preview", "priority/preview", "zone/radar_test",
+        "switch/candidates", "supervisor/room")
+)
+#: Phase A4: the lighting editor commands that change the configuration (or test a profile with real commands),
+#: administrators only, forwarded with config_write() while the integration controls lighting.
+LIGHTING_WRITE_COMMANDS: frozenset[str] = frozenset(
+    f"smart_occupancy/lighting/{c}" for c in (
+        "adaptive/set", "ambient/levels", "ambient/set", "brightness/remove", "brightness/set", "brightness/template",
+        "category/remove", "category/set", "daylight/set", "fixture/remove", "fixture/set", "mood/set",
+        "mood_source/set", "override/clear", "preliminary/set", "priority/lock", "priority/remove", "priority/set",
+        "profile/copy", "profile/reset", "profile/set", "profile/test", "relay/set", "room/acknowledge",
+        "room/activate", "room/deactivate", "room/daylight", "room/group_choice", "room/set", "settings/set",
+        "space/remove", "space/set", "supervisor/set", "switch/add", "switch/learn", "switch/mapping", "switch/mode",
+        "switch/remove", "switch/set", "switch/settings", "vacant/set", "zone/remove", "zone/set")
+)
+#: Phase A4: the integration's lighting bridge (ownership, the owner's fenced commands, the mirror).
+LIGHTING_BRIDGE_COMMANDS: frozenset[str] = frozenset(
+    f"smart_occupancy/lighting/bridge/{c}" for c in (
+        "claim", "execute", "heartbeat", "publish", "inputs", "options", "release", "return")
 )
 #: The only commands that change anything: the existing integration's validated, administrator-only room and
 #: presence configuration commands (Phases A2, A3.1). They write its config entry options and nothing else.
@@ -75,7 +116,7 @@ CONFIG_WRITE_COMMANDS: frozenset[str] = frozenset(
         # Phase A3.1: a room's sensors and timing overrides, or the global occupancy timing defaults.
         "smart_occupancy/presence/set",
     }
-)
+) | LIGHTING_WRITE_COMMANDS
 #: Phase A3.2: the integration's occupancy bridge. They change which engine publishes room occupancy and the
 #: App's published occupancy results; none of them can call a service or control a device.
 ENGINE_COMMANDS: frozenset[str] = frozenset(
@@ -86,16 +127,27 @@ ENGINE_COMMANDS: frozenset[str] = frozenset(
         "smart_occupancy/engine/release",
     }
 )
-#: Subscriptions other than subscribe_events (opened only with subscribe()).
-SUBSCRIPTION_COMMANDS: frozenset[str] = frozenset({"smart_occupancy/engine/subscribe"})
-ALLOWED_COMMANDS: frozenset[str] = READ_ONLY_COMMANDS | CONFIG_WRITE_COMMANDS | ENGINE_COMMANDS | SUBSCRIPTION_COMMANDS
+#: Subscriptions other than subscribe_events (opened only with subscribe()). Phase A4: the lighting bridge, the
+#: lighting editors' change notifications, and the wall switch inputs the lighting runtime listens to (device
+#: triggers run by Home Assistant, MQTT messages through Home Assistant's MQTT integration).
+SUBSCRIPTION_COMMANDS: frozenset[str] = frozenset({
+    "smart_occupancy/engine/subscribe", "smart_occupancy/lighting/bridge/subscribe", "smart_occupancy/lighting/subscribe",
+    "subscribe_trigger", "mqtt/subscribe",
+})
+ALLOWED_COMMANDS: frozenset[str] = (READ_ONLY_COMMANDS | LIGHTING_READ_COMMANDS | CONFIG_WRITE_COMMANDS
+                                    | ENGINE_COMMANDS | LIGHTING_BRIDGE_COMMANDS | SUBSCRIPTION_COMMANDS)
 #: Event types the App may subscribe to.
 ALLOWED_EVENT_TYPES: frozenset[str] = frozenset(
     {"state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated",
-     "floor_registry_updated"}
+     "floor_registry_updated", "label_registry_updated",
+     # Phase A4: conflict detection follows reloaded automations and scripts; start-up of Home Assistant.
+     "automation_reloaded", "script_reloaded", "homeassistant_started"}
 )
 REGISTRY_EVENTS = ("area_registry_updated", "device_registry_updated", "entity_registry_updated",
-                   "floor_registry_updated")
+                   "floor_registry_updated", "label_registry_updated")
+OTHER_EVENTS = ("automation_reloaded", "script_reloaded", "homeassistant_started")
+#: Connected while Home Assistant starts: how often it is asked whether it runs (its start-up event may be missed).
+STARTUP_POLL_SECONDS = 5.0
 REGISTRY_DEBOUNCE = 2.0
 
 RECONNECT_DELAYS = (1, 2, 5, 10, 30)
@@ -169,9 +221,13 @@ class HomeAssistantClient:
         self.devices: list[dict[str, Any]] = []
         self.floors: list[dict[str, Any]] = []
         self.entity_registry: list[dict[str, Any]] = []
+        self.labels: list[dict[str, Any]] = []
+        self.config_entries_all: list[dict[str, Any]] = []
         self.integration = IntegrationReport.unknown()
 
         self.commands_sent: Counter[str] = Counter()
+        self._started_seen = False
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self.config_writes: list[dict[str, Any]] = []  # last writes (type, time, result), for diagnostics
         self.events_total = 0
         self._registry_timer: asyncio.TimerHandle | None = None
@@ -317,6 +373,8 @@ class HomeAssistantClient:
             raise ReadOnlyViolation(f"{command_type!r} changes configuration; use config_write()")
         if command_type in ENGINE_COMMANDS or command_type in SUBSCRIPTION_COMMANDS:
             raise ReadOnlyViolation(f"{command_type!r} is an occupancy bridge command; use engine_command()")
+        if command_type in LIGHTING_BRIDGE_COMMANDS:
+            raise ReadOnlyViolation(f"{command_type!r} is a lighting bridge command; use lighting_command()")
         _, future = await self._send(command_type, params)
         return await asyncio.wait_for(future, COMMAND_TIMEOUT)
 
@@ -345,6 +403,21 @@ class HomeAssistantClient:
             raise ReadOnlyViolation(f"{command_type!r} is not an occupancy bridge command")
         _, future = await self._send(command_type, params)
         return await asyncio.wait_for(future, COMMAND_TIMEOUT)
+
+    async def lighting_command(self, command_type: str, **params: Any) -> Any:
+        """Send one of the integration's lighting bridge commands (LIGHTING_BRIDGE_COMMANDS only)."""
+        if command_type not in LIGHTING_BRIDGE_COMMANDS:
+            raise ReadOnlyViolation(f"{command_type!r} is not a lighting bridge command")
+        _, future = await self._send(command_type, params)
+        return await asyncio.wait_for(future, COMMAND_TIMEOUT)
+
+    async def unsubscribe(self, sub_id: int) -> None:
+        """End one subscription this client opened (no error when the connection is already gone)."""
+        if self._subscriptions.pop(sub_id, None) is None:
+            return
+        with contextlib.suppress(ConnectionError, TimeoutError, HomeAssistantError):
+            _, future = await self._send("unsubscribe_events", {"subscription": sub_id})
+            await asyncio.wait_for(future, COMMAND_TIMEOUT)
 
     async def subscribe(self, command_type: str, handler: Callable[[Any], None], **params: Any) -> int:
         """Open an allowlisted subscription (SUBSCRIPTION_COMMANDS). It ends when the connection does."""
@@ -451,6 +524,7 @@ class HomeAssistantClient:
 
             self._ws = ws
             self.ha_version = reply.get("ha_version")
+            self._started_seen = False
             reader = asyncio.create_task(self._reader(ws), name="ha-websocket-reader")
             helpers: list[asyncio.Task[None]] = []
             try:
@@ -471,6 +545,9 @@ class HomeAssistantClient:
                     asyncio.create_task(self._ping_loop(ws), name="ha-ping"),
                     asyncio.create_task(self._detection_loop(), name="ha-detection"),
                 ]
+                if (self.config.get("state") or "RUNNING") != "RUNNING":
+                    # Connected while Home Assistant starts: the snapshot is incomplete (see _resync_states).
+                    helpers.append(asyncio.create_task(self._startup_watch(), name="ha-startup"))
                 await reader
             finally:
                 for task in (*helpers, reader):
@@ -493,6 +570,8 @@ class HomeAssistantClient:
         await self._subscribe("state_changed", self._on_state_changed)
         for event_type in REGISTRY_EVENTS:
             await self._subscribe(event_type, self._on_registry_event)
+        for event_type in OTHER_EVENTS:
+            await self._subscribe(event_type, self._on_other_event)
         try:
             # Changes of the integration's config entry (also from its own options flow), state included.
             await self._subscribe_command("config_entries/subscribe", {"type_filter": ["service"]},
@@ -517,17 +596,24 @@ class HomeAssistantClient:
         areas = await self._read_registry("config/area_registry/list")
         devices = await self._read_registry("config/device_registry/list")
         registry = await self._read_registry("config/entity_registry/list")
+        if registry:
+            registry = await self._extended_entries(registry)
         floors = await self._read_registry("config/floor_registry/list")
+        labels = await self._read_registry("config/label_registry/list")
+        self.labels = labels or []
         self.areas = areas or []
         self.floors = floors or []
         self.area_count = len(areas) if areas is not None else None
         self.devices = devices or []
         self.entity_registry = registry or []
         try:
-            entries = await self.command("config_entries/get", domain=self._domain)
+            everything = await self.command("config_entries/get")
         except HomeAssistantError as err:
             _LOGGER.warning("Could not read config entries: %s", err)
-            entries = None
+            everything = None
+        self.config_entries_all = [e for e in everything or [] if isinstance(e, dict)]
+        entries = [e for e in self.config_entries_all if e.get("domain") == self._domain] \
+            if everything is not None else None
         try:
             manifest = await self.command("manifest/get", integration=self._domain)
         except HomeAssistantError as err:
@@ -538,6 +624,20 @@ class HomeAssistantClient:
         if report != self.integration:
             self.integration = report
             self._notify("integration", report)
+
+    async def _extended_entries(self, registry: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Phase A4: device classes, capabilities and icons of every entry (the lighting runtime reads them)."""
+        ids = [e["entity_id"] for e in registry if isinstance(e.get("entity_id"), str)]
+        extended: dict[str, Any] = {}
+        for start in range(0, len(ids), 500):
+            try:
+                found = await self.command("config/entity_registry/get_entries", entity_ids=ids[start:start + 500])
+            except HomeAssistantError as err:
+                _LOGGER.debug("Extended registry entries not readable: %s", err)
+                return registry
+            if isinstance(found, dict):
+                extended.update({k: v for k, v in found.items() if isinstance(v, dict)})
+        return [{**e, **extended.get(e.get("entity_id"), {})} for e in registry]
 
     async def _detection_loop(self) -> None:
         while True:
@@ -617,8 +717,72 @@ class HomeAssistantClient:
             self._notify("entity", entity_summary(new_state, entity_id))
         self._notify("state", (entity_id, new_state))
 
+    def _on_other_event(self, event: dict[str, Any]) -> None:
+        if event.get("event_type") == "homeassistant_started":
+            self._started_seen = True
+            self._background(self._after_started(event))
+            return
+        self._notify("event", event)
+
+    def _background(self, coro: Any) -> None:
+        task = asyncio.get_running_loop().create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _after_started(self, event: dict[str, Any]) -> None:
+        await self._resync_states()
+        self._notify("event", event)
+
+    async def _resync_states(self) -> None:
+        """Home Assistant finished starting: the snapshot taken while it started (``get_states`` during start-up)
+        was incomplete, and entities that were already there do not send a state change. Re-read everything and
+        deliver what differs as state changes (as Home Assistant delivers appearing entities)."""
+        try:
+            self.config = await self.command("get_config") or self.config
+            states = await self.command("get_states") or []
+        except (HomeAssistantError, ConnectionError, TimeoutError) as err:
+            _LOGGER.warning("Could not re-read the states after Home Assistant started: %s", err)
+            return
+        changed: list[str] = []
+        for wire in states:
+            if not isinstance(wire, dict) or "entity_id" not in wire:
+                continue
+            entity_id = wire["entity_id"]
+            current = self.states.get(entity_id)
+            # (A state change delivered meanwhile is newer than the snapshot: it stays.)
+            if current == wire or (current is not None and (current.get("last_updated") or "") >
+                                   (wire.get("last_updated") or "")):
+                continue
+            self.states[entity_id] = wire
+            changed.append(entity_id)
+        for entity_id in changed:
+            if entity_id in self.integration.entity_set:
+                self._notify("entity", entity_summary(self.states[entity_id], entity_id))
+            self._notify("state", (entity_id, self.states[entity_id]))
+        _LOGGER.info("Re-read %d states after Home Assistant started (%d new or changed)", len(self.states),
+                     len(changed))
+
+    async def _startup_watch(self) -> None:
+        """Connected while Home Assistant was starting: until its start-up event arrives (or, if it was missed,
+        until it reports RUNNING), poll; then re-read the states once."""
+        for _ in range(120):
+            await asyncio.sleep(STARTUP_POLL_SECONDS)
+            if self._started_seen:
+                return
+            try:
+                config = await self.command("get_config") or {}
+            except (HomeAssistantError, ConnectionError, TimeoutError):
+                continue
+            if config.get("state") == "RUNNING":
+                if not self._started_seen:
+                    self._started_seen = True
+                    self.config = config
+                    await self._after_started({"event_type": "homeassistant_started", "data": {}})
+                return
+
     def _on_registry_event(self, event: dict[str, Any]) -> None:
         """Re-read the registries shortly after they change (bursts are coalesced)."""
+        self._notify("registry_event", event)
         if self._registry_timer is not None:
             self._registry_timer.cancel()
         self._registry_timer = asyncio.get_running_loop().call_later(REGISTRY_DEBOUNCE, self._registry_changed)

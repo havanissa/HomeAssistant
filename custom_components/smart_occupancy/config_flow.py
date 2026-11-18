@@ -13,7 +13,9 @@ from homeassistant.helpers import label_registry as lr, selector as sel
 
 from . import discovery
 from .const import (
+    BUILTIN_MOOD_ENTITY,
     DEFAULT_AUTO_MOOD_ENTITY,
+    DEFAULT_AUTO_OPTION,
     DEFAULT_MAIN_MOOD_ENTITY,
     DEFAULT_MANUAL_MOOD_ENTITY,
     DEFAULT_MISMATCH_GRACE_SECONDS,
@@ -44,6 +46,7 @@ from .models import (
 )
 from .lighting_config import LightingStore, set_profile, table_get, without_categories
 from .mood import mood_names
+from .timing_validation import MIN_STUCK_SECONDS, validate_timing  # noqa: F401 - re-exported
 from .profiles import setting_from_form, validate_setting
 from .supervision import mode_permitted
 
@@ -74,8 +77,6 @@ CONF_ADJACENT = "adjacent_rooms"
 CONF_KIND = "kind"
 
 # A stuck detection shorter than this would flag normal sensors.
-MIN_STUCK_SECONDS = 60
-
 # Room form field -> (sensor kind, allowed domains or None for any)
 KIND_FIELDS: dict[str, tuple[SensorKind, list[str] | None]] = {
     "pir": (SensorKind.PIR, ["binary_sensor"]),
@@ -111,9 +112,11 @@ def _select(options: list[sel.SelectOptionDict] | list[str], *, translation_key:
 # --------------------------------------------------------------------- mood
 def mood_schema(hass: HomeAssistant, mood: MoodConfig, include_mode: OperatingMode | None) -> vol.Schema:
     fields: dict[Any, Any] = {
-        vol.Required(CONF_AUTO_MOOD): _entity_selector(MOOD_ENTITY_DOMAINS, multiple=False),
-        vol.Required(CONF_MANUAL_MOOD): _entity_selector(MOOD_ENTITY_DOMAINS, multiple=False),
-        vol.Required(CONF_MAIN_MOOD): _entity_selector(MOOD_ENTITY_DOMAINS, multiple=False),
+        # Phase A4: all optional. Auto + Manual + Main is the three-helper scheme; Main alone is one mood
+        # selector; nothing selected: moods are defined later (the Smart Lighting App's built-in selector).
+        vol.Optional(CONF_AUTO_MOOD): _entity_selector(MOOD_ENTITY_DOMAINS, multiple=False),
+        vol.Optional(CONF_MANUAL_MOOD): _entity_selector(MOOD_ENTITY_DOMAINS, multiple=False),
+        vol.Optional(CONF_MAIN_MOOD): _entity_selector(MOOD_ENTITY_DOMAINS, multiple=False),
         vol.Required(CONF_AUTO_OPTION, default=mood.auto_option): sel.TextSelector(),
         vol.Required(CONF_GRACE, default=mood.mismatch_grace_seconds): sel.NumberSelector(
             sel.NumberSelectorConfig(min=0, max=600, step=1, unit_of_measurement="s",
@@ -144,13 +147,20 @@ def mood_suggestions(hass: HomeAssistant, mood: MoodConfig) -> dict[str, Any]:
 
 def validate_mood_input(hass: HomeAssistant, user_input: dict[str, Any]) -> dict[str, str]:
     errors: dict[str, str] = {}
-    for key in (CONF_AUTO_MOOD, CONF_MANUAL_MOOD, CONF_MAIN_MOOD):
+    scheme = bool(user_input.get(CONF_AUTO_MOOD) or user_input.get(CONF_MANUAL_MOOD))
+    # The three-helper scheme needs all three; a single selector only Main Mood; none at all is allowed too.
+    keys = (CONF_AUTO_MOOD, CONF_MANUAL_MOOD, CONF_MAIN_MOOD) if scheme else (CONF_MAIN_MOOD,)
+    for key in keys:
         entity_id = user_input.get(key)
-        if not entity_id or hass.states.get(entity_id) is None:
+        if not scheme and not entity_id:
+            continue
+        if not entity_id or (hass.states.get(entity_id) is None and entity_id != BUILTIN_MOOD_ENTITY):
             errors[key] = "entity_not_found"
     ids = [user_input.get(k) for k in (CONF_AUTO_MOOD, CONF_MANUAL_MOOD, CONF_MAIN_MOOD)]
-    if not errors and len(set(ids)) != 3:
+    if scheme and not errors and len(set(ids)) != 3:
         errors["base"] = "mood_entities_not_distinct"
+    if not scheme:
+        return errors
     manual = hass.states.get(user_input.get(CONF_MANUAL_MOOD) or "")
     auto_option = (user_input.get(CONF_AUTO_OPTION) or "").strip()
     if not auto_option:
@@ -161,13 +171,18 @@ def validate_mood_input(hass: HomeAssistant, user_input: dict[str, Any]) -> dict
     return errors
 
 
-def mood_from_input(user_input: dict[str, Any]) -> MoodConfig:
+def mood_from_input(user_input: dict[str, Any], current: MoodConfig | None = None) -> MoodConfig:
+    main = user_input.get(CONF_MAIN_MOOD) or None
+    # The built-in selector keeps its moods while it stays the Main Mood.
+    builtin = current.builtin if current is not None and current.builtin is not None and \
+        main == BUILTIN_MOOD_ENTITY else None
     return MoodConfig(
-        auto_mood_entity=user_input[CONF_AUTO_MOOD],
-        manual_mood_entity=user_input[CONF_MANUAL_MOOD],
-        main_mood_entity=user_input[CONF_MAIN_MOOD],
-        auto_option=user_input[CONF_AUTO_OPTION].strip(),
+        auto_mood_entity=user_input.get(CONF_AUTO_MOOD) or None,
+        manual_mood_entity=user_input.get(CONF_MANUAL_MOOD) or None,
+        main_mood_entity=main,
+        auto_option=(user_input.get(CONF_AUTO_OPTION) or DEFAULT_AUTO_OPTION).strip(),
         mismatch_grace_seconds=int(user_input.get(CONF_GRACE, DEFAULT_MISMATCH_GRACE_SECONDS)),
+        builtin=builtin,
     )
 
 
@@ -193,13 +208,6 @@ def timing_from_input(user_input: dict[str, Any]) -> dict[str, int]:
         if key in TIMING_PARAMETERS and value is not None and value != ""
     }
 
-
-def validate_timing(values: dict[str, int]) -> dict[str, str]:
-    errors: dict[str, str] = {}
-    for key in ("trigger_stuck_after", "presence_stuck_after"):
-        if (value := values.get(key)) and value < MIN_STUCK_SECONDS:
-            errors[key] = "stuck_too_short"
-    return errors
 
 
 def timing_text(timing: OccupancyTiming) -> str:
@@ -479,6 +487,12 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
     def _save(self) -> ConfigFlowResult:
         return self.async_create_entry(data=self._config.as_dict())
 
+    def _app_owns_lighting(self) -> bool:
+        """Phase A4: the Smart Lighting App controls lighting; its configuration is edited there."""
+        runtime = getattr(self.config_entry, "runtime_data", None)
+        bridge = getattr(runtime, "lighting_bridge", None)
+        return bool(bridge is not None and (bridge.app_owns or bridge.busy))
+
     def _lighting_store(self) -> LightingStore | None:
         """The mood lighting store of the loaded integration (profiles live there since 0.3)."""
         runtime = getattr(self.config_entry, "runtime_data", None)
@@ -548,7 +562,7 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
                 errors[CONF_MODE] = "mode_not_available"
             if not errors:
                 self._config = replace(
-                    self._config, mood=mood_from_input(user_input), operating_mode=mode
+                    self._config, mood=mood_from_input(user_input, self._config.mood), operating_mode=mode
                 )
                 return self._save()
         schema = mood_schema(self.hass, self._config.mood, include_mode=self._config.operating_mode)
@@ -580,6 +594,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
 
     # categories ----------------------------------------------------------
     async def async_step_categories(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if self._app_owns_lighting():
+            return self.async_abort(reason="managed_by_app")
         return self.async_show_menu(
             step_id="categories",
             menu_options=["category_add", "category_select", "category_remove", "category_create_labels"],
@@ -660,6 +676,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
         if not self._config.categories:
             return self.async_abort(reason="no_categories")
         if user_input is not None:
+            if self._app_owns_lighting():
+                return self.async_abort(reason="managed_by_app")
             remove = set(user_input.get(CONF_CATEGORIES) or [])
             self._config = _without_categories(self._config, remove)
             if (store := self._lighting_store()) is not None:
@@ -690,6 +708,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
 
     # profiles ------------------------------------------------------------
     async def async_step_profiles(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        if self._app_owns_lighting():
+            return self.async_abort(reason="managed_by_app")
         if (store := self._lighting_store()) is None:
             return self.async_abort(reason="not_loaded")
         if user_input is not None:
@@ -757,6 +777,8 @@ class SmartOccupancyOptionsFlow(RoomFlowMixin, OptionsFlow):
 
     def _store_profile(self, setting: ProfileSetting | None) -> ConfigFlowResult:
         """Save the entry in the lighting store, without reloading the integration."""
+        if self._app_owns_lighting():
+            return self.async_abort(reason="managed_by_app")
         store = self.config_entry.runtime_data.lighting.store
         store.async_set(set_profile(store.config, self._scope, self._mood, self._target, setting, self._profile_area))
         # Unchanged options: the integration is not reloaded.

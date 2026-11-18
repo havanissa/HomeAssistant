@@ -49,6 +49,10 @@ class Settings:
     # (SL_ENGINE_MIN_SHADOW_SECONDS, SL_ENGINE_MIN_TRANSITIONS); they are not App options.
     engine_min_shadow_seconds: int = 7200
     engine_min_transitions: int = 20
+    # Phase A4: the lighting comparison required before a handover (SL_LIGHTING_MIN_SHADOW_SECONDS,
+    # SL_LIGHTING_MIN_COMMANDS; tests and development only).
+    lighting_min_shadow_seconds: int = 7200
+    lighting_min_commands: int = 10
 
     @property
     def token_present(self) -> bool:
@@ -81,6 +85,8 @@ class Settings:
             "data_dir": str(self.data_dir) if self.data_dir else None,
             "engine_min_shadow_seconds": self.engine_min_shadow_seconds,
             "engine_min_transitions": self.engine_min_transitions,
+            "lighting_min_shadow_seconds": self.lighting_min_shadow_seconds,
+            "lighting_min_commands": self.lighting_min_commands,
         }
 
 
@@ -132,6 +138,8 @@ def load_settings(
         data_dir=Path(env.get("SL_DATA_DIR", DATA_DIR)) if env.get("SL_DATA_DIR", DATA_DIR) else None,
         engine_min_shadow_seconds=_positive(env.get("SL_ENGINE_MIN_SHADOW_SECONDS"), 7200),
         engine_min_transitions=_positive(env.get("SL_ENGINE_MIN_TRANSITIONS"), 20),
+        lighting_min_shadow_seconds=_positive(env.get("SL_LIGHTING_MIN_SHADOW_SECONDS"), 7200),
+        lighting_min_commands=_positive(env.get("SL_LIGHTING_MIN_COMMANDS"), 10),
     )
 
 

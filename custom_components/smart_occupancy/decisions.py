@@ -195,6 +195,8 @@ class DecisionLog:
     def __init__(self, hass: HomeAssistant, on_change: Callable[[], None]) -> None:
         self.hass = hass
         self._on_change = on_change
+        # Phase A4: called with (subject, decision) after every record (the App's comparison of both controllers).
+        self.observer: Callable[[str, dict[str, Any]], None] | None = None
         self._logs: dict[str, deque[Decision]] = {}
         self._verify: dict[str, CALLBACK_TYPE] = {}
         self._stopped = False
@@ -295,6 +297,11 @@ class DecisionLog:
                 self._schedule_verify(subject, decision.id, checks, verify_after)
         _LOGGER.debug("decision subject=%s kind=%s action=%s status=%s count=%d", subject, kind, action,
                       decision.status, decision.count)
+        if self.observer is not None:
+            try:
+                self.observer(subject, decision.as_dict())
+            except Exception:  # noqa: BLE001 - observation never affects a decision
+                _LOGGER.debug("decision_observer_failed", exc_info=True)
         self._on_change()
         return decision
 

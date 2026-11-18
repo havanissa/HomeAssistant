@@ -288,7 +288,8 @@
       "all_categories_labelled": "Every category already has a label.",
       "no_rooms": "No rooms are enabled.",
       "no_lights": "This room has no managed lights.",
-      "not_loaded": "The integration is not loaded. Fix its problems and try again."
+      "not_loaded": "The integration is not loaded. Fix its problems and try again.",
+      "managed_by_app": "Lighting is managed by the Smart Lighting App: change it there. This step is read-only until lighting control is returned to the integration."
     }
   },
   "selector": {
@@ -477,12 +478,21 @@
       "recheck": {
         "name": "Re-check diagnostics"
       }
+    },
+    "select": {
+      "mood": {
+        "name": "Mood"
+      }
     }
   },
   "services": {
     "engine_return_to_integration": {
       "name": "Return occupancy control to the integration",
       "description": "Makes the integration's own occupancy engine publish room occupancy again, when the Smart Lighting App owns it. The current occupancy is kept (an occupied room stays occupied). Administrators only. The App returns to comparing (shadow mode) until a new, reviewed handover."
+    },
+    "lighting_return_to_integration": {
+      "name": "Return lighting control to the integration",
+      "description": "Administrators only. Takes lighting control back from the Smart Lighting App (its last configuration and state are kept). Nothing is switched by the change itself."
     }
   }
 }

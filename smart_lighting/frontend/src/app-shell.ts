@@ -13,6 +13,12 @@ import { chip, haConnectionInfo, linkInfo, StoreElement } from "./ui";
 import "./pages/dashboard";
 import "./pages/diagnostics";
 import "./pages/floorplan";
+import "./pages/lighting";
+import "./pages/lighting-control";
+import "./pages/lighting-room";
+import "./pages/lighting-settings";
+import "./pages/moods";
+import "./pages/switches";
 import "./pages/pending";
 import "./pages/presence";
 import "./pages/presence-room";
@@ -43,6 +49,9 @@ export class SlApp extends StoreElement {
     if (route === "rooms" && sub[0]) return `rooms/${sub[0]}`;
     if (route === "presence" && sub[0] && sub[0] !== "diagnostics" && sub[0] !== "engine") return `presence/${sub[0]}`;
     if (route === "floorplan") return "floorplan";
+    // Phase A4: Lighting (a room or the settings), Moods and Switches may hold unsaved drafts.
+    if (route === "lighting" && sub[0] && sub[0] !== "control") return `lighting/${sub[0]}`;
+    if (route === "moods" || route === "switches") return route;
     return null;
   }
 
@@ -109,7 +118,7 @@ export class SlApp extends StoreElement {
 
   private isPending(key: string): boolean {
     if (FOUNDATION.has(key)) return false;
-    return (store.overview?.modules.find((m) => m.key === key)?.status ?? (key === "rooms" || key === "presence" ? "gui" : "pending")) === "pending";
+    return (store.overview?.modules.find((m) => m.key === key)?.status ?? (["rooms", "presence", "lighting", "moods", "switches"].includes(key) ? "gui" : "pending")) === "pending";
   }
 
   private navLink(item: NavItem, variant: "side" | "sheet"): unknown {
@@ -191,6 +200,16 @@ export class SlApp extends StoreElement {
         if (this.sub[0] === "diagnostics") return html`<sl-presence-diagnostics></sl-presence-diagnostics>`;
         if (this.sub[0] === "engine") return html`<sl-presence-engine></sl-presence-engine>`;
         return this.sub[0] ? html`<sl-presence-room .areaId=${this.sub[0]}></sl-presence-room>` : html`<sl-presence></sl-presence>`;
+      case "lighting":
+        if (this.sub[0] === "control") return html`<sl-lighting-control></sl-lighting-control>`;
+        if (this.sub[0] === "settings") return html`<sl-lighting-settings .tab=${this.sub[1] ?? ""}></sl-lighting-settings>`;
+        return this.sub[0]
+          ? html`<sl-lighting-room .areaId=${this.sub[0]} .tab=${this.sub[1] ?? "overview"}></sl-lighting-room>`
+          : html`<sl-lighting></sl-lighting>`;
+      case "moods":
+        return html`<sl-moods .tab=${this.sub[0] ?? ""}></sl-moods>`;
+      case "switches":
+        return html`<sl-switches .areaId=${this.sub[0] ?? ""}></sl-switches>`;
       case "rooms":
         return this.sub[0]
           ? html`<sl-room-editor .areaId=${this.sub[0]} .tab=${this.sub[1] ?? "overview"}></sl-room-editor>`

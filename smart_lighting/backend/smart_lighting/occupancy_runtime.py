@@ -121,6 +121,7 @@ class OccupancyRuntime:
         self.sub_id: int | None = None
         self.integration: dict[str, Any] = {}  # the integration's ownership record, as last reported
         self.integration_results: dict[str, dict[str, Any]] = {}
+        self.result_fired: dict[str, Any] = {}  # when the integration's result fired (ISO), per room
         self.results: dict[str, dict[str, Any]] = {}
         self.epoch: int | None = None
         self._token: str | None = None
@@ -141,6 +142,8 @@ class OccupancyRuntime:
         self._save_handle: asyncio.TimerHandle | None = None
         self._compare_handle: asyncio.TimerHandle | None = None
         self._listeners: list[Callable[[str], None]] = []
+        # Phase A4: the lighting runtime follows the published occupancy of each room.
+        self._result_listeners: list[Callable[[str], None]] = []
         self._unsub: Callable[[], None] | None = None
         self._attempt = 0
         self._stopping = False
@@ -184,6 +187,28 @@ class OccupancyRuntime:
         """``listener(kind)``: "engine" (mode, ownership or connection changed)."""
         self._listeners.append(listener)
         return lambda: self._listeners.remove(listener)
+
+    # ------------------------------------------------- published occupancy (A4)
+    def published_wire(self, area_id: str) -> dict[str, Any] | None:
+        """The published result of a room: the App's while it owns occupancy, otherwise the integration's."""
+        if self.mode == "authoritative":
+            return self.results.get(area_id)
+        return self.integration_results.get(area_id)
+
+    def room_spec(self, area_id: str) -> Any:
+        return self.house.spec.room(area_id) if self.house is not None else None
+
+    def add_result_listener(self, listener: Callable[[str], None]) -> Callable[[], None]:
+        self._result_listeners.append(listener)
+        return lambda: self._result_listeners.remove(listener) if listener in self._result_listeners else None
+
+    def _published_changed(self, area_ids: Any) -> None:
+        for area_id in list(area_ids):
+            for listener in list(self._result_listeners):
+                try:
+                    listener(area_id)
+                except Exception:  # noqa: BLE001 - one listener must not break occupancy
+                    _LOGGER.exception("Occupancy result listener failed")
 
     def _changed(self) -> None:
         for listener in list(self._listeners):
@@ -412,6 +437,7 @@ class OccupancyRuntime:
         self.counters["sessions"] += 1
         self.results = {}
         self.integration_results = dict(hello.get("results") or {})
+        self.result_fired = {}
         now = utcnow()
         lease = hello.get("lease_token")
         if lease and P.valid_id(lease):
@@ -434,6 +460,7 @@ class OccupancyRuntime:
             self._pending.update(spec.area_ids)
             self._spawn(self._publish())
         self._save_soon()
+        self._published_changed(spec.area_ids)
         _LOGGER.info("Occupancy bridge session %s: %d rooms, owner %s (epoch %s), App mode %s",
                      self.session_id[:8], len(spec.rooms), self.integration.get("owner"),
                      self.integration.get("epoch"), self.mode)
@@ -444,8 +471,11 @@ class OccupancyRuntime:
         if not isinstance(wire, dict):
             raise ValueError("result must be an object")
         self.integration_results[area_id] = wire
+        self.result_fired[area_id] = event.get("fired")
         self.comparator.update(area_id, "integration", wire, utcnow())
         self._compare_soon()
+        if self.mode != "authoritative":
+            self._published_changed([area_id])
 
     def _on_input(self, event: dict[str, Any]) -> None:
         house = self.house
@@ -508,6 +538,7 @@ class OccupancyRuntime:
         if self._heartbeat:
             self._heartbeat.cancel()
             self._heartbeat = None
+        self._published_changed(set(self.results) | set(self.integration_results))
         self._changed()
 
     # ----------------------------------------------------------- evaluation
@@ -525,6 +556,8 @@ class OccupancyRuntime:
         self.results[area_id] = wire
         self.comparator.update(area_id, "app", wire, now)
         self._compare_soon()
+        if self.mode == "authoritative":
+            self._published_changed([area_id])
         if evaluation.transition:
             self.counters["transitions"] += 1
             self._save_soon()

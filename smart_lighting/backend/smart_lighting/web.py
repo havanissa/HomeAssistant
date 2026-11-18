@@ -49,6 +49,8 @@ from .const import APP_VERSION
 from .core import AppCore
 from .floorplan import FloorPlanError
 from .ha import HomeAssistantError
+from .lighting_api import LightingApiError
+from .lighting_runtime import LightingError
 from .occupancy_runtime import EngineError
 from .live import LiveHub, origin_allowed
 from .rooms import RoomsError
@@ -494,6 +496,101 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
             return engine_error(err)
         return _json({"result": result})
 
+    # ---------------------------------------------------------- lighting (A4)
+    def lighting_runtime(request: web.Request):
+        core: AppCore = request.app[CORE_KEY]
+        if core.lighting is None or core.lighting_api is None:
+            raise RoomsError("not_connected", "The App is starting", 503)
+        return core.lighting, core.lighting_api
+
+    def lighting_error(err: Exception) -> web.Response:
+        return _json({"error": str(err), "code": getattr(err, "code", "error")}, status=getattr(err, "status", 409))
+
+    async def current_user(request: web.Request) -> tuple[str | None, bool]:
+        user_id = request.headers.get("X-Remote-User-Id")
+        if settings.dev_mode and not user_id:
+            return None, True
+        try:
+            return user_id, bool(await rooms_service(request).is_admin(user_id))
+        except Exception:  # noqa: BLE001 - fail closed
+            return user_id, False
+
+    @rooms_handler
+    async def lighting_status(request: web.Request) -> web.Response:
+        runtime, api = lighting_runtime(request)
+        core: AppCore = request.app[CORE_KEY]
+        acknowledged = None
+        if core.ha is not None and core.ha.connected:
+            try:
+                acknowledged = await core.ha.command("smart_occupancy/lighting/bridge/status")
+            except (HomeAssistantError, ConnectionError, TimeoutError):
+                acknowledged = None
+        data = runtime.status()
+        data["acknowledged_owner"] = acknowledged.get("state") if isinstance(acknowledged, dict) else None
+        data["integration_status"] = acknowledged
+        data["commands_go_to"] = api.where()
+        data["backups"] = runtime.backups()
+        user_id, admin = await current_user(request)
+        data["user"] = {"is_admin": admin}
+        data["area_names"] = {a.get("area_id"): a.get("name") for a in (core.ha.areas if core.ha else [])}
+        return _json(data)
+
+    @rooms_handler
+    async def lighting_command(request: web.Request) -> web.Response:
+        """One lighting editor command (the integration's API): forwarded, or run by the App after the handover."""
+        runtime, api = lighting_runtime(request)
+        if request.content_type != "application/json" or request.headers.get(CSRF_HEADER) != "1":
+            raise RoomsError("forbidden", "This request must come from the Smart Lighting interface", 403)
+        if request.headers.get("Origin") and not origin_allowed(request):
+            raise RoomsError("forbidden", "Cross-site requests are not allowed", 403)
+        try:
+            body = json.loads(await read_limited(request, MAX_BODY))
+        except (ValueError, UnicodeDecodeError) as err:
+            raise RoomsError("invalid_json", "The request body is not valid JSON") from err
+        if not isinstance(body, dict) or not isinstance(body.get("type"), str):
+            raise RoomsError("invalid_json", "The request needs a command type")
+        if api.is_write(body["type"]):
+            await admin_guard(request)
+        user_id, admin = await current_user(request)
+        try:
+            result = await api.call(body, user_id=user_id, is_admin=admin)
+        except LightingApiError as err:
+            return lighting_error(err)
+        return _json({"result": result, "handled_by": api.where()})
+
+    @rooms_handler
+    async def lighting_handover(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        if body.get("confirm") is not True:
+            raise RoomsError("confirmation_required", "Confirm the handover after reviewing the readiness checks")
+        runtime, _api = lighting_runtime(request)
+        try:
+            result = await runtime.handover(request.headers.get("X-Remote-User-Id"))
+        except LightingError as err:
+            return lighting_error(err)
+        return _json({"result": result})
+
+    @rooms_handler
+    async def lighting_release(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        runtime, _api = lighting_runtime(request)
+        try:
+            if body.get("mode") == "return":
+                result = await runtime.return_control(request.headers.get("X-Remote-User-Id"))
+            else:
+                result = await runtime.release(request.headers.get("X-Remote-User-Id"))
+        except LightingError as err:
+            return lighting_error(err)
+        return _json({"result": result})
+
+    @rooms_handler
+    async def lighting_export(request: web.Request) -> web.Response:
+        await admin_guard(request)
+        runtime, _api = lighting_runtime(request)
+        data = runtime.export()
+        return web.Response(text=json.dumps(data, indent=1), content_type="application/json",
+                            headers=download_name("smart-lighting-lighting", data["at"]))
+
     async def live(request: web.Request) -> web.StreamResponse:
         return await request.app[HUB_KEY].handle(request)
 
@@ -540,6 +637,11 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     app.router.add_get("/api/engine/comparison", engine_comparison)
     app.router.add_post("/api/engine/handover", engine_handover)
     app.router.add_post("/api/engine/release", engine_release)
+    app.router.add_get("/api/lighting", lighting_status)
+    app.router.add_post("/api/lighting/command", lighting_command)
+    app.router.add_post("/api/lighting/handover", lighting_handover)
+    app.router.add_post("/api/lighting/release", lighting_release)
+    app.router.add_get("/api/lighting/export", lighting_export)
     app.router.add_route("*", "/api/{tail:.*}", api_not_found)
     assets = settings.static_dir / "assets"
     if assets.is_dir():

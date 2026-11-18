@@ -67,6 +67,8 @@ def expected_unique_ids(config: IntegrationConfig) -> set[str]:
         global_unique_id(k)
         for k in GLOBAL_SENSOR_KEYS + GLOBAL_BINARY_SENSOR_KEYS + GLOBAL_BUTTON_KEYS + GLOBAL_FORECAST_SENSOR_KEYS
     }
+    if config.mood.builtin:
+        ids.add(global_unique_id("mood"))  # the built-in mood selector (Phase A4)
     for area_id, room in config.enabled_rooms.items():
         ids.add(room_unique_id(area_id))
         ids |= {room_entity_unique_id(area_id, key) for key in ROOM_OCCUPANCY_ENTITIES}

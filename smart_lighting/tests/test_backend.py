@@ -15,6 +15,9 @@ from smart_lighting.core import AppCore
 from smart_lighting.ha import (
     CONFIG_WRITE_COMMANDS,
     ENGINE_COMMANDS,
+    LIGHTING_BRIDGE_COMMANDS,
+    LIGHTING_READ_COMMANDS,
+    LIGHTING_WRITE_COMMANDS,
     READ_ONLY_COMMANDS,
     SUBSCRIPTION_COMMANDS,
     HomeAssistantClient,
@@ -64,7 +67,8 @@ async def test_overview_reads_home_assistant_and_detects_integration(app_client:
     assert overview["supervisor"]["available"] is True
     assert "options" not in overview["supervisor"]["app"]  # only whitelisted fields
     assert overview["migration"]["modules_migrated"] == 0  # no automation runs in the App
-    assert overview["migration"]["interfaces_migrated"] == 2  # the Rooms and Presence interfaces
+    # The Rooms, Presence, Lighting, Moods and Switches interfaces (Phase A4).
+    assert overview["migration"]["interfaces_migrated"] == 5
     assert overview["migration"]["modules_total"] == 7
     assert overview["safety"]["service_calls_sent"] == 0
 
@@ -96,7 +100,8 @@ async def test_only_read_only_commands_are_sent(app_client: Any, fake_ha: FakeHo
     subscriptions = [c for c in fake_ha.commands if c["type"] == "subscribe_events"]
     assert [c["event_type"] for c in subscriptions] == [
         "state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated",
-        "floor_registry_updated"]
+        "floor_registry_updated", "label_registry_updated", "automation_reloaded", "script_reloaded",
+        "homeassistant_started"]
     # The supervisor endpoints used are the two basic, read-only ones.
     assert set(fake_ha.supervisor_requests) == {"/addons/self/info", "/info"}
 
@@ -129,7 +134,8 @@ async def test_write_commands_are_refused_before_sending(
 
 
 @pytest.mark.parametrize("command", ["call_service", "get_states", "smart_occupancy/rooms/get",
-                                     "smart_occupancy/lighting/room/activate", "config_entries/update"])
+                                     "smart_occupancy/lighting/editor", "smart_occupancy/lighting/bridge/execute",
+                                     "smart_occupancy/curtains/preset/apply", "config_entries/update"])
 async def test_config_write_accepts_only_room_commands(app_client: Any, fake_ha: FakeHomeAssistant, command: str) -> None:
     before = len(fake_ha.commands)
     with pytest.raises(ReadOnlyViolation):
@@ -143,20 +149,32 @@ def test_client_has_no_device_api() -> None:
     assert not {n for n in names if re.search(r"service|turn_on|turn_off|set_state|fire|update_entry", n)}
     assert {n for n in names if "write" in n} == {"config_write", "config_writes_sent"}
     assert {n for n in names if "engine" in n or n == "subscribe"} == {"engine_command", "subscribe"}
+    # Phase A4: the only way towards a device is the integration's fenced lighting bridge.
+    assert {n for n in names if "lighting" in n} == {"lighting_command"}
     assert READ_ONLY_COMMANDS == {
         "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "config_entries/subscribe",
         "manifest/get", "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
         "config/floor_registry/list", "config/auth/list", "smart_occupancy/rooms/get", "smart_occupancy/rooms/review",
         "smart_occupancy/rooms/restore/review", "smart_occupancy/presence/get", "smart_occupancy/presence/review",
         "history/history_during_period", "smart_occupancy/engine/status",
+        # Phase A4 (lighting runtime reads):
+        "config/label_registry/list", "config/entity_registry/get_entries", "automation/config", "script/config",
+        "device_automation/trigger/list",
+        "validate_config", "unsubscribe_events", "smart_occupancy/lighting/bridge/status",
     }
     # Phase A3.2: the occupancy bridge (ownership and the App's published occupancy results; no device control).
     assert ENGINE_COMMANDS == {"smart_occupancy/engine/claim", "smart_occupancy/engine/publish",
                                "smart_occupancy/engine/heartbeat", "smart_occupancy/engine/release"}
-    assert SUBSCRIPTION_COMMANDS == {"smart_occupancy/engine/subscribe"}
-    # The only commands that change configuration: the integration's validated room and presence configuration commands.
+    # Phase A4: the lighting bridge.
+    assert LIGHTING_BRIDGE_COMMANDS == {f"smart_occupancy/lighting/bridge/{c}" for c in (
+        "claim", "execute", "heartbeat", "publish", "inputs", "options", "release", "return")}
+    assert SUBSCRIPTION_COMMANDS == {"smart_occupancy/engine/subscribe", "smart_occupancy/lighting/bridge/subscribe",
+                                     "smart_occupancy/lighting/subscribe", "subscribe_trigger", "mqtt/subscribe"}
+    # The commands that change configuration: the integration's validated room, presence and lighting commands.
     assert CONFIG_WRITE_COMMANDS == {"smart_occupancy/rooms/set", "smart_occupancy/rooms/restore",
-                                     "smart_occupancy/presence/set"}
+                                     "smart_occupancy/presence/set"} | LIGHTING_WRITE_COMMANDS
+    assert all(c.startswith("smart_occupancy/lighting/") for c in LIGHTING_WRITE_COMMANDS | LIGHTING_READ_COMMANDS)
+    assert not (LIGHTING_WRITE_COMMANDS | LIGHTING_READ_COMMANDS) & LIGHTING_BRIDGE_COMMANDS
 
 
 async def test_token_never_reaches_the_browser(app_client: Any) -> None:

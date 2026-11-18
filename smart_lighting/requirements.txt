@@ -9,3 +9,7 @@ idna==3.20
 multidict==7.2.1
 propcache==0.5.4
 yarl==1.25.1
+# Phase A4: the vendored lighting runtime (same versions as Home Assistant 2026.11).
+astral==2.2
+pytz==2026.6
+voluptuous==0.16.0

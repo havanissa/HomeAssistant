@@ -15,13 +15,15 @@ from making occupancy detection look degraded:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .const import Classification, ProblemCategory, Severity
-from .coordinator import RoomSnapshot, Snapshot
 from .engine import RoomResult, SignalStatus
 from .occupancy import AVAILABLE, PENDING
 from .validation import ENTITY_PROBLEM_CODES
+
+if TYPE_CHECKING:
+    from .coordinator import RoomSnapshot, Snapshot
 
 HEALTHY = Classification.HEALTHY.value
 WARNING = Classification.WARNING.value

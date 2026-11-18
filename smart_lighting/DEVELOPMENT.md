@@ -11,6 +11,37 @@ Layout of the App folder:
 | `tests/` | Backend and package tests (pytest) |
 | `tests/e2e/` | End-to-end stack: fake Supervisor + real App container + Playwright checks |
 
+## Shared lighting runtime (Phase A4)
+
+`backend/smart_occupancy/` is a byte-identical copy of the integration's
+lighting runtime (`custom_components/smart_occupancy/runtime_manifest.py`
+lists the modules); only its `__init__.py` is the App's own. After changing any
+of those modules in the integration, run from the repository root:
+
+```sh
+python3 scripts/sync_lighting_runtime.py           # copy
+python3 scripts/sync_lighting_runtime.py --check   # what the tests check
+```
+
+The modules import Home Assistant's API; in the App those names come from the
+**host interface** `backend/homeassistant/` (documented in its `__init__.py`).
+`tests/test_host_interface.py` fails when a vendored module imports a name the
+host does not provide. `backend/smart_lighting/lighting_host.py` connects one
+controller to the App's websocket client, `lighting_runtime.py` runs the bridge
+session, shadow and owner, `lighting_compare.py` compares, `lighting_api.py`
+routes the interface's lighting commands.
+
+**Behavioural parity.** The integration's suite records scenarios with its own
+controller (`tests/test_lighting_parity*.py`, recorder in
+`tests/lighting_parity.py`): the starting picture, every event, every command
+with its outcome, every decision and the answers to the read-only editor
+commands. `LIGHTING_RECORD=1` (integration suite) writes them to
+`tests/lighting_scenarios/*.json.gz`; without it the integration suite checks
+that the recordings are still what the controller does.
+`tests/test_lighting_parity.py` replays each one through the App's host in
+virtual time and requires the same commands, decisions and answers. Re-record
+after an intended behaviour change and review the difference.
+
 ## Frontend
 
 ```sh
@@ -84,6 +115,16 @@ which the script moves with state writes, not service calls) and the door;
 it checks the Presence dashboard, workspace, timing, sensor changes, a stale
 write, the timeline, global defaults, diagnostics and the floor plan overlay,
 and has a `--phase restart-check`.
+`lighting_checks.py` (Phase A4) needs the integration 0.8.0 with its lighting
+configuration reset (no `.storage/smart_occupancy.lighting*`), the A3.1 seed
+and the stack started with `LIGHTING_MIN_SHADOW_SECONDS=60
+LIGHTING_MIN_COMMANDS=3`: configuration through the App while the integration
+controls lighting, shadow comparison, the browser handover, the App controlling
+`light.bed_light` through the integration, read-only legacy editors, a crash of
+the App container (fallback without a light command), the restarted App in
+shadow, a manual override kept across "Return control"; `--phase
+restart-check` after restarting Home Assistant (the same App resumes) and
+`--phase finish` (the administrator service).
 Primary targets: desktop (1440, 1920 px) and tablets (768 portrait, 1024 and
 1366 landscape, with touch). Phone sizes (360, 390 px, 740 landscape) are
 kept as a regression check of the fallback layout. It fails on any Home

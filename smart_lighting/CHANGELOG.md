@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.5.0
+
+Phase A4: Lighting, Moods and Switches. Needs Smart Occupancy & Lighting
+0.8.0. Nothing is migrated automatically: the integration keeps controlling the
+lights until an administrator performs a reviewed handover.
+
+- **The integration's lighting runtime in the App.** The lighting controller and
+  everything it uses (49 modules, listed in the integration's
+  `runtime_manifest.py`) are byte-identical copies; both test suites and the
+  bridge (SHA-256 fingerprint) check it. They run on a **host interface**
+  (`backend/homeassistant/`): exactly the part of Home Assistant's Python API
+  they use, on the App's websocket connection — states and contexts, the event
+  bus (with Home Assistant's queueing of nested events and eager tasks), timers,
+  registries (including the extended entity entries), the sun, JSON stores, MQTT
+  through Home Assistant (`mqtt/subscribe`), device triggers
+  (`subscribe_trigger`) and automation / script configurations for conflict
+  detection.
+- **Shadow mode** (default): a fresh controller from an exact copy of the
+  integration's configuration and state for every bridge session; it follows
+  configuration and live option changes and sends nothing. The comparison
+  matches commands (service, targets, data within 3 s) and decisions, and keeps
+  every mismatch with both sides' commands.
+- **Handover and rollback** (Lighting → Control): readiness checks (2 h, 10
+  matching commands, no mismatch, same code, same configuration), a reviewed
+  handover (backup of the copy in `/data/lighting/backups`, key-by-key check of
+  the copied configuration), the App's configuration and state stored in
+  `/data/lighting/store` and mirrored to the integration, light commands only
+  through the integration's fenced `execute`, occupancy inputs to the
+  integration's engine, the room view for the integration's entities;
+  "Return control" (a release: the App's final configuration and state go with
+  it, also when the forced return is used while the App controls lighting), an
+  export. Configuration and state are mirrored about two seconds after every
+  change, each on its own. A refused command that means "not the owner" stops
+  the App's controller at once; a reconnect resumes with the lease token,
+  restarts the controller from its own stored state (nothing applied) and
+  applies entity renames made while it was away; a new App process never
+  resumes. A failed return leaves the App's controller working. Connected
+  while Home Assistant is still starting (a Home Assistant restart with the
+  App running), the client re-reads the states once Home Assistant runs, so
+  the resumed controller knows every light.
+- **Host timing as in Home Assistant:** a timer started while an event is
+  handled (a state change, a configuration change from the bridge, an occupancy
+  result) counts from when the event fired in Home Assistant, not from when it
+  reached the App (at most two seconds), so the shadow's debounce ends at the
+  same instant as the integration's. Found with the end-to-end stack: without
+  it the shadow sometimes saw the integration's command land first and
+  planned "already so".
+- **Lighting**, **Moods** and **Switches** pages, on one command API: the
+  integration's own 50 lighting editor commands, forwarded while the
+  integration controls lighting and answered by the App's copy of the same
+  handlers afterwards. A forwarded command that changes the controller's
+  runtime state (override cleared, profile test, switch learning, calibration
+  reset, Priority Inputs, supervisor check) also runs on the shadow's copy, so
+  the comparison stays meaningful.
+- **Universal moods**: one selector or the built-in mood selector instead of the
+  three helpers.
+- Tests: 21 recorded scenarios replayed through the host (same commands, same
+  decisions and the same answers to the editor commands as the integration),
+  the host interface, the runtime against a simulated bridge, the command
+  router; end-to-end `tests/e2e/lighting_checks.py`.
+
 ## 0.4.0
 
 Phase A3.2: occupancy engine migration. Needs Smart Occupancy & Lighting

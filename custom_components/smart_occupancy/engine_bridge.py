@@ -641,7 +641,9 @@ class EngineBridge:
         wire = result_to_wire(engine.result, engine.visit_confirmed)
         if self._sent.get(area_id) != wire:
             self._sent[area_id] = wire
-            self._broadcast({"type": "result", "area_id": area_id, "at": iso(now), "result": wire})
+            # fired: full precision, so the App's lighting runtime can start its timers from this instant.
+            self._broadcast({"type": "result", "area_id": area_id, "at": iso(now), "fired": now.isoformat(),
+                             "result": wire})
 
     @callback
     def input_preliminary(self, signals: dict[str, frozenset[str]], now: datetime) -> None:

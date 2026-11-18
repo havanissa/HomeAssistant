@@ -1,0 +1,896 @@
+/* Moods page (Phase A4). Desktop and landscape tablets first; phones stack. Breakpoints follow the content area
+   (the .content container), like the rest of the App. */
+
+.mo-page input[type="text"],
+.mo-page input[type="number"] {
+  min-height: var(--sl-touch);
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 0.75rem;
+  border: 1px solid var(--sl-divider);
+  border-radius: 10px;
+  background: var(--sl-surface);
+  color: var(--sl-text);
+}
+
+.mo-page input[type="color"] {
+  width: 3rem;
+  height: var(--sl-touch);
+  padding: 2px;
+  border: 1px solid var(--sl-divider);
+  border-radius: 10px;
+  background: var(--sl-surface);
+}
+
+.mo-page select {
+  width: 100%;
+  min-width: 0;
+}
+
+.mo-page .setting-editor .field > span:first-child {
+  font-size: 0.8rem;
+  color: var(--sl-text-2);
+}
+
+.mo-page .setting-editor .field {
+  margin-bottom: 0;
+}
+
+.mo-tabs {
+  margin-bottom: 1rem;
+}
+
+.mo-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.mo-card > * {
+  margin: 0;
+}
+
+.mo-card > .card-head {
+  margin-bottom: 0;
+}
+
+.mo-subhead {
+  margin: 0.5rem 0 0;
+  color: var(--sl-text-2);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.mo-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.mo-field > span:first-child {
+  font-size: 0.8rem;
+  color: var(--sl-text-2);
+}
+
+.mo-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+.mo-inline select {
+  width: auto;
+}
+
+.mo-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr));
+  gap: 0.75rem 1rem;
+  align-items: start;
+}
+
+.mo-form-2 {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+}
+
+.mo-advanced {
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--sl-divider);
+}
+
+.mo-add-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.mo-add-row input {
+  flex: 1 1 auto;
+}
+
+.mo-apply-row,
+.mo-foot-actions,
+.mo-test-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+.mo-apply-row > p,
+.mo-foot-actions > span {
+  flex: 1 1 16rem;
+  margin: 0;
+  display: flex;
+  gap: 0.35rem;
+  align-items: flex-start;
+}
+
+.mo-test-row {
+  justify-content: flex-start;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--sl-divider);
+}
+
+.mo-strong {
+  font-weight: 500;
+}
+
+.mo-setting {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.mo-now {
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: var(--sl-ok-bg);
+  color: var(--sl-ok);
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.mo-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--sl-primary);
+  flex: none;
+}
+
+.mo-row-name {
+  font-weight: 500;
+}
+
+.mo-chips .chip {
+  margin: 0 0.25rem 0.25rem 0;
+}
+
+/* Generic multi-card grid of the simpler tabs. */
+.mo-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+
+.mo-two {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+
+@container (min-width: 56rem) {
+  .mo-grid {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  }
+  .mo-grid > .wide {
+    grid-column: 1 / -1;
+  }
+  .mo-two {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+}
+
+/* ------------------------------------------------------------------ Profiles: side | table | inspector */
+.mo-profiles {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+
+.mo-center {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.mo-center > * {
+  flex-shrink: 0;
+  margin: 0;
+}
+
+.mo-side {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--sl-divider);
+  border-radius: var(--sl-radius);
+  background: var(--sl-surface);
+}
+
+.mo-side-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.mo-side-title {
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--sl-text-2);
+}
+
+.mo-side-title .muted {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+.mo-seg {
+  display: flex;
+  margin: 0;
+}
+
+.mo-seg label {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0.25rem 0.35rem;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.mo-mood-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mo-mood-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 2.75rem;
+  padding: 0.3rem 0.6rem;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--sl-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mo-mood-item:hover {
+  background: var(--sl-surface-2);
+}
+
+.mo-mood-item.selected {
+  background: var(--sl-primary-soft);
+  color: var(--sl-primary-strong);
+  font-weight: 500;
+}
+
+.mo-mood-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mo-every {
+  margin-top: 0.25rem;
+  border-top: 1px dashed var(--sl-divider);
+  border-radius: 0 0 8px 8px;
+}
+
+.mo-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+
+.mo-toolbar-title {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.mo-toolbar-title h3 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.mo-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.mo-on {
+  border-color: var(--sl-primary);
+  background: var(--sl-primary-soft);
+  color: var(--sl-primary-strong);
+}
+
+.mo-table td {
+  vertical-align: top;
+}
+
+.mo-table .inherit-tag {
+  white-space: nowrap;
+}
+
+.mo-table tbody tr {
+  cursor: pointer;
+}
+
+.mo-table tbody tr:hover {
+  background: var(--sl-surface-2);
+}
+
+.mo-table tbody tr.selected {
+  background: var(--sl-primary-soft);
+}
+
+.mo-moods-table tbody tr {
+  cursor: default;
+}
+
+.mo-moods-table select {
+  min-width: 10rem;
+}
+
+.mo-row-btn {
+  display: block;
+  min-width: 8rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mo-has-own td:nth-child(3) {
+  box-shadow: inset 3px 0 0 var(--sl-info);
+}
+
+.mo-more {
+  align-self: flex-start;
+}
+
+.mo-legend {
+  display: flex;
+  gap: 0.4rem;
+  align-items: flex-start;
+}
+
+.mo-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 2rem 1rem;
+  color: var(--sl-text-2);
+  text-align: center;
+}
+
+/* Inspector: a slide-over until there is room for a third column. */
+.mo-inspector {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  width: min(26rem, 94vw);
+  overflow-y: auto;
+  background: var(--sl-surface);
+  border-left: 1px solid var(--sl-divider);
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.25);
+}
+
+.mo-inspector > * {
+  flex-shrink: 0;
+}
+
+.mo-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.mo-insp-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--sl-divider);
+}
+
+.mo-insp-head > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.mo-insp-head h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.mo-insp-section {
+  padding: 0.75rem;
+  border-bottom: 1px solid var(--sl-divider);
+}
+
+.mo-insp-section h4 {
+  margin: 0 0 0.5rem;
+  color: var(--sl-text-2);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.mo-insp-section > p {
+  margin: 0.5rem 0 0;
+}
+
+.mo-inspector .setting-editor {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr));
+}
+
+.mo-insp-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  margin-top: auto;
+  border-top: 1px solid var(--sl-divider);
+  background: var(--sl-surface);
+  position: sticky;
+  bottom: 0;
+}
+
+.mo-insp-foot > p {
+  margin: 0;
+}
+
+.mo-review {
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
+  background: var(--sl-info-bg);
+}
+
+.mo-chain {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mo-chain li {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.4rem 0 0.4rem 1.1rem;
+  border-left: 2px solid var(--sl-divider);
+}
+
+.mo-chain li::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 0.75rem;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--sl-surface);
+  border: 2px solid var(--sl-divider);
+}
+
+.mo-chain li.mo-chain-own::before {
+  border-color: var(--sl-info);
+  background: var(--sl-info);
+}
+
+.mo-chain li.mo-chain-result::before {
+  border-color: var(--sl-ok);
+  background: var(--sl-ok);
+}
+
+.mo-chain-level {
+  font-size: 0.75rem;
+  color: var(--sl-text-2);
+}
+
+/* Mood source */
+.mo-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.mo-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--sl-divider);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.mo-choice.selected {
+  border-color: var(--sl-primary);
+  background: var(--sl-primary-soft);
+}
+
+.mo-choice input {
+  margin-top: 0.2rem;
+  accent-color: var(--sl-primary);
+}
+
+.mo-builtin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: mo;
+}
+
+.mo-builtin-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.mo-builtin-list li::before {
+  counter-increment: mo;
+  content: counter(mo);
+  width: 1.5rem;
+  color: var(--sl-text-2);
+  font-size: 0.8rem;
+  text-align: right;
+  margin-right: 0.25rem;
+}
+
+.mo-builtin-list input {
+  flex: 1 1 auto;
+}
+
+.mo-builtin-list .icon-btn:first-of-type .icon {
+  transform: rotate(90deg);
+}
+
+.mo-builtin {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.mo-builtin > p {
+  margin: 0;
+}
+
+.mo-found {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mo-found li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.mo-found strong {
+  min-width: 6rem;
+}
+
+/* Light types */
+.mo-types {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mo-type {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--sl-divider);
+  border-radius: 10px;
+}
+
+.mo-type-editing {
+  border-color: var(--sl-primary);
+}
+
+.mo-type-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+
+.mo-type-icon {
+  display: inline-flex;
+  padding: 0.35rem;
+  border-radius: 10px;
+  background: var(--sl-primary-soft);
+  color: var(--sl-primary-strong);
+}
+
+.mo-type-text {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.mo-type-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.mo-type-lights {
+  margin: 0.4rem 0 0;
+  padding-left: 2.9rem;
+}
+
+.mo-type-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.mo-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mo-suggestions li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mo-suggestions .btn {
+  margin-left: auto;
+}
+
+/* Global adjustment */
+.mo-source {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.mo-source > p {
+  margin: 0;
+}
+
+.mo-suggest {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.mo-handling {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 12rem;
+}
+
+.mo-dialog .mo-form-grid {
+  margin: 0.75rem 0;
+}
+
+@container (min-width: 44rem) {
+  .mo-profiles {
+    grid-template-columns: 12.5rem minmax(0, 1fr);
+  }
+  .mo-side {
+    position: sticky;
+    top: 4rem;
+    max-height: calc(100vh - 5rem);
+    overflow-y: auto;
+  }
+}
+
+@container (min-width: 60rem) {
+  .mo-profiles {
+    grid-template-columns: 14rem minmax(0, 1fr);
+  }
+}
+
+@container (min-width: 66rem) {
+  .mo-profiles.mo-with-inspector {
+    grid-template-columns: 13rem minmax(0, 1fr) 21rem;
+  }
+  .mo-inspector {
+    position: sticky;
+    top: 4rem;
+    z-index: auto;
+    width: auto;
+    max-height: calc(100vh - 5rem);
+    border: 1px solid var(--sl-divider);
+    border-radius: var(--sl-radius);
+    box-shadow: var(--sl-shadow);
+  }
+  .mo-scrim {
+    display: none;
+  }
+}
+
+@container (min-width: 90rem) {
+  .mo-profiles {
+    grid-template-columns: 16rem minmax(0, 1fr);
+  }
+  .mo-profiles.mo-with-inspector {
+    grid-template-columns: 16rem minmax(0, 1fr) 26rem;
+  }
+}
+
+.mo-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.mo-level {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.mo-level:hover {
+  background: var(--sl-surface-2);
+}
+
+.mo-level .icon {
+  margin-top: 0.1rem;
+  color: var(--sl-text-2);
+}
+
+.mo-level.selected {
+  background: var(--sl-primary-soft);
+  color: var(--sl-primary-strong);
+}
+
+.mo-level.selected .icon {
+  color: inherit;
+}
+
+.mo-level input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mo-level-name {
+  font-weight: 500;
+}
+
+.mo-level:focus-within {
+  outline: 2px solid var(--sl-primary);
+  outline-offset: -2px;
+}
+
+.mo-preview-table td {
+  vertical-align: top;
+  min-width: 5.5rem;
+}
+
+.mo-preview-table td:first-child {
+  min-width: 8rem;
+}
+
+/* Narrow (portrait tablets, phones): the choices wrap as rows of chips above the table. */
+@container (max-width: 43.99rem) {
+  .mo-mood-list,
+  .mo-levels {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+  .mo-mood-item,
+  .mo-level {
+    width: auto;
+    border: 1px solid var(--sl-divider);
+    border-radius: 999px;
+  }
+  .mo-every {
+    margin-top: 0;
+  }
+  .mo-level .small {
+    display: none;
+  }
+  .mo-level {
+    align-items: center;
+  }
+}
+
+.mo-moods-table td {
+  vertical-align: middle;
+}
+
+.mo-card > .mo-field,
+.mo-card > form.mo-field {
+  max-width: 32rem;
+}
+
+.mo-card > .btn {
+  align-self: flex-start;
+}
+
+dialog.mo-dialog {
+  width: min(40rem, calc(100vw - 2rem));
+  max-height: 85vh;
+  margin: auto;
+  border-radius: var(--sl-radius);
+}
+
+dialog.mo-dialog .sheet-body {
+  overflow-y: auto;
+}

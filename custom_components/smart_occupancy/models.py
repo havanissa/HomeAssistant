@@ -80,11 +80,25 @@ class MoodConfig:
     main_mood_entity: str | None = None
     auto_option: str = DEFAULT_AUTO_OPTION
     mismatch_grace_seconds: int = DEFAULT_MISMATCH_GRACE_SECONDS
+    # Phase A4: the moods of the built-in mood selector (None: a helper or an existing selector is used).
+    builtin: tuple[str, ...] | None = None
+
+    @property
+    def source(self) -> str:
+        """``helpers`` (the Auto / Manual / Main scheme), ``entity`` (one selector), ``builtin`` or ``none``."""
+        if self.builtin is not None:
+            return "builtin"
+        if self.auto_mood_entity or self.manual_mood_entity:
+            return "helpers"
+        return "entity" if self.main_mood_entity else "none"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> MoodConfig:
         data = data or {}
+        builtin = data.get("builtin")
         return cls(
+            builtin=tuple(str(m) for m in builtin if isinstance(m, str) and m.strip()) if isinstance(
+                builtin, list) else None,
             auto_mood_entity=data.get("auto_mood_entity"),
             manual_mood_entity=data.get("manual_mood_entity"),
             main_mood_entity=data.get("main_mood_entity"),
@@ -101,7 +115,7 @@ class MoodConfig:
             "main_mood_entity": self.main_mood_entity,
             "auto_option": self.auto_option,
             "mismatch_grace_seconds": self.mismatch_grace_seconds,
-        }
+        } | ({"builtin": list(self.builtin)} if self.builtin is not None else {})
 
     @property
     def entity_ids(self) -> list[str]:

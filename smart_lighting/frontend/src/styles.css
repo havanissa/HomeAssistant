@@ -4999,3 +4999,16 @@ sl-plan-canvas {
     width: 100%;
   }
 }
+
+/* Phase A4: lighting pages ------------------------------------------------------------- */
+.lighting-banner { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; padding: 0.6rem 0.9rem;
+  border-radius: var(--radius, 10px); background: var(--surface-2, rgba(127,127,127,0.08)); margin-bottom: 1rem; }
+.lighting-banner > span { flex: 1 1 20rem; min-width: 0; }
+.lighting-banner-app { border-left: 4px solid var(--ok, #2e7d32); }
+.lighting-banner-integration { border-left: 4px solid var(--info, #1565c0); }
+.setting-editor { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 11rem), 1fr)); gap: 0.5rem 0.75rem; align-items: end; }
+.setting-editor .field { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+.setting-editor .field-check { flex-direction: row; align-items: center; gap: 0.4rem; grid-column: 1 / -1; }
+.setting-editor .setting-actions { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.setting-swatch { display: inline-block; width: 0.9rem; height: 0.9rem; border-radius: 50%; vertical-align: middle;
+  border: 1px solid rgba(0,0,0,0.2); margin-right: 0.25rem; }

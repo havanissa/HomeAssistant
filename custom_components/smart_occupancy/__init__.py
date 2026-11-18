@@ -42,7 +42,7 @@ from .presence_log import record_config_change, record_reload
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SELECT]
 
 # Config entry major/minor version. Minor 2 = options payload CONFIG_VERSION 2.
 ENTRY_VERSION = 1
@@ -54,11 +54,14 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Serve the dashboard cards and register the websocket API (once per run)."""
     from .engine_api import async_register_engine_service
+    from .lighting_bridge_api import async_register_lighting_service
     from .websocket import async_register_websocket_commands
 
     async_register_websocket_commands(hass)
     # Phase A3.2: return occupancy control to the integration's engine without the App (administrators only).
     async_register_engine_service(hass)
+    # Phase A4: return lighting control to the integration without the App (administrators only).
+    async_register_lighting_service(hass)
     await async_register_card(hass)
     return True
 
@@ -75,6 +78,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntr
     await coordinator.occupancy.async_load()
     # Mood lighting configuration (seeded from the options on first start).
     await coordinator.lighting.async_load()
+    # Phase A4: who controls lighting. While the Smart Lighting App does, this controller stays dormant.
+    await coordinator.lighting_bridge.async_load()
+    coordinator.lighting_bridge.async_prepare_controller()
     # Occupancy forecast (0.5.0): settings and the learned daily summaries.
     await coordinator.forecast.async_load()
     # Curtains (0.6.1): windows, presets and the last results. Loading never moves a cover.
@@ -82,12 +88,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEntr
     await coordinator.async_config_entry_first_refresh()
     coordinator.async_start()
     coordinator.occupancy.async_start()
-    coordinator.lighting.async_start()
+    if not coordinator.lighting_bridge.app_owns:
+        coordinator.lighting.async_start()
+    coordinator.lighting_bridge.async_start()
     coordinator.forecast.async_start()
     coordinator.curtains.async_start()
     entry.async_on_unload(coordinator.async_stop)
     entry.async_on_unload(coordinator.occupancy.async_stop)
-    entry.async_on_unload(coordinator.lighting.async_stop)
+    # (The bridge may replace the controller: stop whichever one is current.)
+    entry.async_on_unload(lambda: coordinator.lighting.async_stop())
+    entry.async_on_unload(coordinator.lighting_bridge.async_stop)
     entry.async_on_unload(coordinator.forecast.async_stop)
     entry.async_on_unload(coordinator.curtains.async_stop)
 
@@ -110,6 +120,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: SmartOccupancyConfigEnt
         await entry.runtime_data.tracker.async_flush()
         await entry.runtime_data.occupancy.async_flush()
         await entry.runtime_data.lighting.async_flush()
+        # Stopped first: nothing is saved by this bridge after its final write (the next one loads it).
+        entry.runtime_data.lighting_bridge.async_stop()
+        await entry.runtime_data.lighting_bridge.async_flush()
         await entry.runtime_data.forecast.async_flush()
         await entry.runtime_data.curtains.async_flush()
     return unloaded
@@ -202,7 +215,11 @@ def _rename_listener(hass: HomeAssistant, entry: SmartOccupancyConfigEntry):
         old, new = data["old_entity_id"], data["entity_id"]
         entry.runtime_data.curtains.rename_entity(old, new)
         store = entry.runtime_data.lighting.store
-        if (lighting := rename_entity(store.config, old, new)) is not None:
+        if entry.runtime_data.lighting_bridge.app_owns:
+            # The Smart Lighting App owns the lighting configuration and follows the rename itself; one made
+            # while it is away is handed to it when it resumes (or applied when the integration takes over).
+            entry.runtime_data.lighting_bridge.note_rename(old, new)
+        elif (lighting := rename_entity(store.config, old, new)) is not None:
             _LOGGER.info("entity_renamed old=%s new=%s (lighting configuration updated)", old, new)
             store.async_set(lighting)
         updated = rename_entity_references(dict(entry.options), old, new)

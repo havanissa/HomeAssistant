@@ -26,6 +26,12 @@ the integration's, and decides room occupancy only after a reviewed handover
 that the integration acknowledges. ``modules()`` and ``migration()`` take that
 acknowledged owner, so Presence counts as migrated only while the App's engine
 really publishes occupancy.
+
+Phase A4 moves Lighting, Moods and Switches together (one tightly coupled
+subsystem, one lighting owner): their interfaces are in the App; the
+integration's lighting runtime runs in the App in shadow mode and, after a
+reviewed handover the integration acknowledges, controls the lights and owns the
+lighting configuration. The three count as migrated only while that is so.
 """
 
 from __future__ import annotations
@@ -103,19 +109,30 @@ MODULES: tuple[Module, ...] = (
         phase="A3.2",
     ),
     Module(
-        "lighting", "Lighting", "lightbulb-group", "feature", PENDING,
-        "Automatic lighting, vacancy, ambient light levels and brightness rules.",
-        "The Smart Room Lighting card.",
+        "lighting", "Lighting", "lightbulb-group", "feature", GUI,
+        "Automatic lighting, vacancy, daylight, ambient light levels and brightness rules, zones, shared spaces and "
+        "the Room Supervisor.",
+        "This App (Lighting). Until the handover the integration's cards keep working on the same configuration; "
+        "afterwards they are read-only.",
+        scope="Lighting configuration and live decisions; the lighting runtime itself (Phase A4: shadow comparison, "
+              "reviewed handover and rollback).",
+        phase="A4",
     ),
     Module(
-        "moods", "Moods", "palette", "feature", PENDING,
-        "Moods, light types and Occupied / Vacant lighting profiles.",
-        "The Smart Lighting Profiles card.",
+        "moods", "Moods", "palette", "feature", GUI,
+        "Moods and their source, light types and Occupied / Vacant lighting profiles.",
+        "This App (Moods).",
+        scope="Mood source (helpers, one selector or the built-in selector), mood inheritance and fallback, light "
+              "types, Occupied and Vacant profiles, previews and explicit tests.",
+        phase="A4",
     ),
     Module(
-        "switches", "Switches", "light-switch", "feature", PENDING,
+        "switches", "Switches", "light-switch", "feature", GUI,
         "Wall switches, remotes, button actions and Priority Inputs.",
-        "The Smart Room Lighting card (switch settings).",
+        "This App (Switches).",
+        scope="Wall switches and remotes (event entities, MQTT, device triggers), button mappings, Observing / "
+              "Active, manual overrides and Priority Inputs.",
+        phase="A4",
     ),
     Module(
         "curtains", "Curtains", "curtains", "feature", PENDING,
@@ -138,28 +155,39 @@ MODULES: tuple[Module, ...] = (
 )
 
 
-def _current(occupancy_owner: str) -> tuple[Module, ...]:
-    """The modules with Presence's automation owner as the integration acknowledges it."""
-    owner = APP if occupancy_owner == APP else INTEGRATION
-    return tuple(replace(m, automation_owner=owner, controlled_by=owner) if m.key == "presence" else m
-                 for m in MODULES)
+LIGHTING_MODULES = ("lighting", "moods", "switches")
 
 
-def modules(occupancy_owner: str = INTEGRATION) -> list[dict[str, str | None]]:
-    return [m.as_dict() for m in _current(occupancy_owner)]
+def _current(occupancy_owner: str, lighting_owner: str = INTEGRATION) -> tuple[Module, ...]:
+    """The modules with the automation owners as the integration acknowledges them."""
+    occupancy = APP if occupancy_owner == APP else INTEGRATION
+    lighting = APP if lighting_owner == APP else INTEGRATION
+    out = []
+    for m in MODULES:
+        if m.key == "presence":
+            m = replace(m, automation_owner=occupancy, controlled_by=occupancy)
+        elif m.key in LIGHTING_MODULES:
+            # One owner for the whole lighting subsystem; its configuration moves with it.
+            m = replace(m, automation_owner=lighting, controlled_by=lighting, config_source=lighting)
+        out.append(m)
+    return tuple(out)
 
 
-def migration(occupancy_owner: str = INTEGRATION) -> dict[str, object]:
+def modules(occupancy_owner: str = INTEGRATION, lighting_owner: str = INTEGRATION) -> list[dict[str, str | None]]:
+    return [m.as_dict() for m in _current(occupancy_owner, lighting_owner)]
+
+
+def migration(occupancy_owner: str = INTEGRATION, lighting_owner: str = INTEGRATION) -> dict[str, object]:
     """Migration progress. Only completed work counts; nothing is estimated.
 
     ``modules_migrated`` counts modules whose *automation* runs in the App (none
     yet); ``interfaces_migrated`` counts modules configured in the App.
     """
-    features = [m for m in _current(occupancy_owner) if m.kind == "feature"]
+    features = [m for m in _current(occupancy_owner, lighting_owner) if m.kind == "feature"]
     migrated = [m for m in features if m.automation_owner == APP]
     interfaces = [m for m in features if m.gui_owner == APP]
     return {
-        "current_phase": "A3.2",
+        "current_phase": "A4",
         "foundation_complete": True,
         "modules_total": len(features),
         "modules_migrated": len(migrated),

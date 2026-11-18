@@ -35,7 +35,7 @@ from homeassistant.components import websocket_api
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant, callback
 
-from .config_flow import MIN_STUCK_SECONDS, validate_timing
+from .timing_validation import MIN_STUCK_SECONDS, validate_timing
 from .const import DOMAIN, TIMING_PARAMETERS, SensorKind, SensorRole
 from .engine import SignalStatus, Value, interpret
 from .models import IntegrationConfig, OccupancyTiming

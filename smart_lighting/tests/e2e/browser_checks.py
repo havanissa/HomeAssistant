@@ -42,9 +42,17 @@ READ_ONLY = {
     "history/history_during_period", "smart_occupancy/engine/status",
     # Phase A3.2: the occupancy bridge session (shadow mode; it changes nothing by itself).
     "smart_occupancy/engine/subscribe",
+    # Phase A4: what the lighting runtime reads in shadow mode, its bridge session and the lighting pages' reads.
+    "config/label_registry/list", "config/entity_registry/get_entries", "automation/config", "script/config",
+    "device_automation/trigger/list", "validate_config", "unsubscribe_events", "subscribe_trigger", "mqtt/subscribe",
+    "smart_occupancy/lighting/bridge/subscribe", "smart_occupancy/lighting/bridge/status",
+    "smart_occupancy/lighting/editor", "smart_occupancy/lighting/preview", "smart_occupancy/lighting/room/activation",
+    "smart_occupancy/lighting/brightness/preview", "smart_occupancy/lighting/priority/preview",
+    "smart_occupancy/lighting/zone/radar_test", "smart_occupancy/lighting/switch/candidates",
+    "smart_occupancy/lighting/supervisor/room",
 }
-APP_VERSION = "0.4.0"
-INTEGRATION_VERSION = "0.7.0"
+APP_VERSION = "0.5.0"
+INTEGRATION_VERSION = "0.8.0"
 
 VIEWPORTS = {
     "phone-360": {"viewport": {"width": 360, "height": 740}, "is_mobile": True, "has_touch": True, "device_scale_factor": 3},
@@ -202,6 +210,11 @@ def run_viewport(browser: Any, name: str, out: Path, errors: list[str]) -> None:
         elif route == "presence":
             # Phase A3.1: the Presence interface is in the App; the integration keeps the engine.
             expect(frame.locator("[data-testid=presence-ownership]")).to_contain_text("Smart Occupancy integration")
+        elif route in ("lighting", "moods", "switches"):
+            # Phase A4: built pages; the banner says who controls the lights (the integration, by default).
+            banner = frame.locator(".lighting-banner").first
+            expect(banner).to_be_visible()
+            expect(banner).to_have_class(re.compile(r"lighting-banner-integration"))
         elif route not in ("dashboard", "diagnostics", "settings"):
             card = frame.locator(f"[data-testid=pending-{route}]")
             expect(card).to_be_visible()

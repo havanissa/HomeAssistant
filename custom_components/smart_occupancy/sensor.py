@@ -357,7 +357,7 @@ class RoomStateSensor(RoomOccupancyEntity, SensorEntity):
             for v in result.views(SignalStatus.ACTIVE, SignalStatus.GRACE)
         ]
         mode = coordinator.data.effective_mode if coordinator.data else OperatingMode.OBSERVE
-        lighting_active = coordinator.lighting.room_active(self._area_id)
+        lighting_active = coordinator.lighting_view.room_active(self._area_id)
         return {
             "integration": "smart_occupancy",
             "area_id": self._area_id,
@@ -387,7 +387,7 @@ class RoomStateSensor(RoomOccupancyEntity, SensorEntity):
             "observe_only": not lighting_active,
             "lighting_control": lighting_active,
             # Main Mood is Manual: automatic lighting is paused (also in this room).
-            "lighting_paused": lighting_active and coordinator.lighting.manual_mode,
+            "lighting_paused": lighting_active and coordinator.lighting_view.manual_mode,
             "comparison": (
                 {"helper": room_config.reference_occupancy_entity, **comparison.as_dict()}
                 if comparison else None
@@ -530,7 +530,7 @@ class RoomMoodLightingSensor(RoomOccupancyEntity, SensorEntity):
         self.async_on_remove(async_dispatcher_connect(self.hass, SIGNAL_LIGHTING_UPDATED, self._write_if_changed))
 
     def _diagnostics(self) -> dict[str, Any]:
-        diag = self.coordinator.lighting.room_diagnostics(self._area_id)
+        diag = self.coordinator.lighting_view.room_diagnostics(self._area_id)
         # Zones and the Room Supervisor (0.6.0): their status only; check times and logs are not entity state.
         zones = diag.pop("zones", None) or {}
         supervisor = diag.pop("supervisor", None) or {}
@@ -587,7 +587,7 @@ class RoomDaylightSensor(RoomOccupancyEntity, SensorEntity):
         return self.coordinator.last_update_success
 
     def _summary(self) -> dict[str, Any]:
-        return self.coordinator.lighting.daylight.status(self._area_id).summary()
+        return self.coordinator.lighting_view.daylight_summary(self._area_id)
 
     @property
     def native_value(self) -> str | None:
@@ -595,12 +595,11 @@ class RoomDaylightSensor(RoomOccupancyEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        rt = self.coordinator.lighting.runtime.get(self._area_id)
-        activation = rt.activation if rt else None
+        last_at, text = self.coordinator.lighting_view.activation(self._area_id)
         return {
             "integration": "smart_occupancy",
             "area_id": self._area_id,
             **self._summary(),
-            "last_activation_at": rt.last_activation_at if rt else None,
-            "activation": activation.get("text") if activation else None,
+            "last_activation_at": last_at,
+            "activation": text,
         }

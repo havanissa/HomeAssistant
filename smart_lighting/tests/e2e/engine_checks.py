@@ -2,7 +2,7 @@
 
 Needs the stack from stack.sh started with lowered handover thresholds
 (``ENGINE_MIN_SHADOW_SECONDS=60 ENGINE_MIN_TRANSITIONS=6``), a real Home
-Assistant with Smart Occupancy & Lighting 0.7.0 and the A3.1 seed (Kamar Norður
+Assistant with Smart Occupancy & Lighting 0.8.0 (or 0.7.0) and the A3.1 seed (Kamar Norður
 with the template radar that follows ``input_boolean.nobara_pc``), Docker
 (to crash and restart the App container) and Playwright:
 
@@ -184,7 +184,7 @@ def phase_all(args: argparse.Namespace, out: Path) -> None:
     state: dict[str, Any] = {"timing": presence_room(args)["timing_overrides"]}
     (out / STATE_FILE).write_text(json.dumps(state))
     own = engine(args)
-    check("integration 0.7.0 is the owner by default", own["owner"] == "integration" and own["integration_version"] == "0.7.0",
+    check("integration 0.8.0 is the owner by default", own["owner"] == "integration" and own["integration_version"] == "0.8.0",
           own)
     data = wait("App in shadow mode", lambda: (d := app("api/engine"))["mode"] == "shadow" and d, 60)
     check("App: shadow mode, bridge connected, owner acknowledged", data["bridge"] == "connected"
