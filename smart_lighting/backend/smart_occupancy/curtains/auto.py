@@ -96,7 +96,7 @@ from .logic import (
     decide,
     precedence,
 )
-from . import schedule
+from . import multisun, schedule
 from .modes import effective
 from .rules import consistency, dump as dump_rules, resolve as resolve_rules
 from .solar import exposure, window_angle_from_sun_angle
@@ -122,6 +122,7 @@ ACTION_WORDS = {
     "hold": "Manual hold", "blocked": "Prevented", "failed": "Failed", "off": "Off", "released": "Hold released",
     "hold_started": "Manual hold started", "enabled": "Automatic enabled", "resumed": "Resumed",
     "mode": "Mode changed", "moving": "Moving", "config": "Mapping changed",
+    "sun_sensors": "Sunlight sensors",
 }
 _NOT_LOGGED = frozenset({"moved", "moving"})  # "moved" is logged with its details when it is sent
 POLICY_WORDS = {"next_phase": "Until the next automatic phase", "duration": "For a number of minutes",
@@ -176,6 +177,10 @@ class WindowRuntime:
     log: list[dict[str, Any]] = field(default_factory=list)
     # 0.6.4: a confirmed mapping change that applies at the next change of condition: {"condition", "at"}
     defer: dict[str, Any] | None = None
+    # App 0.8.0: multi-sensor sunlight (``sun`` is stored; the countdown inside it is not, see multisun.py)
+    sun: multisun.SunState = field(default_factory=multisun.SunState)
+    sun_result: dict[str, Any] | None = None
+    sun_readings: list[dict[str, Any]] = field(default_factory=list)
 
     def export(self) -> dict[str, Any]:
         hold = dict(self.hold, created=_iso(self.hold["created"])) if self.hold else None
@@ -187,7 +192,8 @@ class WindowRuntime:
                 "thermal": self.thermal, "applied": self.applied,
                 "moves": self.moves, "last_move_at": _iso(self.last_move_at),
                 "last_condition": self.last_condition, "status": self.status,
-                "log": self.log, "defer": self.defer}
+                "log": self.log, "defer": self.defer,
+                **({"multi_sun": self.sun.export()} if self.sun.active else {})}
 
     @classmethod
     def restore(cls, data: Any) -> WindowRuntime:
@@ -221,6 +227,7 @@ class WindowRuntime:
         rt.log = [x for x in (log if isinstance(log, list) else ()) if isinstance(x, Mapping)][:LOG_LENGTH]
         defer = data.get("defer")
         rt.defer = dict(defer) if isinstance(defer, Mapping) and isinstance(defer.get("condition"), str) else None
+        rt.sun = multisun.SunState.restore(data.get("multi_sun"))
         return rt
 
 
@@ -335,6 +342,8 @@ class AutoCurtains:
                     ids.add(values[key])
             if values["room_temp_entity"]:
                 self._temp_history(values["room_temp_entity"])
+            if window.multi_sun_active:
+                ids.update(x.entity_id for x in window.sun_sensors if x.enabled)
             if window.area_id:
                 areas.add(window.area_id)
         if house_lux := self.house_values()["lux_entity"]:
@@ -399,7 +408,8 @@ class AutoCurtains:
             self.temp_histories[entity_id].add(dt_util.utcnow(), self._temp_value(entity_id))
         for window in self.mgr.config.windows.values():
             values, _ = self.mgr.config.rules_for(window)
-            if entity_id in (values["sleep_entity"], values["lamp_entity"], *(values[k] for k in ENV_KEYS)):
+            if entity_id in (values["sleep_entity"], values["lamp_entity"], *(values[k] for k in ENV_KEYS)) or (
+                    window.multi_sun_active and any(x.entity_id == entity_id for x in window.sun_sensors)):
                 self.evaluate(window.window_id)
         if entity_id == self.house_values()["lux_entity"]:
             self.evaluate_house()
@@ -721,6 +731,12 @@ class AutoCurtains:
                 rt.fallback = False
             ev.fallback_daylight = rt.fallback
             env["outdoor_lux"] = Reading("outdoor_lux", None, unit="lx", detail="No light sensor chosen")
+        if window.multi_sun_active:
+            self._multi_sun(window, rt, values, ev, utc, sun.elevation, dry)
+        else:
+            rt.sun_result, rt.sun_readings = None, []
+            if rt.sun.active and not dry:
+                rt.sun = multisun.SunState()  # switched off (reviewed): the multi-sensor condition ends with it
         # sun geometry (with a small hysteresis once the window is shading)
         solar = window.solar
         if rt.in_sun:
@@ -839,6 +855,46 @@ class AutoCurtains:
             env["indoor_lux"] = judge_lux(values["indoor_lux_entity"], state_of("indoor_lux_entity"), now=utc,
                                           since=None, elevation=None, stale_minutes=values["lux_stale"],
                                           stuck_minutes=0, dark_lux=0, role="indoor_lux")
+
+    def _multi_sun(self, window: Window, rt: WindowRuntime, values: Mapping[str, Any], ev: Evidence,
+                   utc: datetime, elevation: float | None, dry: bool) -> None:
+        """The window's own sunlight sensors (App 0.8.0): each judged like the outdoor light sensor (missing,
+        unavailable, non-numeric, stale, stuck and implausible readings are never evidence), then the ANY / ALL
+        rules of ``multisun.evaluate``."""
+        readings: list[multisun.SensorReading] = []
+        names: dict[str, str] = {}
+        shown: list[dict[str, Any]] = []
+        for sensor in window.sun_sensors:
+            state = self.hass.states.get(sensor.entity_id)
+            names[sensor.entity_id] = str(state.attributes.get("friendly_name") or sensor.entity_id) if state \
+                else sensor.entity_id
+            if not sensor.enabled:
+                readings.append(multisun.SensorReading(sensor.entity_id, False, False, None, "disabled"))
+                shown.append({"entity_id": sensor.entity_id, "name": names[sensor.entity_id], "enabled": False,
+                              "status": "disabled", "status_word": "Disabled", "value": None, "detail": ""})
+                continue
+            reading = judge_lux(sensor.entity_id, state, now=utc, since=self.since_of(sensor.entity_id),
+                                elevation=elevation, stale_minutes=values["lux_stale"],
+                                stuck_minutes=values["lux_stuck"], dark_lux=values["dusk_lux"], role="sun_sensor")
+            if reading.ok:
+                ev.deadlines.append(reading.reported + timedelta(minutes=values["lux_stale"]))
+                ev.deadlines.append(stuck_deadline(reading, values["lux_stuck"]))
+            readings.append(multisun.SensorReading(sensor.entity_id, True, reading.ok,
+                                                   reading.value if reading.ok else None, reading.status,
+                                                   reading.detail))
+            shown.append({"entity_id": sensor.entity_id, "name": names[sensor.entity_id], "enabled": True,
+                          **{k: v for k, v in reading.as_dict().items() if k in ("status", "status_word", "value",
+                                                                                 "unit", "detail", "since")}})
+        result = multisun.evaluate(rt.sun, readings, on_lux=values["multisun_on_lux"],
+                                   off_lux=values["multisun_off_lux"], release_minutes=values["multisun_release"],
+                                   now=utc, names=names)
+        if result.release_at is not None:
+            ev.deadlines.append(result.release_at)
+        healthy = any(r.enabled and r.ok for r in readings)
+        ev.multi_sun = {**result.as_dict(), "any_healthy": healthy}
+        rt.sun_result, rt.sun_readings = ev.multi_sun, shown
+        if result.changed and not dry:
+            self._log(window, rt, "sun_sensors", result.reason)
 
     # ---------------------------------------------------------- evaluation
     @callback
@@ -1180,6 +1236,14 @@ class AutoCurtains:
             "glare": {"enabled": bool(values["glare_sensitive"]), "when": values["glare_when"],
                       "active": bool(decision and decision.condition == "glare")},
             "sun_evidence": values["sun_evidence"],
+            "multi_sun": {"enabled": window.multi_sun, "active_source": window.multi_sun_active,
+                          "sensors": rt.sun_readings or [
+                              {"entity_id": x.entity_id, "name": x.entity_id, "enabled": x.enabled,
+                               "status": "none" if x.enabled else "disabled", "value": None}
+                              for x in window.sun_sensors],
+                          "result": rt.sun_result,
+                          "levels": {"on_lux": values["multisun_on_lux"], "off_lux": values["multisun_off_lux"],
+                                     "release_minutes": values["multisun_release"]}},
         }
 
     def diagnostics(self) -> dict[str, Any]:
@@ -1195,7 +1259,8 @@ class AutoCurtains:
 
 def summary(window: Window, decision: Decision | None, action: str, text: str, preset) -> str:
     """One line for the decision log, e.g. "Morning. Stova Suður → Half shade (Global Mode)." (0.6.4)."""
-    if decision is None or action in ("enabled", "resumed", "mode", "released", "hold_started", "config", "off"):
+    if decision is None or action in ("enabled", "resumed", "mode", "released", "hold_started", "config", "off",
+                                      "sun_sensors"):
         return text
     word = MODE_WORDS.get(decision.condition, CONDITION_WORDS.get(decision.condition, decision.condition))
     lead = ""

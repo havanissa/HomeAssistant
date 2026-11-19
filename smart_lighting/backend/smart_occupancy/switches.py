@@ -59,6 +59,21 @@ _ACTION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-.:]{0,63}$")
 # MQTT topic levels: no wildcards, no control characters.
 _TOPIC_RE = re.compile(r"^[^#+\x00-\x1f\x7f]{1,256}$")
 ROOM_TARGET = "room"
+#: App 0.8.0: a target ``room:<area_id>`` means every managed light of that room (cross-room targets).
+ROOM_PREFIX = "room:"
+MAX_TARGETS = 16
+
+
+def target_ref_ok(ref: Any) -> bool:
+    """A valid target reference: ``room``, ``room:<area_id>`` or a light / light group entity id."""
+    if not isinstance(ref, str) or not ref or len(ref) > 255:
+        return False
+    if ref == ROOM_TARGET:
+        return True
+    if ref.startswith(ROOM_PREFIX):
+        area = ref[len(ROOM_PREFIX):]
+        return bool(area) and area.replace("_", "").isalnum()
+    return ref.startswith("light.") and len(ref) > len("light.")
 # Actions that need a light target (the room's lights or one light/group).
 LIGHT_ACTIONS = frozenset({
     ButtonAction.ON, ButtonAction.OFF, ButtonAction.TOGGLE, ButtonAction.BRIGHTNESS_UP,
@@ -280,11 +295,28 @@ class ButtonMapping:
     entity: str | None = None            # scene / script / WLED preset select entity
     option: str | None = None            # WLED preset name
     minutes: int | None = None           # temporary room mood; None = until changed
+    # App 0.8.0: explicit targets, also in other rooms: lights / light groups and ``room:<area_id>`` (every managed
+    # light of that room). Empty = ``target`` alone, exactly as before.
+    targets: tuple[str, ...] = ()
+
+    @property
+    def refs(self) -> tuple[str, ...]:
+        """What the light action addresses: the explicit targets, else the single ``target``."""
+        return self.targets or (self.target,)
+
+    @property
+    def cross_room(self) -> bool:
+        return any(r != ROOM_TARGET for r in self.refs)
 
     @classmethod
     def from_dict(cls, data: Any) -> ButtonMapping:
         data = data if isinstance(data, dict) else {}
         target = data.get("target")
+        targets: list[str] = []
+        for ref in data.get("targets") or () if isinstance(data.get("targets"), (list, tuple)) else ():
+            ref = ref.strip() if isinstance(ref, str) else ref
+            if target_ref_ok(ref) and ref not in targets:
+                targets.append(ref)
         return cls(
             action=_enum(ButtonAction, data.get("action"), ButtonAction.NONE),
             target=target.strip() if isinstance(target, str) and target.strip() else ROOM_TARGET,
@@ -296,6 +328,7 @@ class ButtonMapping:
             entity=_str(data.get("entity")),
             option=_str(data.get("option")),
             minutes=_int(data.get("minutes"), None, 1, MANUAL_OVERRIDE_MAX_MINUTES),
+            targets=tuple(targets[:MAX_TARGETS]),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -303,6 +336,7 @@ class ButtonMapping:
             "action": self.action.value, "target": self.target, "on_values": self.on_values.value,
             "brightness": self.brightness, "color_temp": self.color_temp, "mood": self.mood,
             "scope": self.scope, "entity": self.entity, "option": self.option, "minutes": self.minutes,
+            **({"targets": list(self.targets)} if self.targets else {}),
         }
 
     def describe(self) -> str:
@@ -320,8 +354,8 @@ class ButtonMapping:
             word = f"{word} {self.entity}"
         if self.action == ButtonAction.WLED_PRESET and self.option:
             word = f"{word} {self.option}"
-        if self.action in LIGHT_ACTIONS and self.target != ROOM_TARGET:
-            word = f"{word} ({self.target})"
+        if self.action in LIGHT_ACTIONS and self.refs != (ROOM_TARGET,):
+            word = f"{word} ({', '.join(self.refs)})"
         return word
 
 

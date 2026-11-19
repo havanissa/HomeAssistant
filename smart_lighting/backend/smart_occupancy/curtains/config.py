@@ -322,6 +322,14 @@ class Window:
     auto: Mapping[str, Any] = field(default_factory=dict)
     # Automations an administrator reviewed and allowed to coexist with Automatic for these covers.
     allowed_automations: tuple[str, ...] = ()
+    # App 0.8.0: this window's own sunlight sensors (multisun.py); off unless switched on with at least one sensor.
+    multi_sun: bool = False
+    sun_sensors: tuple[Any, ...] = ()
+
+    @property
+    def multi_sun_active(self) -> bool:
+        """Multi-sensor sunlight is the window's sun evidence (switched on, at least one enabled sensor)."""
+        return self.multi_sun and any(s.enabled for s in self.sun_sensors)
 
     @property
     def effective_bearing(self) -> float | None:
@@ -354,6 +362,8 @@ class Window:
             "conditions": {c: self.conditions.get(c) for c in CONDITIONS},
             "cover_modes": {k: dict(v) for k, v in self.cover_modes.items() if v},
             "auto": _rules().dump(self.auto), "allowed_automations": list(self.allowed_automations),
+            **({"multi_sun": self.multi_sun, "sun_sensors": [x.as_dict() for x in self.sun_sensors]}
+               if self.multi_sun or self.sun_sensors else {}),
         }
 
     @property
@@ -417,6 +427,8 @@ class Window:
             auto=_rules().load(data.get("auto"), "window", legacy=True),
             allowed_automations=tuple(a for a in data.get("allowed_automations") or ()
                                       if isinstance(a, str) and a.startswith("automation."))[:64],
+            multi_sun=data.get("multi_sun") is True,
+            sun_sensors=_multisun().sensors_from(data.get("sun_sensors")),
         )
 
 
@@ -662,6 +674,12 @@ def default_conditions(presets: tuple[Preset, ...]) -> dict[str, str | None]:
         "heat": None,
         "manual_override": None,  # a manual move is kept as it is
     }
+
+
+def _multisun():
+    from . import multisun  # noqa: PLC0415 - App 0.8.0 module
+
+    return multisun
 
 
 def _rules():

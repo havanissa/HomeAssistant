@@ -82,6 +82,9 @@ GROUPS: tuple[tuple[str, str, str], ...] = (
     ("schedule", "Schedule", "When Morning, Daytime, Evening and Night begin. A phase only makes a mode eligible: "
      "sleep, missing daylight and every other protection still apply."),
     ("sun", "Strong sunshine", "Sun protection needs the sun in front of the window and measured strong light."),
+    ("multisun", "Multi-sensor sunlight",
+     "Optional, per window: several illuminance sensors. Any one above “Activate above” starts sun protection; it "
+     "ends only when every sensor is below “Release below” for the whole delay."),
     ("manual", "Manual changes", "How long a manual move is kept before automatic control takes over again."),
     ("movement", "Movement safety", "Limits that keep covers from moving too often."),
     # 0.6.3 (shown in the window's Environment tab)
@@ -173,6 +176,13 @@ RULES: tuple[Rule, ...] = (
          choices=(("measured", "Measured outdoor light only"),
                   ("weather", "Without a light sensor: also a clear sky from the weather entity")), confirm=True),
     Rule("cloud_max", "int", 30, "sun", "Clear sky up to", "Cloud cover for the weather evidence", 0, 100, "%"),
+    # ------------------------------------------------------------- multisun (App 0.8.0)
+    Rule("multisun_on_lux", "int", 30000, "multisun", "Activate above",
+         "Any one sensor above this level is direct sunlight", 100, 200000, "lx"),
+    Rule("multisun_off_lux", "int", 15000, "multisun", "Release below",
+         "Every sensor must be below this level (lower than “Activate above”)", 0, 200000, "lx"),
+    Rule("multisun_release", "int", 15, "multisun", "Release delay",
+         "How long every sensor must stay below the release level", 0, 240, "min"),
     # --------------------------------------------------------------- manual
     Rule("manual_policy", "choice", "next_phase", "manual", "Keep a manual move",
          choices=(("next_phase", "Until the next automatic phase"), ("duration", "For a number of minutes"),
@@ -394,6 +404,8 @@ def consistency(values: Mapping[str, Any]) -> list[str]:
         problems.append("“Dark below” must be lower than “Daylight from”")
     if values["sun_release_lux"] >= values["sun_lux"]:
         problems.append("“Released below” must be lower than “Strong sunshine from”")
+    if values.get("multisun_off_lux", 0) >= values.get("multisun_on_lux", 1):
+        problems.append("Multi-sensor sunlight: “Release below” must be lower than “Activate above”")
     if values["dusk_elevation"] > values["daylight_elevation"]:
         problems.append("The dark elevation must not be above the daylight elevation")
     if values["max_temp"] <= values["preferred_temp"] + values["comfort_band"]:

@@ -51,6 +51,7 @@ from .const import (
 )
 from .controller import LightingController
 from .discovery import area_name
+from .lighting import light_capabilities
 from .occupancy import friendly_name
 from .switch_discovery import (
     async_device_triggers,
@@ -65,7 +66,10 @@ from .switch_inputs import SwitchStatus
 from .switches import (
     ACTION_WORDS,
     IGNORED_WORDS,
+    MAX_TARGETS,
+    ROOM_PREFIX,
     ROOM_TARGET,
+    target_ref_ok,
     ButtonMapping,
     SwitchConfig,
     SwitchSettings,
@@ -252,6 +256,8 @@ def switches_model(hass: HomeAssistant, ctrl: LightingController, area_id: str) 
         "ignored_words": IGNORED_WORDS,
         "targets": [{"entity_id": e, "name": friendly_name(hass, e), "group": e in managed.members or
                      e in managed.opaque_groups} for e in managed.controlled],
+        # App 0.8.0: every room's lights, grouped for the target picker (this room, adjacent, others).
+        "target_options": target_options(hass, ctrl, area_id),
         "scenes": sorted(({"entity_id": s.entity_id, "name": s.name} for s in hass.states.async_all("scene")),
                          key=lambda x: x["name"].casefold()),
         "scripts": sorted(({"entity_id": s.entity_id, "name": s.name} for s in hass.states.async_all("script")),
@@ -419,6 +425,83 @@ def ws_set(hass: HomeAssistant, connection, msg) -> None:
     connection.send_result(msg["id"], {"revision": ctrl.store.revision})
 
 
+def _light_option(hass: HomeAssistant, ctrl: LightingController, entity_id: str, room: str | None) -> dict[str, Any]:
+    caps = light_capabilities(hass, entity_id)
+    state = hass.states.get(entity_id)
+    members = sorted(state.attributes.get("entity_id") or ()) if state is not None else []
+    for managed in ctrl.managed.values():
+        members = sorted(set(members) | set(managed.members.get(entity_id) or ()))
+    return {"entity_id": entity_id, "name": friendly_name(hass, entity_id) or entity_id, "room": room,
+            "room_name": (area_name(hass, room) or room) if room else None, "group": bool(members),
+            "members": members, "online": state is not None and state.state not in ("unavailable", "unknown"),
+            "brightness": caps.brightness, "color_temp": caps.color_temp or caps.color,
+            "on_off_only": caps.known and not caps.brightness}
+
+
+def _room_option(hass: HomeAssistant, ctrl: LightingController, room: str) -> dict[str, Any]:
+    managed = ctrl.managed_room(room)
+    lights = list(managed.controlled) if room in ctrl.managed else \
+        [e for e in ctrl.config.room(room).lights if e.startswith("light.")]
+    return {"area_id": room, "name": area_name(hass, room) or room, "ref": f"{ROOM_PREFIX}{room}",
+            "managed": room in ctrl.managed, "lights": [_light_option(hass, ctrl, e, room) for e in lights]}
+
+
+def adjacent_rooms(ctrl: LightingController, area_id: str) -> list[str]:
+    """Rooms explicitly connected to this one: configured adjacent rooms and shared (open-plan) spaces. A floor
+    plan suggestion counts only once it was accepted into the room's configuration."""
+    room = ctrl.config.room(area_id)
+    out = [a for a in (room.adjacent_rooms if room else ()) if a != area_id]
+    space = ctrl.lighting.space_of(area_id)
+    for other in (space.rooms if space else ()):
+        if other != area_id and other not in out:
+            out.append(other)
+    return out
+
+
+def target_options(hass: HomeAssistant, ctrl: LightingController, area_id: str) -> dict[str, Any]:
+    adjacent = adjacent_rooms(ctrl, area_id)
+    others = sorted((a for a in ctrl.config.rooms if a != area_id and a not in adjacent),
+                    key=lambda a: (area_name(hass, a) or a).casefold())
+    return {"this_room": _room_option(hass, ctrl, area_id),
+            "adjacent": [_room_option(hass, ctrl, a) for a in adjacent if a in ctrl.config.rooms],
+            "other": [_room_option(hass, ctrl, a) for a in others]}
+
+
+def mapping_preview(hass: HomeAssistant, ctrl: LightingController, area_id: str, mapping: ButtonMapping) -> dict[str, Any]:
+    """What a light mapping would affect, before it is saved: every physical light with its room and what it
+    supports, duplicates and group members dropped, references that resolve to nothing."""
+    resolved, missing = ctrl.resolve_switch_targets(area_id, mapping.refs)
+    wanted: list[str] = []
+    for ref in mapping.refs:
+        if ref == ROOM_TARGET:
+            wanted += list(ctrl.managed_room(area_id).controlled)
+        elif ref.startswith(ROOM_PREFIX):
+            wanted += list(ctrl.managed_room(ref[len(ROOM_PREFIX):]).controlled)
+        else:
+            wanted.append(ref)
+    kept = {e for e, _a in resolved}
+    dropped = sorted({e for e in wanted if e not in kept})
+    targets = [_light_option(hass, ctrl, e, owner) for e, owner in resolved]
+    action = mapping.action
+    for t in targets:
+        t["skipped"] = None
+        if action in (ButtonAction.BRIGHTNESS_UP, ButtonAction.BRIGHTNESS_DOWN, ButtonAction.DIM_UP,
+                      ButtonAction.DIM_DOWN) and not t["brightness"]:
+            t["skipped"] = "on/off only: not dimmed"
+        elif action == ButtonAction.SET_COLOR_TEMP and not t["color_temp"]:
+            t["skipped"] = "no colour temperature"
+        elif action == ButtonAction.SET_BRIGHTNESS and not t["brightness"]:
+            t["skipped"] = "on/off only: switched on without a brightness"
+        elif not t["online"]:
+            t["skipped"] = "offline"
+    names = [f"{t['name']} ({t['room_name']})" if t["room"] and t["room"] != area_id else t["name"] for t in targets]
+    what = ACTION_WORDS.get(action, action.value)
+    summary = f"{what} {', '.join(names[:4])}{f' and {len(names) - 4} more' if len(names) > 4 else ''}" if names \
+        else f"{what}: no light"
+    return {"summary": summary, "targets": targets, "dropped": dropped, "missing": missing,
+            "cross_room": any(t["room"] not in (None, area_id) for t in targets)}
+
+
 def validate_mapping(hass: HomeAssistant, ctrl: LightingController, area_id: str,
                      mapping: ButtonMapping) -> str | None:
     """Why a mapping cannot be saved, or None. Only fixed, safe actions on validated entities."""
@@ -429,6 +512,17 @@ def validate_mapping(hass: HomeAssistant, ctrl: LightingController, area_id: str
         if mapping.target != ROOM_TARGET and (not mapping.target.startswith("light.") or (
                 hass.states.get(mapping.target) is None and er.async_get(hass).async_get(mapping.target) is None)):
             return f"{mapping.target} is not a light or light group"
+        if len(mapping.targets) > MAX_TARGETS:
+            return f"At most {MAX_TARGETS} targets"
+        for ref in mapping.targets:
+            if ref == ROOM_TARGET:
+                continue
+            if ref.startswith(ROOM_PREFIX):
+                if ref[len(ROOM_PREFIX):] not in ctrl.config.rooms:
+                    return f"{ref[len(ROOM_PREFIX):]} is not a configured room"
+            elif not ref.startswith("light.") or (hass.states.get(ref) is None
+                                                  and er.async_get(hass).async_get(ref) is None):
+                return f"{ref} is not a light or light group"
         if a == ButtonAction.ON and mapping.on_values == OnValues.FIXED and not (mapping.brightness or mapping.color_temp):
             return "Choose a brightness or colour temperature for fixed values"
         if a == ButtonAction.SET_BRIGHTNESS and not mapping.brightness:
@@ -472,6 +566,7 @@ def validate_mapping(hass: HomeAssistant, ctrl: LightingController, area_id: str
     vol.Optional("mapping"): vol.Any(None, {
         vol.Required("action"): vol.In([a.value for a in ButtonAction]),
         vol.Optional("target"): vol.All(str, vol.Length(min=1, max=255)),
+        vol.Optional("targets"): vol.All([vol.All(str, vol.Length(min=1, max=255))], vol.Length(max=MAX_TARGETS)),
         vol.Optional("on_values"): vol.In([v.value for v in OnValues]),
         vol.Optional("brightness"): vol.Any(None, vol.All(vol.Coerce(int), vol.Range(min=BRIGHTNESS_MIN,
                                                                                       max=BRIGHTNESS_MAX))),
@@ -517,6 +612,11 @@ def ws_mapping(hass: HomeAssistant, connection, msg) -> None:
     if msg.get("mapping") is None:
         mappings[raw] = ButtonMapping()  # explicitly unassigned (no default suggestion)
     else:
+        # An explicit target that is not a light, a light group or a room is refused, never silently dropped
+        # (dropping it would leave the mapping pointing at the switch's own room).
+        if bad := [r for r in msg["mapping"].get("targets") or () if not target_ref_ok(r)]:
+            connection.send_error(msg["id"], "invalid_mapping", f"{bad[0]} is not a light, light group or room")
+            return
         mapping = ButtonMapping.from_dict(msg["mapping"])
         if error := validate_mapping(hass, ctrl, msg["area_id"], mapping):
             connection.send_error(msg["id"], "invalid_mapping", error)
@@ -629,4 +729,26 @@ def ws_settings(hass: HomeAssistant, connection, msg) -> None:
     connection.send_result(msg["id"], {"revision": ctrl.store.revision})
 
 
-SWITCH_HANDLERS = (ws_candidates, ws_add, ws_set, ws_mapping, ws_mode, ws_learn, ws_remove, ws_settings)
+@websocket_api.websocket_command({
+    vol.Required("type"): "smart_occupancy/lighting/switch/preview",
+    vol.Required("area_id"): str,
+    vol.Required("mapping"): dict,
+})
+@websocket_api.require_admin
+@callback
+def ws_preview(hass: HomeAssistant, connection, msg) -> None:
+    """App 0.8.0: the physical lights a (not yet saved) light mapping would affect. Read only."""
+    if (ctrl := _ctrl(hass, connection, msg)) is None:
+        return
+    raw = dict(msg["mapping"])
+    bad = [r for r in raw.get("targets") or () if not target_ref_ok(r)]
+    if bad:
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, f"Not a valid target: {bad[0]}")
+        return
+    mapping = ButtonMapping.from_dict(raw)
+    result = mapping_preview(hass, ctrl, msg["area_id"], mapping)
+    result["error"] = validate_mapping(hass, ctrl, msg["area_id"], mapping)
+    connection.send_result(msg["id"], result)
+
+
+SWITCH_HANDLERS = (ws_candidates, ws_add, ws_set, ws_mapping, ws_mode, ws_learn, ws_remove, ws_settings, ws_preview)

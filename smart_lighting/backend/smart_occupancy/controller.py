@@ -3585,36 +3585,95 @@ class LightingController:
                     "override_minutes": minutes, "decision": decision.as_dict() if decision else None}
 
     @callback
+    def light_owner(self, entity_id: str, prefer: str | None = None) -> str | None:
+        """The room whose automatic lighting manages a light (``prefer`` when it is one of several)."""
+        areas = [area for area, _target in self._light_targets.get(entity_id, ())]
+        if prefer is not None and prefer in areas:
+            return prefer
+        return areas[0] if areas else None
+
+    def resolve_switch_targets(self, area_id: str, refs: tuple[str, ...]) -> tuple[list[tuple[str, str | None]],
+                                                                                   list[str]]:
+        """App 0.8.0: the lights a switch's light action addresses, each with the room that manages it.
+
+        ``room`` is the switch's own room (as before), ``room:<area>`` every managed light of that room, an entity
+        id that light or light group (managed by any room, or by none). Duplicates and members of an addressed
+        group are dropped, so no light gets two commands. Returns (targets, references that resolve to nothing)."""
+        from .switches import ROOM_PREFIX, ROOM_TARGET  # noqa: PLC0415
+
+        out: list[tuple[str, str | None]] = []
+        missing: list[str] = []
+        seen: set[str] = set()
+
+        def add(entity_id: str, owner: str | None) -> None:
+            if entity_id not in seen:
+                seen.add(entity_id)
+                out.append((entity_id, owner))
+
+        for ref in refs:
+            if ref == ROOM_TARGET:
+                for entity_id in self.managed_room(area_id).controlled:
+                    add(entity_id, area_id)
+            elif ref.startswith(ROOM_PREFIX):
+                room = ref[len(ROOM_PREFIX):]
+                if room not in self.managed or not self.managed_room(room).controlled:
+                    missing.append(ref)
+                    continue
+                for entity_id in self.managed_room(room).controlled:
+                    add(entity_id, room)
+            elif ref.startswith("light."):
+                add(ref, self.light_owner(ref, area_id))
+        covered: set[str] = set()
+        for entity_id, _owner in out:
+            members = set(self.hass.states.get(entity_id).attributes.get("entity_id") or ()) \
+                if self.hass.states.get(entity_id) is not None else set()
+            for managed in self.managed.values():
+                members |= set(managed.members.get(entity_id) or ())
+            covered |= (members & seen) - {entity_id}
+        return [(e, a) for e, a in out if e not in covered], missing
+
     def register_switch_override(self, area_id: str, entities: list[str], state: str, *, switch: SwitchConfig,
                                  raw: str, reason: str) -> list[str]:
-        """Manual override for the managed lights (or their managed groups) a switch press changed."""
-        targets: list[str] = []
+        """Manual override for the managed lights (or their managed groups) a switch press changed.
+
+        A light managed by the switch's own room is registered there, exactly as before. App 0.8.0: a light the
+        switch reaches in another room is registered in the room that manages it, with that room's override time;
+        the switch's room and the other room's occupancy are not changed by it."""
+        by_area: dict[str, list[str]] = {}
         for entity_id in entities:
-            for area, target in self._light_targets.get(entity_id, ()):
-                if area == area_id and target not in targets:
-                    targets.append(target)
-        if not targets:
+            pairs = list(self._light_targets.get(entity_id, ()))
+            own = [(area, target) for area, target in pairs if area == area_id]
+            for area, target in own or pairs:
+                if target not in by_area.setdefault(area, []):
+                    by_area[area].append(target)
+        if not by_area:
             return []
-        rt = self.runtime_for(area_id)
-        minutes = switch.override_minutes if switch.override_minutes is not None else \
-            self.lighting.override_minutes(area_id)
         now_dt = dt_util.utcnow()
-        for target in targets:
-            rt.last_commands.pop(target, None)
-            rt.adaptive_sent.pop(target, None)
-            rt.overrides[target] = {
-                "entity_id": target, "source": "wall_switch", "since": _iso(now_dt),
-                "until": _iso(now_dt + timedelta(minutes=minutes)) if minutes else None,
-                "user_id": None, "state": state, "switch": switch.name, "switch_id": switch.id,
-                "action": raw, "reason": reason,
-            }
-        _LOGGER.info("lighting_manual_override area=%s lights=%s source=wall_switch switch=%s action=%s",
-                     area_id, ",".join(targets), switch.id, raw)
-        self.explain.override(area_id, targets, "wall_switch", state, minutes, switch=switch.name, action=raw)
+        registered: list[str] = []
+        for area, targets in by_area.items():
+            rt = self.runtime_for(area)
+            if area == area_id:
+                minutes = switch.override_minutes if switch.override_minutes is not None else \
+                    self.lighting.override_minutes(area_id)
+            else:
+                minutes = self.lighting.override_minutes(area)
+            for target in targets:
+                rt.last_commands.pop(target, None)
+                rt.adaptive_sent.pop(target, None)
+                rt.overrides[target] = {
+                    "entity_id": target, "source": "wall_switch", "since": _iso(now_dt),
+                    "until": _iso(now_dt + timedelta(minutes=minutes)) if minutes else None,
+                    "user_id": None, "state": state, "switch": switch.name, "switch_id": switch.id,
+                    "action": raw, "reason": reason, **({"switch_room": area_id} if area != area_id else {}),
+                }
+                registered.append(target)
+            _LOGGER.info("lighting_manual_override area=%s lights=%s source=wall_switch switch=%s action=%s%s",
+                         area, ",".join(targets), switch.id, raw, f" from={area_id}" if area != area_id else "")
+            self.explain.override(area, targets, "wall_switch", state, minutes, switch=switch.name, action=raw)
         self._mark_dirty()
         self._schedule_override_expiry()
         self._notify()
-        return targets
+        return registered
 
 
 def _summary(mood: str | None, items, trigger: str, *, failed: int = 0) -> str:

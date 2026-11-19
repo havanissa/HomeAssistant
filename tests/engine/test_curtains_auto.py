@@ -914,7 +914,8 @@ async def test_settings_scopes_through_the_card_api(hass, pilot, house, covers, 
     assert model["rules"]["global"] == {"daylight_lux": 200, "lux_entity": LUX}
     assert model["rules"]["rooms"][house.kamar]["daylight_lux"] == 300
     assert {g[0] for g in model["rules"]["groups"]} == {"sleep", "lamp", "daylight", "schedule", "sun", "manual",
-                                                        "movement", "environment", "thermal"}
+                                                        "movement", "environment", "thermal",
+                                                        "multisun"}  # App 0.8.0: multi-sensor sunlight
     await r.api.ok("auto/settings", scope="room", area_id=house.kamar, values={"daylight_lux": None})
     assert r.auto(k)["sources"]["daylight_lux"] == "global"
     err = await r.api.error("auto/settings", scope="global", values={"dusk_lux": 500})

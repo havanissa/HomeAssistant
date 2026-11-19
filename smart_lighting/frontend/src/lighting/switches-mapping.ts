@@ -2,7 +2,10 @@
 // action uses are shown; the integration validates every entity again before saving.
 import { html, nothing, type TemplateResult } from "lit";
 
-import { LIGHT_ACTIONS, type Mapping, type SwitchesModel } from "./switches-model";
+import { LIGHT_ACTIONS, mappingSummary, previewTargets, refLabel, targetRefs, withTargets, type Mapping, type SwitchesModel, type TargetRoom } from "./switches-model";
+
+/** App 0.8.0: the search text of the "Other rooms" picker, per open editor (kept while the editor re-renders). */
+let otherSearch = "";
 
 type Change = (patch: Partial<Mapping>) => void;
 
@@ -28,11 +31,14 @@ export function mappingFields(m: Mapping, sw: SwitchesModel, moods: string[], on
     select("Action", m.action || "none", sw.actions.map((a) => [a.value, a.label]), (v) => onChange({ action: v }), disabled, "action"),
   ];
   if (LIGHT_ACTIONS.includes(m.action) && m.action !== "dim_stop") {
-    const target = m.target || "room";
-    const options: [string, string][] = [["room", "All room lights"],
-      ...sw.targets.map((t): [string, string] => [t.entity_id, `${t.name || t.entity_id}${t.group ? " (group)" : ""}`])];
-    if (target !== "room" && !sw.targets.some((t) => t.entity_id === target)) options.push([target, target]);
-    parts.push(select("Lights", target, options, (v) => onChange({ target: v }), disabled, "target"));
+    if (sw.target_options) parts.push(targetPicker(m, sw, onChange, disabled));
+    else {
+      const target = m.target || "room";
+      const options: [string, string][] = [["room", "All room lights"],
+        ...sw.targets.map((t): [string, string] => [t.entity_id, `${t.name || t.entity_id}${t.group ? " (group)" : ""}`])];
+      if (target !== "room" && !sw.targets.some((t) => t.entity_id === target)) options.push([target, target]);
+      parts.push(select("Lights", target, options, (v) => onChange({ target: v }), disabled, "target"));
+    }
   }
   if (m.action === "on") {
     parts.push(select("Switch on with", m.on_values || "mood", [["mood", "The current mood"], ["last", "The light's last values"], ["fixed", "Fixed values"]],
@@ -75,4 +81,54 @@ export function mappingFields(m: Mapping, sw: SwitchesModel, moods: string[], on
     }
   }
   return html`<div class="sw-map-fields">${parts}</div>`;
+}
+
+
+function roomGroup(label: string, room: TargetRoom, own: boolean): TemplateResult {
+  return html`<optgroup label=${label}>
+    <option value=${own ? "room" : room.ref}>${own ? "All room lights" : `${room.name}: all lights`}</option>
+    ${room.lights.map((l) => html`<option value=${l.entity_id}>${own ? "" : `${room.name} → `}${l.name}${l.group ? " (group)" : ""}${l.on_off_only ? " · on/off" : ""}</option>`)}
+  </optgroup>`;
+}
+
+/** App 0.8.0: the targets of a light action - this room, adjacent rooms, any other room by search - as chips,
+ * with a readable summary and the physical lights it will affect. */
+function targetPicker(m: Mapping, sw: SwitchesModel, onChange: Change, disabled: boolean): TemplateResult {
+  const o = sw.target_options!;
+  const refs = targetRefs(m);
+  const set = (next: string[]) => onChange(withTargets(next, sw));
+  const add = (ref: string) => {
+    if (!ref) return;
+    // The first explicit choice replaces the default "All room lights".
+    const base = refs.length === 1 && refs[0] === "room" && !(m.targets && m.targets.length) ? [] : refs;
+    set([...base, ref]);
+  };
+  const query = otherSearch.trim().toLowerCase();
+  const others = o.other.map((room) => ({ ...room, lights: room.lights.filter((l) => !query || l.name.toLowerCase().includes(query)
+    || room.name.toLowerCase().includes(query) || l.entity_id.includes(query)) })).filter((room) => !query || room.lights.length
+    || room.name.toLowerCase().includes(query));
+  const preview = previewTargets(m, sw);
+  return html`<div class="field sw-wide sw-targets" data-field="targets"><span>Lights</span>
+    <div class="sw-target-chips">${refs.map((ref) => html`<span class="chip chip-info sw-target-chip" data-ref=${ref}>${refLabel(ref, sw)}
+      ${refs.length > 1 || ref !== "room" ? html`<button type="button" class="chip-x" aria-label=${`Remove ${refLabel(ref, sw)}`} ?disabled=${disabled}
+        @click=${() => set(refs.filter((r) => r !== ref))}>×</button>` : nothing}</span>`)}</div>
+    <div class="sw-target-add">
+      <select data-field="target-add" aria-label="Add a target" ?disabled=${disabled} @change=${(e: Event) => { const el = e.target as HTMLSelectElement; add(el.value); el.value = ""; }}>
+        <option value="">Add a target…</option>
+        ${roomGroup("This room", o.this_room, true)}
+        ${o.adjacent.map((room) => roomGroup(`Adjacent: ${room.name}`, room, false))}
+        ${others.length ? others.map((room) => roomGroup(`Other: ${room.name}`, room, false)) : nothing}
+      </select>
+      ${o.other.length ? html`<input type="search" class="sw-target-search" placeholder="Search other rooms" aria-label="Search lights in other rooms" .value=${otherSearch}
+        ?disabled=${disabled} @input=${(e: Event) => { otherSearch = (e.target as HTMLInputElement).value; onChange({}); }} />` : nothing}
+    </div>
+    <span class="small sw-target-summary" data-testid="mapping-summary">${mappingSummary(m, sw)}</span>
+    <details class="sw-target-preview" data-testid="mapping-preview"><summary class="small">Affects ${preview.rows.length} light${preview.rows.length === 1 ? "" : "s"}${preview.rows.some((r) => r.room && r.room !== o.this_room.area_id) ? " (also in other rooms)" : ""}</summary>
+      <ul class="plain-list small">${preview.rows.map((r) => html`<li>${r.name}${r.room_name && r.room !== o.this_room.area_id ? html` <span class="muted">· ${r.room_name}</span>` : nothing}
+        <span class="muted">· ${r.entity_id}</span>${r.skipped ? html` <span class="tone-warning">· ${r.skipped}</span>` : nothing}</li>`)}</ul>
+      ${preview.dropped.length ? html`<p class="small muted">Not commanded separately (covered by a group): ${preview.dropped.join(", ")}</p>` : nothing}
+      ${preview.missing.length ? html`<p class="small tone-warning">No lights: ${preview.missing.map((r) => refLabel(r, sw)).join(", ")}</p>` : nothing}
+      <p class="small muted">A light switched in another room counts as a manual change in that room (its own override time); the other room's occupancy is not changed.</p>
+    </details>
+  </div>`;
 }

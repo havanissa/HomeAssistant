@@ -321,6 +321,10 @@ class CurtainManager:
                 window = replace(window, layers=tuple(replace(x, entity_id=new) if x.entity_id == old else x
                                                       for x in window.layers))
                 changed = True
+            if any(x.entity_id == old for x in window.sun_sensors):  # App 0.8.0: the window's sunlight sensors
+                window = replace(window, sun_sensors=tuple(replace(x, entity_id=new) if x.entity_id == old else x
+                                                           for x in window.sun_sensors))
+                changed = True
             windows[window_id] = window
         if changed:
             _LOGGER.info("entity_renamed old=%s new=%s (curtain configuration updated)", old, new)

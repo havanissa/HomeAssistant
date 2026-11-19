@@ -547,3 +547,19 @@ async def test_a_fresh_app_next_to_the_companion_imports_the_legacy_stores(fake_
     # A second transfer never replaces the App's copies.
     again = await step(client, "transfer_config", {"apply": True})
     assert all(s["import"] is False for s in again["stores"]) and again["stores_imported"] == []
+
+
+async def test_app_0_8_refuses_the_changed_0_9_0_handovers_with_the_way_forward(legacy_app: Any, fake_ha: FakeHomeAssistant) -> None:
+    """App 0.8.0 changed engine code 0.9.0 fingerprints: lighting, curtain and forecast handovers are refused up front
+    (occupancy keeps its unchanged engine); the message points at the companion update and Activate."""
+    await step(legacy_app, "inspect")
+    handed = await step(legacy_app, "transfer_control", {"domain": "occupancy"})
+    assert handed["domains"]["occupancy"]
+    r = await legacy_app.post("/api/migration/transfer_control", json={"domain": "lighting"}, headers=ADMIN_HEADERS)
+    body = await r.json()
+    assert r.status == 409 and body["code"] == "app_too_new" and "1.0.0" in body["error"], body
+    # Curtains and forecasts follow lighting in the safe order, so they point at it first.
+    for domain in ("curtains", "forecast"):
+        r = await legacy_app.post("/api/migration/transfer_control", json={"domain": domain}, headers=ADMIN_HEADERS)
+        assert r.status == 409 and (await r.json())["code"] == "order"
+    assert legacy_app.core.lighting.mode == "shadow"  # nothing changed hands
