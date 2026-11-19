@@ -280,15 +280,33 @@ class MigrationService:
             else:
                 check(f"{domain}_owner", owner.get("owner") in ("app", "none", "app_away"), f"{domain}: one owner",
                       f"owner {owner.get('owner')}")
-        options = core.core_config.options or self.legacy_options()
+        # The configuration to check: the App's own (staged or authoritative), else the one Transfer config would
+        # import - the 0.9.0 options through its lighting bridge, or the companion's legacy export (an App
+        # installed fresh next to companion 1.0.0 has nothing else).
+        options = core.core_config.options
+        source = "the App's configuration"
+        if options is None:
+            options, source = self.legacy_options(), "the integration's options (lighting bridge)"
+        if options is None and mode == "companion" and core.companion is not None:
+            try:
+                export = await core.companion.legacy_export()
+            except CompanionError as err:
+                export = {}
+                source = f"the companion's legacy export could not be read ({err.code})"
+            else:
+                source = "the companion's legacy data"
+            legacy = (export.get("entry") or {}).get("options")
+            options = legacy if isinstance(legacy, dict) else None
         try:
             from .core_config import validate_options  # noqa: PLC0415
 
             validate_options(options or {})
             check("config", options is not None, "Configuration integrity",
-                  "The configuration parses with the shared model" if options is not None else "No configuration")
+                  f"{source[0].upper()}{source[1:]} parses with the shared model ({len(options.get('rooms') or {})} rooms)"
+                  if options is not None else "No configuration: neither the App, the integration nor the companion "
+                                              "holds one (start a new installation in Settings → Setup)")
         except CoreConfigError as err:
-            check("config", False, "Configuration integrity", str(err))
+            check("config", False, "Configuration integrity", f"{source}: {err}")
         writable = core.settings.data_dir is not None and os.access(core.settings.data_dir, os.W_OK)
         check("storage", writable, "App storage", "Writable" if writable else "The data folder is not writable")
         if mode == "companion":

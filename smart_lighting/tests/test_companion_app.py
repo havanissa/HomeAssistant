@@ -507,6 +507,11 @@ async def test_a_fresh_app_next_to_the_companion_imports_the_legacy_stores(fake_
     core = client.core
     await wait_for(lambda: core.companion.state == "present")
     assert core.lighting.stored_config_doc() is None and core.curtains.stored_config_doc() is None
+    # Production finding (0.7.1): Validate found "No configuration" here and blocked the wizard at step 3.
+    validate = await step(client, "validate")
+    checks = {c["key"]: c for c in validate["checks"]}
+    assert validate["ok"] is True, [c for c in validate["checks"] if c["status"] != "ok"]
+    assert checks["config"]["status"] == "ok" and "companion" in checks["config"]["detail"]
     review = await step(client, "transfer_config", {"apply": False})
     assert {s["key"]: s["import"] for s in review["stores"]} == {"smart_occupancy.lighting": True, "smart_occupancy.curtains": True,
                                                                 "smart_occupancy.forecast_days": True}
