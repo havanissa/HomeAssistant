@@ -413,6 +413,9 @@ def phase_reinstall(args: argparse.Namespace, out: Path) -> None:
           and all(v == "none" for v in system["owners"].values()), (system["config_authority"], system["owners"]))
     setup = app("api/setup")
     check("setup refuses to start fresh (legacy data present)", app_post("api/setup/start", {})[0] == 409, setup["config"])
+    st, validated = step("validate")
+    check("validate passes on the companion's legacy configuration", st == 200 and validated["result"]["ok"] is True,
+          [c for c in validated.get("result", {}).get("checks", []) if c["status"] != "ok"])
     st, review = step("transfer_config", {"apply": False})
     plan = {x["key"]: x["import"] for x in review["result"]["stores"]}
     check("review lists the stores to import", st == 200 and plan.get("smart_occupancy.lighting") is True, plan)

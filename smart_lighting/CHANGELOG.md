@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.2
+
+- **Validate no longer blocks an App installed fresh next to companion 1.0.0.** Its *Configuration
+  integrity* check looked only at the App's own configuration and at the 0.9.0 lighting bridge, so with
+  neither (a reinstalled App, the integration already replaced) it reported "No configuration" and the
+  wizard could not continue past step 3. It now also checks the configuration in the companion's legacy
+  data, the one *Transfer config* imports, and says which source it checked.
+
 ## 0.7.1
 
 - **Transfer config imports the integration's stores too.** With the companion installed, *Transfer config*

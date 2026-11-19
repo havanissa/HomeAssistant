@@ -1,6 +1,6 @@
 # Home Assistant App configuration: Smart Occupancy & Lighting (Phase A6).
 name: Smart Occupancy & Lighting
-version: "0.7.1"
+version: "0.7.2"
 slug: smart_lighting
 description: >-
   Web interface and automation runtimes for Smart Occupancy & Lighting: rooms,
