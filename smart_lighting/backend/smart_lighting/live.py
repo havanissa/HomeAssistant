@@ -93,6 +93,7 @@ class LiveHub:
             self.core.curtains.add_listener(self._on_curtains)
         if self.core.forecast is not None:
             self.core.forecast.add_listener(self._on_forecast)
+        self.core.add_system_listener(self._on_system)
         self._tasks = [
             asyncio.create_task(self._flush_loop(), name="live-flush"),
             asyncio.create_task(self._heartbeat_loop(), name="live-heartbeat"),
@@ -141,6 +142,11 @@ class LiveHub:
             rt = self.core.forecast
             self._schedule(self._broadcast({"type": "predictions", "what": kind, "mode": rt.mode,
                                             "bridge": rt.bridge, "owner": self.core.forecast_owner()}))
+
+    def _on_system(self, what: str) -> None:
+        """Phase A6: the companion, the configuration authority or a runtime's control changed (refetch System)."""
+        if self.clients:
+            self._schedule(self._broadcast({"type": "system", "what": what}))
 
     def _on_engine(self, kind: str) -> None:
         if self.clients and self.core.occupancy is not None:

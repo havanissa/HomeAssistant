@@ -49,6 +49,8 @@ class Store {
   predictions: EngineBrief | null = null;
   predictionsVersion = 0;
   predictionsModelsVersion = 0;
+  /** Phase A6: bumped when the companion, the configuration authority or any owner changes. */
+  systemVersion = 0;
   private listeners = new Set<Listener>();
 
   subscribe(listener: Listener): () => void {
@@ -123,6 +125,9 @@ class Store {
         this.predictions = { mode: message.mode, owner: message.owner, bridge: message.bridge };
         if (message.what === "models") this.predictionsModelsVersion += 1;
         else this.predictionsVersion += 1;
+        break;
+      case "system":
+        this.systemVersion += 1;
         break;
       case "entities": {
         if (!this.overview) return;

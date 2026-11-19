@@ -162,6 +162,10 @@ export interface Overview {
   lighting?: EngineBrief | null;
   curtains?: EngineBrief | null;
   predictions?: EngineBrief | null;
+  /** Phase A6: the companion session, the App's configuration authority and the configuration host. */
+  companion?: Record<string, unknown> | null;
+  config?: { authoritative: boolean; staged: boolean; revision: string | null } & Record<string, unknown>;
+  system?: Record<string, unknown> | null;
   generated_at: string;
 }
 
@@ -202,6 +206,8 @@ export type LiveMessage =
   | { type: "lighting"; what: string; mode: string; owner: string; bridge: string }
   | { type: "curtains"; what: string; mode: string; owner: string; bridge: string }
   | { type: "predictions"; what: string; mode: string; owner: string; bridge: string }
+  /** Phase A6: the companion, the configuration authority or an owner changed (refetch /api/system). */
+  | { type: "system"; what: string }
   | { type: "pong" };
 
 export interface LiveState {

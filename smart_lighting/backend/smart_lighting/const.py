@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Final
 
 APP_NAME: Final = "Smart Occupancy & Lighting"
-APP_VERSION: Final = "0.6.0"  # must match config.yaml (checked by the tests)
-APP_PHASE: Final = "A5"
+APP_VERSION: Final = "0.7.0"  # must match config.yaml (checked by the tests)
+APP_PHASE: Final = "A6"
 
 # The existing custom integration this App will eventually replace. It keeps
 # running every automation. Since Phase A2 the App edits its room

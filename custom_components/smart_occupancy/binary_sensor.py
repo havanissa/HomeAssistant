@@ -1,78 +1,104 @@
-"""Diagnostic binary sensors."""
+"""Binary sensors of the companion: room occupancy, predicted occupancy and the mood mismatch."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.binary_sensor import (
-    BinarySensorDeviceClass,
-    BinarySensorEntity,
-)
+from homeassistant.components.binary_sensor import BinarySensorDeviceClass, BinarySensorEntity
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .coordinator import SmartOccupancyConfigEntry, SmartOccupancyCoordinator
-from .forecast_entities import RoomPredictedSensor
-from .entity import RoomOccupancyEntity, SmartOccupancyEntity, global_unique_id
+from .companion import Companion
+from .const import SIGNAL_ROOMS_CHANGED
+from .entity import CompanionEntity, RoomEntity, global_unique_id
+from .sensor import _remove
 
 PARALLEL_UPDATES = 0
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: SmartOccupancyConfigEntry,
-    async_add_entities: AddConfigEntryEntitiesCallback,
-) -> None:
-    coordinator = entry.runtime_data
-    entities: list[BinarySensorEntity] = [MoodMismatchSensor(coordinator)]
-    entities += [RoomOccupiedSensor(coordinator, a) for a in sorted(coordinator.config.enabled_rooms)]
-    # Occupancy forecast (0.5.0, observation only).
-    entities += [RoomPredictedSensor(coordinator, a) for a in sorted(coordinator.config.enabled_rooms)]
-    async_add_entities(entities)
+async def async_setup_entry(hass: HomeAssistant, entry: Any, async_add_entities: AddConfigEntryEntitiesCallback) -> None:
+    companion: Companion = entry.runtime_data
+    async_add_entities([MoodMismatchSensor(companion)])
+    created: dict[str, list[RoomEntity]] = {}
+
+    @callback
+    def sync() -> None:
+        rooms = companion.rooms
+        new: list[RoomEntity] = []
+        for area_id in sorted(rooms):
+            if area_id not in created:
+                created[area_id] = [RoomOccupiedSensor(companion, area_id), RoomPredictedSensor(companion, area_id)]
+                new.extend(created[area_id])
+        if new:
+            async_add_entities(new)
+        for area_id in [a for a in created if a not in rooms]:
+            for entity in created.pop(area_id):
+                hass.async_create_task(_remove(hass, entity))
+
+    sync()
+    entry.async_on_unload(async_dispatcher_connect(hass, SIGNAL_ROOMS_CHANGED, sync))
 
 
-class MoodMismatchSensor(SmartOccupancyEntity, BinarySensorEntity):
-    """On when Main Mood disagrees with the existing rule beyond the grace period."""
-
+class MoodMismatchSensor(CompanionEntity, BinarySensorEntity):
+    _view_domain = "system"
     _attr_translation_key = "mood_mismatch"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator: SmartOccupancyCoordinator) -> None:
-        super().__init__(coordinator, global_unique_id("mood_mismatch"))
+    def __init__(self, companion: Companion) -> None:
+        super().__init__(companion, global_unique_id("mood_mismatch"))
+
+    def _entity_view(self) -> dict[str, Any] | None:
+        return (self.companion.view("system") or {}).get("mood_mismatch")
 
     @property
     def is_on(self) -> bool | None:
-        data = self.coordinator.data
-        if data.mood.consistent is None:
-            return None  # cannot be judged (helper missing or unavailable)
-        return data.mood_mismatch
+        view = self._entity_view()
+        value = view.get("value") if view else None
+        return value if isinstance(value, bool) else None
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        mood = self.coordinator.data.mood
-        return {
-            "main_mood": mood.main_mood,
-            "expected_main_mood": mood.expected_main_mood,
-            "grace_seconds": self.coordinator.config.mood.mismatch_grace_seconds,
-        }
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        view = self._entity_view()
+        return dict(view.get("attributes") or {}) if view else None
 
 
-class RoomOccupiedSensor(RoomOccupancyEntity, BinarySensorEntity):
-    """Occupancy computed by this integration's engine (Observe only: nothing acts on it here).
-
-    On for possible occupancy, confirmed occupancy and while vacancy is being
-    confirmed. Off when vacant. During an outage of every occupancy sensor it
-    keeps its last value; it is unknown only if nothing has ever been known.
-    """
+class RoomOccupiedSensor(RoomEntity, BinarySensorEntity):
+    """Occupancy decided by the App's engine. Keeps its last value while the App is away (never inferred)."""
 
     _platform_domain = "binary_sensor"
     _key = "occupied"
+    _view_domain = "occupancy"
     _attr_translation_key = "room_occupied"
     _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
 
     @property
     def is_on(self) -> bool | None:
-        result = self.result
-        return result.occupied if result else None
+        view = self._entity_view()
+        value = view.get("value") if view else None
+        return value if isinstance(value, bool) else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        view = self._entity_view()
+        if view is None:
+            return None
+        return {**dict(view.get("attributes") or {}), "fresh": self.fresh}
+
+
+class RoomPredictedSensor(RoomEntity, BinarySensorEntity):
+    _platform_domain = "binary_sensor"
+    _key = "predicted"
+    _view_domain = "forecast"
+    _attr_translation_key = "room_predicted"
+    _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
+    _attr_icon = "mdi:crystal-ball"
+    _unrecorded_attributes = frozenset({"explanation"})
+
+    @property
+    def is_on(self) -> bool | None:
+        view = self._entity_view()
+        value = view.get("value") if view else None
+        return value if isinstance(value, bool) else None

@@ -174,16 +174,19 @@ LIGHTING_MODULES = ("lighting", "moods", "switches")
 
 
 def _current(occupancy_owner: str, lighting_owner: str = INTEGRATION, curtains_owner: str = INTEGRATION,
-             forecast_owner: str = INTEGRATION) -> tuple[Module, ...]:
-    """The modules with the automation owners as the integration acknowledges them."""
+             forecast_owner: str = INTEGRATION, config_authority: str = INTEGRATION) -> tuple[Module, ...]:
+    """The modules with the automation owners as the integration (or the companion) acknowledges them."""
     occupancy = APP if occupancy_owner == APP else INTEGRATION
     lighting = APP if lighting_owner == APP else INTEGRATION
     curtains = APP if curtains_owner == APP else INTEGRATION
     forecast = APP if forecast_owner == APP else INTEGRATION
+    core = APP if config_authority == APP else INTEGRATION
     out = []
     for m in MODULES:
         if m.key == "presence":
-            m = replace(m, automation_owner=occupancy, controlled_by=occupancy)
+            m = replace(m, automation_owner=occupancy, controlled_by=occupancy, config_source=core)
+        elif m.key == "rooms":
+            m = replace(m, config_source=core)
         elif m.key in LIGHTING_MODULES:
             # One owner for the whole lighting subsystem; its configuration moves with it.
             m = replace(m, automation_owner=lighting, controlled_by=lighting, config_source=lighting)
@@ -191,28 +194,32 @@ def _current(occupancy_owner: str, lighting_owner: str = INTEGRATION, curtains_o
             m = replace(m, automation_owner=curtains, controlled_by=curtains, config_source=curtains)
         elif m.key == "predictions":
             m = replace(m, automation_owner=forecast, controlled_by=forecast, config_source=forecast)
+        if m.kind == "feature" and m.automation_owner == APP:
+            m = replace(m, status=AVAILABLE)
         out.append(m)
     return tuple(out)
 
 
 def modules(occupancy_owner: str = INTEGRATION, lighting_owner: str = INTEGRATION, curtains_owner: str = INTEGRATION,
-            forecast_owner: str = INTEGRATION) -> list[dict[str, str | None]]:
-    return [m.as_dict() for m in _current(occupancy_owner, lighting_owner, curtains_owner, forecast_owner)]
+            forecast_owner: str = INTEGRATION, config_authority: str = INTEGRATION) -> list[dict[str, str | None]]:
+    return [m.as_dict() for m in _current(occupancy_owner, lighting_owner, curtains_owner, forecast_owner,
+                                          config_authority)]
 
 
 def migration(occupancy_owner: str = INTEGRATION, lighting_owner: str = INTEGRATION, curtains_owner: str = INTEGRATION,
-              forecast_owner: str = INTEGRATION) -> dict[str, object]:
+              forecast_owner: str = INTEGRATION, config_authority: str = INTEGRATION) -> dict[str, object]:
     """Migration progress. Only completed work counts; nothing is estimated.
 
     ``modules_migrated`` counts modules whose *automation* runs in the App;
     ``interfaces_migrated`` counts modules configured in the App.
     """
-    features = [m for m in _current(occupancy_owner, lighting_owner, curtains_owner, forecast_owner)
+    features = [m for m in _current(occupancy_owner, lighting_owner, curtains_owner, forecast_owner, config_authority)
                 if m.kind == "feature"]
     migrated = [m for m in features if m.automation_owner == APP]
     interfaces = [m for m in features if m.gui_owner == APP]
     return {
-        "current_phase": "A5",
+        "current_phase": "A6",
+        "config_authority": config_authority,
         "foundation_complete": True,
         "modules_total": len(features),
         "modules_migrated": len(migrated),

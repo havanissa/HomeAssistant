@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.7.0
+
+Phase A6: the App is the product; the integration becomes the companion. Works with
+Smart Occupancy & Lighting **0.9.0** (as before, through its bridges, for the
+migration) and **1.0.0** (the companion). Nothing changes on upgrade until an
+administrator runs the migration wizard.
+
+- **The App holds every configuration.** `CoreConfigStore` (`/data/config/core.json`):
+  rooms, sensors, lights, light types, mood source and occupancy timing, with revisions,
+  backups, atomic writes, stale detection, renames, export and reviewed import
+  (Settings → Migration & System, `GET /api/config/export`, `POST /api/config/import`).
+  Lighting, curtain and forecast settings were already the App's.
+- **Companion mode of every runtime.** With the companion installed the App claims
+  occupancy, lighting, curtains and predictions (epoch, 30 s lease, heartbeats) and
+  publishes the native entities' views; lights and covers are commanded only through the
+  companion's fenced executor. A lost lease stops the engine at once and the App claims
+  again with a new epoch; a restart never reuses a lease.
+- **Settings → Migration & System**: who runs what (as the companion acknowledges it),
+  the configuration authority, the companion (pair, claim, stop, revoke), engine health,
+  and the eight-step wizard: Inspect, Backup, Validate, Transfer config, Transfer
+  control, Activate, Verify, Retire — with Abort and Restore legacy data. Every step is
+  started by an administrator and recorded.
+- **Settings → Setup**: the guided setup of a new installation (safe defaults, no
+  automatic control until you enable it per room). Refused while 0.9.0 is installed.
+- **Dashboard** rebuilt from the App's own runtimes: house occupancy, rooms (occupancy,
+  lighting mode, mood, daylight, prediction), mood, curtains, predictions, unavailable
+  devices, health, who runs what, with freshness.
+- **Outage behaviour page** (Settings → Migration & System → Outage behaviour): what works
+  and what does not while the App is away.
+- Rooms and Presence editors run locally against the App's configuration once the App is
+  the authority; the "pending module" page is gone.
+- Live message `system` for owner / authority / companion changes; `GET /api/system`,
+  `/api/dashboard`, `/api/migration`, `/api/setup`.
+- Removed: the sync scripts and the byte-identical-copy tests (the App is the only copy);
+  `scripts/check_protocol.py` checks the shared companion protocol instead.
+
 ## 0.6.0
 
 Phase A5: Curtains and Predictions. Needs Smart Occupancy & Lighting 0.9.0.

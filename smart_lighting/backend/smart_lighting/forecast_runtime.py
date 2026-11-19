@@ -42,6 +42,10 @@ from smart_occupancy.runtime_manifest import RUNTIME_VERSION, fingerprint as run
 
 from .forecast_compare import ForecastComparator, iso
 from .forecast_host import DAYS_STORE_KEY, ForecastInstance
+from . import entity_views
+from .companion_client import CompanionClient, CompanionError
+from .companion_mode import CompanionMode
+from .core_config import CoreConfigStore
 from .ha import HomeAssistantClient, HomeAssistantError
 from .lighting_host import room_result
 
@@ -74,10 +78,14 @@ def _detail(err: Exception) -> str:
 
 class ForecastRuntime:
     def __init__(self, ha: HomeAssistantClient, occupancy: Any, data_dir: Path | None, *, app_version: str,
-                 min_shadow_seconds: int = MIN_SHADOW_SECONDS, min_matches: int = MIN_MATCHES) -> None:
+                 min_shadow_seconds: int = MIN_SHADOW_SECONDS, min_matches: int = MIN_MATCHES,
+                 companion: CompanionClient | None = None, core_config: CoreConfigStore | None = None) -> None:
         self.ha = ha
         self.occupancy = occupancy
         self.dir = data_dir / "predictions" if data_dir else None
+        self.core_config = core_config
+        self.cm = CompanionMode(self, "forecast", companion, core_config) if companion and core_config else None
+        self.core_host: Any = None
         self.app_version = app_version
         self.min_shadow_seconds = min_shadow_seconds
         self.min_matches = min_matches
@@ -127,11 +135,15 @@ class ForecastRuntime:
         self.mode = "standalone"
         self._unsubs.append(self.ha.add_listener(self._on_ha))
         self._unsubs.append(self.occupancy.add_result_listener(self._on_occupancy))
+        if self.cm is not None:
+            self.cm.start()
         if self.ha.connected:
             self._connected()
 
     async def stop(self) -> None:
         self._stopping = True
+        if self.cm is not None:
+            await self.cm.stop()
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -201,9 +213,15 @@ class ForecastRuntime:
             self.instance.occupancy_changed(area_id, fired)
 
     def _connected(self) -> None:
+        if self.cm is not None and self.cm.active:
+            return  # Phase A6: the companion session claims the domain; there is no legacy bridge to shadow
         if self._subscribe_task is None or self._subscribe_task.done():
             self._attempt = 0
             self._subscribe_task = asyncio.get_running_loop().create_task(self._subscribe_loop())
+
+    def companion_absent(self) -> None:
+        if self.ha.connected:
+            self._connected()
 
     def _disconnected(self, reason: str) -> None:
         self.session_id = None
@@ -412,6 +430,9 @@ class ForecastRuntime:
     async def _publish_view(self) -> None:
         self._view_handle = None
         inst = self.instance
+        if self.cm is not None and self.cm.owner:
+            await self.cm.publish_now()
+            return
         if self.mode != "owner" or inst is None or inst.manager is None:
             return
         try:
@@ -425,6 +446,8 @@ class ForecastRuntime:
     async def _publish_export(self) -> None:
         self._export_handle = None
         inst = self.instance
+        if self.cm is not None and self.cm.owner:
+            return  # the learned data lives in the App's own store (and its backups); nothing to mirror
         if self.mode != "owner" or inst is None or inst.manager is None:
             return
         try:
@@ -436,6 +459,8 @@ class ForecastRuntime:
                 self._schedule_export(60)
 
     def _start_heartbeat(self) -> None:
+        if self.cm is not None and self.cm.owner:
+            return
         if self._heartbeat is None or self._heartbeat.done():
             self._heartbeat = asyncio.get_running_loop().create_task(self._heartbeat_loop())
 
@@ -451,6 +476,9 @@ class ForecastRuntime:
                 _LOGGER.debug("forecast heartbeat failed: %s", err)
 
     async def _lose(self, why: str) -> None:
+        if self.cm is not None and self.cm.owner:
+            await self.cm.lose(why)
+            return
         if self.mode != "owner" or self._switching:
             return
         _LOGGER.warning("The App no longer produces the forecasts (%s); back to shadow mode", why)
@@ -478,6 +506,10 @@ class ForecastRuntime:
 
     def readiness(self, now: datetime | None = None) -> dict[str, Any]:
         now = now or utcnow()
+        if self.cm is not None and self.cm.active:
+            from .curtains_runtime import _companion_readiness  # noqa: PLC0415
+
+            return _companion_readiness(self.cm, "Forecasts claimed")
         report = self.comparator.report(now)
         checks: list[dict[str, Any]] = []
 
@@ -510,6 +542,11 @@ class ForecastRuntime:
             "thresholds": {"min_shadow_seconds": self.min_shadow_seconds, "min_matches": self.min_matches}}
 
     async def handover(self, user_id: str | None) -> dict[str, Any]:
+        if self.cm is not None and self.cm.active:
+            try:
+                return await self.cm.claim(user_id, manual=True)
+            except CompanionError as err:
+                raise ForecastError(err.code, str(err), err.status) from err
         if self.mode == "owner":
             raise ForecastError("already_owner", "The App already produces the forecasts")
         if self._switching:
@@ -617,6 +654,8 @@ class ForecastRuntime:
         return {"applied": True, "days": taken}
 
     async def release(self, user_id: str | None) -> dict[str, Any]:
+        if self.cm is not None and self.cm.active:
+            return await self.cm.release(user_id)
         if self.mode != "owner" or self.instance is None:
             return await self.return_control(user_id)
         if self._switching:
@@ -651,6 +690,8 @@ class ForecastRuntime:
         return {"ownership": self.integration}
 
     async def return_control(self, user_id: str | None) -> dict[str, Any]:
+        if self.cm is not None and self.cm.active:
+            return await self.cm.release(user_id)
         if self.mode == "owner" and self.instance is not None and not self._switching:
             try:
                 return await self.release(user_id)
@@ -771,7 +812,51 @@ class ForecastRuntime:
             "running": bool(inst and inst.started), "counters": dict(self.counters), "last_error": self.last_error,
             "notices": self.notices, "ownership_log": list(self.ownership_log), "last_copy": self.last_copy,
             "comparison": self.comparator.report(now), "readiness": self.readiness(now),
+            "companion": self.cm.status() if self.cm is not None else None,
         }
+
+    # ---------------------------------------------------------- companion (A6)
+    def companion_can_claim(self) -> str | None:
+        if self.core_config is None or not self.core_config.authoritative:
+            return "the App is not the configuration authority yet (finish the setup or the migration)"
+        return None
+
+    def companion_revision(self) -> str | None:
+        settings, _learned, _days = self._own_revisions()
+        return settings
+
+    def companion_targets(self) -> dict[str, list[str]] | None:
+        return None  # forecasts command nothing
+
+    async def companion_start_owner(self) -> None:
+        self.options = dict((self.core_config.options if self.core_config else None) or {})
+        oldest = (self.cm.companion.hello or {}).get("recorder_oldest") if self.cm else None
+        self.recorder_oldest = float(oldest) if isinstance(oldest, (int, float)) and not isinstance(oldest, bool) \
+            else None
+        await self._stop_instance(flush=self.mode == "owner")
+        self.mode, self.bridge, self.bridge_error = "owner", "companion", None
+        self.integration = {"owner": "app", "state": "app", "manager": "companion"}
+        self._log("companion_claim", epoch=self.cm.lease.epoch if self.cm and self.cm.lease else None)
+        await self._start_owner(export=None)
+        self._changed()
+
+    async def companion_stop_owner(self, *, flush: bool) -> None:
+        self.mode = "standalone"
+        await self._stop_instance(flush=flush)
+        self._changed()
+
+    def companion_config_changed(self, options: dict[str, Any]) -> None:
+        self.options = dict(options)
+        inst = self.instance
+        if inst is not None and inst.manager is not None:
+            inst.options_changed(self.options)
+
+    def companion_view(self) -> dict[str, Any] | None:
+        inst = self.instance
+        mgr = inst.manager if inst else None
+        if mgr is None:
+            return None
+        return entity_views.forecast_view(mgr, sorted(mgr.coordinator.config.enabled_rooms))
 
     @property
     def manager(self) -> Any:

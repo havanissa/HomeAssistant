@@ -260,9 +260,12 @@ def _device_view(device: dict[str, Any], index: Index, states: dict[str, dict[st
 class RoomsService:
     """Room configuration through the existing integration's API, plus discovery from the registries."""
 
-    def __init__(self, ha: HomeAssistantClient, data_dir: Path | None) -> None:
+    def __init__(self, ha: HomeAssistantClient, data_dir: Path | None, local: Any = None) -> None:
         self.ha = ha
         self.backup_dir = data_dir / "room-backups" if data_dir else None
+        # Phase A6: the App's own configuration host (the same validated handlers, run locally) once the App is
+        # the configuration authority; until then the commands go to the monolithic integration as before.
+        self.local = local
         self.model: dict[str, Any] | None = None
         self.api_state = "unknown"  # unknown | ok | unsupported | unavailable | error
         self.api_error: str | None = None
@@ -289,10 +292,27 @@ class RoomsService:
             self._index = idx
         return self._index
 
+    @property
+    def where(self) -> str:
+        """``app`` when the App's configuration host answers the room commands, else ``integration``."""
+        return "app" if self.local is not None and self.local.authoritative else "integration"
+
     async def refresh(self) -> bool:
-        """Re-read the integration's room configuration. Returns True when it changed."""
+        """Re-read the room configuration (the App's, or the integration's). Returns True when it changed."""
         async with self._lock:
             before = (self.model or {}).get("revision"), (self.model or {}).get("loaded"), self.api_state
+            if self.where == "app":
+                try:
+                    model = await self.local.call("smart_occupancy/rooms/get", {}, user_id=None, is_admin=True)
+                except Exception as err:  # noqa: BLE001 - reported as the API's state
+                    self.api_state, self.api_error = "error", f"{getattr(err, 'code', 'error')}: {err}"
+                    self.model = None
+                else:
+                    self.model = model if isinstance(model, dict) else None
+                    self.api_state, self.api_error = ("ok", None) if self.model else ("error", "Unexpected answer")
+                    self.loaded_at = utcnow_iso()
+                after = (self.model or {}).get("revision"), (self.model or {}).get("loaded"), self.api_state
+                return before != after
             try:
                 model = await self.ha.command("smart_occupancy/rooms/get")
             except HomeAssistantError as err:
@@ -315,6 +335,7 @@ class RoomsService:
     def status(self) -> dict[str, Any]:
         model = self.model or {}
         return {
+            "where": self.where,
             "api": self.api_state,
             "error": self.api_error,
             "loaded": bool(model.get("loaded")),
@@ -768,6 +789,16 @@ class RoomsService:
             await asyncio.sleep(0.25)
 
     async def _call(self, command: str, *, write: bool = False, **params: Any) -> dict[str, Any]:
+        if self.where == "app":
+            from .core_host import CoreApiError  # noqa: PLC0415
+
+            try:
+                result = await self.local.call(command, params, user_id=None, is_admin=True)
+            except CoreApiError as err:
+                status = {"stale_revision": 409, "confirmation_required": 409, "not_authoritative": 503,
+                          "unauthorized": 403}.get(err.code, err.status if err.status != 400 else 400)
+                raise RoomsError(err.code, str(err), status) from err
+            return result if isinstance(result, dict) else {}
         try:
             if write:
                 result = await self.ha.config_write(command, **params)

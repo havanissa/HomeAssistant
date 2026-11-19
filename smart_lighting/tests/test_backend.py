@@ -159,6 +159,8 @@ def test_client_has_no_device_api() -> None:
     assert {n for n in names if "lighting" in n} == {"lighting_command"}
     assert {n for n in names if "curtain" in n} == {"curtains_command"}
     assert {n for n in names if "forecast" in n} == {"forecast_command"}
+    # Phase A6: the companion integration's fenced executor and ownership commands (COMPANION_COMMANDS only).
+    assert {n for n in names if "companion" in n} == {"companion_command"}
     assert READ_ONLY_COMMANDS == {
         "ping", "get_config", "get_states", "subscribe_events", "config_entries/get", "config_entries/subscribe",
         "manifest/get", "config/entity_registry/list", "config/area_registry/list", "config/device_registry/list",
@@ -171,6 +173,8 @@ def test_client_has_no_device_api() -> None:
         "validate_config", "unsubscribe_events", "smart_occupancy/lighting/bridge/status",
         # Phase A5: the curtain and forecast ownership records.
         "smart_occupancy/curtains/bridge/status", "smart_occupancy/forecast/bridge/status",
+        # Phase A6: the companion's records and the cards' read-only view.
+        "smart_occupancy/companion/status", "smart_occupancy/companion/view",
     }
     # Phase A3.2: the occupancy bridge (ownership and the App's published occupancy results; no device control).
     assert ENGINE_COMMANDS == {"smart_occupancy/engine/claim", "smart_occupancy/engine/publish",
@@ -181,7 +185,9 @@ def test_client_has_no_device_api() -> None:
     assert SUBSCRIPTION_COMMANDS == {"smart_occupancy/engine/subscribe", "smart_occupancy/lighting/bridge/subscribe",
                                      "smart_occupancy/lighting/subscribe", "subscribe_trigger", "mqtt/subscribe",
                                      "smart_occupancy/curtains/bridge/subscribe",
-                                     "smart_occupancy/forecast/bridge/subscribe", "smart_occupancy/curtains/subscribe"}
+                                     "smart_occupancy/forecast/bridge/subscribe", "smart_occupancy/curtains/subscribe",
+                                     # Phase A6: the companion session.
+                                     "smart_occupancy/companion/subscribe"}
     # Phase A5: the curtain bridge (its execute is fenced and allowlisted by the integration) and the forecast bridge
     # (no device command at all).
     assert CURTAIN_BRIDGE_COMMANDS == {f"smart_occupancy/curtains/bridge/{c}" for c in (

@@ -1,10 +1,68 @@
 # Smart Occupancy & Lighting
 
-The **Smart Lighting** App is the new home of the Smart Occupancy & Lighting
-configuration. It replaces the integration's dashboard cards and options
-screens module by module, and only after you approve each step.
+The **Smart Lighting** App is the home of Smart Occupancy & Lighting: every
+engine and every configuration. The *Smart Occupancy & Lighting* integration
+(1.0.0, the companion) gives it native entities, a fenced way to command lights
+and covers, and compact dashboard cards.
 
-## Phase A5: Curtains and Predictions (this version)
+## Phase A6: the App is the product (this version)
+
+This version works with the integration **0.9.0** (through its bridges, exactly
+as in A5, for the time of the migration) and with the companion **1.0.0**.
+Nothing changes when you update: the integration keeps running everything until
+you run the migration wizard.
+
+### Settings → Migration & System
+
+- **Overview**: who runs each subsystem (as the companion or the 0.9.0
+  integration acknowledges it), the configuration authority (the integration, a
+  staged copy, or the App), the companion (version, paired, entities), the
+  configuration host (revision, backups, published to the companion), *Take
+  control* / *Stop* per subsystem, *Revoke the App's control* (an emergency stop:
+  nothing is switched by it), *Export configuration*.
+- **Migration wizard**: eight steps, each started by you and recorded:
+  1. **Inspect** (changes nothing), 2. **Backup** (one file in the App's storage,
+  without credentials), 3. **Validate**, 4. **Transfer config** (review, then
+  apply as a staged copy while 0.9.0 still runs), 5. **Transfer control**
+  (occupancy → lighting → curtains → predictions, the reviewed handovers of
+  A3.2–A5), 6. **Activate** (after you updated the integration to 1.0.0 and
+  restarted Home Assistant: pairs, compares the staged copy with the companion's
+  legacy data, makes the App the authority, claims every subsystem),
+  7. **Verify**, 8. **Retire** (the companion backs the legacy data up inside
+  Home Assistant and removes it from the active installation). *Abort* gives
+  control back or restores the legacy data for a rollback to 0.9.0.
+- **Outage behaviour**: what works while the App is away. In short: nothing is
+  switched or moved, the entities keep their last published state marked as not
+  fresh, no vacancy is inferred, physical switches keep working through their
+  own integrations, and the App claims control again with a fresh session when
+  it is back. **There is no fallback engine any more**: an App outage means no
+  automatic decisions until the App is back. Keep the App's watchdog on.
+
+### Settings → Setup
+
+A new home, without the monolithic integration: install the companion
+(optional, for entities and device control), pair it, **Create the
+configuration** (no rooms, no mood source, nothing automatic), then rooms,
+sensors, lighting, moods, switches, curtains, predictions, a floor plan, and the
+explicit review that switches a room to Automatic. Every room starts Observing.
+
+### Dashboard
+
+The house now, from the App's own runtimes: occupied rooms, every room's
+occupancy, lighting mode, mood, daylight and prediction, the mood, curtains,
+predictions, unavailable devices, health and who runs what, with a mark when a
+value is not fresh.
+
+### Companion cards (phones)
+
+The companion's compact cards keep the names of the old editor cards so your
+dashboards keep working: **Smart Occupancy: Home** (every room with Resume and
+Automatic / Observe), **Smart Lighting** (the mood and a mood picker), **Smart
+Room Lighting** (one room) and **Smart Curtains** (windows by room, presets,
+holds, modes). Their actions are relayed to the App and need an administrator;
+settings are edited in the App.
+
+## Phase A5: Curtains and Predictions
 
 This version needs Smart Occupancy & Lighting **0.9.0**. The last two
 automation subsystems move into the App the way lighting did: the App runs the
@@ -312,6 +370,11 @@ a Raspberry Pi 4/5, Home Assistant Green/Yellow or an x86 PC).
 3. **Start.** On the App's **Info** tab, turn on **Show in sidebar** if it is
    off, optionally turn on **Start on boot** and **Watchdog**, then select **Start**.
 4. **Open.** Select **Smart Lighting** in the sidebar.
+5. **Companion** (recommended): install the *Smart Occupancy & Lighting*
+   integration 1.0.0 with HACS, add it under Settings → Devices & services, then
+   pair it in the App (Settings → Setup, or Settings → Migration & System).
+   Without it the App configures everything but has no native entities and
+   cannot command lights or covers.
 
 Only administrators see the sidebar entry. The App works the same in the Home
 Assistant Companion app on phones and tablets.
@@ -323,8 +386,10 @@ the App's page (Settings → Apps). Updating rebuilds the App on your device.
 
 ### Uninstalling
 
-Settings → Apps → Smart Occupancy & Lighting → **Uninstall**. The integration
-and its configuration are not affected.
+Settings → Apps → Smart Occupancy & Lighting → **Uninstall**. The companion
+integration keeps its entities with their last published state (not fresh) and
+runs no automation; export the App's configuration first (Settings → Migration &
+System → Export configuration) if you may want it back.
 
 ## Using the App
 
@@ -439,8 +504,9 @@ a backup) and **Backups**.
 
 ## Migration: one system in control
 
-Modules move from the integration to the App one at a time, only after you
-approve each step. For each module the App reports where it is **configured**,
+Since Phase A6 the whole move is one wizard (Settings → Migration & System, see
+above). The earlier, module-by-module path still works on 0.9.0 and is what the
+wizard's *Transfer control* step runs: For each module the App reports where it is **configured**,
 where the configuration is **stored**, and which system **runs** it. In this
 version Rooms and Presence are configured in the App and stored in the
 integration. Room occupancy is decided by the integration's engine until you
@@ -492,6 +558,18 @@ one side produces the forecasts.
 - Floor plans and their images are stored in the App's data folder. Images are
   checked by their content (PNG, JPEG, WebP only; no SVG) and are only served
   through Home Assistant's Ingress, never from a public address.
+
+## Known limitations (Phase A6)
+
+- **No automation while the App is away.** The companion runs no engine. Keep
+  the App's watchdog on; check Settings → Migration & System after an update.
+- The App needs the Supervisor (Home Assistant OS or a Supervised installation).
+- The Room Status card still reads the room sensor's attributes; the editor tabs
+  the 0.9.0 cards had are gone (the App is the editor).
+- The *Restart recovery* check in **Verify** is informational until Home
+  Assistant was restarted once with the companion.
+- Rolling back to 0.9.0 after **Retire** needs *Abort → Restore the legacy data*
+  first (or the companion's `legacy/restore` command), then the downgrade.
 
 ## Known limitations (Phase A5)
 

@@ -6,7 +6,7 @@
 import { html, nothing } from "lit";
 
 import { icon } from "./icons";
-import { BOTTOM_NAV, FOUNDATION, leaveWarning, NAV, navigate, routeFromHash, subPath, type NavItem } from "./router";
+import { BOTTOM_NAV, leaveWarning, NAV, navigate, routeFromHash, subPath, type NavItem } from "./router";
 import { store } from "./store";
 import { chip, haConnectionInfo, linkInfo, StoreElement } from "./ui";
 
@@ -22,7 +22,6 @@ import "./pages/lighting-room";
 import "./pages/lighting-settings";
 import "./pages/moods";
 import "./pages/switches";
-import "./pages/pending";
 import "./pages/predictions";
 import "./pages/predictions-control";
 import "./pages/predictions-room";
@@ -33,6 +32,8 @@ import "./presence/components";
 import "./pages/room-editor";
 import "./pages/rooms";
 import "./pages/settings";
+import "./pages/setup";
+import "./pages/system";
 
 export class SlApp extends StoreElement {
   static properties = { route: { state: true }, sub: { state: true }, railExpanded: { state: true }, moreOpen: { state: true } };
@@ -125,14 +126,8 @@ export class SlApp extends StoreElement {
     this.moreOpen = false;
   }
 
-  private isPending(key: string): boolean {
-    if (FOUNDATION.has(key)) return false;
-    return (store.overview?.modules.find((m) => m.key === key)?.status ?? "gui") === "pending";
-  }
-
-  private navLink(item: NavItem, variant: "side" | "sheet"): unknown {
+  private navLink(item: NavItem): unknown {
     const isActive = item.key === this.route;
-    const pending = this.isPending(item.key);
     return html`<a
       href="#/${item.key}"
       class="nav-link ${isActive ? "active" : ""}"
@@ -142,11 +137,6 @@ export class SlApp extends StoreElement {
     >
       ${icon(item.icon)}
       <span class="label">${item.title}</span>
-      ${pending
-        ? variant === "sheet"
-          ? chip("pending", "Pending")
-          : html`<span class="pending-dot" aria-hidden="true"></span><span class="visually-hidden">(migration pending)</span>`
-        : nothing}
     </a>`;
   }
 
@@ -189,7 +179,7 @@ export class SlApp extends StoreElement {
           <h2 id="more-title">All modules</h2>
           <button type="button" class="icon-btn" aria-label="Close" @click=${() => this.closeMore()}>${icon("close")}</button>
         </header>
-        <nav class="sheet-nav" aria-label="All modules">${NAV.map((item) => this.navLink(item, "sheet"))}</nav>
+        <nav class="sheet-nav" aria-label="All modules">${NAV.map((item) => this.navLink(item))}</nav>
       </div>
     </dialog>`;
   }
@@ -201,6 +191,9 @@ export class SlApp extends StoreElement {
       case "diagnostics":
         return html`<sl-diagnostics></sl-diagnostics>`;
       case "settings":
+        // Phase A6: #/settings/system[/<tab>] (Migration & System) and #/settings/setup (a new installation).
+        if (this.sub[0] === "system") return html`<sl-system .tab=${this.sub[1] ?? "overview"}></sl-system>`;
+        if (this.sub[0] === "setup") return html`<sl-setup></sl-setup>`;
         return html`<sl-settings></sl-settings>`;
       case "floorplan":
         return html`<sl-floorplan .mode=${this.sub[0] ?? ""}></sl-floorplan>`;
@@ -238,7 +231,7 @@ export class SlApp extends StoreElement {
           return html`<sl-predictions-room .areaId=${this.sub[1]} .tab=${this.sub[2] ?? "forecast"}></sl-predictions-room>`;
         return html`<sl-predictions .tab=${this.sub[0] ?? "house"}></sl-predictions>`;
       default:
-        return html`<sl-pending-module .moduleKey=${this.route}></sl-pending-module>`;
+        return html`<sl-dashboard></sl-dashboard>`;
     }
   }
 
@@ -268,9 +261,9 @@ export class SlApp extends StoreElement {
             <span class="brand-mark">${icon("lightbulb-auto")}</span>
             <span class="brand-text">Smart Lighting</span>
           </div>
-          <nav class="nav" aria-label="Modules">${NAV.map((item) => this.navLink(item, "side"))}</nav>
+          <nav class="nav" aria-label="Modules">${NAV.map((item) => this.navLink(item))}</nav>
           <div class="sidebar-foot">
-            <span class="muted small">Phase ${overview?.app.phase ?? "A1"} · v${overview?.app.version ?? "…"}</span>
+            <span class="muted small">v${overview?.app.version ?? "…"}</span>
           </div>
         </aside>
         <div class="scrim" @click=${() => (this.railExpanded = false)}></div>

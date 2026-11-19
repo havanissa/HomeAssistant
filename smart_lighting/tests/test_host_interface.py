@@ -1,7 +1,6 @@
-"""Phase A4: the vendored lighting runtime and the host interface it runs on.
+"""Phase A4 / A6: the App's engine modules and the host interface they run on.
 
-* The vendored modules are byte-identical to the integration's (``scripts/sync_lighting_runtime.py``) and the
-  fingerprint covers them.
+* The engine modules are the App's own since Phase A6 (the companion integration ships none of them).
 * Every Home Assistant name they import exists in the host interface (``backend/homeassistant``).
 * The host behaves like Home Assistant where the runtime depends on it: listener order and nested events, eager
   tasks, timers (and their recheck), state objects from the websocket, contexts, the store format and migrations,
@@ -37,26 +36,36 @@ VENDORED = APP / "backend/smart_occupancy"
 
 
 def _manifest() -> list[str]:
-    tree = ast.parse((REPO / "custom_components/smart_occupancy/runtime_manifest.py").read_text())
+    tree = ast.parse((VENDORED / "runtime_manifest.py").read_text())
     for node in tree.body:
         if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == "MODULES":
             return list(ast.literal_eval(node.value))
     raise AssertionError("MODULES not found")
 
 
-def test_vendored_copies_are_identical_and_fingerprinted() -> None:
-    result = subprocess.run([sys.executable, str(REPO / "scripts/sync_lighting_runtime.py"), "--check"],
-                            capture_output=True, text=True, check=False)
-    assert result.returncode == 0, result.stdout + result.stderr
+def test_the_engine_modules_are_the_apps_only_copy() -> None:
+    """Phase A6: the companion integration ships none of the engine modules; the manifests list the App's."""
+    from smart_occupancy.app_manifest import ALL_MODULES, APP_MODULES, FINGERPRINT_0_9_0  # noqa: PLC0415
     from smart_occupancy.runtime_manifest import MODULES, fingerprint  # noqa: PLC0415
 
     assert list(MODULES) == _manifest()
-    assert fingerprint() == fingerprint(REPO / "custom_components/smart_occupancy")
+    # The 0.9.0 runtime stays byte-identical (its fingerprint) so the App can still hand over from 0.9.0.
+    assert fingerprint() == FINGERPRINT_0_9_0, "a 0.9.0 runtime module changed: put App changes in an App-only module"
+    assert set(APP_MODULES).isdisjoint(MODULES) and all((VENDORED / n).is_file() for n in ALL_MODULES)
+    present = {p.name for p in VENDORED.glob("*.py")} | {"curtains/" + p.name for p in (VENDORED / "curtains").glob("*.py")}
+    assert present - {"__init__.py", "curtains/__init__.py"} <= set(ALL_MODULES) | {m for m in MODULES}, present - set(ALL_MODULES)
+    companion = REPO / "custom_components/smart_occupancy"
+    # The companion has a ``const.py`` of its own (its version, store keys and option names); no engine module.
+    shared = {"const.py"}
+    assert not [name for name in MODULES if name not in shared and (companion / name).exists()]
+    assert "engine" not in (companion / "const.py").read_text(encoding="utf-8").lower().split("import", 1)[0]
 
 
 def test_every_imported_home_assistant_name_exists() -> None:
+    from smart_occupancy.app_manifest import ALL_MODULES  # noqa: PLC0415
+
     missing = []
-    for name in _manifest():
+    for name in ALL_MODULES:
         tree = ast.parse((VENDORED / name).read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("homeassistant"):

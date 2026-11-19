@@ -96,7 +96,18 @@ READ_ONLY_COMMANDS: frozenset[str] = frozenset(
         # Phase A5: the curtain and forecast ownership records.
         "smart_occupancy/curtains/bridge/status",
         "smart_occupancy/forecast/bridge/status",
+        # Phase A6: the companion's ownership records and the cards' read-only view.
+        "smart_occupancy/companion/status",
+        "smart_occupancy/companion/view",
     }
+)
+#: Phase A6: the companion integration (pairing, claims, the fenced executor, the published views, the retired
+#: data of the monolithic integration). ``execute`` is the only path from the App to a device once the companion
+#: replaced the monolithic integration; the companion accepts it only from the session holding the domain's lease.
+COMPANION_COMMANDS: frozenset[str] = frozenset(
+    f"smart_occupancy/companion/{c}" for c in (
+        "pair", "unpair", "claim", "heartbeat", "publish", "execute", "release", "revoke", "action_result",
+        "renames_applied", "legacy/export", "legacy/status", "legacy/retire", "legacy/restore")
 )
 #: Phase A5: the integration's curtain editor commands that only read or simulate (forwarded while it controls the
 #: curtains; answered by the App's own handlers after the handover).
@@ -179,11 +190,13 @@ SUBSCRIPTION_COMMANDS: frozenset[str] = frozenset({
     # Phase A5: the curtain and forecast bridges and the curtain editors' change notifications.
     "smart_occupancy/curtains/bridge/subscribe", "smart_occupancy/forecast/bridge/subscribe",
     "smart_occupancy/curtains/subscribe",
+    # Phase A6: the companion session.
+    "smart_occupancy/companion/subscribe",
 })
 ALLOWED_COMMANDS: frozenset[str] = (READ_ONLY_COMMANDS | LIGHTING_READ_COMMANDS | CURTAIN_READ_COMMANDS
                                     | FORECAST_READ_COMMANDS | CONFIG_WRITE_COMMANDS | ENGINE_COMMANDS
                                     | LIGHTING_BRIDGE_COMMANDS | CURTAIN_BRIDGE_COMMANDS | FORECAST_BRIDGE_COMMANDS
-                                    | SUBSCRIPTION_COMMANDS)
+                                    | COMPANION_COMMANDS | SUBSCRIPTION_COMMANDS)
 #: Event types the App may subscribe to.
 ALLOWED_EVENT_TYPES: frozenset[str] = frozenset(
     {"state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated",
@@ -296,7 +309,7 @@ class HomeAssistantClient:
         changed), config_entry (the integration's config entry changed), registries.
         """
         self._listeners.append(listener)
-        return lambda: self._listeners.remove(listener)
+        return lambda: self._listeners.remove(listener) if listener in self._listeners else None
 
     @property
     def connected(self) -> bool:
@@ -481,6 +494,13 @@ class HomeAssistantClient:
         """Send one of the integration's forecast bridge commands (FORECAST_BRIDGE_COMMANDS only)."""
         if command_type not in FORECAST_BRIDGE_COMMANDS:
             raise ReadOnlyViolation(f"{command_type!r} is not a forecast bridge command")
+        _, future = await self._send(command_type, params)
+        return await asyncio.wait_for(future, COMMAND_TIMEOUT)
+
+    async def companion_command(self, command_type: str, **params: Any) -> Any:
+        """Phase A6: a command of the companion integration (pairing, claims, the fenced executor, views)."""
+        if command_type not in COMPANION_COMMANDS:
+            raise ReadOnlyViolation(f"{command_type!r} is not a companion command")
         _, future = await self._send(command_type, params)
         return await asyncio.wait_for(future, COMMAND_TIMEOUT)
 

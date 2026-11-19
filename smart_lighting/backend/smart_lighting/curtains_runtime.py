@@ -45,6 +45,10 @@ from smart_occupancy.runtime_manifest import RUNTIME_VERSION, fingerprint as run
 
 from .curtains_compare import CurtainComparator, iso
 from .curtains_host import CURTAINS_STATE_STORE_KEY, CURTAINS_STORE_KEY, CurtainInstance
+from . import entity_views
+from .companion_client import CompanionClient, CompanionError
+from .companion_mode import CompanionMode
+from .core_config import CoreConfigStore
 from .ha import HomeAssistantClient, HomeAssistantError
 from .lighting_host import AppBackend, room_result
 from .lighting_scripts import AutomationEntity, ScriptEntity
@@ -80,10 +84,14 @@ def _detail(err: Exception) -> str:
 
 class CurtainRuntime:
     def __init__(self, ha: HomeAssistantClient, occupancy: Any, data_dir: Path | None, *, app_version: str,
-                 min_shadow_seconds: int = MIN_SHADOW_SECONDS, min_decisions: int = MIN_DECISIONS) -> None:
+                 min_shadow_seconds: int = MIN_SHADOW_SECONDS, min_decisions: int = MIN_DECISIONS,
+                 companion: CompanionClient | None = None, core_config: CoreConfigStore | None = None) -> None:
         self.ha = ha
         self.occupancy = occupancy
         self.dir = data_dir / "curtains" if data_dir else None
+        self.core_config = core_config
+        self.cm = CompanionMode(self, "curtains", companion, core_config) if companion and core_config else None
+        self.core_host: Any = None
         self.app_version = app_version
         self.min_shadow_seconds = min_shadow_seconds
         self.min_decisions = min_decisions
@@ -131,11 +139,15 @@ class CurtainRuntime:
         self.mode = "standalone"
         self._unsubs.append(self.ha.add_listener(self._on_ha))
         self._unsubs.append(self.occupancy.add_result_listener(self._on_occupancy))
+        if self.cm is not None:
+            self.cm.start()
         if self.ha.connected:
             self._connected()
 
     async def stop(self) -> None:
         self._stopping = True
+        if self.cm is not None:
+            await self.cm.stop()
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -244,9 +256,15 @@ class CurtainRuntime:
             self.instance.automations_changed(automations, scripts)
 
     def _connected(self) -> None:
+        if self.cm is not None and self.cm.active:
+            return  # Phase A6: the companion session claims the domain; there is no legacy bridge to shadow
         if self._subscribe_task is None or self._subscribe_task.done():
             self._attempt = 0
             self._subscribe_task = asyncio.get_running_loop().create_task(self._subscribe_loop())
+
+    def companion_absent(self) -> None:
+        if self.ha.connected:
+            self._connected()
 
     def _disconnected(self, reason: str) -> None:
         self.session_id = None
@@ -391,6 +409,8 @@ class CurtainRuntime:
         return AppBackend(self.ha, execute=None)
 
     def _options(self) -> dict[str, Any]:
+        if self.cm is not None and self.cm.active and self.core_config is not None:
+            return dict(self.core_config.options or {})
         rooms = getattr(self.occupancy, "options", None)
         return dict(rooms) if isinstance(rooms, dict) else {}
 
@@ -451,6 +471,16 @@ class CurtainRuntime:
     async def _execute(self, domain: str, service: str, data: dict[str, Any], context: Context) -> None:
         """The owner manager's only way to a cover (the integration fences and allowlists it)."""
         self.counters["commands"] += 1
+        if self.cm is not None and self.cm.owner:
+            try:
+                await self.cm.execute(domain, service, data, context.id, purpose=None, area_id=None)
+            except CompanionError as err:
+                self.counters["command_errors"] += 1
+                self.last_error = {"at": iso(utcnow()), "code": err.code, "detail": str(err)}
+                if err.code == "not_allowed":
+                    _LOGGER.warning("The companion refused a cover command: %s", err)
+                raise HostError(str(err)) from err
+            return
         try:
             await self._owner_command("smart_occupancy/curtains/bridge/execute", domain=domain, service=service,
                                       data=data, context_id=context.id)
@@ -497,6 +527,10 @@ class CurtainRuntime:
     async def _publish(self) -> None:
         self._publish_handle = None
         inst = self.instance
+        if self.cm is not None and self.cm.owner:
+            self._dirty.clear()
+            await self.cm.publish_now()
+            return
         if self.mode != "owner" or inst is None or inst.manager is None or not self._dirty:
             return
         dirty, self._dirty = self._dirty, set()
@@ -519,6 +553,8 @@ class CurtainRuntime:
                     self._schedule_publish(10)
 
     def _start_heartbeat(self) -> None:
+        if self.cm is not None and self.cm.owner:
+            return
         if self._heartbeat is None or self._heartbeat.done():
             self._heartbeat = asyncio.get_running_loop().create_task(self._heartbeat_loop())
 
@@ -534,6 +570,9 @@ class CurtainRuntime:
                 _LOGGER.debug("curtains heartbeat failed: %s", err)
 
     async def _lose(self, why: str) -> None:
+        if self.cm is not None and self.cm.owner:
+            await self.cm.lose(why)
+            return
         if self.mode != "owner" or self._switching:
             return
         _LOGGER.warning("The App no longer controls the curtains (%s); back to shadow mode", why)
@@ -567,6 +606,8 @@ class CurtainRuntime:
 
     def readiness(self, now: datetime | None = None) -> dict[str, Any]:
         now = now or utcnow()
+        if self.cm is not None and self.cm.active:
+            return _companion_readiness(self.cm, "Curtains claimed")
         report = self.comparator.report(now)
         checks: list[dict[str, Any]] = []
 
@@ -607,6 +648,11 @@ class CurtainRuntime:
             "thresholds": {"min_shadow_seconds": self.min_shadow_seconds, "min_decisions": self.min_decisions}}
 
     async def handover(self, user_id: str | None) -> dict[str, Any]:
+        if self.cm is not None and self.cm.active:
+            try:
+                return await self.cm.claim(user_id, manual=True)
+            except CompanionError as err:
+                raise CurtainsError(err.code, str(err), err.status) from err
         if self.mode == "owner":
             raise CurtainsError("already_owner", "The App already controls the curtains")
         if self._switching:
@@ -738,6 +784,11 @@ class CurtainRuntime:
                 "observing_instead": downgraded}
 
     async def release(self, user_id: str | None) -> dict[str, Any]:
+        if self.cm is not None and self.cm.active:
+            mgr = self.manager
+            if mgr is not None and self.moving_windows():
+                raise CurtainsError("moving", "A cover is still being moved; wait until it has reached its position")
+            return await self.cm.release(user_id)
         if self.mode != "owner" or self.instance is None:
             return await self.return_control(user_id)
         if self._switching:
@@ -781,6 +832,11 @@ class CurtainRuntime:
         """Return control without a handover of the final state. While a cover is being moved the return is
         refused (code ``moving``) unless forced: the integration would otherwise take the movement for a manual
         change (its mirror lags about two seconds)."""
+        if self.cm is not None and self.cm.active:
+            if self.moving_windows() and not force:
+                raise CurtainsError("moving", "A cover is still being moved; wait until it has reached its position "
+                                              "(or force the return)")
+            return await self.cm.release(user_id)
         if self.mode == "owner" and self.instance is not None and not self._switching:
             try:
                 return await self.release(user_id)
@@ -835,9 +891,78 @@ class CurtainRuntime:
             "counters": dict(self.counters), "last_error": self.last_error,
             "notices": self.notices, "ownership_log": list(self.ownership_log),
             "comparison": self.comparator.report(now), "readiness": self.readiness(now),
+            "companion": self.cm.status() if self.cm is not None else None,
         }
 
     @property
     def manager(self) -> Any:
         inst = self.instance
         return inst.manager if inst is not None else None
+
+    # ---------------------------------------------------------- companion (A6)
+    def stored_config_doc(self) -> dict[str, Any] | None:
+        path = self.dir / "store" / CURTAINS_STORE_KEY if self.dir else None
+        if path is None or not path.is_file():
+            return None
+        try:
+            from smart_occupancy.curtains.config import CurtainConfig  # noqa: PLC0415
+
+            data = json.loads(path.read_text(encoding="utf-8")).get("data")
+            return CurtainConfig.from_dict(data or {}).as_dict()
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as err:
+            _LOGGER.warning("The stored curtain configuration could not be read: %s", err)
+            return None
+
+    def companion_can_claim(self) -> str | None:
+        if self.core_config is None or not self.core_config.authoritative:
+            return "the App is not the configuration authority yet (finish the setup or the migration)"
+        return None
+
+    def companion_revision(self) -> str | None:
+        doc = self.config_doc() or self.stored_config_doc()
+        return S.config_revision(doc) if doc is not None else None
+
+    def companion_targets(self) -> dict[str, list[str]]:
+        doc = self.config_doc() or self.stored_config_doc() or {}
+        return {"covers": sorted(S.covers_of(doc))}
+
+    async def companion_start_owner(self) -> None:
+        await self._stop_instance(flush=self.mode == "owner")
+        self.mode, self.bridge, self.bridge_error = "owner", "companion", None
+        self.integration = {"owner": "app", "state": "app", "manager": "companion"}
+        self._log("companion_claim", epoch=self.cm.lease.epoch if self.cm and self.cm.lease else None)
+        await self._start_owner(config=None, state=None)
+        self._changed()
+
+    async def companion_stop_owner(self, *, flush: bool) -> None:
+        self.mode = "standalone"
+        await self._stop_instance(flush=flush)
+        self._changed()
+
+    def companion_config_changed(self, options: dict[str, Any]) -> None:
+        inst = self.instance
+        if inst is not None and inst.manager is not None:
+            inst.coordinator.set_options(dict(options))
+
+    def companion_view(self) -> dict[str, Any] | None:
+        inst = self.instance
+        mgr = inst.manager if inst else None
+        if mgr is None:
+            return None
+        return entity_views.curtains_view(inst.hass, mgr)
+
+
+def _companion_readiness(cm: Any, title: str) -> dict[str, Any]:
+    checks = [
+        {"key": "companion", "status": "ok" if cm.companion.present else "error", "title": "Companion connected",
+         "detail": cm.companion.error or cm.companion.state},
+        {"key": "paired", "status": "ok" if cm.companion.trusted else "error", "title": "App paired",
+         "detail": "The companion trusts this App" if cm.companion.trusted else "Pair the App (Settings → System)"},
+        {"key": "config", "status": "ok" if cm.runtime.companion_can_claim() is None else "error",
+         "title": "Configuration in the App", "detail": cm.runtime.companion_can_claim() or "The App owns it"},
+        {"key": "owner", "status": "ok" if cm.owner else "warning", "title": title,
+         "detail": f"state {cm.state}" + (f": {cm.error}" if cm.error else "")},
+    ]
+    return {"ready": cm.owner, "checks": checks, "summary": {"seconds": 0, "matched": 0, "command_matches": 0,
+                                                             "mismatches": 0, "decision_differences": 0},
+            "thresholds": {"min_shadow_seconds": 0, "min_decisions": 0, "min_matches": 0}, "companion": True}

@@ -1,8 +1,4 @@
-"""Diagnostic button: re-evaluate all diagnostics on demand.
-
-Evaluation is already event driven; this only lets you confirm the current
-state immediately (for example after fixing a device). It reads states only.
-"""
+"""Diagnostic button: ask the App to re-evaluate its diagnostics now."""
 
 from __future__ import annotations
 
@@ -11,26 +7,25 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .coordinator import SmartOccupancyConfigEntry, SmartOccupancyCoordinator
-from .entity import SmartOccupancyEntity, global_unique_id
+from .companion import Companion
+from .entity import CompanionEntity, global_unique_id
 
 PARALLEL_UPDATES = 0
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: SmartOccupancyConfigEntry,
-    async_add_entities: AddConfigEntryEntitiesCallback,
-) -> None:
+async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities: AddConfigEntryEntitiesCallback) -> None:
     async_add_entities([RecheckButton(entry.runtime_data)])
 
 
-class RecheckButton(SmartOccupancyEntity, ButtonEntity):
+class RecheckButton(CompanionEntity, ButtonEntity):
     _attr_translation_key = "recheck"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
-    def __init__(self, coordinator: SmartOccupancyCoordinator) -> None:
-        super().__init__(coordinator, global_unique_id("recheck"))
+    def __init__(self, companion: Companion) -> None:
+        super().__init__(companion, global_unique_id("recheck"))
+
+    def _entity_view(self):
+        return {"value": None, "attributes": {}, "available": True}
 
     async def async_press(self) -> None:
-        await self.coordinator.async_recheck()
+        self.companion.recheck()
