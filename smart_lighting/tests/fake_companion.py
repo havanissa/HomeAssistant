@@ -17,6 +17,9 @@ from typing import Any
 
 from smart_lighting import companion_protocol as P
 
+from .fake_curtains import curtain_doc
+from .fake_lighting import lighting_doc
+
 COMPANION_VERSION = "1.0.0"
 
 
@@ -79,7 +82,13 @@ class FakeCompanion:
         self.rechecks = 0
         self.fail_execute: str | None = None  # refuse the next execute with this code
         self.legacy_options: dict[str, Any] | None = copy.deepcopy(fake.legacy_options) if getattr(fake, "legacy_options", None) else None
-        self.legacy_stores: dict[str, Any] = {"smart_occupancy.lighting": {"version": 3, "data": {"rooms": {}}}}
+        # The 0.9.0 stores as the companion exports them (version headers kept): a lighting configuration with one
+        # room already in Automatic, and a curtain configuration with one window.
+        self.legacy_stores: dict[str, Any] = {
+            "smart_occupancy.lighting": {"version": 1, "minor_version": 9, "data": lighting_doc()},
+            "smart_occupancy.curtains": {"version": 1, "minor_version": 4, "data": curtain_doc()},
+            "smart_occupancy.forecast_days": {"version": 1, "minor_version": 1, "data": {"days": {}}},
+        }
         self.retired: dict[str, Any] | None = None
         self.backup: dict[str, Any] | None = None
         self.renames: list[list[str]] = []

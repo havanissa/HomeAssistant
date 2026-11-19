@@ -320,6 +320,7 @@ class MigrationService:
     async def transfer_config(self, *, apply: bool, user_id: str | None) -> dict[str, Any]:
         core = self.core
         mode = self.mode
+        export: dict[str, Any] | None = None
         if mode == "companion" and core.companion is not None:
             export = await core.companion.legacy_export()
             options = (export.get("entry") or {}).get("options")
@@ -340,8 +341,13 @@ class MigrationService:
         except CoreConfigError as err:
             raise MigrationError(err.code, str(err), err.status) from err
         result = {"at": utcnow(), "source": source, "authority": authority, "review": review,
-                  "source_revision": P.revision(options), "applied": False}
+                  "source_revision": P.revision(options), "applied": False,
+                  "stores": self._legacy_stores_plan(export) if export is not None else []}
         if apply:
+            # The engine stores first: the configuration change below lets the runtimes claim at once, and a
+            # claim starts each engine from its store (an import after that would race the running engine).
+            if export is not None:
+                result["stores_imported"] = await self._import_legacy_stores(export)
             try:
                 await core.core_config.import_apply(document, expected_revision=core.core_config.revision,
                                                     source="legacy", reason="migration", authority=authority)
@@ -352,6 +358,60 @@ class MigrationService:
             if core.core_host is not None:
                 core.core_host.schedule_snapshot(0)
         return await self._record("transfer_config", "done" if apply else "reviewed", result)
+
+    # The integration's stores that the App's engines read from their own storage (lighting profiles, switches,
+    # zones and ambient rules; curtain windows, presets and state; the learned forecast days and settings). On
+    # 0.9.0 they reached the App through the A4 / A5 handovers; with the companion (or after the App's storage
+    # was reset) they are imported from the companion's legacy export, each only when the App has no copy yet.
+    LEGACY_STORE_KEYS = {"smart_occupancy.lighting": "lighting", "smart_occupancy.lighting_state": "lighting",
+                         "smart_occupancy.curtains": "curtains", "smart_occupancy.curtains_state": "curtains",
+                         "smart_occupancy.forecast_days": "predictions", "smart_occupancy.forecast_settings": "predictions"}
+
+    def _store_path(self, key: str) -> Path | None:
+        """Where the runtime that owns ``key`` keeps it (``<data>/<runtime>/store/<key>``)."""
+        data_dir = self.core.settings.data_dir
+        return data_dir / self.LEGACY_STORE_KEYS[key] / "store" / key if data_dir else None
+
+    def _legacy_stores_plan(self, export: dict[str, Any]) -> list[dict[str, Any]]:
+        plan = []
+        for key in self.LEGACY_STORE_KEYS:
+            value = (export.get("stores") or {}).get(key)
+            if not isinstance(value, dict) or "data" not in value:
+                continue
+            path = self._store_path(key)
+            exists = path is not None and path.is_file()
+            plan.append({"key": key, "version": f"{value.get('version', 1)}.{value.get('minor_version', 1)}",
+                         "action": "keep the App's copy" if exists else "import", "import": not exists})
+        return plan
+
+    async def _import_legacy_stores(self, export: dict[str, Any]) -> list[str]:
+        """Write the legacy stores into the App's storage in Home Assistant's store format (the engines migrate
+        older versions when they load them). Never replaces a store the App already has."""
+        if self.core.settings.data_dir is None:
+            return []
+        imported: list[str] = []
+        for item in self._legacy_stores_plan(export):
+            if not item["import"]:
+                continue
+            key = item["key"]
+            value = export["stores"][key]
+            payload = {"version": int(value.get("version") or 1), "minor_version": int(value.get("minor_version") or 1),
+                       "key": key, "data": value["data"]}
+            target = self._store_path(key)
+            assert target is not None
+
+            def write(path: Path = target, text: str = json.dumps(payload, ensure_ascii=False, indent=2)) -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name(path.name + ".tmp")
+                tmp.write_text(text, encoding="utf-8")
+                os.replace(tmp, path)
+
+            await asyncio.to_thread(write)
+            imported.append(key)
+        if imported:
+            _LOGGER.warning("migration: %d legacy store(s) imported into the App's storage: %s", len(imported),
+                            ", ".join(imported))
+        return imported
 
     async def transfer_control(self, domain: str, user_id: str | None) -> dict[str, Any]:
         if domain not in DOMAINS:
