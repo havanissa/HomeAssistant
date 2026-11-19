@@ -64,6 +64,17 @@ class PresenceService:
 
     # --------------------------------------------------------------- reading
     async def _get(self, area_id: str | None = None) -> dict[str, Any]:
+        if self.rooms.where == "app":
+            from .core_host import CoreApiError  # noqa: PLC0415
+
+            try:
+                model = await self.rooms.local.call("smart_occupancy/presence/get",
+                                                    {"area_id": area_id} if area_id else {}, user_id=None, is_admin=True)
+            except CoreApiError as err:
+                self.api_state, self.api_error = "error", f"{err.code}: {err}"
+                raise RoomsError(err.code, str(err), err.status) from err
+            self.api_state, self.api_error = "ok", None
+            return model if isinstance(model, dict) else {}
         try:
             model = await self.ha.command("smart_occupancy/presence/get", **({"area_id": area_id} if area_id else {}))
         except HomeAssistantError as err:

@@ -53,6 +53,20 @@ from occupancy_core.engine import StateError
 from occupancy_core.house import House, HouseSpec, Observation
 from occupancy_core.wire import WireError, iso, parse_time, result_to_wire, spec_from_wire, spec_to_wire
 
+
+def house_spec(config: Any) -> Any:
+    """The engines' configuration from the core configuration: every enabled room's signals, timing, neighbours."""
+    from occupancy_core.house import RoomSpec  # noqa: PLC0415
+
+    return HouseSpec(tuple(
+        RoomSpec(area_id, room.sensors, config.timing_for(area_id), room.adjacent_rooms)
+        for area_id, room in config.enabled_rooms.items()
+    ))
+
+from . import entity_views
+from .companion_client import CompanionClient
+from .companion_mode import CompanionMode
+from .core_config import CoreConfigStore
 from .ha import HomeAssistantClient, HomeAssistantError
 from .occupancy_compare import Comparator, brief
 
@@ -104,9 +118,17 @@ class OccupancyRuntime:
     """One shared-engine House, its timers, the bridge session and the comparison."""
 
     def __init__(self, ha: HomeAssistantClient, data_dir: Path | None, *, app_version: str,
-                 min_shadow_seconds: int = MIN_SHADOW_SECONDS, min_transitions: int = MIN_TRANSITIONS) -> None:
+                 min_shadow_seconds: int = MIN_SHADOW_SECONDS, min_transitions: int = MIN_TRANSITIONS,
+                 companion: CompanionClient | None = None, core_config: CoreConfigStore | None = None) -> None:
         self.ha = ha
         self.dir = data_dir / "occupancy" if data_dir else None
+        # Phase A6: with the companion integration the App's engine is the only one; its spec is the App's core
+        # configuration and its results are published to the companion's entities.
+        self.core_config = core_config
+        self.cm = CompanionMode(self, "occupancy", companion, core_config) if companion and core_config else None
+        self.core_host: Any = None
+        self.comparisons: dict[str, Any] = {}  # area -> ComparisonTracker (rooms with a reference helper)
+        self._reference_rooms: dict[str, list[str]] = {}  # reference entity -> rooms
         self.app_version = app_version
         self.min_shadow_seconds = min_shadow_seconds
         self.min_transitions = min_transitions
@@ -157,6 +179,8 @@ class OccupancyRuntime:
             self._notice("self_test_failed", "The engine self-test failed: a handover is not possible")
         await self._load()
         self._unsub = self.ha.add_listener(self._on_ha)
+        if self.cm is not None:
+            self.cm.start()
         if self.ha.connected:
             self._connected()
         _LOGGER.info("Occupancy runtime started (engine %s, instance %s, mode %s); self-test: %d scenarios %s",
@@ -180,13 +204,15 @@ class OccupancyRuntime:
         for handle in (self._save_handle, self._compare_handle):
             if handle:
                 handle.cancel()
+        if self.cm is not None:
+            await self.cm.stop()
         await self._save_state()
         await self._save_comparison()
 
     def add_listener(self, listener: Callable[[str], None]) -> Callable[[], None]:
         """``listener(kind)``: "engine" (mode, ownership or connection changed)."""
         self._listeners.append(listener)
-        return lambda: self._listeners.remove(listener)
+        return lambda: self._listeners.remove(listener) if listener in self._listeners else None
 
     # ------------------------------------------------- published occupancy (A4)
     def published_wire(self, area_id: str) -> dict[str, Any] | None:
@@ -259,12 +285,15 @@ class OccupancyRuntime:
         # Restart semantics of the engine: an occupied room stays occupied (start-up hold, new quiet period).
         house.load({a: r for a, r in rooms.items() if isinstance(r, dict)}, utcnow(), self._lookup, self._name_of)
         self.house = house
+        self._stored_rooms = {a: r for a, r in rooms.items() if isinstance(r, dict)}
+        self._stored_comparisons = data.get("comparisons") if isinstance(data.get("comparisons"), dict) else {}
 
     def _state_data(self) -> dict[str, Any] | None:
         if self.house is None:
             return None
         return {"schema": STATE_SCHEMA, "core_version": CORE_VERSION, "fingerprint": self.fingerprint,
-                "saved_at": iso(utcnow()), "spec": spec_to_wire(self.house.spec), "rooms": self.house.persist()}
+                "saved_at": iso(utcnow()), "spec": spec_to_wire(self.house.spec), "rooms": self.house.persist(),
+                "comparisons": {a: c.persist() for a, c in self.comparisons.items()}}
 
     def _save_soon(self) -> None:
         if self.dir is None or self._save_handle is not None:
@@ -325,7 +354,14 @@ class OccupancyRuntime:
 
     def _on_state(self, entity_id: str, new_state: dict[str, Any] | None) -> None:
         house = self.house
-        if house is None or not house.rooms_of(entity_id):
+        if house is None:
+            return
+        if entity_id in self._reference_rooms and not house.rooms_of(entity_id):
+            now = utcnow()
+            for area_id in self._reference_rooms[entity_id]:
+                self._compare(area_id, now)
+            return
+        if not house.rooms_of(entity_id):
             return
         now = utcnow()
         obs = None
@@ -345,9 +381,15 @@ class OccupancyRuntime:
             self.house.resync(now, self._lookup)
             for area_id in self.house.spec.area_ids:
                 self._evaluate(area_id, now)
+        if self.cm is not None and self.cm.active:
+            return  # Phase A6: the companion session claims the domain; there is no legacy bridge to shadow
         if self.session_id is None and (self._subscribe_task is None or self._subscribe_task.done()):
             self._attempt = 0
             self._subscribe_task = asyncio.get_running_loop().create_task(self._subscribe_loop())
+
+    def companion_absent(self) -> None:
+        if self.ha.connected:
+            self._connected()
 
     def _disconnected(self, reason: str) -> None:
         if self.mode == "authoritative":
@@ -364,6 +406,10 @@ class OccupancyRuntime:
         self._changed()
 
     def _lease_lapsed(self) -> None:
+        # A 0.9.0 lease that ran out while the bridge was gone. Not when the companion holds the domain meanwhile
+        # (the integration was replaced during the gap): that lease has its own heartbeat and loss handling.
+        if self.cm is not None and (self.cm.owner or self.cm.active):
+            return
         if self.mode == "authoritative" and self.session_id is None:
             self._lose("the lease ran out while the bridge was disconnected", P.REASON_LEASE_EXPIRED)
 
@@ -528,7 +574,8 @@ class OccupancyRuntime:
         self._changed()
 
     def _lose(self, why: str, code: str | None = None) -> None:
-        if self.mode != "authoritative":
+        """The 0.9.0 bridge took occupancy back. The companion lease is handled by ``CompanionMode.lose``."""
+        if self.mode != "authoritative" or (self.cm is not None and self.cm.owner):
             return
         _LOGGER.warning("The App no longer owns occupancy (%s, %s); back to shadow mode", why, code)
         self._log_ownership("lost", reason=code or why)
@@ -550,6 +597,8 @@ class OccupancyRuntime:
         engine = house.engines[area_id]
         self.counters["evaluations"] += 1
         self._schedule(area_id, house.next_deadline(area_id, now), now)
+        if self.cm is not None and self.cm.owner:
+            self._compare(area_id, now)
         wire = result_to_wire(evaluation.result, engine.visit_confirmed)
         if wire == self.results.get(area_id):
             return
@@ -583,6 +632,10 @@ class OccupancyRuntime:
 
     # ------------------------------------------------------------ publishing
     async def _publish(self) -> None:
+        if self.cm is not None and self.cm.owner:
+            self._pending.clear()
+            await self.cm.publish_now()
+            return
         async with self._publish_lock:
             if self.mode != "authoritative" or not self._pending or self.session_id is None:
                 return
@@ -616,6 +669,8 @@ class OccupancyRuntime:
             self.lease_until = (reply or {}).get("lease_until")
 
     def _start_heartbeat(self) -> None:
+        if self.cm is not None and self.cm.owner:
+            return
         if self._heartbeat is None or self._heartbeat.done():
             self._heartbeat = asyncio.get_running_loop().create_task(self._heartbeat_loop())
 
@@ -652,6 +707,12 @@ class OccupancyRuntime:
     # ------------------------------------------------------- handover, rollback
     def readiness(self, now: datetime | None = None) -> dict[str, Any]:
         now = now or utcnow()
+        if self.cm is not None and self.cm.active:
+            from .curtains_runtime import _companion_readiness  # noqa: PLC0415
+
+            report = _companion_readiness(self.cm, "Occupancy claimed")
+            return {**report, "shadow_seconds": 0, "transitions": 0, "disagreements": 0,
+                    "thresholds": {"min_shadow_seconds": 0, "min_transitions": 0}}
         own = self.integration
         summary = self.comparator.summary(now)
         totals = summary["totals"]
@@ -704,6 +765,13 @@ class OccupancyRuntime:
 
     async def handover(self, user_id: str | None) -> dict[str, Any]:
         """The reviewed handover: only when every readiness check passes; the integration decides."""
+        if self.cm is not None and self.cm.active:
+            from .companion_client import CompanionError  # noqa: PLC0415
+
+            try:
+                return await self.cm.claim(user_id, manual=True)
+            except CompanionError as err:
+                raise EngineError(err.code, str(err), err.status) from err
         if self.mode == "authoritative":
             raise EngineError("already_owner", "The App already owns occupancy")
         ready = self.readiness()
@@ -759,6 +827,8 @@ class OccupancyRuntime:
 
     async def release(self, user_id: str | None) -> dict[str, Any]:
         """Return control to the integration (always allowed; harmless when it already owns occupancy)."""
+        if self.cm is not None and self.cm.active:
+            return await self.cm.release(user_id)
         try:
             reply = await self.ha.engine_command(
                 "smart_occupancy/engine/release", reason="Return control to integration (Smart Lighting App)",
@@ -809,7 +879,152 @@ class OccupancyRuntime:
             "comparison": self.comparator.summary(now),
             "readiness": self.readiness(now),
             "now": iso(now),
+            "companion": self.cm.status() if self.cm is not None else None,
         }
+
+    # ---------------------------------------------------------- companion (A6)
+    def result(self, area_id: str) -> Any:
+        """The published ``RoomResult`` of a room: the App's own engine's while it is the engine."""
+        if self.house is not None and (self.mode == "authoritative" or (self.cm is not None and self.cm.active)):
+            return self.house.result(area_id)
+        from .lighting_host import room_result  # noqa: PLC0415
+
+        return room_result(self, area_id)
+
+    def comparison(self, area_id: str) -> Any:
+        return self.comparisons.get(area_id)
+
+    def same_signals(self, config: Any) -> bool:
+        return self.house is not None and self.house.spec.same_signals(house_spec(config))
+
+    def source_name(self, area_id: str, entity_id: str | None) -> str | None:
+        engine = self.house.engines.get(area_id) if self.house else None
+        track = engine.tracks.get(entity_id) if engine and entity_id else None
+        return track.name if track else None
+
+    def local_input(self, kind: str, params: dict[str, Any]) -> None:
+        """An input of the App's lighting runtime (possible occupancy signals, zone holds, switch activity)."""
+        self._on_input({"kind": kind, "at": iso(utcnow()), **params})
+
+    def _install_config(self, options: dict[str, Any]) -> None:
+        """Build (or reconfigure) the House from the App's core configuration; nothing known is lost."""
+        from smart_occupancy.models import IntegrationConfig  # noqa: PLC0415
+
+        config = IntegrationConfig.from_dict(options)
+        spec = house_spec(config)
+        now = utcnow()
+        if self.house is not None and self.house.spec.same_signals(spec):
+            self.house.reconfigure(spec)
+        else:
+            stored = self.house.persist() if self.house is not None else {}
+            if not stored and getattr(self, "_stored_rooms", None):
+                stored = self._stored_rooms
+            for handle in self._timers.values():
+                handle.cancel()
+            self._timers.clear()
+            house = House(spec)
+            house.load({a: r for a, r in stored.items() if isinstance(r, dict) and a in spec.area_ids}, now,
+                       self._lookup, self._name_of)
+            self.house = house
+            self.results = {a: w for a, w in self.results.items() if a in spec.area_ids}
+        self._reference_rooms = {}
+        stored_comparisons = getattr(self, "_stored_comparisons", {}) or {}
+        comparisons: dict[str, Any] = {}
+        from smart_occupancy.comparison import ComparisonTracker  # noqa: PLC0415
+
+        for area_id, room in config.enabled_rooms.items():
+            if room.reference_occupancy_entity:
+                engine = self.house.engines[area_id]
+                previous = self.comparisons.get(area_id)
+                if previous is not None:
+                    previous.grace_seconds = engine.timing.correlation_window
+                    comparisons[area_id] = previous
+                else:
+                    comparisons[area_id] = ComparisonTracker.restore(stored_comparisons.get(area_id),
+                                                                     engine.timing.correlation_window)
+                self._reference_rooms.setdefault(room.reference_occupancy_entity, []).append(area_id)
+        self.comparisons = comparisons
+        self.house.resync(now, self._lookup)
+        for area_id in spec.area_ids:
+            self._evaluate(area_id, now)
+        self._save_soon()
+        self._published_changed(spec.area_ids)
+
+    def _compare(self, area_id: str, now: datetime) -> None:
+        tracker = self.comparisons.get(area_id)
+        result = self.house.result(area_id) if self.house else None
+        if tracker is None or result is None:
+            return
+        reference = next((e for e, rooms in self._reference_rooms.items() if area_id in rooms), None)
+        state = self.ha.states.get(reference or "")
+        from occupancy_core.engine import Value, interpret  # noqa: PLC0415
+
+        value = interpret(state.get("state") if state else None)
+        helper = None if value == Value.UNKNOWN else value == Value.ACTIVE
+        if tracker.update(now, result.occupied, helper, result.last_activity):
+            self._save_soon()
+            if self.cm is not None and self.cm.owner:
+                self.cm.schedule_publish()
+
+    def companion_can_claim(self) -> str | None:
+        if self.core_config is None or not self.core_config.authoritative:
+            return "the App is not the configuration authority yet (finish the setup or the migration)"
+        if self.self_test and not self.self_test["passed"]:
+            return "the engine self-test failed"
+        return None
+
+    def companion_revision(self) -> str | None:
+        return self.house.spec.revision() if self.house is not None else None
+
+    def companion_targets(self) -> dict[str, list[str]] | None:
+        return None  # occupancy commands nothing
+
+    async def companion_start_owner(self) -> None:
+        """The App's engine from the core configuration and its own stored state; nothing is invented."""
+        self._install_config((self.core_config.options if self.core_config else None) or {})
+        self.mode = "authoritative"
+        self.bridge, self.bridge_error = "companion", None
+        self.integration = {"owner": "app", "state": "app", "epoch": self.cm.lease.epoch if self.cm and self.cm.lease
+                            else None}
+        self._log_ownership("companion_claim", epoch=self.integration.get("epoch"))
+        self._published_changed(list(self.house.spec.area_ids) if self.house else [])
+        self._changed()
+
+    async def companion_stop_owner(self, *, flush: bool) -> None:
+        """The engine keeps evaluating for the App's own pages; nothing is published until claimed again."""
+        self.mode = "standalone"
+        self.integration = {}
+        if flush:
+            await self._save_state()
+        self._changed()
+
+    def companion_config_changed(self, options: dict[str, Any]) -> None:
+        self._install_config(options)
+
+    def companion_view(self) -> dict[str, Any] | None:
+        if self.house is None or self.core_config is None or not self.core_config.options:
+            return None
+        from smart_occupancy.models import IntegrationConfig  # noqa: PLC0415
+
+        config = IntegrationConfig.from_dict(self.core_config.options)
+        host = self.core_host
+        snapshot = getattr(host, "snapshot", None) if host is not None else None
+        names = {}
+        if host is not None and getattr(host, "hass", None) is not None:
+            from smart_occupancy.discovery import area_name  # noqa: PLC0415
+
+            names = {a: area_name(host.hass, a) or a for a in self.house.spec.area_ids}
+        rooms: dict[str, Any] = {}
+        for area_id in self.house.spec.area_ids:
+            result = self.house.result(area_id)
+            rooms[area_id] = entity_views.occupancy_room(
+                area_id, result, room_name=names.get(area_id) or area_id, config=config, snapshot=snapshot,
+                lighting_active=bool(host.lighting_active(area_id)) if host is not None else False,
+                manual_mode=bool(host.manual_mode()) if host is not None else False,
+                comparison=self.comparisons.get(area_id),
+                source_name=self.source_name(area_id, result.last_activity_source) if result else None,
+                mode=config.operating_mode) or {}
+        return {"rooms": rooms}
 
 
 def _time(value: Any) -> datetime | None:

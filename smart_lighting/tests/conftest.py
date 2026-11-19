@@ -126,6 +126,11 @@ class FakeHomeAssistant:
         self.curtains_editor_calls: list[dict[str, Any]] = []
         self.forecast: Any = None
         self.forecast_editor_calls: list[dict[str, Any]] = []
+        # Phase A6: the companion integration (tests/fake_companion.py); None = the monolithic integration (or none).
+        self.companion: Any = None
+        self.integration_version = "0.6.8"
+        self.legacy_options: dict[str, Any] | None = None
+        self.service_calls: list[dict[str, Any]] = []
 
     # -- data ---------------------------------------------------------------
     def config(self) -> dict[str, Any]:
@@ -327,6 +332,8 @@ class FakeHomeAssistant:
             self.connections.remove(ws)
             self.subscriptions.pop(ws, None)
             self.entry_subscriptions.pop(ws, None)
+            if self.companion is not None:
+                self.companion.close_ws(ws)
             if self.engine is not None:
                 for session, item in list(self.engine.sessions.items()):
                     if item[0] is ws:
@@ -361,7 +368,8 @@ class FakeHomeAssistant:
             await result(self.entries(msg.get("domain")))
         elif kind == "manifest/get":
             if self.integration_installed and msg["integration"] == "smart_occupancy":
-                await result({"domain": "smart_occupancy", "name": "Smart Occupancy & Lighting", "version": "0.6.8"})
+                await result({"domain": "smart_occupancy", "name": "Smart Occupancy & Lighting",
+                              "version": self.integration_version})
             else:
                 await error("not_found", "Integration not found")
         elif kind == "config/entity_registry/list":
@@ -479,6 +487,11 @@ class FakeHomeAssistant:
             await result({"handled_by": "integration", "type": kind})
         elif kind in ("automation/config", "script/config"):
             await error("not_found", "Entity not found")
+        elif kind.startswith("smart_occupancy/companion/"):
+            if self.companion is None:
+                await error("unknown_command", f"Unknown command {kind}")
+            else:
+                await self.companion.answer(ws, msg, result, error)
         elif kind.startswith("smart_occupancy/engine/"):
             if self.engine is None:
                 await error("unknown_command", f"Unknown command {kind}")
@@ -489,6 +502,19 @@ class FakeHomeAssistant:
             await result({e: self.history[e] for e in msg["entity_ids"] if e in self.history})
         else:
             await error("unknown_command", f"Unknown command {kind}")
+
+    async def service_called(self, domain: str, service: str, data: dict[str, Any], context_id: str) -> None:
+        """A command the companion executed on the App's behalf: recorded, and a light reports its new state."""
+        self.service_calls.append({"domain": domain, "service": service, "data": data, "context_id": context_id})
+        target = data.get("entity_id")
+        targets = target if isinstance(target, list) else [target] if target else []
+        if domain == "light" and service in ("turn_on", "turn_off"):
+            for entity_id in targets:
+                current = next((s for s in self.states if s["entity_id"] == entity_id), None)
+                attributes = dict((current or {}).get("attributes") or {"friendly_name": entity_id})
+                if service == "turn_on" and "brightness" in data:
+                    attributes["brightness"] = data["brightness"]
+                await self.emit_live_context(entity_id, "on" if service == "turn_on" else "off", attributes, context_id)
 
     async def emit_state(self, entity_id: str, value: str, name: str) -> None:
         new = state(entity_id, value, name)

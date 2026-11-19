@@ -102,9 +102,21 @@ export class SlSettings extends StoreElement {
           ${kv([
             ["App", o?.app.name ?? "Smart Occupancy & Lighting"],
             ["Version", o?.app.version],
-            ["Phase", o ? `${o.app.phase} (foundation, read-only)` : null],
-            ["Feature settings", "Not in the App yet: they are migrated module by module"],
+            ["Configuration", o?.config ? (o.config.authoritative ? "Kept by the App" : o.config.staged ? "Staged copy (migration in progress)" : "Kept by the integration (until migrated)") : null],
+            ["Companion integration", o?.companion ? String((o.companion as { state?: string }).state ?? "—") : null],
           ])}
+        </section>
+
+        <section class="card" data-testid="system-links">
+          <header class="card-head">${icon("shield-check")}<h3>Migration &amp; System</h3></header>
+          <p class="muted small">Who runs each subsystem, the configuration authority, the companion integration, engine health, and the wizard that retires the monolithic integration.</p>
+          <p><a class="btn btn-primary" href="#/settings/system" data-testid="open-system">${icon("shield-check", 18)}Open Migration &amp; System</a></p>
+        </section>
+
+        <section class="card" data-testid="setup-links">
+          <header class="card-head">${icon("plus")}<h3>Setup</h3></header>
+          <p class="muted small">A guided checklist for a new installation: configuration, rooms, sensors, lights, moods, switches, curtains, predictions, the companion.</p>
+          <p><a class="btn" href="#/settings/setup" data-testid="open-setup">${icon("arrow-right", 18)}Open Setup</a></p>
         </section>
 
         <section class="card wide">

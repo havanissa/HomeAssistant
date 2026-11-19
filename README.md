@@ -2,7 +2,9 @@
 
 A Home Assistant custom integration that will eventually provide intelligent occupancy detection, predictive room occupancy, mood-based lighting and lighting supervision.
 
-> **New: the Smart Lighting App (Phase A2).** This repository is also a Home Assistant **App repository**. The App *Smart Occupancy & Lighting* opens from the sidebar as **Smart Lighting** and gradually takes over configuration from the dashboard cards. Since App 0.2.0 (with this integration 0.6.9) its **Rooms** page is a full room editor: every area, its devices, sensor and light assignments, reviewed before saving. The configuration stays in this integration (its options), which keeps running every automation; *Configure → Rooms* keeps working on the same settings (see [Room configuration API](#room-configuration-api-for-the-smart-lighting-app-069)). App 0.2.1 (Phase A2.1) adds an optional **Floor plan**: draw the home, link rooms to areas, place devices and watch them live; it is stored in the App and changes no automation. Installation and details: [smart_lighting/DOCS.md](smart_lighting/DOCS.md).
+> **1.0.0: this integration is now the *companion* of the Smart Lighting App (Phase A6).** It ships no engine any more: the App (0.7.0) runs room occupancy, lighting, curtains and predictions and holds every configuration; the integration provides the native entities (same ids), a fenced executor for the App's light and cover commands, ownership records, the compact dashboard cards and the export / retirement of the 0.9.0 data. **Nothing is migrated automatically**: run the wizard in *Smart Lighting → Settings → Migration & System* (steps 1–5 before updating to 1.0.0, Activate / Verify / Retire after). While the App is stopped nothing is switched and nothing is inferred. Everything below this note that describes options screens, card editors, bridges and "the integration keeps running …" is the history of 0.2–0.9 and the rules the App's engines still follow; see [Companion integration (1.0.0)](#companion-integration-100), [Upgrading](#upgrading) and [docs/A6-standalone-migration.md](docs/A6-standalone-migration.md).
+
+> **The Smart Lighting App (Phase A2).** This repository is also a Home Assistant **App repository**. The App *Smart Occupancy & Lighting* opens from the sidebar as **Smart Lighting** and gradually takes over configuration from the dashboard cards. Since App 0.2.0 (with this integration 0.6.9) its **Rooms** page is a full room editor: every area, its devices, sensor and light assignments, reviewed before saving. The configuration stays in this integration (its options), which keeps running every automation; *Configure → Rooms* keeps working on the same settings (see [Room configuration API](#room-configuration-api-for-the-smart-lighting-app-069)). App 0.2.1 (Phase A2.1) adds an optional **Floor plan**: draw the home, link rooms to areas, place devices and watch them live; it is stored in the App and changes no automation. Installation and details: [smart_lighting/DOCS.md](smart_lighting/DOCS.md).
 
 **This is Phase 0.3.5: mood-based lighting with simple dashboard cards (Smart Lighting Profiles, Smart Room Lighting, Room Status), on top of the Phase 0.2 occupancy engine (see [CHANGELOG.md](CHANGELOG.md)).** Phase 0.3.5 adds **native wall switches and remotes** (Zigbee2MQTT, MQTT device triggers and event entities): assign a switch to a room, learn its buttons, give each button an action, and let presses count as manual changes that automatic lighting respects (see [Wall switches and remotes](#wall-switches-and-remotes-phase-035)). Phase 0.3.3 switches a room's mood lighting on when someone arrives **and it is dark**: indoor light sensors (protected against being lit by the room's own lamps), an optional outdoor sensor and the sun decide whether artificial light is needed. Phase 0.3.2 lets moods, light types and single lights follow your **existing global brightness and colour temperature adjustment**, and adds the **Manual** pause. The interface stays simple by default; everything else is under *Advanced*.
 
@@ -73,6 +75,7 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 
 - Home Assistant 2026.10 or newer. Tested against **2026.11.1** (with its frontend build 20261028.5) and 2026.10.4.
 - No Python dependencies
+- The Smart Lighting App 0.7.0 or newer (Home Assistant OS / Supervised). Without the App the companion shows its entities with their last published state and controls nothing.
 
 ## Installation
 
@@ -80,8 +83,9 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 
 1. In HACS: ⋮ → **Custom repositories** → add `https://github.com/havanissa/HomeAssistant`, type **Integration**.
 2. Install **Smart Occupancy & Lighting** and restart Home Assistant.
+3. Add it under **Settings → Devices & services** (one instance, no options), then pair it from the App (*Settings → Setup* for a new home, *Settings → Migration & System* for an existing one).
 
-Updating from 0.1.x or 0.2.x keeps your configuration. See [Upgrading](#upgrading).
+**Updating from 0.9.0 to 1.0.0** is part of the App's migration wizard: do not update before its steps 1–5 are done (the configuration is staged in the App first). See [Upgrading](#upgrading).
 
 ### Manual
 
@@ -125,6 +129,25 @@ Updating from 0.1.x or 0.2.x keeps your configuration. See [Upgrading](#upgradin
 | Mood profiles | A form-based fallback for the dashboard editors: edit one profile entry at the **Global**, **Room override** or **Individual light override** level. It is saved in the lighting store at once and does not reload the integration. |
 
 Each options run makes one change and saves it. The integration then reloads with the new configuration.
+
+### Companion integration (1.0.0)
+
+Since 1.0.0 the integration offers one protocol, shared byte-for-byte with the App (`protocol.py` = the App's `companion_protocol.py`, checked by `scripts/check_protocol.py` and both test suites). Design, the safety policy while the App is away, the migration and rollback procedures: [docs/A6-standalone-migration.md](docs/A6-standalone-migration.md).
+
+| Command | What it does |
+|---|---|
+| `smart_occupancy/companion/status` | The records (owner, epoch, state `none` / `app` / `app_away`, lease, targets, executed and refused commands, history), sessions, pairing, the live entity map, legacy status. |
+| `smart_occupancy/companion/subscribe` | The App's session: `hello` (versions, ownership, pending renames, entities, rooms, legacy summary), then `ownership`, `pairing`, `renames`, `areas`, `action` and `recheck` events. Protocol version checked. |
+| `smart_occupancy/companion/pair`, `unpair` | An administrator pairs the App (the companion stores the token's hash; the App keeps the token). Unpairing revokes every lease. |
+| `smart_occupancy/companion/claim` | A trusted session takes a domain (`occupancy`, `lighting`, `curtains`, `forecast`): compare-and-swap on the epoch, refused while another live session holds the lease, targets required for `lighting` (`lights`, `relays`, `actions`) and `curtains` (`covers`). Grants a 30 s lease renewed by `heartbeat` (10 s). |
+| `smart_occupancy/companion/publish` | The owner's view of its domain's entities (what the native entities show; `fresh` while the lease is valid), new targets, the configuration revision; or the `system` view (rooms, global sensors, observation, mood mismatch, the mood selector's options). |
+| `smart_occupancy/companion/execute` | One device command of the owner: `light` / `switch` / `scene` / `script` / `select` / `input_select` services with allowlisted data for lighting; `cover.set_cover_position` (0–100), `open_cover`, `close_cover` of one configured cover for curtains; only published targets; the App's context id; strictly increasing sequence numbers; 20 s timeout. |
+| `smart_occupancy/companion/release`, `revoke` | The owner gives a domain up; an administrator revokes (also the service `smart_occupancy.revoke_app_control`). Nothing is switched by either. |
+| `smart_occupancy/companion/view`, `view/subscribe` | Read-only (every user): the data of the compact cards. `action` relays a card's action (`room/resume`, `room/mode`, `mood/select`, `curtains/apply`, `curtains/resume`, `curtains/mode`) to the App; `action_result` is its answer. |
+| `smart_occupancy/companion/legacy/export`, `legacy/status`, `legacy/retire`, `legacy/restore` | The 0.9.0 options and 15 stores: exported for the App's backup, retired into `.storage/smart_occupancy.legacy_backup` (confirmation and the expected revision required; never deleted by software), restored for a rollback. |
+| `smart_occupancy/companion/renames_applied` | The App confirms it rewrote renamed entity ids. |
+
+Everything below (0.6.9 – 0.9.0) describes the APIs of the monolithic integration; they no longer exist in 1.0.0 and are kept here as the history of the migration.
 
 ### Room configuration API for the Smart Lighting App (0.6.9)
 
@@ -1647,10 +1670,19 @@ logger:
 
 ## Development and tests
 
+Three suites. The two Home Assistant suites import `custom_components.smart_occupancy` differently and must run in separate processes (the runner does that):
+
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements_test.txt
-.venv/bin/pytest
+.venv/bin/python scripts/run_tests.py tests/companion   # the companion (1.0.0) in a real Home Assistant
+.venv/bin/python scripts/run_tests.py tests/engine      # the App's engines through the frozen 0.9.0 harness (1 199 tests)
+.venv/bin/python scripts/run_tests.py                   # both
+python3 scripts/check_protocol.py                      # the shared companion protocol is byte-identical
+cd smart_lighting && python -m pytest tests            # the App (see smart_lighting/DEVELOPMENT.md)
+cd smart_lighting/frontend && npm test && npm run build
 ```
+
+`tests/engine/custom_components/smart_occupancy/` is a test harness only: the glue of 0.9.0, whose package appends the App's engine package (`smart_lighting/backend/smart_occupancy`) to its path. There is one copy of every engine.
 
 To test against a Home Assistant release newer than the harness (2026.11.1 at the time of writing), install it over the harness, install the libraries that release declares for the components the tests start (MQTT and the Supervisor client its config flow imports), and use the runner, which aliases one helper that moved in 2026.11:
 
@@ -1686,9 +1718,11 @@ The suite covers:
   - the room card's icon tabs (labels, keyboard, wrapping), Presence tab and vacancy controls
 - card serving through the real frontend component
 
-Observe rooms are asserted never to call a light service. Any test that logs an ERROR, or in which Home Assistant reports deprecated usage, fails. CI (`.github/workflows/validate.yml`) runs hassfest, HACS validation and the tests on Home Assistant 2026.10.4 and 2026.11.1.
+Observe rooms are asserted never to call a light service. Any test that logs an ERROR, or in which Home Assistant reports deprecated usage, fails. GitHub Actions are disabled on this repository: run the suites locally before a merge.
 
 ## Upgrading
+
+**From 0.9.0 to 1.0.0 (the companion).** This is the one upgrade that is part of a procedure: the App's migration wizard (*Smart Lighting → Settings → Migration & System*). Update the App to 0.7.0 first (nothing changes), run Inspect, Backup, Validate, Transfer config and Transfer control there, **then** update this integration to 1.0.0 and restart Home Assistant, and finish with Activate, Verify and Retire. Entity ids, unique ids and attributes are kept; the config entry is kept (its options are retired into a backup store at the last step). After the update and before Activate nothing is switched: the entities keep their ids but are unavailable until the App publishes (the companion has nothing to show yet); from then on an App outage keeps the last published state, marked as not fresh. Rollback: *Abort* in the wizard (restores the legacy data after a retirement), then downgrade to 0.9.0 in HACS and restart. Details: [docs/A6-standalone-migration.md](docs/A6-standalone-migration.md).
 
 **From 0.6.6.** Nothing to configure, and nothing changes in any room. The lighting store is migrated from 1.7 to 1.8: the global ambient defaults are added (5 and 20 lx, 2 lx hysteresis, 120 s stability, keep the last reliable category), every room gets ambient brightness control **off** and no enrolled light. Profiles, zones and their targets, overrides and every other setting are kept. The room card gets a **Lighting** section under Settings. The room mood-lighting sensor gets one unrecorded attribute (`brightness`). 0.6.6 can be reinstalled; it ignores the new keys.
 

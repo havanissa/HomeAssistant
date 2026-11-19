@@ -11,31 +11,51 @@ Layout of the App folder:
 | `tests/` | Backend and package tests (pytest) |
 | `tests/e2e/` | End-to-end stack: fake Supervisor + real App container + Playwright checks |
 
-## Shared automation runtime (Phase A4 lighting, Phase A5 curtains and forecasts)
+## The engines (Phase A6: the App is the only copy)
 
-`backend/smart_occupancy/` is a byte-identical copy of the integration's
-automation runtime (`custom_components/smart_occupancy/runtime_manifest.py`
-lists the modules: the lighting controller, the `curtains/` package, the
-forecast modules and the bridge protocols); only its `__init__.py` is the App's
-own. After changing any
-of those modules in the integration, run from the repository root:
+`backend/smart_occupancy/` is **the** implementation of every engine: room
+occupancy (`occupancy_core/`), lighting, the `curtains/` package, the forecast
+modules, the rooms and presence API handlers, the diagnostics snapshot
+(`snapshot.py`) and the problem tracker. `runtime_manifest.py` lists the
+modules. Since 1.0.0 the integration ships none of them: it is the *companion*
+(`custom_components/smart_occupancy/`: entities, the fenced executor, records,
+cards). The engines' 1 199 Home Assistant tests still run from the repository
+root (`python scripts/run_tests.py tests/engine`) through a frozen copy of the
+0.9.0 glue in `tests/engine/custom_components/smart_occupancy/`, whose package
+appends this folder to its path.
+
+Until every installation has migrated, the modules listed in
+`runtime_manifest.py` must stay byte-identical to 0.9.0 (its bridges check the
+runtime fingerprint before the wizard's *Transfer control* step);
+`app_manifest.py` lists the App-only modules and pins `FINGERPRINT_0_9_0`, and
+`tests/test_host_interface.py` fails when a listed module changes. New engine
+code goes into an App-only module.
+
+The one file that exists twice is the companion protocol:
+`custom_components/smart_occupancy/protocol.py` (the source) and
+`backend/smart_lighting/companion_protocol.py` (the App's copy, because the
+container cannot read the integration). After changing it, run from the
+repository root:
 
 ```sh
-python3 scripts/sync_lighting_runtime.py           # copy
-python3 scripts/sync_lighting_runtime.py --check   # what the tests check
+python3 scripts/check_protocol.py           # what both test suites check
+python3 scripts/check_protocol.py --sync    # copy
 ```
 
 The modules import Home Assistant's API; in the App those names come from the
 **host interface** `backend/homeassistant/` (documented in its `__init__.py`).
-`tests/test_host_interface.py` fails when a vendored module imports a name the
-host does not provide. `backend/smart_lighting/lighting_host.py` connects one
-controller to the App's websocket client, `lighting_runtime.py` runs the bridge
-session, shadow and owner, `lighting_compare.py` compares, `lighting_api.py`
-routes the interface's lighting commands. Phase A5 adds the same four modules
-for curtains (`curtains_host.py`, `curtains_runtime.py`, `curtains_compare.py`,
-`curtains_api.py`) and forecasts (`forecast_host.py` — history through
-`history/history_during_period` —, `forecast_runtime.py`, `forecast_compare.py`,
-`forecast_api.py`).
+`tests/test_host_interface.py` fails when an engine module imports a name the
+host does not provide. Per subsystem the App has a host (`lighting_host.py`,
+`curtains_host.py`, `forecast_host.py`), a runtime (`*_runtime.py`: the 0.9.0
+bridge session with shadow and owner, and since A6 the **companion mode**
+through `companion_mode.py`), a comparator (`*_compare.py`) and an API
+(`*_api.py`). `core_config.py` is the App's configuration authority
+(`/data/config/core.json`), `core_host.py` the host of the configuration-level
+engines (snapshot, rooms and presence handlers, the system view),
+`companion_client.py` the session with the companion, `migration.py` the
+eight-step wizard and `onboarding.py` the setup of a new installation.
+`tests/fake_companion.py` is the companion's side for the App tests
+(`tests/test_companion_app.py`).
 
 **Behavioural parity.** The integration's suite records scenarios with its own
 controller (`tests/test_lighting_parity*.py`, recorder in

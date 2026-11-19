@@ -95,7 +95,7 @@ def test_modules_and_migration() -> None:
     assert [(m.key, m.status, m.controlled_by, m.automation_owner) for m in tools] == [
         ("floorplan", AVAILABLE, None, None)]
     m = migration()
-    assert m["current_phase"] == "A5"
+    assert m["current_phase"] == "A6"
     assert m["modules_migrated"] == 0 and m["percent"] == 0  # by default no automation has moved (occupancy too)
     assert m["interfaces_migrated"] == 7
     presence = next(i for i in m["items"] if i["key"] == "presence")

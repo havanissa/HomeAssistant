@@ -42,6 +42,10 @@ from occupancy_core import fingerprint as core_fingerprint
 from smart_occupancy import lighting_sync as S
 from smart_occupancy.runtime_manifest import RUNTIME_VERSION, fingerprint as runtime_fingerprint
 
+from . import entity_views
+from .companion_client import CompanionClient, CompanionError
+from .companion_mode import CompanionMode
+from .core_config import CoreConfigStore
 from .ha import HomeAssistantClient, HomeAssistantError
 from .lighting_compare import LightingComparator, iso
 from .lighting_host import LIGHTING_STATE_STORE_KEY, LIGHTING_STORE_KEY, AppBackend, LightingInstance, room_result
@@ -82,10 +86,15 @@ def _detail(err: Exception) -> str:
 
 class LightingRuntime:
     def __init__(self, ha: HomeAssistantClient, occupancy: Any, data_dir: Path | None, *, app_version: str,
-                 min_shadow_seconds: int = MIN_SHADOW_SECONDS, min_commands: int = MIN_COMMANDS) -> None:
+                 min_shadow_seconds: int = MIN_SHADOW_SECONDS, min_commands: int = MIN_COMMANDS,
+                 companion: CompanionClient | None = None, core_config: CoreConfigStore | None = None) -> None:
         self.ha = ha
         self.occupancy = occupancy
         self.dir = data_dir / "lighting" if data_dir else None
+        # Phase A6: with the companion integration the App is the only lighting engine; the lease is the companion's.
+        self.core_config = core_config
+        self.cm = CompanionMode(self, "lighting", companion, core_config) if companion and core_config else None
+        self.core_host: Any = None
         self.app_version = app_version
         self.min_shadow_seconds = min_shadow_seconds
         self.min_commands = min_commands
@@ -135,11 +144,15 @@ class LightingRuntime:
         self.mode = "standalone"
         self._unsubs.append(self.ha.add_listener(self._on_ha))
         self._unsubs.append(self.occupancy.add_result_listener(self._on_occupancy))
+        if self.cm is not None:
+            self.cm.start()
         if self.ha.connected:
             self._connected()
 
     async def stop(self) -> None:
         self._stopping = True
+        if self.cm is not None:
+            await self.cm.stop()
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -254,9 +267,16 @@ class LightingRuntime:
             self.instance.automations_changed(automations, scripts)
 
     def _connected(self) -> None:
+        if self.cm is not None and self.cm.active:
+            return  # Phase A6: the companion session claims the domain; there is no legacy bridge to shadow
         if self._subscribe_task is None or self._subscribe_task.done():
             self._attempt = 0
             self._subscribe_task = asyncio.get_running_loop().create_task(self._subscribe_loop())
+
+    def companion_absent(self) -> None:
+        """The installed integration is the monolithic one (0.9.0): its legacy bridge is used (migration)."""
+        if self.ha.connected:
+            self._connected()
 
     def _disconnected(self, reason: str) -> None:
         self.session_id = None
@@ -489,6 +509,16 @@ class LightingRuntime:
     async def _execute(self, domain: str, service: str, data: dict[str, Any], context: Context) -> None:
         """The owner controller's only way to a device (the integration fences and allowlists it)."""
         self.counters["commands"] += 1
+        if self.cm is not None and self.cm.owner:
+            try:
+                await self.cm.execute(domain, service, data, context.id, purpose=None, area_id=None)
+            except CompanionError as err:
+                self.counters["command_errors"] += 1
+                self.last_error = {"at": iso(utcnow()), "code": err.code, "detail": str(err)}
+                if err.code == "not_allowed":
+                    _LOGGER.warning("The companion refused a lighting command: %s", err)
+                raise HostError(str(err)) from err
+            return
         try:
             await self._owner_command("smart_occupancy/lighting/bridge/execute", domain=domain, service=service,
                                       data=data, context_id=context.id)
@@ -505,6 +535,9 @@ class LightingRuntime:
             raise HostError("Home Assistant is not connected") from err
 
     def _send_input(self, kind: str, params: dict[str, Any]) -> None:
+        if self.cm is not None and self.cm.owner:
+            self.occupancy.local_input(kind, params)  # the App's own occupancy engine
+            return
         if self.mode == "owner":
             self._spawn(self._send_input_now(kind, params))
 
@@ -516,6 +549,10 @@ class LightingRuntime:
         """A lighting command of the App changed the integration's options (light types or the mood source)."""
         changes = {k: options[k] for k in ("mood", "categories") if options.get(k) != self.options.get(k)}
         if not changes:
+            return
+        if self.cm is not None and self.cm.owner and self.core_config is not None:
+            await self.core_config.save({**(self.core_config.options or {}), **changes}, expected_revision=None,
+                                        reason="lighting options", source="app")
             return
         await self._owner_command("smart_occupancy/lighting/bridge/options",
                                   options_revision=S.config_revision(self.options), **changes)
@@ -550,6 +587,10 @@ class LightingRuntime:
     async def _publish(self) -> None:
         self._publish_handle = None
         inst = self.instance
+        if self.cm is not None and self.cm.owner:
+            self._dirty.clear()
+            await self.cm.publish_now()
+            return
         if self.mode != "owner" or inst is None or inst.controller is None or not self._dirty:
             return
         dirty, self._dirty = self._dirty, set()
@@ -592,6 +633,9 @@ class LightingRuntime:
     async def _publish_view(self) -> None:
         self._view_handle = None
         inst = self.instance
+        if self.cm is not None and self.cm.owner:
+            await self.cm.publish_now()
+            return
         if self.mode != "owner" or inst is None or inst.controller is None:
             return
         rooms = self.room_views()
@@ -607,6 +651,8 @@ class LightingRuntime:
                 self._schedule_view(10)
 
     def _start_heartbeat(self) -> None:
+        if self.cm is not None and self.cm.owner:
+            return  # the companion lease has its own heartbeat
         if self._heartbeat is None or self._heartbeat.done():
             self._heartbeat = asyncio.get_running_loop().create_task(self._heartbeat_loop())
 
@@ -623,6 +669,9 @@ class LightingRuntime:
 
     async def _lose(self, why: str) -> None:
         """No longer the owner: stop at once (nothing more is sent), then shadow again from a fresh copy."""
+        if self.cm is not None and self.cm.owner:
+            await self.cm.lose(why)
+            return
         if self.mode != "owner" or self._switching:
             return  # (a release in progress ends the ownership itself)
         _LOGGER.warning("The App no longer controls lighting (%s); back to shadow mode", why)
@@ -640,6 +689,8 @@ class LightingRuntime:
     # -------------------------------------------------------- handover, return
     def readiness(self, now: datetime | None = None) -> dict[str, Any]:
         now = now or utcnow()
+        if self.cm is not None and self.cm.active:
+            return self._companion_readiness()
         report = self.comparator.report(now)
         checks: list[dict[str, Any]] = []
 
@@ -677,6 +728,11 @@ class LightingRuntime:
 
     async def handover(self, user_id: str | None) -> dict[str, Any]:
         """The reviewed handover: only when every readiness check passes; the integration decides."""
+        if self.cm is not None and self.cm.active:
+            try:
+                return await self.cm.claim(user_id, manual=True)
+            except CompanionError as err:
+                raise LightingError(err.code, str(err), err.status) from err
         if self.mode == "owner":
             raise LightingError("already_owner", "The App already controls lighting")
         if self._switching:
@@ -754,6 +810,8 @@ class LightingRuntime:
 
     async def release(self, user_id: str | None) -> dict[str, Any]:
         """Return control to the integration with the App's final configuration and state."""
+        if self.cm is not None and self.cm.active:
+            return await self.cm.release(user_id)
         if self.mode != "owner" or self.instance is None:
             return await self.return_control(user_id)
         if self._switching:
@@ -793,6 +851,8 @@ class LightingRuntime:
 
     async def return_control(self, user_id: str | None) -> dict[str, Any]:
         """Any time: the integration takes lighting back from its mirror (also when the App is not the owner)."""
+        if self.cm is not None and self.cm.active:
+            return await self.cm.release(user_id)
         if self.mode == "owner" and self.instance is not None and not self._switching:
             try:
                 # The owner hands back its final configuration and state (nothing of the last seconds is lost).
@@ -842,12 +902,114 @@ class LightingRuntime:
             "running": bool(inst and inst.started), "counters": dict(self.counters), "last_error": self.last_error,
             "notices": self.notices, "ownership_log": list(self.ownership_log),
             "comparison": self.comparator.report(now), "readiness": self.readiness(now),
+            "companion": self.cm.status() if self.cm is not None else None,
         }
 
     @property
     def controller(self) -> Any:
         inst = self.instance
         return inst.controller if inst is not None else None
+
+    # ---------------------------------------------------------- companion (A6)
+    def stored_config_doc(self) -> dict[str, Any] | None:
+        """The App's stored lighting configuration (its own store), read without starting a controller."""
+        path = self.dir / "store" / LIGHTING_STORE_KEY if self.dir else None
+        if path is None or not path.is_file():
+            return None
+        try:
+            from smart_occupancy.lighting_config import LightingConfig  # noqa: PLC0415
+
+            data = json.loads(path.read_text(encoding="utf-8")).get("data")
+            return LightingConfig.from_dict(data or {}).as_dict()
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as err:
+            _LOGGER.warning("The stored lighting configuration could not be read: %s", err)
+            return None
+
+    def stored_config(self) -> Any:
+        from smart_occupancy.lighting_config import LightingConfig  # noqa: PLC0415
+
+        ctrl = self.controller
+        if ctrl is not None:
+            return ctrl.lighting
+        doc = self.stored_config_doc()
+        return LightingConfig.from_dict(doc) if doc is not None else None
+
+    def companion_can_claim(self) -> str | None:
+        if self.core_config is None or not self.core_config.authoritative:
+            return "the App is not the configuration authority yet (finish the setup or the migration)"
+        return None
+
+    def companion_revision(self) -> str | None:
+        doc = self.config_doc() or self.stored_config_doc()
+        return S.config_revision(doc) if doc is not None else None
+
+    def companion_targets(self) -> dict[str, list[str]]:
+        """Every entity the lighting controller may command: the companion executes nothing else."""
+        from smart_occupancy.models import IntegrationConfig  # noqa: PLC0415
+
+        doc = self.config_doc() or self.stored_config_doc() or {}
+        lights = {e for e in S.referenced_entities(doc) if e.startswith("light.")}
+        ctrl = self.controller
+        if ctrl is not None:
+            for managed in ctrl.managed.values():
+                lights.update(managed.targets)
+                for members in managed.members.values():
+                    lights.update(members)
+        options = (self.core_config.options if self.core_config else None) or {}
+        for room in IntegrationConfig.from_dict(options).enabled_rooms.values():
+            lights.update(e for e in room.lights if e.startswith("light."))
+        mood = IntegrationConfig.from_dict(options).mood
+        actions = set(S.switch_action_entities(doc))
+        actions.update(e for e in (mood.manual_mood_entity, mood.main_mood_entity)
+                       if e and e.split(".", 1)[0] in ("select", "input_select"))
+        return {"lights": sorted(e for e in lights if e.startswith("light.")), "relays": sorted(S.relays(doc)),
+                "actions": sorted(actions)}
+
+    async def companion_start_owner(self) -> None:
+        """The App's controller from its own store: nothing is applied at start (as after a restart)."""
+        self.options = dict((self.core_config.options if self.core_config else None) or {})
+        await self._stop_instance(flush=self.mode == "owner")
+        self.mode, self.bridge, self.bridge_error = "owner", "companion", None
+        self.integration = {"owner": "app", "state": "app", "controller": "companion"}
+        self._log("companion_claim", epoch=self.cm.lease.epoch if self.cm and self.cm.lease else None)
+        await self._start_owner(config=None, state=None, recent=None)
+        self._changed()
+
+    async def companion_stop_owner(self, *, flush: bool) -> None:
+        self.mode = "standalone"
+        await self._stop_instance(flush=flush)
+        self._changed()
+
+    def companion_config_changed(self, options: dict[str, Any]) -> None:
+        self.options = dict(options)
+        inst = self.instance
+        if inst is not None and inst.controller is not None:
+            inst.coordinator.set_options(self.options)
+            inst.controller.async_registry_changed()
+            inst.controller.async_presence_changed()
+
+    def companion_view(self) -> dict[str, Any] | None:
+        ctrl = self.controller
+        if ctrl is None:
+            return None
+        return entity_views.lighting_view(ctrl, sorted(ctrl.config.enabled_rooms))
+
+    def _companion_readiness(self) -> dict[str, Any]:
+        cm = self.cm
+        assert cm is not None
+        checks = [
+            {"key": "companion", "status": "ok" if cm.companion.present else "error", "title": "Companion connected",
+             "detail": cm.companion.error or cm.companion.state},
+            {"key": "paired", "status": "ok" if cm.companion.trusted else "error", "title": "App paired",
+             "detail": "The companion trusts this App" if cm.companion.trusted else "Pair the App (Settings → System)"},
+            {"key": "config", "status": "ok" if cm.runtime.companion_can_claim() is None else "error",
+             "title": "Configuration in the App", "detail": cm.runtime.companion_can_claim() or "The App owns it"},
+            {"key": "owner", "status": "ok" if cm.owner else "warning", "title": "Lighting claimed",
+             "detail": f"state {cm.state}" + (f": {cm.error}" if cm.error else "")},
+        ]
+        return {"ready": cm.owner, "checks": checks, "summary": {"seconds": 0, "matched": 0, "mismatches": 0,
+                                                                 "decision_differences": 0},
+                "thresholds": {"min_shadow_seconds": 0, "min_commands": 0}, "companion": True}
 
 
 def _jsonable(value: Any) -> Any:

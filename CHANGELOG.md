@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.0 — The companion integration (App Phase A6)
+
+**This release removes every engine from the integration.** Smart Occupancy & Lighting 1.0.0 is the *companion* of the Smart Lighting App (0.7.0 or newer): it provides the native entities, a fenced executor for the App's device commands, the ownership records, events, diagnostics, the compact dashboard cards and the export / retirement of the 0.9.0 data. **Nothing is migrated automatically on upgrade.** Before updating, run steps 1–5 of *Smart Lighting → Settings → Migration & System*; after the update and a restart, run *Activate*, *Verify* and *Retire* there. Procedure, rollback and the safety policy: [docs/A6-standalone-migration.md](docs/A6-standalone-migration.md).
+
+### Changed
+
+- The domain (`smart_occupancy`), the config entry and every entity id, unique id and attribute are kept. Entities now show what the App publishes and carry `fresh: false` while the App is away.
+- **No automation runs in the integration.** While the App is stopped or disconnected, lights and covers are not touched, occupancy keeps its last published state (no vacancy is inferred), and the App claims again with a new epoch when it is back. This replaces 0.9.0's hot standby (see the design document for why).
+- The options flow is gone; every setting is edited in the App. The config entry keeps only `{"companion": …}` after the retirement.
+- The dashboard cards are compact everyday cards (House, Smart Lighting, Smart Room Lighting, Smart Curtains) under the old element names (`smart-occupancy-mood-editor-card`, `smart-occupancy-room-lighting-card`, `smart-occupancy-curtains-card`, new `smart-occupancy-house-card`); their actions (mood, Resume, Automatic / Observe, curtain presets and modes) are relayed to the App. The Room Status card is unchanged.
+
+### Added
+
+- `protocol.py` (shared with the App, byte-identical): sessions, pairing (token hash stored; the App keeps the token), claims with epoch and lease (30 s, heartbeat 10 s), strictly increasing sequence numbers, the command allowlist (`light` / `switch` / `scene` / `script` / `select` / `input_select` for lighting; `cover.set_cover_position` 0–100 / `open_cover` / `close_cover`, one configured cover, for curtains), view validation, renames.
+- Websocket commands `smart_occupancy/companion/{status, subscribe, pair, unpair, claim, heartbeat, publish, execute, release, revoke, action_result, renames_applied, legacy/export, legacy/status, legacy/retire, legacy/restore, action}` (administrators) and the read-only `view` / `view/subscribe` for the cards.
+- Service `smart_occupancy.revoke_app_control` (optional `domain`): an emergency stop of the App's control; nothing is switched by it.
+- `.storage/smart_occupancy.companion`: the records (owner, epoch, history, targets, published views). Leases never survive a restart.
+- Legacy export (entry options and the 15 stores of 0.9.0), retirement into `.storage/smart_occupancy.legacy_backup` (never deleted by software) and restore for a rollback to 0.9.0.
+
+### Removed
+
+- `occupancy_core/`, the lighting, curtain, forecast and daylight engines, the editor websocket APIs (`rooms`, `presence`, `lighting`, `brightness`, `curtains`, `forecast`), the three bridges and their services (`engine_return_to_integration`, `lighting_return_to_integration`, `curtains_return_to_integration`, `forecast_return_to_integration`), `services.yaml` entries for them, `scripts/sync_*`. The engines live in the App (`smart_lighting/backend/smart_occupancy/`); their 1 199 tests run in `tests/engine` through a frozen copy of the 0.9.0 glue.
+
 ## 0.9.0 — Curtain and forecast bridges for the Smart Lighting App (App Phase A5)
 
 The integration keeps controlling the curtains and producing the occupancy forecasts by default, also after this update. Nothing changes until an administrator performs a reviewed handover in the Smart Lighting App (0.6.0). No curtain rule and no forecast rule changed.

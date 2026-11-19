@@ -72,6 +72,10 @@ class CurtainsApi:
         return command in CURTAIN_WRITE_COMMANDS
 
     def where(self) -> str:
+        """Where commands go: ``app`` (local handlers) or ``integration`` (forwarded to the 0.9.0 bridges)."""
+        cm = getattr(self.runtime, "cm", None)
+        if cm is not None and cm.active:
+            return "app"  # Phase A6: the companion runs no engine; the App's handlers are the only editor
         return "app" if self.runtime.mode == "owner" and self.runtime.manager is not None else "integration"
 
     async def call(self, msg: dict[str, Any], *, user_id: str | None, is_admin: bool) -> Any:

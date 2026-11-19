@@ -60,6 +60,10 @@ from .forecast_api import ForecastApiError
 from .forecast_runtime import ForecastError
 from .lighting_api import LightingApiError
 from .lighting_runtime import LightingError
+from .migration import MigrationError
+from .onboarding import OnboardingError
+from .companion_client import CompanionError
+from .core_config import CoreConfigError
 from .occupancy_runtime import EngineError
 from .live import LiveHub, origin_allowed
 from .rooms import RoomsError
@@ -812,6 +816,196 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         except ForecastError as err:
             return lighting_error(err)
 
+    # ------------------------------------------------------ system (A6)
+    def system_error(err: Exception) -> web.Response:
+        return _json({"error": str(err), "code": getattr(err, "code", "error")}, status=getattr(err, "status", 409))
+
+    @rooms_handler
+    async def system_status(request: web.Request) -> web.Response:
+        core: AppCore = request.app[CORE_KEY]
+        return _json(core.system())
+
+    @rooms_handler
+    async def dashboard(request: web.Request) -> web.Response:
+        core: AppCore = request.app[CORE_KEY]
+        return _json(core.dashboard())
+
+    @rooms_handler
+    async def system_pair(request: web.Request) -> web.Response:
+        await write_guard(request)
+        core: AppCore = request.app[CORE_KEY]
+        if core.onboarding is None:
+            raise RoomsError("not_connected", "The App is starting", 503)
+        try:
+            return _json({"result": await core.onboarding.pair(request.headers.get("X-Remote-User-Id"))})
+        except OnboardingError as err:
+            return system_error(err)
+
+    def _runtime_of(core: AppCore, domain: Any) -> Any:
+        runtime = {"occupancy": core.occupancy, "lighting": core.lighting, "curtains": core.curtains,
+                   "forecast": core.forecast}.get(domain)
+        if runtime is None:
+            raise RoomsError("invalid_domain", "Unknown control domain", 400)
+        return runtime
+
+    @rooms_handler
+    async def system_claim(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        core: AppCore = request.app[CORE_KEY]
+        runtime = _runtime_of(core, body.get("domain"))
+        try:
+            result = await runtime.handover(request.headers.get("X-Remote-User-Id"))
+        except Exception as err:  # noqa: BLE001 - the runtimes' typed refusals
+            return system_error(err)
+        return _json({"result": result})
+
+    @rooms_handler
+    async def system_release(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        core: AppCore = request.app[CORE_KEY]
+        runtime = _runtime_of(core, body.get("domain"))
+        try:
+            result = await runtime.release(request.headers.get("X-Remote-User-Id"))
+        except Exception as err:  # noqa: BLE001
+            return system_error(err)
+        return _json({"result": result})
+
+    @rooms_handler
+    async def system_revoke(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        core: AppCore = request.app[CORE_KEY]
+        if core.companion is None or not core.companion.present:
+            raise RoomsError("not_connected", "The companion is not connected", 503)
+        try:
+            return _json({"result": await core.companion.revoke(body.get("domain"))})
+        except CompanionError as err:
+            return system_error(err)
+
+    # ----------------------------------------------------- migration (A6)
+    def migration_service(request: web.Request) -> Any:
+        core: AppCore = request.app[CORE_KEY]
+        if core.migration is None:
+            raise RoomsError("not_connected", "The App is starting", 503)
+        return core.migration
+
+    @rooms_handler
+    async def migration_status(request: web.Request) -> web.Response:
+        return _json(migration_service(request).status())
+
+    @rooms_handler
+    async def migration_step(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        service = migration_service(request)
+        step = request.match_info["step"]
+        user = request.headers.get("X-Remote-User-Id")
+        try:
+            if step == "inspect":
+                result = await service.inspect()
+            elif step == "backup":
+                result = await service.backup(user)
+            elif step == "validate":
+                result = await service.validate()
+            elif step == "transfer_config":
+                result = await service.transfer_config(apply=body.get("apply") is True, user_id=user)
+            elif step == "transfer_control":
+                result = await service.transfer_control(str(body.get("domain") or ""), user)
+            elif step == "activate":
+                result = await service.activate(reimport=body.get("reimport") is True, user_id=user)
+            elif step == "verify":
+                result = await service.verify()
+            elif step == "retire":
+                if body.get("confirm") is not True:
+                    raise RoomsError("confirmation_required", "Confirm the retirement of the legacy data")
+                result = await service.retire(user)
+            elif step == "abort":
+                result = await service.abort(user, restore_legacy=body.get("restore_legacy") is True)
+            else:
+                raise RoomsError("unknown_step", "Unknown migration step", 404)
+        except (MigrationError, CompanionError, CoreConfigError) as err:
+            return system_error(err)
+        return _json({"result": result, "status": service.status()})
+
+    @rooms_handler
+    async def migration_backups(request: web.Request) -> web.Response:
+        return _json({"backups": migration_service(request).backups()})
+
+    @rooms_handler
+    async def migration_backup(request: web.Request) -> web.Response:
+        await admin_guard(request)
+        try:
+            data = migration_service(request).backup_file(request.match_info["backup_id"])
+        except MigrationError as err:
+            return system_error(err)
+        return web.Response(text=json.dumps(data, indent=1, default=str), content_type="application/json",
+                            headers={"Content-Disposition": f'attachment; filename="{request.match_info["backup_id"]}.json"'})
+
+    # --------------------------------------------------------- setup (A6)
+    @rooms_handler
+    async def setup_status(request: web.Request) -> web.Response:
+        core: AppCore = request.app[CORE_KEY]
+        if core.onboarding is None:
+            raise RoomsError("not_connected", "The App is starting", 503)
+        return _json(core.onboarding.status())
+
+    @rooms_handler
+    async def setup_start(request: web.Request) -> web.Response:
+        await write_guard(request)
+        core: AppCore = request.app[CORE_KEY]
+        if core.onboarding is None:
+            raise RoomsError("not_connected", "The App is starting", 503)
+        try:
+            return _json({"result": await core.onboarding.start_fresh(request.headers.get("X-Remote-User-Id"))})
+        except OnboardingError as err:
+            return system_error(err)
+
+    # -------------------------------------------- core configuration (A6)
+    @rooms_handler
+    async def config_export(request: web.Request) -> web.Response:
+        await admin_guard(request)
+        core: AppCore = request.app[CORE_KEY]
+        data = core.core_config.export()
+        return web.Response(text=json.dumps(data, indent=1), content_type="application/json",
+                            headers=download_name("smart-lighting-config", data["created_at"]))
+
+    @rooms_handler
+    async def config_import_review(request: web.Request) -> web.Response:
+        body = await write_guard(request, MAX_PLAN_BODY)
+        core: AppCore = request.app[CORE_KEY]
+        states = core.ha.states if core.ha else {}
+        try:
+            return _json(core.core_config.import_review(body.get("file"), entity_exists=lambda e: e in states))
+        except CoreConfigError as err:
+            return system_error(err)
+
+    @rooms_handler
+    async def config_import(request: web.Request) -> web.Response:
+        body = await write_guard(request, MAX_PLAN_BODY)
+        core: AppCore = request.app[CORE_KEY]
+        try:
+            result = await core.core_config.import_apply(body.get("file"), expected_revision=body.get("revision"),
+                                                         source="import", reason="import")
+        except CoreConfigError as err:
+            return system_error(err)
+        if core.core_host is not None:
+            core.core_host.schedule_snapshot(0)
+        return _json(result)
+
+    @rooms_handler
+    async def config_backups(request: web.Request) -> web.Response:
+        await admin_guard(request)
+        core: AppCore = request.app[CORE_KEY]
+        return _json({"backups": core.core_config.backups()})
+
+    @rooms_handler
+    async def config_backup(request: web.Request) -> web.Response:
+        await admin_guard(request)
+        core: AppCore = request.app[CORE_KEY]
+        try:
+            data = core.core_config.backup(request.match_info["backup_id"])
+        except CoreConfigError as err:
+            return system_error(err)
+        return _json(data, headers={"Content-Disposition": f'attachment; filename="{request.match_info["backup_id"]}.json"'})
+
     async def live(request: web.Request) -> web.StreamResponse:
         return await request.app[HUB_KEY].handle(request)
 
@@ -879,6 +1073,23 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     app.router.add_get("/api/predictions/export", predictions_export)
     app.router.add_post("/api/predictions/import/review", predictions_import_review)
     app.router.add_post("/api/predictions/import", predictions_import)
+    app.router.add_get("/api/system", system_status)
+    app.router.add_get("/api/dashboard", dashboard)
+    app.router.add_post("/api/system/pair", system_pair)
+    app.router.add_post("/api/system/claim", system_claim)
+    app.router.add_post("/api/system/release", system_release)
+    app.router.add_post("/api/system/revoke", system_revoke)
+    app.router.add_get("/api/migration", migration_status)
+    app.router.add_get("/api/migration/backups", migration_backups)
+    app.router.add_get("/api/migration/backups/{backup_id}", migration_backup)
+    app.router.add_post("/api/migration/{step}", migration_step)
+    app.router.add_get("/api/setup", setup_status)
+    app.router.add_post("/api/setup/start", setup_start)
+    app.router.add_get("/api/config/export", config_export)
+    app.router.add_post("/api/config/import/review", config_import_review)
+    app.router.add_post("/api/config/import", config_import)
+    app.router.add_get("/api/config/backups", config_backups)
+    app.router.add_get("/api/config/backups/{backup_id}", config_backup)
     app.router.add_route("*", "/api/{tail:.*}", api_not_found)
     assets = settings.static_dir / "assets"
     if assets.is_dir():
