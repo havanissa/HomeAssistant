@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .core import HomeAssistant
 
 
-class ConfigEntryState:
+class ConfigEntryState(StrEnum):
+    """As Home Assistant's (an enum with ``.value``; compared by identity in the room and presence handlers)."""
+
     LOADED = "loaded"
     NOT_LOADED = "not_loaded"
 

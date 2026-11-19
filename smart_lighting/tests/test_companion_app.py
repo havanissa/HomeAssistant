@@ -516,6 +516,23 @@ async def test_a_fresh_app_next_to_the_companion_imports_the_legacy_stores(fake_
     assert {s["key"]: s["import"] for s in review["stores"]} == {"smart_occupancy.lighting": True, "smart_occupancy.curtains": True,
                                                                 "smart_occupancy.forecast_days": True}
     assert core.lighting.stored_config_doc() is None  # a review writes nothing
+    await step(client, "transfer_config", {"apply": True})
+    # Production finding (0.7.2): the App's own room and presence handlers failed ("'str' object has no attribute
+    # 'value'") once the App held the configuration; Diagnostics showed the Room configuration API in error.
+    await wait_for(lambda: core.core_host.authoritative)
+    rooms = await (await client.get("/api/rooms")).json()
+    assert rooms["status"]["api"] != "error", rooms["status"]
+    assert rooms["status"]["where"] == "app" and any(r["area_id"] == AREA and r["configured"] for r in rooms["rooms"])
+    presence = await client.get(f"/api/presence/rooms/{AREA}")
+    assert presence.status == 200, await presence.text()
+    health = {c["key"]: c for c in core.health()["checks"]}
+    assert health["rooms_api"]["status"] == "ok", health["rooms_api"]
+    assert health["presence_api"]["status"] == "ok", health["presence_api"]
+    # Production finding (0.7.2): with the companion there is nothing to hand over; the step must complete.
+    control = await step(client, "transfer_control", {})
+    assert control["skipped"] is True and set(control["domains"]) == {"occupancy", "lighting", "curtains", "forecast"}
+    status = await (await client.get("/api/migration")).json()
+    assert next(s for s in status["steps"] if s["key"] == "transfer_control")["status"] == "done"
     activated = await step(client, "activate")
     assert activated["activated"] is True
     await all_claimed(client)

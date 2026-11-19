@@ -422,6 +422,8 @@ def phase_reinstall(args: argparse.Namespace, out: Path) -> None:
     st, applied = step("transfer_config", {"apply": True})
     check("options and stores imported", st == 200 and applied["result"]["authority"] == "app"
           and "smart_occupancy.lighting" in applied["result"]["stores_imported"], applied.get("result", {}).get("stores_imported"))
+    st, control = step("transfer_control", {})
+    check("transfer control completes with nothing to hand over", st == 200 and control["result"].get("skipped") is True, control)
     start = len(args.watcher.events)
     st, activated = step("activate")
     check("activate claims every domain", st == 200 and activated["result"]["activated"] is True, activated)
@@ -445,6 +447,14 @@ def phase_reinstall(args: argparse.Namespace, out: Path) -> None:
         raise
     st, verify = step("verify")
     check("verify ok", st == 200 and verify["result"]["ok"] is True, verify.get("result"))
+    rooms = app("api/rooms")
+    check("the App's Rooms editor works (Room configuration API)", rooms["status"]["api"] != "error"
+          and rooms["status"]["where"] == "app", rooms["status"])
+    presence = app(f"api/presence/rooms/{KAMAR}")  # opening Presence once (the check appears after the first use)
+    check("the App's Presence page answers", isinstance(presence, dict) and "error" not in presence, str(presence)[:200])
+    health = {c["key"]: c for c in app("api/overview")["checks"]}
+    check("Diagnostics: room and presence APIs healthy", health["rooms_api"]["status"] == "ok"
+          and health["presence_api"]["status"] == "ok", (health["rooms_api"], health["presence_api"]))
     screenshot(args, out, "reinstall-system", "settings/system/migration")
 
 

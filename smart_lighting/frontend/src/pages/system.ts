@@ -268,6 +268,7 @@ export class SlSystem extends StoreElement {
           ${missing.length ? html`<p class="small tone-warning">Referenced entities that do not exist in Home Assistant: ${missing.join(", ")}</p>` : nothing}`;
       }
       case "transfer_control": {
+        if (r.skipped) return html`<p class="small muted">Nothing to hand over: the companion grants control to the App.</p>`;
         const domains = (r.domains ?? {}) as Record<string, { at: string; by: string | null }>;
         return html`<ul class="plain-list small">${DOMAINS.map((k) => html`<li>${chip(domains[k] ? "ok" : "pending", DOMAIN_TITLES[k])} ${domains[k] ? html`<span class="muted">handed over ${fmt(domains[k].at)}</span>` : nothing}</li>`)}</ul>`;
       }
@@ -298,6 +299,9 @@ export class SlSystem extends StoreElement {
         return html`<button type="button" class="btn" ?disabled=${busy} data-testid="migration-config-review" @click=${() => void run({ apply: false })}>${icon("eye", 18)}Review</button>
           <button type="button" class="btn btn-primary" ?disabled=${busy || step.status === "pending"} data-testid="migration-config-apply" @click=${() => void run({ apply: true }, "Configuration transferred")}>${icon("import", 18)}Apply the reviewed transfer</button>`;
       case "transfer_control":
+        if (m.mode === "companion")
+          return html`<button type="button" class="btn btn-primary" ?disabled=${busy} data-testid="migration-control-skip" @click=${() => void run({}, "Nothing to hand over: continue with Activate")}>${icon("arrow-right", 18)}Continue (nothing to hand over)</button>
+            <span class="small muted block">With the companion there are no 0.9.0 bridges to hand over from: the App takes each subsystem itself once it holds the configuration, or at Activate.</span>`;
         return html`${DOMAINS.map((k) => {
           const done = m.owners[k]?.owner === "app" || m.owners[k]?.owner === "app_away";
           return html`<button type="button" class="btn ${done ? "" : "btn-primary"}" ?disabled=${busy || done} data-testid=${`migration-control-${k}`} @click=${() => void run({ domain: k }, `${DOMAIN_TITLES[k]} handed over`)}>${icon(done ? "ok" : "swap", 18)}${DOMAIN_TITLES[k]}${done ? " · done" : ""}</button>`;

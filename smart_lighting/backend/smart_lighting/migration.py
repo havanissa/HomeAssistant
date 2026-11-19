@@ -432,6 +432,14 @@ class MigrationService:
         return imported
 
     async def transfer_control(self, domain: str, user_id: str | None) -> dict[str, Any]:
+        if self.mode == "companion":
+            # No 0.9.0 bridges to hand over from: with the companion the App claims each domain itself (once it is
+            # the configuration authority, or at Activate). The step is complete; it records who owns what.
+            owners = self.owners()
+            domains = {d: {"at": utcnow(), "outcome": "not needed: the companion grants control to the App",
+                           "owner": owners[d].get("owner"), "by": user_id} for d in DOMAINS}
+            return await self._record("transfer_control", "done", {"at": utcnow(), "domains": domains,
+                                                                   "owners": owners, "skipped": True})
         if domain not in DOMAINS:
             raise MigrationError("invalid", f"unknown domain {domain}")
         rt = self._runtimes()[domain]
