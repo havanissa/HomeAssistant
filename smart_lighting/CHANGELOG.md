@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.3
+
+- **The Rooms and Presence editors work once the App holds the configuration.** The App runs the rooms and
+  presence handlers itself, and they read the config entry's state as Home Assistant's enum; the App's host
+  stored a plain string, so every request failed with "'str' object has no attribute 'value'" (Diagnostics:
+  *Room configuration API* in error). The host now uses an enum like Home Assistant.
+- **Transfer control no longer blocks the wizard with the companion installed.** The step hands control over
+  through the 0.9.0 bridges; with companion 1.0.0 there are none, and the App takes each subsystem itself as
+  soon as it holds the configuration. Every domain button was then disabled (already the App's) and the step
+  could never complete, so *Activate* was out of reach. With the companion the step now offers *Continue
+  (nothing to hand over)* and records who owns each subsystem.
+
 ## 0.7.2
 
 - **Validate no longer blocks an App installed fresh next to companion 1.0.0.** Its *Configuration
