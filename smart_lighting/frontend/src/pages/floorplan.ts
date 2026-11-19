@@ -13,6 +13,7 @@ import { live as liveValue } from "lit/directives/live.js";
 
 import { formatTime, plural } from "../format";
 import { icon } from "../icons";
+import { inspectLight } from "../lighting/light-inspector";
 import { normalize } from "../lookup";
 import { navigatePath, setLeaveGuard } from "../router";
 import { ApiError, AVAILABILITY, downloadJson, getRooms, type Availability } from "../rooms/model";
@@ -2075,6 +2076,8 @@ export class SlFloorplan extends StoreElement {
         ${r.missing ? html`<p class="notice notice-warning small">${icon("warning", 18)}<span>${p.entity_id} no longer exists in Home Assistant. Replace it with another entity, or remove the icon.</span></p>` : nothing}
       </section>
       ${this.presenceSensorSection(r.entity_id)}
+      ${/^(light|switch)\./.test(r.entity_id) ? html`<section class="inspector-section" data-testid="fp-light-inspect"><h4>Lighting</h4>
+        <button type="button" class="btn btn-small" data-testid="fp-open-light-inspector" @click=${() => inspectLight(r.entity_id)}>${icon("information-outline", 16)}What controls this light?</button></section>` : nothing}
       <section class="inspector-section" data-testid="fp-device-identity">
         <h4>Device</h4>
         ${kvRows([

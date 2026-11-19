@@ -50,7 +50,10 @@ from .brightness import (
     MAX_TEMPLATES,
     LightMatrix,
     Template,
+    DELAY_MAX,
+    ROOM,
     cells_from,
+    delays_from,
     find_template,
     with_matrix,
 )
@@ -149,11 +152,17 @@ _TUNING = {
     vol.Optional("dead_band"): _NONE_OR(vol.All(vol.Coerce(int), vol.Range(min=0, max=DEAD_BAND_MAX))),
     vol.Optional("min_interval"): _NONE_OR(vol.All(vol.Coerce(int), vol.Range(min=0, max=MIN_INTERVAL_MAX))),
 }
+_SECONDS = vol.All(vol.Coerce(int), vol.Range(min=0, max=DELAY_MAX))
+_DELAY = vol.Any(None, vol.Schema({vol.Optional("on"): _SECONDS, vol.Optional("off"): _SECONDS}))
+#: App 0.9.0: cell delays, ``{column: {category: {"on": s, "off": s} | null}}`` (null: immediate again).
+_DELAYS = vol.Schema({vol.All(str, vol.Length(min=1, max=60)): vol.Schema({
+    vol.All(str, vol.Match(r"^[a-z0-9_]{1,40}$")): _DELAY})})
 _MATRIX = vol.Schema({
     vol.Optional("enabled"): bool,
     vol.Optional("room"): _CELLS,
     vol.Optional("zones"): {str: _CELLS},
     vol.Optional("template"): vol.Any(None, str),
+    vol.Optional("delays"): _DELAYS,
 })
 
 
@@ -356,8 +365,26 @@ def _matrix_from(ctrl: LightingController, connection, msg, area_id: str, entity
     columns = {z: cells(c, {}) for z, c in current.zones.items()}
     for zone_id, new in data.get("zones", {}).items():
         columns[zone_id] = cells(columns.get(zone_id, {}), new)
+    # Cell delays (App 0.9.0): given cells replace the stored ones; a delay belongs to an On cell (a value above 0).
+    if bad := [c for c in data.get("delays", {}) if c != ROOM and c not in columns]:
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT,
+                              f"{', '.join(bad)}: not a column of this light's matrix")
+        return None
+    delays: dict[str, dict[str, tuple[int, int]]] = {c: dict(d) for c, d in current.delays.items()}
+    for column, given in data.get("delays", {}).items():
+        merged = dict(delays.get(column, {}))
+        for level, pair in given.items():
+            if pair is None:
+                merged.pop(level, None)
+            else:
+                old_on, old_off = merged.get(level, (0, 0))
+                merged[level] = (int(pair.get("on", old_on)), int(pair.get("off", old_off)))
+        delays[column] = merged
+    values = {ROOM: room_cells, **columns}
+    delays = {c: kept for c, d in delays.items() if c in values and (kept := {
+        k: p for k, p in d.items() if p != (0, 0) and (values[c].get(k) or 0) > 0})}
     return replace(current, enabled=data.get("enabled", current.enabled), room=room_cells, zones=columns,
-                   template=data.get("template", current.template))
+                   template=data.get("template", current.template), delays=delays)
 
 
 @websocket_api.websocket_command({
@@ -446,6 +473,10 @@ def ws_brightness_remove(hass: HomeAssistant, connection: websocket_api.ActiveCo
     vol.Optional("name"): vol.All(str, vol.Strip, vol.Length(min=1, max=60)),
     vol.Optional("room"): _CELLS,
     vol.Optional("zone"): _CELLS,
+    # App 0.9.0: {"room": {category: {"on", "off"}}, "zone": {...}}
+    vol.Optional("delays"): vol.Schema({vol.Optional("room"): vol.Schema({
+        vol.All(str, vol.Match(r"^[a-z0-9_]{1,40}$")): _DELAY}), vol.Optional("zone"): vol.Schema({
+            vol.All(str, vol.Match(r"^[a-z0-9_]{1,40}$")): _DELAY})}),
 })
 @websocket_api.require_admin
 @callback
@@ -480,9 +511,17 @@ def ws_brightness_template(hass: HomeAssistant, connection: websocket_api.Active
         levels = (lighting.ambient_for(area).levels if area in ctrl.config.rooms else None) or (
             current.levels if current and "room" not in msg else lighting.ambient.levels) or DEFAULT_LEVELS
         keys = [lv.id for lv in levels]
+        room = cells_from(msg.get("room", current.room if current else {}), keys)
+        zone = cells_from(msg.get("zone", current.zone if current else {}), keys)
+
+        def delays(column: str, cells: dict[str, int | None], old: dict[str, tuple[int, int]]) -> dict[str, tuple[int, int]]:
+            given = (msg.get("delays") or {}).get(column)
+            pairs = delays_from({k: v for k, v in given.items() if v}) if isinstance(given, dict) else dict(old)
+            return {k: p for k, p in pairs.items() if k in keys and (cells.get(k) or 0) > 0}
         template = Template(id=current.id if current else slug(name, taken, "template"), name=name,
-                            room=cells_from(msg.get("room", current.room if current else {}), keys),
-                            zone=cells_from(msg.get("zone", current.zone if current else {}), keys), levels=levels)
+                            room=room, zone=zone, levels=levels,
+                            room_delays=delays("room", room, current.room_delays if current else {}),
+                            zone_delays=delays("zone", zone, current.zone_delays if current else {}))
         templates = [template if t.id == template.id else t for t in templates] if current else [*templates, template]
         result = {"template": template.as_dict()}
     ctrl.store.async_set(replace(lighting, brightness_templates=tuple(templates)))

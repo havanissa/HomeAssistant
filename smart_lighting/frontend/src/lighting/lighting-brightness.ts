@@ -7,6 +7,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { icon } from "../icons";
 import { chip, kv, StoreElement } from "../ui";
 import { cmd, lighting } from "./api";
+import { inspectButton } from "./light-inspector";
 import {
   AMB_BASIS,
   advancedToggle,
@@ -25,7 +26,41 @@ import {
 } from "./lighting-model";
 
 type Cells = Record<string, number | null>;
-interface MatrixDraft { entity_id: string; enabled: boolean; room: Cells; zones: Record<string, Cells>; template: string | null; dirty: boolean; enrolled: boolean }
+/** App 0.9.0: per-cell delays in seconds, column ("room" or a zone id) → category → {on, off} (absent = 0 = immediate). */
+type Delays = Record<string, Record<string, { on: number; off: number }>>;
+interface MatrixDraft { entity_id: string; enabled: boolean; room: Cells; zones: Record<string, Cells>; delays: Delays; template: string | null; dirty: boolean; enrolled: boolean }
+const DELAY_MAX = 3600;
+
+function cleanDelays(d: Delays, values: (col: string, level: string) => number | null | undefined): Delays {
+  const out: Delays = {};
+  for (const [col, levels] of Object.entries(d ?? {})) {
+    for (const [level, p] of Object.entries(levels ?? {})) {
+      const on = Math.max(0, Math.min(DELAY_MAX, Math.round(Number(p?.on) || 0)));
+      const off = Math.max(0, Math.min(DELAY_MAX, Math.round(Number(p?.off) || 0)));
+      if ((on || off) && (Number(values(col, level)) || 0) > 0) (out[col] ??= {})[level] = { on, off };
+    }
+  }
+  return out;
+}
+
+/** The delays to send: every cell of the draft, null where none (so a removed delay is removed). */
+export function delaysPayload(d: { room: Cells; zones: Record<string, Cells>; delays: Delays }): Record<string, Record<string, { on: number; off: number } | null>> {
+  const out: Record<string, Record<string, { on: number; off: number } | null>> = {};
+  const cols: Array<[string, Cells]> = [["room", d.room], ...Object.entries(d.zones)];
+  for (const [col, cells] of cols) {
+    out[col] = {};
+    for (const level of Object.keys(cells)) {
+      const p = d.delays?.[col]?.[level];
+      out[col][level] = p && (p.on || p.off) && (cells[level] ?? 0) > 0 ? { on: p.on, off: p.off } : null;
+    }
+  }
+  return out;
+}
+
+export function delayText(p: { on?: number; off?: number } | null | undefined): string {
+  if (!p || (!p.on && !p.off)) return "";
+  return [p.on ? `Delay On ${p.on} s` : null, p.off ? `Delay Off ${p.off} s` : null].filter(Boolean).join(" · ");
+}
 
 export class SlLpBrightness extends StoreElement {
   static properties = {
@@ -86,11 +121,13 @@ export class SlLpBrightness extends StoreElement {
     let m = l.matrix;
     if (!m) {
       const t = (this.b.templates ?? []).find((x: Obj) => x.id === this.b.default_template) ?? this.b.templates?.[0] ?? { room: {}, zone: {} };
-      m = { enabled: true, room: { ...this.emptyCells(), ...t.room }, zones: Object.fromEntries(zones.map((z) => [z, { ...this.emptyCells(), ...t.zone }])), template: t.id ?? null };
+      m = { enabled: true, room: { ...this.emptyCells(), ...t.room }, zones: Object.fromEntries(zones.map((z) => [z, { ...this.emptyCells(), ...t.zone }])), template: t.id ?? null,
+        delays: this.templateDelays(t, zones) };
     }
     this.draft = {
       entity_id: entityId, enabled: m.enabled !== false, room: { ...this.emptyCells(), ...m.room }, template: m.template ?? null,
       zones: Object.fromEntries(zones.map((z) => [z, { ...this.emptyCells(), ...((m.zones ?? {})[z] ?? {}) }])), dirty: !l.matrix, enrolled: !!l.matrix,
+      delays: JSON.parse(JSON.stringify(m.delays ?? {})),
     };
     this.loadPreview();
   }
@@ -105,10 +142,31 @@ export class SlLpBrightness extends StoreElement {
     if (changed.has("room") && this.sel && !(this.b.lights ?? []).some((x: Obj) => x.entity_id === this.sel)) this.select(null);
   }
 
+  private templateDelays(t: Obj, zones: string[]): Delays {
+    const td = t?.delays ?? {};
+    const out: Delays = {};
+    if (td.room && Object.keys(td.room).length) out.room = JSON.parse(JSON.stringify(td.room));
+    if (td.zone && Object.keys(td.zone).length) for (const z of zones) out[z] = JSON.parse(JSON.stringify(td.zone));
+    return out;
+  }
+
   private update_(patch: Partial<MatrixDraft>): void {
     if (!this.draft) return;
-    this.draft = { ...this.draft, ...patch, dirty: true };
+    const next = { ...this.draft, ...patch, dirty: true };
+    // A delay belongs to an On cell: a cell set to Off or Not configured loses its delays.
+    next.delays = cleanDelays(next.delays, (col, level) => (col === "room" ? next.room[level] : next.zones[col]?.[level]));
+    this.draft = next;
     this.loadPreview();
+  }
+
+  private setDelay(kind: "on" | "off", seconds: number | null): void {
+    const d = this.draft;
+    const c = this.cell;
+    if (!d || !c) return;
+    const cur = d.delays?.[c.col]?.[c.level] ?? { on: 0, off: 0 };
+    const delays: Delays = JSON.parse(JSON.stringify(d.delays ?? {}));
+    (delays[c.col] ??= {})[c.level] = { ...cur, [kind]: Math.max(0, Math.min(DELAY_MAX, Math.round(seconds ?? 0))) };
+    this.update_({ delays });
   }
 
   private loadPreview(): void {
@@ -117,7 +175,7 @@ export class SlLpBrightness extends StoreElement {
     if (!d) return;
     this.timer = window.setTimeout(async () => {
       try {
-        const res = await lighting<Obj>(cmd("brightness/preview"), { area_id: this.room.area_id, entity_id: d.entity_id, matrix: { enabled: true, room: d.room, zones: d.zones } });
+        const res = await lighting<Obj>(cmd("brightness/preview"), { area_id: this.room.area_id, entity_id: d.entity_id, matrix: { enabled: true, room: d.room, zones: d.zones, delays: delaysPayload(d) } });
         if (this.draft?.entity_id === d.entity_id) { this.preview = res; this.previewError = null; }
       } catch (err) {
         this.preview = null;
@@ -138,13 +196,14 @@ export class SlLpBrightness extends StoreElement {
     const t = (this.b.templates ?? []).find((x: Obj) => x.id === id);
     const d = this.draft;
     if (!t || !d) return;
-    this.update_({ room: { ...this.emptyCells(), ...t.room }, zones: Object.fromEntries(Object.keys(d.zones).map((z) => [z, { ...this.emptyCells(), ...t.zone }])), template: t.id });
+    this.update_({ room: { ...this.emptyCells(), ...t.room }, zones: Object.fromEntries(Object.keys(d.zones).map((z) => [z, { ...this.emptyCells(), ...t.zone }])), template: t.id,
+      delays: this.templateDelays(t, Object.keys(d.zones)) });
   }
 
   private async save(enrol: boolean): Promise<void> {
     const d = this.draft;
     if (!d) return;
-    const ok = await this.send("brightness/set", { entity_id: d.entity_id, matrix: { enabled: d.enabled, room: d.room, zones: d.zones, template: d.template }, ...(enrol ? { confirm: true } : {}) },
+    const ok = await this.send("brightness/set", { entity_id: d.entity_id, matrix: { enabled: d.enabled, room: d.room, zones: d.zones, template: d.template, delays: delaysPayload(d) }, ...(enrol ? { confirm: true } : {}) },
       enrol ? "Enrolled · nothing was sent" : "Saved · nothing was sent");
     if (ok && this.draft) this.draft = { ...this.draft, dirty: false, enrolled: true };
   }
@@ -224,7 +283,7 @@ export class SlLpBrightness extends StoreElement {
     const ab = after?.rule?.brightness;
     const resolved = (item: Obj | null | undefined) => (item ? (item.service === "turn_off" ? "Off" : item.service === "turn_on" ? summary(item.resolved) : "No command") : "—");
     return html`<div class="lp-matrix-panel" data-testid="lighting-matrix">
-      <div class="lp-row-line"><h3 class="lp-h2">${l.name}</h3>${d.enrolled ? (d.enabled ? chip("ok", "Enrolled") : chip("warning", "Paused")) : chip("neutral", "Not enrolled")}
+      <div class="lp-row-line"><h3 class="lp-h2">${l.name}</h3>${inspectButton(l.entity_id, this.room.area_id, l.name)}${d.enrolled ? (d.enabled ? chip("ok", "Enrolled") : chip("warning", "Paused")) : chip("neutral", "Not enrolled")}
         ${d.dirty && d.enrolled ? chip("info", "Unsaved changes") : nothing}<span class="spacer"></span>
         <button type="button" class="icon-btn" aria-label="Close" @click=${() => this.select(null)}>${icon("close")}</button></div>
       ${onoff ? html`<p class="notice notice-info">${icon("info", 20)}<span>${l.name}${l.fixture?.kind === "dumb" ? " is a Dumb Light: it" : ""} switches on and off only: each value is On or Off (no dimming, colour or fade is sent).</span></p>` : nothing}
@@ -235,18 +294,21 @@ export class SlLpBrightness extends StoreElement {
         <select aria-label="Apply a template" @change=${(e: Event) => { const v = (e.target as HTMLSelectElement).value; (e.target as HTMLSelectElement).value = ""; if (v) this.applyTemplate(v); }}>
           <option value="">Apply a template…</option>${(b.templates ?? []).map((t: Obj) => html`<option value=${t.id}>${t.name}${t.builtin ? "" : " (saved)"}</option>`)}</select>
         ${others.length ? html`<select aria-label="Copy from another light" @change=${(e: Event) => { const v = (e.target as HTMLSelectElement).value; (e.target as HTMLSelectElement).value = "";
-            const o = others.find((x) => x.entity_id === v); if (o) this.update_({ room: { ...this.emptyCells(), ...o.matrix.room }, zones: Object.fromEntries(Object.keys(d.zones).map((z) => [z, { ...this.emptyCells(), ...(o.matrix.zones?.[z] ?? d.zones[z]) }])) }); }}>
+            const o = others.find((x) => x.entity_id === v); if (o) this.update_({ room: { ...this.emptyCells(), ...o.matrix.room }, zones: Object.fromEntries(Object.keys(d.zones).map((z) => [z, { ...this.emptyCells(), ...(o.matrix.zones?.[z] ?? d.zones[z]) }])),
+              delays: Object.fromEntries(Object.entries(o.matrix.delays ?? {}).filter(([col]) => col === "room" || col in d.zones).map(([col, v]) => [col, JSON.parse(JSON.stringify(v))])) }); }}>
           <option value="">Copy from light…</option>${others.map((x) => html`<option value=${x.entity_id}>${x.name}</option>`)}</select>` : nothing}
         ${zones.length ? html`<select aria-label="Copy the Room occupied column to a zone" @change=${(e: Event) => { const v = (e.target as HTMLSelectElement).value; (e.target as HTMLSelectElement).value = "";
-            if (v) this.update_({ zones: { ...d.zones, [v]: { ...d.room } } }); }}>
+            if (v) this.update_({ zones: { ...d.zones, [v]: { ...d.room } }, delays: { ...d.delays, [v]: JSON.parse(JSON.stringify(d.delays.room ?? {})) } }); }}>
           <option value="">Copy Room column to…</option>${zones.map((z) => html`<option value=${z.id}>${z.name} zone</option>`)}</select>` : nothing}
         <button type="button" class="btn btn-small" @click=${() => (this.templateName = this.templateName === null ? `${l.name} light` : null)}>${icon("save", 16)}Save as template</button>
       </div>
       ${this.templateName !== null ? html`<div class="lp-inline lp-subcard"><label class="lp-field"><span class="lp-label">Template name (for every room)</span>
           <input type="text" maxlength="60" .value=${this.templateName} @input=${(e: Event) => (this.templateName = (e.target as HTMLInputElement).value)} /></label>
         <button type="button" class="btn btn-small btn-primary" ?disabled=${!this.templateName.trim()} @click=${async () => {
-          const zone = Object.values(d.zones)[0] ?? this.emptyCells();
-          if (await this.send("brightness/template", { op: "save", name: this.templateName!.trim(), room: d.room, zone }, "Template saved")) this.templateName = null; }}>Save template</button></div>` : nothing}`}
+          const firstZone = Object.keys(d.zones)[0];
+          const zone = firstZone ? d.zones[firstZone] : this.emptyCells();
+          const delays = { room: d.delays.room ?? {}, zone: firstZone ? d.delays[firstZone] ?? {} : {} };
+          if (await this.send("brightness/template", { op: "save", name: this.templateName!.trim(), room: d.room, zone, delays }, "Template saved")) this.templateName = null; }}>Save template</button></div>` : nothing}`}
       <p class="small muted">Rows: ambient light. Columns: who is in the room. ${onoff ? "On or Off" : "0 % = Off"}, — = not configured. Select a value to change it.</p>
       <div class="table-wrap"><table class="lp-matrix">
         <thead><tr><th scope="col">Ambient light</th>${l.columns.map((col: Obj) => html`<th scope="col">${col.id === "room" ? "Room occupied" : `${col.name} zone`}
@@ -257,13 +319,14 @@ export class SlLpBrightness extends StoreElement {
             const wins = d.enrolled && !d.dirty && nb && nb.column === col.id && nb.level === lv.key;
             const editing = c && c.col === col.id && c.level === lv.key;
             const shade = v === null || v === undefined ? 0 : v === 0 ? 0 : onoff ? 0.55 : 0.12 + (v / 100) * 0.6;
+            const dly = delayText(d.delays?.[col.id]?.[lv.key]);
             return html`<td><button type="button" class="lp-cell ${v === null || v === undefined ? "unset" : v === 0 ? "off" : ""} ${wins ? "wins" : ""} ${editing ? "editing" : ""}"
-              style=${`--lp-shade:${shade}`} ?disabled=${dis} aria-pressed=${editing ? "true" : "false"}
-              aria-label=${`${col.id === "room" ? "Room occupied" : `${col.name} zone`}, ${lv.name}: ${v === null || v === undefined ? "not configured" : this.cellText(v, onoff)}`}
-              @click=${() => (this.cell = editing ? null : { col: col.id, level: lv.key })}>${this.cellText(v, onoff)}${wins ? html`<span class="lp-cell-now">in use</span>` : nothing}</button></td>`;
+              style=${`--lp-shade:${shade}`} ?disabled=${dis} aria-pressed=${editing ? "true" : "false"} title=${dly || nothing} data-delay=${dly ? "1" : nothing}
+              aria-label=${`${col.id === "room" ? "Room occupied" : `${col.name} zone`}, ${lv.name}: ${v === null || v === undefined ? "not configured" : this.cellText(v, onoff)}${dly ? `, ${dly}` : ""}`}
+              @click=${() => (this.cell = editing ? null : { col: col.id, level: lv.key })}>${this.cellText(v, onoff)}${dly ? html`<span class="lp-cell-delay" aria-hidden="true">${icon("timer-outline", 13)}</span>` : nothing}${wins ? html`<span class="lp-cell-now">in use</span>` : nothing}</button></td>`;
           })}</tr>`)}</tbody></table></div>
-      ${c && edCol ? html`<div class="lp-subcard lp-cell-editor" role="group" aria-label="Edit a brightness value">
-        <strong>${edCol.id === "room" ? "Room occupied" : `${edCol.name} zone`} · ${levels.find((x) => x.key === c.level)?.name ?? c.level}</strong>
+      ${c && edCol ? html`<div class="lp-subcard lp-cell-editor" role="group" aria-label="Edit a brightness value" data-testid="lighting-cell-editor">
+        <strong>${edCol.id === "room" ? "Room occupied" : `Zone: ${edCol.name}`} · ${levels.find((x) => x.key === c.level)?.name ?? c.level}</strong>
         ${onoff ? html`<div class="lp-seg" role="group" aria-label="On or Off">
             <button type="button" class=${edVal !== null && edVal !== undefined && edVal > 0 ? "on" : ""} @click=${() => this.setCell(100)}>On</button>
             <button type="button" class=${edVal === 0 ? "on" : ""} @click=${() => this.setCell(0)}>Off</button></div>`
@@ -272,6 +335,13 @@ export class SlLpBrightness extends StoreElement {
             <span class="lp-input-row"><input type="number" min="0" max="100" class="lp-num" .value=${edVal === null || edVal === undefined ? "" : String(edVal)} aria-label="Brightness in percent"
               @change=${(e: Event) => { const raw = (e.target as HTMLInputElement).value.trim(); this.setCell(raw === "" ? null : Math.max(0, Math.min(100, Number(raw)))); }} /> %</span>
             <button type="button" class="btn btn-small" @click=${() => this.setCell(0)}>Off</button></div>`}
+        ${(edVal ?? 0) > 0 ? html`<div class="lp-form lp-delays" data-testid="lighting-cell-delays">
+            ${numberField({ label: "Delay On", value: d.delays?.[c.col]?.[c.level]?.on ?? 0, unit: "s", min: 0, max: DELAY_MAX, step: 1,
+              help: "Wait this long before switching on (0 = at once).", onChange: (v) => this.setDelay("on", v) })}
+            ${numberField({ label: "Delay Off", value: d.delays?.[c.col]?.[c.level]?.off ?? 0, unit: "s", min: 0, max: DELAY_MAX, step: 1,
+              help: "Keep it on this long after this situation ends (0 = at once).", onChange: (v) => this.setDelay("off", v) })}
+          </div>
+          <p class="small muted">Delays apply only to switching on and off: a change from one brightness to another is never delayed. A manual change, a wall switch, a Priority Input or vacancy always acts at once.</p>` : nothing}
         <div class="row-actions lp-row"><button type="button" class="btn btn-small" @click=${() => this.setCell(null)}>Not configured</button>
           <button type="button" class="btn btn-small" @click=${() => (this.cell = null)}>${icon("check", 16)}Done</button></div>
         <p class="small muted">${edCol.id === "room" ? "Not configured: the light keeps its mood brightness in this situation." : "Not configured: this zone does not claim the brightness (another active zone, else Room occupied decides)."}</p>
@@ -283,6 +353,7 @@ export class SlLpBrightness extends StoreElement {
           ["Mood", p.mood ?? "no mood"],
           ["Without matrix", html`${resolved(p.before)} <span class="small muted">${p.before?.rule?.name ?? ""}</span>`],
           ["With this matrix", html`<strong>${ab ? `${ab.column_name} · ${ab.level_name} → ${ab.text}` : resolved(after)}</strong>${ab?.appearance ? html` <span class="small muted">${ab.appearance}</span>` : nothing}`],
+          ab && (ab.delay_on || ab.delay_off) ? ["Delays of this cell", delayText({ on: ab.delay_on, off: ab.delay_off })] : null,
           ["Command", after ? (after.decision === "change" ? (p.would_send ? "sent at the next trigger" : "would be sent (room Observing)") : after.decision === "unchanged" ? "none needed (already like this)" : after.reason) : "—"]])}
         ${ab?.explanation && (ab.superseded ?? []).length > 1 ? html`<p class="small muted">${ab.explanation}</p>` : nothing}
         ${(p.conflicts ?? []).length ? html`<div class="notice notice-warning">${icon("warning", 20)}<span><strong>What changes for this light</strong><ul class="lp-dlist">${p.conflicts.map((x: string) => html`<li>${x}</li>`)}</ul></span></div>` : nothing}`}
@@ -322,7 +393,7 @@ export class SlLpBrightness extends StoreElement {
             return html`<li><button type="button" class="lp-pick ${this.sel === x.entity_id ? "selected" : ""}" aria-pressed=${this.sel === x.entity_id ? "true" : "false"} @click=${() => this.select(this.sel === x.entity_id ? null : x.entity_id)}>
               ${icon(x.type === "relay" ? "electric-switch" : "lightbulb", 20)}<span class="lp-pick-main"><strong>${x.name}</strong>
                 <span class="small muted">${nb ? `${nb.column_name} · ${nb.level_name} → ${nb.text}` : x.now ? `${x.now.rule ?? ""} · ${stateText(x.now.requested)}` : ""}</span>
-                <span>${chip(tone as never, word)}</span></span></button></li>`;
+                <span>${chip(tone as never, word)}</span></span></button>${inspectButton(x.entity_id, this.room.area_id, x.name)}</li>`;
           })}${!lights.length ? html`<li class="muted">No light is managed in this room.</li>` : nothing}</ul>
           <div class="lp-matrix-main">${l && this.draft ? this.matrixPanel(l, this.draft) : html`<div class="lp-placeholder">${icon("grid", 32)}<p class="muted">Select a light to see or edit its brightness matrix.</p></div>`}</div>
         </div>`, { wide: true, testid: "lighting-matrices" })}</div>`;

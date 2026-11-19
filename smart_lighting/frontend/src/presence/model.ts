@@ -176,7 +176,7 @@ export interface PresenceRoom {
   explain: { state_label: string; next: NextStep[]; next_evaluation: string | null; vacancy_path: "fast" | "normal" | null; visit_confirmed: boolean } | null;
   comparison?: Record<string, unknown> | null;
   tags: Filter[];
-  counts: { sensors: number; active: number; unavailable: number; excluded: number; errors: number; warnings: number; info: number; overrides: number };
+  counts: { sensors: number; active: number; unavailable: number; excluded: number; errors: number; warnings: number; info: number; overrides: number; zones?: number; zones_active?: number };
   confirm_at: string | null;
 }
 
@@ -730,7 +730,7 @@ export function diagnosticLink(d: Diagnostic, areaId: string | null | undefined)
   if (d.target === "rooms_editor") return `#/rooms/${encodeURIComponent(area)}/presence`;
   if (d.target === "timing") return `${base}?tab=timing${d.setting ? `&setting=${encodeURIComponent(d.setting)}` : ""}`;
   if (d.target === "sensors" && d.entity_id) return `${base}?sensor=${encodeURIComponent(d.entity_id)}`;
-  if (d.target === "zones") return `${base}?tab=live`;
+  if (d.target === "zones") return `${base}?tab=zones`;
   return base;
 }
 

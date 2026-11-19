@@ -1269,3 +1269,36 @@ sl-lp-levels {
 .sw-target-summary {
   font-weight: 500;
 }
+
+/* App 0.9.0: a cell with a Delay On / Delay Off (a small clock, no extra text in the grid). */
+.lp-cell-delay {
+  position: absolute;
+  top: 0.2rem;
+  right: 0.3rem;
+  display: inline-flex;
+  color: var(--sl-primary-strong);
+}
+
+.lp-delays {
+  margin-top: 0.5rem;
+}
+
+/* A pick list row with its inspector button beside it. */
+.lp-pick-list > li:has(.lp-inspect-btn) {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.lp-pick-list > li:has(.lp-inspect-btn) > .lp-pick {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Zone lighting rules / Presence zones (App 0.9.0). */
+.lp-zone-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}

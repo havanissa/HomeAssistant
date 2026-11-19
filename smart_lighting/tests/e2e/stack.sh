@@ -32,7 +32,7 @@ fi
 : "${HA_TOKEN:?set HA_TOKEN (long-lived access token of that Home Assistant)}"
 
 down
-docker build -q --build-arg BUILD_VERSION=0.8.0 --build-arg BUILD_ARCH=amd64 -t "$IMAGE" "$APP_DIR" >/dev/null
+docker build -q --build-arg BUILD_VERSION=0.9.0 --build-arg BUILD_ARCH=amd64 -t "$IMAGE" "$APP_DIR" >/dev/null
 docker network inspect "$NET" >/dev/null 2>&1 \
   || docker network create --driver bridge --subnet 172.30.32.0/23 --gateway 172.30.32.1 "$NET" >/dev/null
 

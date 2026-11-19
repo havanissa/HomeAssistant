@@ -28,10 +28,15 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.exceptions import HomeAssistantError as HostError, Unauthorized
 
+from . import zones_api
 from .ha import LIGHTING_READ_COMMANDS, LIGHTING_WRITE_COMMANDS, HomeAssistantClient, HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
 COMMAND_TIMEOUT = 30.0
+#: App 0.9.0 (Phase A6.2): commands only the App's own lighting runtime answers (never forwarded to the 0.9.0
+#: integration, which does not have them): the light inspector and Identify.
+APP_READ_COMMANDS: frozenset[str] = frozenset({"smart_occupancy/lighting/light/inspect"})
+APP_WRITE_COMMANDS: frozenset[str] = frozenset({"smart_occupancy/lighting/light/identify"})
 
 
 class LightingApiError(Exception):
@@ -43,6 +48,7 @@ class LightingApiError(Exception):
 
 def _handlers() -> dict[str, Any]:
     from smart_occupancy.brightness_websocket import BRIGHTNESS_HANDLERS  # noqa: PLC0415
+    from smart_occupancy.light_inspector import INSPECTOR_HANDLERS  # noqa: PLC0415
     from smart_occupancy.lighting_websocket import LIGHTING_HANDLERS  # noqa: PLC0415
     from smart_occupancy.preliminary_websocket import PRELIMINARY_HANDLERS  # noqa: PLC0415
     from smart_occupancy.priority_websocket import PRIORITY_HANDLERS  # noqa: PLC0415
@@ -52,7 +58,7 @@ def _handlers() -> dict[str, Any]:
 
     out = {}
     for handler in (*LIGHTING_HANDLERS, *SWITCH_HANDLERS, *PRELIMINARY_HANDLERS, *PROFILE_HANDLERS, *ZONE_HANDLERS,
-                    *BRIGHTNESS_HANDLERS, *PRIORITY_HANDLERS):
+                    *BRIGHTNESS_HANDLERS, *PRIORITY_HANDLERS, *INSPECTOR_HANDLERS):
         out[handler._ws_command] = handler  # noqa: SLF001
     return out
 
@@ -72,7 +78,8 @@ class LightingApi:
 
     @staticmethod
     def is_write(command: str) -> bool:
-        return command in LIGHTING_WRITE_COMMANDS
+        return command in LIGHTING_WRITE_COMMANDS or command in APP_WRITE_COMMANDS \
+            or command in zones_api.WRITE_COMMANDS
 
     #: Forwarded commands that change the controller's runtime state (not only its configuration, which reaches
     #: the shadow as a ``config`` event): a manual override cleared, a profile test, switch learning, a daylight
@@ -91,7 +98,17 @@ class LightingApi:
 
     async def call(self, msg: dict[str, Any], *, user_id: str | None, is_admin: bool) -> Any:
         command = msg.get("type")
-        if command not in LIGHTING_READ_COMMANDS and command not in LIGHTING_WRITE_COMMANDS:
+        if command in zones_api.COMMANDS:
+            # Presence → Zones (App 0.9.0): composed of the zone commands below, wherever lighting runs.
+            if command in zones_api.WRITE_COMMANDS and not is_admin:
+                raise LightingApiError("unauthorized", "Only administrators can change zones", 403)
+            try:
+                return await zones_api.call(self, command, {k: v for k, v in msg.items() if k not in ("type", "id")},
+                                            user_id=user_id, is_admin=is_admin)
+            except zones_api.ZonesError as err:
+                raise LightingApiError(err.code, str(err), err.status) from err
+        app_only = command in APP_READ_COMMANDS or command in APP_WRITE_COMMANDS
+        if command not in LIGHTING_READ_COMMANDS and command not in LIGHTING_WRITE_COMMANDS and not app_only:
             raise LightingApiError("not_allowed", f"{command!r} is not a lighting editor command", 403)
         if self.is_write(command) and not is_admin:
             raise LightingApiError("unauthorized", "Only administrators can change lighting", 403)
@@ -99,7 +116,13 @@ class LightingApi:
             raise LightingApiError("busy", "Lighting control is changing owner; try again in a moment", 409)
         params = {k: v for k, v in msg.items() if k not in ("type", "id")}
         if self.where() == "app":
-            return await self._local(command, params, user_id=user_id, is_admin=is_admin)
+            result = await self._local(command, params, user_id=user_id, is_admin=is_admin)
+            if command == "smart_occupancy/lighting/light/inspect" and isinstance(result, dict) and result.get("control"):
+                result["control"]["authority"] = {**result["control"]["authority"], **self._authority()}
+            return result
+        if app_only:
+            raise LightingApiError("app_only", "Available once the App runs lighting (Settings → Migration & System)",
+                                   409)
         try:
             if self.is_write(command):
                 result = await self.ha.config_write(command, **params)
@@ -116,6 +139,23 @@ class LightingApi:
             except LightingApiError as err:  # the integration's answer counts; the shadow is diagnostics
                 _LOGGER.debug("shadow did not mirror %s: %s", command, err)
         return result
+
+    def _authority(self) -> dict[str, Any]:
+        """Who may command lights now, as the App's lighting runtime holds it (for the inspector)."""
+        rt = self.runtime
+        cm = getattr(rt, "cm", None)
+        status = rt.status() if hasattr(rt, "status") else {}
+        mode, bridge = status.get("mode"), status.get("bridge")
+        lease = status.get("lease_until")
+        if cm is not None and cm.active:
+            epoch = status.get("epoch") or getattr(cm, "epoch", None)
+            text = ("The App owns lighting" + (f" (epoch {epoch})" if epoch else "") + "; every command goes through "
+                    "the companion's fenced executor" + (f", lease until {lease}" if lease else ""))
+        elif mode == "owner":
+            text = "The App owns lighting through the 0.9.0 bridge"
+        else:
+            text = "The App does not command lights now (shadow or starting)"
+        return {"mode": mode, "bridge": bridge, "epoch": status.get("epoch"), "lease_until": lease, "text": text}
 
     async def _local(self, command: str, params: dict[str, Any], *, user_id: str | None, is_admin: bool) -> Any:
         """Run the integration's own handler against the App's controller (exactly the command's validation)."""

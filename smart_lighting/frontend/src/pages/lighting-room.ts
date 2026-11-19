@@ -1,7 +1,8 @@
 // Room lighting workspace (Phase A4): one room's automatic lighting. Overview (live lights, what each one gets
 // and why, decisions, problems), Automatic (mode with a reviewed activation, switch-on and daylight, vacancy,
 // manual changes, possible occupancy), Lights (discovery, exclusions, relays, fixture types, groups, competing
-// automations), Brightness (ambient levels and matrices), Zones (zones, radar zones, shared space), Supervisor
+// automations), Brightness (ambient levels and matrices), Zone lighting (which lights respond to the room's zones;
+// the zones themselves are Presence's since App 0.9.0), Supervisor
 // and Log. Every value comes from the lighting runtime (``smart_occupancy/lighting/editor``); every change is one
 // of its commands. Nothing here simulates a capability a light does not report.
 import "../lighting/lighting-pages.css";
@@ -13,6 +14,7 @@ import { icon } from "../icons";
 import { chip, kv } from "../ui";
 import { cmd, lighting } from "../lighting/api";
 import { controlBanner, LightingElement, problemNotice } from "../lighting/components";
+import { inspectButton, inspectLight } from "../lighting/light-inspector";
 import {
   advancedToggle,
   AUTO_ON,
@@ -56,7 +58,7 @@ const TABS: Array<{ key: Tab; title: string; icon: string }> = [
   { key: "automatic", title: "Automatic", icon: "lightbulb-auto" },
   { key: "lights", title: "Lights", icon: "lightbulb-group" },
   { key: "brightness", title: "Brightness", icon: "brightness" },
-  { key: "zones", title: "Zones", icon: "layers" },
+  { key: "zones", title: "Zone lighting", icon: "layers" },
   { key: "supervisor", title: "Supervisor", icon: "shield-check" },
   { key: "log", title: "Log", icon: "history" },
 ];
@@ -220,7 +222,7 @@ export class SlLightingRoom extends LightingElement {
             @click=${() => (this.selected = this.selected === l.entity_id ? null : l.entity_id)}
             @keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.selected = l.entity_id; } }}>
           <td><span class="cell-main">${icon(l.type === "relay" ? "electric-switch" : l.is_group ? "lightbulb-group" : "lightbulb", 20)}
-            <span><span class="cell-name">${l.name}</span><span class="block small muted mono">${l.entity_id}</span></span></span></td>
+            <span><span class="cell-name">${l.name}</span><span class="block small muted mono">${l.entity_id}</span></span>${l.missing ? nothing : inspectButton(l.entity_id, r.area_id, l.name)}</span></td>
           <td>${this.typeLabel(l)}</td>
           <td><span class="lp-state lp-state-${l.state ?? "unknown"}">${l.state ?? "—"}</span></td>
           ${opts.columns === "now"
@@ -335,7 +337,8 @@ export class SlLightingRoom extends LightingElement {
             @change=${(e: Event) => void this.send("room/acknowledge", { automation: c.automation, acknowledged: (e.target as HTMLInputElement).checked }, "Saved")} />
           <span><strong>${c.name ?? c.automation}</strong> <span class="small muted">${c.enabled ? "enabled" : "disabled"}${c.via ? ` · ${c.via}` : ""}</span>
             <span class="block small ${c.enabled && !c.acknowledged ? "tone-warning" : "muted"}">${c.acknowledged ? "Allowed: both control this light." : c.enabled ? "Not allowed: automatic lighting leaves this light alone. Tick to allow both." : "Disabled: no conflict."}</span></span></label></li>`)}</ul></section>` : nothing}
-      <section class="inspector-section"><button type="button" class="btn btn-small" @click=${() => this.go("lights")}>${icon("tune", 18)}Classify or exclude (Lights)</button>
+      <section class="inspector-section"><button type="button" class="btn btn-small btn-primary" data-testid="lighting-open-inspector" @click=${() => inspectLight(l.entity_id, r.area_id)}>${icon("information-outline", 18)}What controls it? · Identify</button>
+        <button type="button" class="btn btn-small" @click=${() => this.go("lights")}>${icon("tune", 18)}Classify or exclude (Lights)</button>
         <button type="button" class="btn btn-small" @click=${() => this.go("brightness")}>${icon("brightness", 18)}Brightness matrix</button></section>
     </aside>`;
   }
@@ -724,7 +727,7 @@ export class SlLightingRoom extends LightingElement {
           <p class="small muted">Global defaults: <a href="#/lighting/settings/supervisor">Lighting settings</a>.</p>` : nothing}`, { testid: "lighting-sup-settings" })}</div>
       ${card("Lights: winning rule, expected and actual", "lightbulb-group", html`
         ${targets.length ? html`<div class="table-wrap"><table class="plain-table lp-table lp-select-table"><thead><tr><th scope="col">Light</th><th scope="col">Rule</th><th scope="col">Expected</th><th scope="col">Actual</th><th scope="col">Status</th></tr></thead>
-          <tbody>${targets.map((t) => html`<tr class=${this.supSel === t.entity_id ? "selected" : ""} tabindex="0" @click=${() => (this.supSel = this.supSel === t.entity_id ? null : t.entity_id)}>
+          <tbody>${targets.map((t) => html`<tr class=${this.supSel === t.entity_id ? "selected" : ""} tabindex="0" data-entity=${t.entity_id} @click=${() => (this.supSel = this.supSel === t.entity_id ? null : t.entity_id)}>
             <td>${t.name}${t.type === "relay" ? html` <span class="small muted">relay</span>` : nothing}</td><td>${typeof t.rule === "string" ? t.rule : t.rule?.name ?? "—"}</td>
             <td>${stateText(t.desired)}</td><td>${stateText(t.actual)}</td><td>${chip(SUP_RESULT[t.result]?.[1] ?? "neutral", SUP_RESULT[t.result]?.[0] ?? t.result)}</td></tr>`)}</tbody></table></div>`
           : html`<p class="muted">No light checked yet.</p>`}
@@ -763,7 +766,7 @@ export class SlLightingRoom extends LightingElement {
       case "automatic": content = this.renderAutomatic(r); break;
       case "lights": content = this.renderLights(r); break;
       case "brightness": content = html`<sl-lp-brightness .room=${r} .host=${this} .busy=${this.busy} .canEdit=${this.canEdit}></sl-lp-brightness>`; break;
-      case "zones": content = html`<sl-lp-zones .room=${r} .model=${this.model} .host=${this} .busy=${this.busy} .canEdit=${this.canEdit}></sl-lp-zones>`; break;
+      case "zones": content = html`<sl-lp-zones mode="lighting" .room=${r} .model=${this.model} .host=${this} .busy=${this.busy} .canEdit=${this.canEdit}></sl-lp-zones>`; break;
       case "supervisor": content = this.renderSupervisor(r); break;
       case "log": content = this.renderLog(r); break;
       default: content = this.renderOverview(r);

@@ -18,6 +18,7 @@ event sequences.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import os
 from pathlib import Path
 import random
@@ -39,6 +40,10 @@ from .test_zones import SHOWER, SINK, home, options as zone_options, replace_sen
 RECORD = os.environ.get("LIGHTING_RECORD") == "1"
 TIMING = {"correlation_window": 10, "exit_confirmation": 30, "inactivity_timeout": 60, "startup_hold": 0}
 START = "2026-06-15 10:00:00+00:00"
+# The daytime of the scenarios that need the sun high (daylight and brightness rules). Fixed: their recordings carry
+# absolute times, so "the next 20:00 UTC" of the daylight tests (which depends on the day the suite runs) would make
+# them differ from the recording on every other day.
+PARITY_DAY = datetime(2026, 11, 19, 20, 0, tzinfo=UTC)
 
 
 @pytest.fixture

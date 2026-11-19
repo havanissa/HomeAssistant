@@ -187,6 +187,8 @@ from .adaptive import (
 from .conflicts import AutomationInfo, Conflict, collect_automations, find_conflicts
 from .daylight import BRIGHT, DARK, GATE_CODES, GATE_NEVER, GATE_NOT_NEEDED, GATE_UNCERTAIN, DaylightGate
 from .ambient import AmbientStatus
+from .brightness_delays import KEEPS_PENDING, DelayTracker
+from .light_identify import IDENTIFY_SECONDS, PURPOSES as IDENTIFY_PURPOSES, IdentifyManager
 from .brightness_runtime import AmbientLevels
 from .daylight_monitor import DaylightMonitor, DaylightStatus
 from .decisions import DecisionLog
@@ -444,6 +446,24 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat(timespec="seconds") if value else None
 
 
+_SOURCE_TEXT = {"ui": "from Home Assistant", "wall_switch": "with a wall switch", "automation": "by an automation",
+                "unattributed": "by something Home Assistant does not identify"}
+_LOOK = ("brightness", "color_mode", "color_temp_kelvin", "color_temp", "hs_color", "rgb_color", "rgbw_color",
+         "rgbww_color", "xy_color", "effect")
+
+
+def _as_before(snap: dict[str, Any], attributes: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """A light's state as Identify captured it (its supported modes as now): what the plans see during the hold."""
+    attrs = {k: v for k, v in attributes.items() if k not in _LOOK}
+    if snap.get("state") == "on":
+        attrs |= {k: v for k, v in snap.items() if k != "state"}
+        for mode, key in (("color_temp", "color_temp_kelvin"), ("hs", "hs_color"), ("rgb", "rgb_color"),
+                          ("rgbw", "rgbw_color"), ("rgbww", "rgbww_color"), ("xy", "xy_color")):
+            if key in snap:
+                attrs["color_mode"] = mode
+    return str(snap.get("state")), attrs
+
+
 def _significant(old: State, new: State) -> bool:
     if old.state != new.state:
         return True
@@ -515,6 +535,11 @@ class LightingController:
         self.supervisor = Supervisor(hass, self)
         # Priority Inputs (0.6.8).
         self.priority = PriorityInputs(hass, self)
+        # Delay On / Delay Off of brightness matrix cells (App 0.9.0): pending delayed actions, never an executor.
+        self.delays = DelayTracker(hass, revision=lambda: self.store.revision, on_due=self._on_delay_due,
+                                   on_change=self._on_delays_changed, current=self._cell_delays)
+        # Identify (App 0.9.0): temporary identification holds of single lights, through this executor only.
+        self.identify = IdentifyManager(hass, self)
         # Lighting ownership (Phase A4, ``lighting_bridge.py``). Nothing changes while these keep their defaults.
         # fenced: no new command may be sent (a handover or fallback is in progress). dormant: loaded but not
         # running because the Smart Lighting App controls lighting; it never saves its state.
@@ -586,6 +611,8 @@ class LightingController:
         self.decisions.restore(data.get("decisions"))
         self.zones.restore(data.get("zones"))
         self.priority.restore(data.get("priority"))
+        self.delays.restore(data.get("delays"))  # (each light's lit cell only: pending actions are never replayed)
+        self.identify.restore(data.get("identify"))  # (an identification a crash interrupted: checked at start)
         now = dt_util.utcnow()
         for area_id in self.config.enabled_rooms:
             rt = RoomRuntime.restore(rooms.get(area_id))
@@ -657,6 +684,7 @@ class LightingController:
             # Zones active at start are the baseline (nothing is applied on start).
             rt.zone_winners = self._zone_winners(area_id)
         self.priority.async_started()  # (inputs are evaluated once they had time to settle)
+        self.identify.async_started()
         self._automations = None
         self._conflicts = None
         _LOGGER.debug(
@@ -692,6 +720,8 @@ class LightingController:
         self.zones.async_stop()
         self.supervisor.async_stop()
         self.priority.async_stop()
+        self.delays.async_stop()
+        self.identify.async_stop()
         self.decisions.async_stop()
         for task in list(self._tasks):
             task.cancel()
@@ -1049,13 +1079,16 @@ class LightingController:
             cat = self.config.category(category) if category else None
             conflicts = self.conflicts(area_id).get(entity_id, [])
             fixture = room.fixtures.get(entity_id)
+            value, attributes = (state.state if state else None), (dict(state.attributes) if state else {})
+            if self.identify.ops and (snap := self.identify.snapshot_for_plan(entity_id)) is not None:
+                value, attributes = _as_before(snap, attributes)  # Identify: planned as it was before
             out.append(Target(
                 entity_id=entity_id,
                 name=(fixture.name if fixture and fixture.name else None) or friendly_name(hass, entity_id),
                 category=category,
                 category_name=cat.name if cat else None,
-                state=state.state if state else None,
-                attributes=dict(state.attributes) if state else {},
+                state=value,
+                attributes=attributes,
                 # (A Dumb Light is commanded on/off only, 0.6.8: never more than the entity supports.)
                 capabilities=fixture_capabilities(target_capabilities(hass, entity_id), fixture),
                 is_group=entity_id in managed.members or entity_id in managed.opaque_groups,
@@ -1165,6 +1198,8 @@ class LightingController:
         self._arbitrate(area_id, plan, targets, arb.rule_info(arb.RULE_OCCUPIED, f"Occupied profile ({mood})"
                                                                if mood else "Occupied profile"),
                         fresh=fresh, zones=assume is None, brightness=bctx, lighting=lighting)
+        if assume is None and self.delays.pending:
+            self.delays.annotate(area_id, plan.items)  # (pending Delay On / Off: shown, never started here)
         now = time.monotonic()
         force = self._adaptive_force.get(area_id, set())
         competing = self.adaptive_conflicts(area_id)
@@ -1524,7 +1559,10 @@ class LightingController:
         if not self._running or self._stopped or area_id not in self.config.enabled_rooms:
             self._notify()
             return
-        if self.room_active(area_id) and not self._manual:
+        if self.zones.quiet:
+            # A zone edit changed a zone's state (App 0.9.0): the new baseline; its lights follow at the next trigger.
+            self._create_task(self.async_zones(area_id, "zone_config", zones, observe=True))
+        elif self.room_active(area_id) and not self._manual:
             self._create_task(self.async_zones(area_id, "zone", zones))
         else:
             self._create_task(self.async_zones(area_id, "zone", zones, observe=True))
@@ -1544,6 +1582,10 @@ class LightingController:
             previous = dict(rt.zone_winners)
             affected = {e for e in {*winners, *previous} if winners.get(e) != previous.get(e)}
             released_owned = {e for e in rt.zone_owned if e not in winners}
+            if trigger == "zone_config":
+                rt.zone_winners = winners  # (a saved zone edit: the baseline only, nothing is sent or logged)
+                self._finish(area_id, self.effective_plan(area_id, trigger))
+                return None
             if affected or trigger != "zone":
                 # (A reconnect or the end of Manual mood: lights a zone left on are handled again.)
                 affected |= released_owned
@@ -1564,6 +1606,14 @@ class LightingController:
                 if item is not None and item.decision != CHANGE and arb.releases(item) \
                         and entity_id not in rt.overrides and self.hass.states.is_state(entity_id, "on"):
                     cleanup.append(entity_id)
+            if plan.control_enabled and not plan.manual_mode and not observe and (changes or cleanup or (
+                    self.delays.pending and any(k[0] == area_id for k in self.delays.pending))):
+                # Delay On / Delay Off of matrix cells (App 0.9.0): held lights get nothing now.
+                occ = self.coordinator.occupancy.result(area_id)
+                held = self.delays.gate(area_id, [items[e] for e in sorted(affected) if e in items], trigger=trigger,
+                                        occupied=bool(occ and occ.occupied), releases=cleanup)
+                changes = [i for i in changes if i.entity_id not in held]
+                cleanup = [e for e in cleanup if e not in held]
             executing = plan.control_enabled and not plan.manual_mode and not observe and (changes or cleanup)
             ok: list[PlanItem] = []
             errors: dict[str, str] = {}
@@ -1588,7 +1638,8 @@ class LightingController:
             # Owned lights that no zone claims any more and that the remaining rule took over are no longer the zones'.
             for entity_id in released_owned:
                 item = items.get(entity_id)
-                if item is not None and not arb.releases(item) and item.reason_code not in ("offline", "manual_mode"):
+                if item is not None and not arb.releases(item) and item.reason_code not in (
+                        "offline", "manual_mode", "delay_off"):  # (a held release stays the zones' until it is due)
                     rt.zone_owned.pop(entity_id, None)
             decision = self.explain.zones(area_id, trigger, plan, zones or set(), [items[e] for e in sorted(affected)
                                           if e in items], ok=ok if executing else None, errors=errors,
@@ -1610,6 +1661,128 @@ class LightingController:
                     rt.zone_owned.pop(item.entity_id, None)
             else:
                 rt.zone_owned.pop(item.entity_id, None)
+
+    # ---------------------------------------------------------- Identify (App 0.9.0)
+    async def async_identify(self, area_id: str, entity_id: str, *, whole_group: bool = False,
+                             user_id: str | None = None) -> dict[str, Any]:
+        return await self.identify.async_identify(area_id, entity_id, whole_group=whole_group, user_id=user_id)
+
+    async def async_identify_send(self, area_id: str, service: str, data_by_entity: dict[str, dict[str, Any]], *,
+                                  purpose: str) -> dict[str, str]:
+        """Identify's commands: the same fenced path as every lighting command (explicit: also in Manual mood)."""
+        return await self._send(area_id, service, data_by_entity, purpose=purpose, explicit=True)
+
+    async def async_save_state_now(self) -> None:
+        if not self.dormant and not self._stopped:
+            await self._state_store.async_save(self._state_data())
+
+    @callback
+    def expect_reports(self, restore: dict[str, dict[str, Any]], service: str | None) -> None:
+        """A group is identified: its members' own reports of our command are ours (echoes)."""
+        until = time.monotonic() + OWN_CHANGE_WINDOW_SECONDS
+        for entity_id, snap in restore.items():
+            self._expected[entity_id] = (until, service or ("turn_on" if snap.get("state") == "on" else "turn_off"))
+
+    @callback
+    def explain_identify(self, op) -> None:
+        """Identify in the room's decision log (an administrator's action: never a manual override)."""
+        name = friendly_name(self.hass, op.target) or op.target
+        status = {"restored": "executed", "failed": "failed"}.get(op.outcome or "", "noted")
+        text = {"restored": f"{name} was switched to full brightness for {IDENTIFY_SECONDS:g} s and restored",
+                "failed": f"Identify {name}: {op.reason}",
+                "superseded": f"Identify {name} ended early: {op.reason}",
+                "interrupted": f"Identify {name} ended early: {op.reason}"}.get(op.outcome or "", f"Identify {name}")
+        self.decisions.record(op.area_id, module="lighting", trigger="identify", kind="identify",
+                              action="Identify", explanation=text + ".", mode=self.explain.mode(op.area_id),
+                              status=status, target=name,
+                              details={"entity_id": op.target, "outcome": op.outcome, "reason": op.reason,
+                                       "group": op.group, "restored": op.reason if op.outcome == "restored" else None,
+                                       "attribution": "Identify (administrator); not a manual change"})
+
+    # ------------------------------------------- brightness cell delays (App 0.9.0)
+    def _cell_delays(self, area_id: str, entity_id: str, column: str, level: str) -> tuple[int, int] | None:
+        """A matrix cell's delays now (None: the light has no matrix or the zone column is gone)."""
+        matrix = self.lighting.room(area_id).matrix(entity_id)
+        if matrix is None or (column != bright.ROOM and column not in matrix.zones):
+            return None
+        return matrix.delay(column, level)
+
+    @callback
+    def _on_delays_changed(self) -> None:
+        self._mark_dirty()
+        self._notify()
+
+    @callback
+    def _on_delay_due(self, area_id: str, entity_id: str) -> None:
+        """A Delay On / Delay Off ended: the light's winning decision is planned and revalidated now."""
+        if self._running and not self._stopped:
+            self._create_task(self.async_delay_due(area_id, entity_id))
+
+    async def async_delay_due(self, area_id: str, entity_id: str) -> Plan | None:
+        """Execute a due delayed switch-on or switch-off - only if the current winning rule still wants it.
+
+        Planned again (fresh), through the same gate as every application: a decision that changed meanwhile
+        cancels the action or starts the new rule's own delay; what remains is sent like any application.
+        """
+        if self._stopped:
+            return None
+        lock = self._locks.setdefault(area_id, asyncio.Lock())
+        async with lock:
+            pend = self.delays.get(area_id, entity_id)
+            if pend is None or not pend.fired or self._stopped:
+                return None
+            if self._manual or not self.room_active(area_id):
+                self.delays.end(area_id, entity_id, "cancelled", "automatic lighting is paused or Observing")
+                return None
+            rt = self.runtime_for(area_id)
+            plan = self.effective_plan(area_id, "brightness_delay", fresh=True)
+            item = next((i for i in plan.items if i.entity_id == entity_id), None)
+            if item is None:
+                self.delays.end(area_id, entity_id, "cancelled", "the light is no longer controlled")
+                return plan
+            release = False
+            if pend.release and item.decision != CHANGE and entity_id in rt.zone_owned \
+                    and entity_id not in self._zone_winners(area_id) and arb.releases(item) \
+                    and entity_id not in rt.overrides and self.hass.states.is_state(entity_id, "on"):
+                zone = self.lighting.room(area_id).zone(rt.zone_owned[entity_id])
+                release = zone is None or zone.release != ZoneRelease.LEAVE
+            occ = self.coordinator.occupancy.result(area_id)
+            held = self.delays.gate(area_id, [item], trigger="brightness_delay", occupied=bool(occ and occ.occupied),
+                                    releases={entity_id} if release else ())
+            if item.decision == BLOCKED and item.reason_code == "offline":
+                rt.pending_reconnect.add(entity_id)  # (its delay was served: applied as soon as it is back)
+            ok: list[PlanItem] = []
+            errors: dict[str, str] = {}
+            removed: list[str] = []
+            if entity_id not in held and item.decision == CHANGE:
+                errors = {e: m for e, m in (await self._execute(area_id, [item])).items() if m != _PAUSED}
+                ok = [item] if not errors and not self._manual else []
+                for done in ok:
+                    rt.last_commands[done.entity_id] = (done.service or "", dict(done.data))
+                    rt.adaptive_sent.pop(done.entity_id, None)
+                self._note_zone_sent(area_id, ok)
+            elif entity_id not in held and release:
+                off = {"transition": 1} if target_capabilities(self.hass, entity_id).transition else {}
+                err = await self._send(area_id, "turn_off", {entity_id: off}, purpose="zone_release")
+                if err.get(entity_id) and err[entity_id] != _PAUSED:
+                    errors[entity_id] = err[entity_id]
+                elif not err:
+                    removed.append(entity_id)
+                    rt.last_commands[entity_id] = ("turn_off", off)
+            winners = self._zone_winners(area_id)
+            if entity_id in winners:
+                rt.zone_winners[entity_id] = winners[entity_id]
+            else:
+                rt.zone_winners.pop(entity_id, None)
+            if release and (removed or errors):
+                rt.last_trigger = "brightness_delay"
+                self.explain.zones(area_id, "brightness_delay", plan, set(), [item], ok=[], errors=errors,
+                                   removed=removed, observing=False)
+            elif ok or errors:
+                rt.last_trigger = "brightness_delay"
+                self.explain.plan(area_id, "brightness_delay", plan, [item], ok=ok, errors=errors)
+            self._finish(area_id, plan)
+            return plan
 
     # ------------------------------------------------------------- triggers
     @callback
@@ -1708,6 +1881,7 @@ class LightingController:
                 self._visit_trigger(area_id, "motion")
             elif result.state == OccupancyState.VACANT and result.occupied is False:
                 rt.visit_started = False
+                self.delays.cancel_room(area_id, "the room is vacant: its vacancy behaviour applies")
                 if rt.visit_confirmed:
                     rt.visit_confirmed = False
                 # A possible occupancy stage that is still running ends: its lights are its own to remove.
@@ -2076,6 +2250,7 @@ class LightingController:
             self.explain.paused(area_id, triggers)
         self._pending.clear()
         self._cancel_adaptive()
+        self.delays.cancel_all("Main Mood is Manual: automatic lighting is paused")
         _LOGGER.info("lighting_manual_mode_started dropped_pending=%d (%s)", dropped, MANUAL_PAUSED_TEXT)
         self._notify()
 
@@ -2136,7 +2311,7 @@ class LightingController:
             deferred = [d.due for _t, d in decisions.values() if d.decision == DEFERRED and d.due]
             if sends:
                 assert_room_control_permitted(self.room_active(area_id), area_id)
-                errors = await self._send(area_id, "turn_on", {e: d.data for e, d in sends.items()})
+                errors = await self._send(area_id, "turn_on", {e: d.data for e, d in sends.items()}, adaptive=True)
                 now = time.monotonic()
                 for entity_id, d in sends.items():
                     if entity_id in errors:
@@ -2240,12 +2415,18 @@ class LightingController:
         expected = self._expected.get(entity_id)
         # Our command reported back with a new context (e.g. MQTT): same direction, shortly after.
         echo = bool(expected and expected[0] >= now and (expected[1] == "turn_off") == (new.state == "off"))
+        if self.identify.ops and (op := self.identify.held(entity_id)) is not None:
+            source = self._classify(op.area_id, ctx, now, echo)
+            if source != "ours":
+                self.identify.note_change(entity_id, _SOURCE_TEXT.get(source, f"by {source}"))
         switched_on = old.state != "on" and new.state == "on"
         for area_id, target in self._light_targets.get(entity_id, ()):
             source = self._classify(area_id, ctx, now, echo)
             if source == "ours":
                 continue
             rt = self.runtime.setdefault(area_id, RoomRuntime())
+            if self.delays.pending:
+                self.delays.supersede(area_id, [target], f"changed by {source.replace('_', ' ')}")
             rt.last_commands.pop(target, None)
             rt.adaptive_sent.pop(target, None)
             rt.last_external[target] = {
@@ -2354,6 +2535,11 @@ class LightingController:
                 return None  # Manual started while this application was queued: not replayed
             plan = self.plan(area_id, trigger, fresh=True)
             rt = self.runtime.setdefault(area_id, RoomRuntime())
+            if plan.mood is not None:
+                # Delay On / Delay Off of matrix cells (App 0.9.0): held items become "unchanged" (nothing sent).
+                occ = self.coordinator.occupancy.result(area_id)
+                self.delays.gate(area_id, [i for i in plan.items if only is None or i.entity_id in only],
+                                 trigger=trigger, occupied=bool(occ and occ.occupied))
             changes = [i for i in plan.changes if only is None or i.entity_id in only]
             relevant = [i for i in plan.items if only is None or i.entity_id in only]
             rt.pending_reconnect = {
@@ -2954,7 +3140,7 @@ class LightingController:
         return errors
 
     async def _send(self, area_id: str, service: str, data_by_entity: dict[str, dict[str, Any]], *,
-                    purpose: str = "lighting", explicit: bool = False) -> dict[str, str]:
+                    purpose: str = "lighting", explicit: bool = False, adaptive: bool = False) -> dict[str, str]:
         """Send one service to several targets, batched by domain and identical data. Returns {entity: error}.
 
         Lights get ``light.<service>``; relay outputs ``switch.<service>`` with no light attributes (0.6.0).
@@ -2962,6 +3148,11 @@ class LightingController:
         command is an explicit, armed request (``explicit``: a Priority Input, 0.6.8). Every command is reported
         to the Room Supervisor, which verifies it (``purpose`` says what sent it).
         """
+        if self.identify.ops and purpose not in IDENTIFY_PURPOSES:
+            # A light on an Identify hold: this newer command supersedes it (a global adjustment waits for it).
+            # (App 0.9.0: ``adaptive`` - a global adjustment update of the appearance only - waits for the restore.)
+            await self.identify.before_command(self._with_groups(area_id, data_by_entity),
+                                               "adaptive" if adaptive else purpose)
         batches: dict[tuple[str, str], list[str]] = {}
         for entity_id, data in data_by_entity.items():
             target = entity_id.split(".", 1)[0]
@@ -2989,9 +3180,22 @@ class LightingController:
                 errors.update({e: str(err) or type(err).__name__ for e in entity_ids})
             _LOGGER.debug("lighting_command area=%s service=%s.%s data=%s", area_id, target_domain, service, data)
         sent = {e: d for e, d in data_by_entity.items() if errors.get(e) != _PAUSED}
-        if sent:
+        if sent and self.delays.pending and purpose not in KEEPS_PENDING and not adaptive:
+            # Another path commanded these lights (vacancy, a Priority Input, a correction ...): no delayed action.
+            self.delays.supersede(area_id, self._with_groups(area_id, sent), f"{purpose.replace('_', ' ')} command")
+        if sent and purpose not in IDENTIFY_PURPOSES:  # (Identify is not supervised: it restores what it changed)
             self.supervisor.note_command(area_id, service, sent, errors, purpose)
         return errors
+
+    def _with_groups(self, area_id: str, entity_ids) -> set[str]:
+        """These targets, the members of those that are groups and the groups that contain them."""
+        managed = self.managed_room(area_id)
+        out = set(entity_ids)
+        for entity_id in list(out):
+            out |= set(managed.members.get(entity_id, ()))
+            if group := managed.covered_by.get(entity_id):
+                out.add(group)
+        return out
 
     # --------------------------------------------------------- priority inputs (0.6.8)
     async def async_priority(self, area_id: str, input_id: str, event: str, *, reason: str | None = None,
@@ -3158,6 +3362,8 @@ class LightingController:
             entity_id = item.entity_id
             if self._stopped or self._manual or not self.room_active(area_id):
                 return {entity_id: "not permitted now (Observing or Manual mood)"}
+            if self.identify.covering({entity_id}):
+                return {entity_id: "being identified"}
             rt = self.runtime_for(area_id)
             if entity_id in rt.overrides:
                 return {entity_id: "manual override"}
@@ -3187,7 +3393,11 @@ class LightingController:
         self._invalidate_managed()
         self._sync_preliminary_signals()
         if any(old.room(a).zones != new.room(a).zones for a in {*old.rooms, *new.rooms}):
-            self.zones.async_config_changed()
+            # App 0.9.0: saving zones sends no command (a removed zone still hands its lights back at once).
+            # (A zone switched off ends like a removed one: its lights are handed back at once.)
+            removed = any({z.id for z in old.room(a).zones if z.enabled}
+                          - {z.id for z in new.room(a).zones if z.enabled} for a in {*old.rooms, *new.rooms})
+            self.zones.async_config_changed(quiet=not removed)
         if old.supervisor != new.supervisor or any(
                 old.room(a).supervisor != new.room(a).supervisor for a in {*old.rooms, *new.rooms}):
             self.supervisor.async_config_changed()
@@ -3196,6 +3406,13 @@ class LightingController:
             self.priority.async_config_changed()
         self.daylight.async_config_changed()
         self.coordinator.async_schedule_refresh()
+        if self.delays.pending or old.rooms != new.rooms:
+            # A room set to Observing, or a light whose matrix is gone: no delayed action (nothing is sent).
+            for area_id in list(self.config.enabled_rooms):
+                if not new.room(area_id).control_enabled:
+                    self.delays.cancel_room(area_id, "the room is Observing")
+            self.delays.forget(lambda a, e: a in self.config.enabled_rooms and new.room(a).ambient.enabled
+                               and new.room(a).matrix(e) is not None)
         if old.adaptive != new.adaptive:
             self._source_controllers = None
             self.adaptive.async_configure(new.adaptive)
@@ -3421,7 +3638,10 @@ class LightingController:
         return {"rooms": {a: rt.persist() for a, rt in self.runtime.items()}, "adaptive": self.adaptive.persist(),
                 "daylight": self.daylight.persist(), "switches": self.switch_inputs.persist(),
                 "decisions": self.decisions.persist(), "zones": self.zones.persist(), "ambient": self.ambient.persist(),
-                "priority": self.priority.persist()}
+                "priority": self.priority.persist(),
+                # (App 0.9.0: only when a light has a lit matrix cell; older state is written exactly as before.)
+                **({"delays": d} if (d := self.delays.persist())["lit"] else {}),
+                **({"identify": j} if (j := self.identify.persist()) else {})}
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -3435,6 +3655,8 @@ class LightingController:
             "ambient": self.ambient.diagnostics(),
             "zones": self.zones.diagnostics(),
             "priority_inputs": self.priority.diagnostics(),
+            "brightness_delays": self.delays.diagnostics(),
+            "identify": self.identify.diagnostics(),
             "switches": {
                 "mqtt": self.switch_inputs.mqtt_state,
                 "bridge_devices": len(self.switch_inputs.bridge_devices),
@@ -3495,6 +3717,17 @@ class LightingController:
         """
         if self._stopped:
             return {e: "stopped" for e in data_by_entity}
+        if self.delays.pending:
+            # A person's command (wall switch, profile test) ends a delayed action of these lights in every room.
+            ids = set(data_by_entity)
+            for room_id in self.config.enabled_rooms:
+                ids |= self._with_groups(room_id, data_by_entity)
+            self.delays.supersede(None, ids, f"{purpose.replace('_', ' ')} command")
+        if self.identify.ops:
+            ids = set(data_by_entity)
+            for room_id in self.config.enabled_rooms:
+                ids |= self._with_groups(room_id, data_by_entity)
+            await self.identify.before_command(ids, purpose)
         batches: dict[str, list[str]] = {}
         for entity_id, data in data_by_entity.items():
             batches.setdefault(json.dumps(data, sort_keys=True), []).append(entity_id)

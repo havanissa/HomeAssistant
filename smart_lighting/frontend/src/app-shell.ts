@@ -29,6 +29,7 @@ import "./pages/presence";
 import "./pages/presence-room";
 import "./pages/presence-engine";
 import "./presence/components";
+import "./lighting/light-inspector";
 import "./pages/room-editor";
 import "./pages/rooms";
 import "./pages/settings";
@@ -281,6 +282,7 @@ export class SlApp extends StoreElement {
         ${this.renderBottomNav()}
       </div>
       ${this.renderMoreSheet()}
+      <sl-light-inspector></sl-light-inspector>
     `;
   }
 }

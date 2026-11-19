@@ -7,10 +7,19 @@ from __future__ import annotations
 
 from homeassistant.core import HomeAssistant
 
+import pytest
+
 from . import lighting_parity as lp
+from . import test_brightness
 from .test_brightness import OUTDOOR, home, start  # noqa: F401
-from .test_lighting_parity import START, begin, devices, finish, ws_admin  # noqa: F401
+from .test_lighting_parity import PARITY_DAY, START, begin, devices, finish, ws_admin  # noqa: F401
 from .test_phase48_runtime import SETTLE, cupboard, door
+
+
+@pytest.fixture(autouse=True)
+def _parity_day(monkeypatch):
+    """The recorded day (``start`` moves the clock to ``test_brightness.DAY``, which depends on the day it runs)."""
+    monkeypatch.setattr(test_brightness, "DAY", PARITY_DAY)
 
 
 async def wait(hass, freezer, seconds: float, rec, sim) -> None:

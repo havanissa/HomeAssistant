@@ -515,8 +515,8 @@ class RoomLighting:
             "relays": list(self.relays),
             "supervisor": self.supervisor.as_dict(),
             "ambient": self.ambient.as_dict(),
-            "brightness": {e: m.as_dict() | {"zones": {z: c for z, c in m.as_dict()["zones"].items() if z in zone_ids}}
-                           for e, m in self.brightness.items()},
+            # (Columns and cell delays of zones that no longer exist are dropped.)
+            "brightness": {e: m.without_columns(zone_ids).as_dict() for e, m in self.brightness.items()},
             "fixtures": {e: f.as_dict() for e, f in self.fixtures.items()},
             "priority_inputs": [p.as_dict() for p in self.priority_inputs],
         }
@@ -1023,6 +1023,9 @@ def migrate_store(old_major: int, old_minor: int, data: dict[str, Any]) -> dict[
                              if isinstance(z, dict) else z for z in room.get("zones") or []]
             rooms[area_id] = room
         data["rooms"] = rooms
+    # 1.10 (App 0.9.0, Phase A6.2): brightness matrix cells may have a Delay On / Delay Off ("delays"). A matrix
+    # without them is unchanged (every delay 0 s: immediate, exactly as before), so nothing is converted. Zones
+    # keep their ids; Presence edits their detection and Lighting their lighting rules in the same records.
     return data
 
 

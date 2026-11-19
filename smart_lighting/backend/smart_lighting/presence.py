@@ -197,6 +197,9 @@ class PresenceService:
                 "warnings": sum(1 for d in diags if d["level"] == "warning"),
                 "info": sum(1 for d in diags if d["level"] == "info"),
                 "overrides": len(room.get("timing_overrides") or {}),
+                # App 0.9.0: the room's zones (Presence → a room → Zones).
+                "zones": len(room.get("zones") or []),
+                "zones_active": sum(1 for z in room.get("zones") or [] if z.get("active")),
             },
             "confirm_at": min(sustained) if sustained and state == "possible_occupancy" else None,
         }

@@ -23,6 +23,18 @@ A value is a brightness percentage:
   the light to its previous rules (mood profile, zone target) for that
   category.
 
+Cell delays (App 0.9.0, Phase A6.2)
+-----------------------------------
+A configured cell may also have a **Delay On** and a **Delay Off** in seconds
+(``LightMatrix.delays``; 0-``DELAY_MAX``; absent = 0 = immediate, exactly the
+behaviour before). They are lighting delays of that cell, not occupancy
+timers: Delay On holds an Off -> On switch-on the cell requests; Delay Off holds
+the switch-off that follows when the cell that kept the light on stops
+applying while the room stays occupied. A change between two brightness values
+is never delayed. The runtime (``brightness_delays.py``) revalidates the
+winning decision before it executes a delayed command and never replays one
+after a restart.
+
 Which column decides
 --------------------
 Only while the room is occupied (its vacancy behaviour is unchanged). Among
@@ -55,6 +67,7 @@ if TYPE_CHECKING:  # (profiles imports the lighting configuration, which imports
     from .profiles import ResolvedSetting
 
 MAX_TEMPLATES = 24
+DELAY_MAX = 3600  # seconds: the longest Delay On / Delay Off of a cell (App 0.9.0)
 APPEARANCE_FIELDS = ("color_temp_kelvin", "color_temp_mode", "color_temp_offset", "rgb_color", "hs_color", "effect")
 ROOM = "room"
 
@@ -95,6 +108,43 @@ def describe_value(value: int | None, *, onoff: bool = False) -> str:
     return "On" if onoff else f"{value} %"
 
 
+def _seconds(value: Any) -> int:
+    """A cell delay: whole seconds, 0-DELAY_MAX (anything else is 0, immediate)."""
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if math.isnan(number):
+        return 0
+    return int(round(min(max(number, 0), DELAY_MAX)))
+
+
+Delays = dict[str, tuple[int, int]]  # category id -> (Delay On, Delay Off) seconds; only non-zero pairs are kept
+
+
+def delays_from(data: Any) -> Delays:
+    """``{category: {"on": s, "off": s}}`` of one column; pairs of 0 s are dropped (0 = immediate)."""
+    out: Delays = {}
+    for key, item in (data.items() if isinstance(data, dict) else []):
+        if not isinstance(key, str) or not LEVEL_ID.match(key) or not isinstance(item, dict):
+            continue
+        pair = (_seconds(item.get("on")), _seconds(item.get("off")))
+        if pair != (0, 0):
+            out[key] = pair
+    return dict(list(out.items())[:MAX_LEVELS_LIMIT * 2])
+
+
+def delays_as_dict(delays: Mapping[str, tuple[int, int]]) -> dict[str, dict[str, int]]:
+    return {k: {"on": on, "off": off} for k, (on, off) in delays.items() if (on, off) != (0, 0)}
+
+
+def describe_delays(on: int, off: int) -> str:
+    parts = ([f"Delay On {on} s"] if on else []) + ([f"Delay Off {off} s"] if off else [])
+    return " · ".join(parts)
+
+
 # ------------------------------------------------------------ configuration
 @dataclass(frozen=True, slots=True)
 class LightMatrix:
@@ -107,6 +157,8 @@ class LightMatrix:
     template: str | None = None      # the template it was created from ("Restore defaults")
     enrolled_at: str | None = None
     enrolled_by: str | None = None
+    # Cell delays (App 0.9.0): column ("room" or a zone id) -> category -> (Delay On, Delay Off) seconds.
+    delays: dict[str, Delays] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, entity_id: str, data: Any, zone_ids: Iterable[str] | None = None) -> LightMatrix:
@@ -114,21 +166,38 @@ class LightMatrix:
         known = set(zone_ids) if zone_ids is not None else None
         zones = {str(z): cells_from(c) for z, c in (data.get("zones") or {}).items()
                  if isinstance(c, dict) and (known is None or z in known)}
+        delays = {str(col): d for col, c in (data.get("delays") or {}).items()
+                  if isinstance(col, str) and (col == ROOM or (known is None or col in known))
+                  and (d := delays_from(c))} if isinstance(data.get("delays"), dict) else {}
         return cls(
             entity_id=entity_id, enabled=data.get("enabled", True) is not False, room=cells_from(data.get("room")),
             zones=zones, template=data.get("template") if isinstance(data.get("template"), str) else None,
             enrolled_at=data.get("enrolled_at") if isinstance(data.get("enrolled_at"), str) else None,
             enrolled_by=data.get("enrolled_by") if isinstance(data.get("enrolled_by"), str) else None,
+            delays=delays,
         )
 
     def as_dict(self) -> dict[str, Any]:
-        return {"enabled": self.enabled, "room": cells_as_dict(self.room),
-                "zones": {z: cells_as_dict(c) for z, c in self.zones.items()}, "template": self.template,
-                "enrolled_at": self.enrolled_at, "enrolled_by": self.enrolled_by}
+        out = {"enabled": self.enabled, "room": cells_as_dict(self.room),
+               "zones": {z: cells_as_dict(c) for z, c in self.zones.items()}, "template": self.template,
+               "enrolled_at": self.enrolled_at, "enrolled_by": self.enrolled_by}
+        if delays := {c: d for c, cd in self.delays.items() if (d := delays_as_dict(cd))}:
+            out["delays"] = delays  # (only when a delay is configured: older matrices serialise exactly as before)
+        return out
 
     def value(self, column: str, level: str) -> int | None:
         cells = self.room if column == ROOM else self.zones.get(column) or {}
         return cells.get(level)
+
+    def delay(self, column: str, level: str) -> tuple[int, int]:
+        """(Delay On, Delay Off) of one cell in seconds; (0, 0) = immediate."""
+        return (self.delays.get(column) or {}).get(level, (0, 0))
+
+    def without_columns(self, keep: Iterable[str]) -> LightMatrix:
+        """Only the zone columns (and their delays) of ``keep`` (a removed zone leaves no values behind)."""
+        keep = set(keep)
+        return replace(self, zones={z: c for z, c in self.zones.items() if z in keep},
+                       delays={c: d for c, d in self.delays.items() if c == ROOM or c in keep})
 
     def columns(self) -> dict[str, dict[str, int | None]]:
         return {ROOM: self.room, **self.zones}
@@ -140,13 +209,14 @@ class LightMatrix:
     def remapped(self, moves: Mapping[str, str | None]) -> LightMatrix:
         """Categories removed in a reviewed change: ``{removed: target}`` moves a value (it replaces the target's
         value), ``{removed: None}`` deletes it."""
-        def move(cells: dict[str, int | None]) -> dict[str, int | None]:
+        def move(cells: dict[str, Any]) -> dict[str, Any]:
             out = {k: v for k, v in cells.items() if k not in moves}
             for old, new in moves.items():
                 if new is not None and cells.get(old) is not None:
                     out[new] = cells[old]
             return out
-        return replace(self, room=move(self.room), zones={z: move(c) for z, c in self.zones.items()})
+        return replace(self, room=move(self.room), zones={z: move(c) for z, c in self.zones.items()},
+                       delays={c: d for c, cd in self.delays.items() if (d := move(cd))})
 
     @property
     def configured(self) -> bool:
@@ -201,6 +271,9 @@ class Template:
     zone: dict[str, int | None]
     builtin: bool = False
     levels: tuple[AmbientLevel, ...] = DEFAULT_LEVELS
+    # Cell delays (App 0.9.0) of the Room occupied column and of the zone column: category -> (on, off) seconds.
+    room_delays: Delays = field(default_factory=dict)
+    zone_delays: Delays = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Any) -> Template | None:
@@ -209,27 +282,41 @@ class Template:
         name = str(data.get("name") or data["id"]).strip()[:60] or data["id"]
         levels = _levels_from(data.get("levels"))
         keys = [lv.id for lv in levels]
+        delays = data.get("delays") if isinstance(data.get("delays"), dict) else {}
         return cls(id=data["id"], name=name, room=cells_from(data.get("room"), keys),
-                   zone=cells_from(data.get("zone"), keys), levels=levels)
+                   zone=cells_from(data.get("zone"), keys), levels=levels,
+                   room_delays={k: v for k, v in delays_from(delays.get("room")).items() if k in keys},
+                   zone_delays={k: v for k, v in delays_from(delays.get("zone")).items() if k in keys})
 
     def as_dict(self) -> dict[str, Any]:
         keys = [lv.id for lv in self.levels]
-        return {"id": self.id, "name": self.name, "room": cells_as_dict(self.room, keys),
-                "zone": cells_as_dict(self.zone, keys), "builtin": self.builtin,
-                "levels": [lv.as_dict() for lv in self.levels]}
+        out = {"id": self.id, "name": self.name, "room": cells_as_dict(self.room, keys),
+               "zone": cells_as_dict(self.zone, keys), "builtin": self.builtin,
+               "levels": [lv.as_dict() for lv in self.levels]}
+        if self.room_delays or self.zone_delays:
+            out["delays"] = {"room": delays_as_dict(self.room_delays), "zone": delays_as_dict(self.zone_delays)}
+        return out
 
     def for_levels(self, levels: tuple[AmbientLevel, ...]) -> Template:
         """This template for other categories (values mapped by id, else by lux range)."""
         if tuple(lv.id for lv in levels) == tuple(lv.id for lv in self.levels):
             return self
+
+        def mapped(delays: Delays) -> Delays:
+            out = map_cells(delays, self.levels, levels)  # type: ignore[arg-type]
+            return {k: v for k, v in out.items() if v}  # type: ignore[misc]
         return replace(self, room=map_cells(self.room, self.levels, levels),
-                       zone=map_cells(self.zone, self.levels, levels), levels=levels)
+                       zone=map_cells(self.zone, self.levels, levels), levels=levels,
+                       room_delays=mapped(self.room_delays), zone_delays=mapped(self.zone_delays))
 
     def matrix(self, entity_id: str, zone_ids: Iterable[str], levels: tuple[AmbientLevel, ...] | None = None,
                **kw: Any) -> LightMatrix:
         t = self.for_levels(levels) if levels else self
+        zone_ids = list(zone_ids)
+        delays = ({ROOM: dict(t.room_delays)} if t.room_delays else {}) | (
+            {z: dict(t.zone_delays) for z in zone_ids} if t.zone_delays else {})
         return LightMatrix(entity_id=entity_id, room=dict(t.room), zones={z: dict(t.zone) for z in zone_ids},
-                           template=self.id, **kw)
+                           template=self.id, delays=delays, **kw)
 
 
 def _t(id_: str, name: str, room: tuple[int | None, ...], zone: tuple[int | None, ...]) -> Template:
@@ -286,6 +373,8 @@ class MatrixDecision:
     explanation: str = ""
     level_name: str = ""
     onoff: bool = False         # an on/off-only target (relay, Dumb Light): any value above 0 is On
+    delay_on: int = 0           # the cell's Delay On / Delay Off in seconds (App 0.9.0; 0 = immediate)
+    delay_off: int = 0
 
     @property
     def off(self) -> bool:
@@ -296,10 +385,13 @@ class MatrixDecision:
         return None if self.column == ROOM else self.column
 
     def as_dict(self) -> dict[str, Any]:
-        return {"column": self.column, "column_name": self.column_name, "level": self.level,
-                "level_name": self.level_name or self.level, "value": self.value,
-                "text": describe_value(self.value, onoff=self.onoff), "onoff": self.onoff,
-                "superseded": list(self.superseded), "explanation": self.explanation}
+        out = {"column": self.column, "column_name": self.column_name, "level": self.level,
+               "level_name": self.level_name or self.level, "value": self.value,
+               "text": describe_value(self.value, onoff=self.onoff), "onoff": self.onoff,
+               "superseded": list(self.superseded), "explanation": self.explanation}
+        if self.delay_on or self.delay_off:  # (only when configured: unchanged answers for older matrices)
+            out |= {"delay_on": self.delay_on, "delay_off": self.delay_off}
+        return out
 
 
 def _why_wins(winner: ColumnClaim, other: ColumnClaim) -> str:
@@ -327,14 +419,17 @@ def decide(matrix: LightMatrix, level: str, claims: list[ColumnClaim], level_nam
         reasons += [f"{c.name} zone has no value for {name}" for c in unset]
         column = f"{winner.name} zone"
         text = "; ".join(reasons) if reasons else f"{column} is active"
-        return MatrixDecision(matrix.entity_id, winner.zone_id, column, level, value, superseded, text, name)
+        on, off = matrix.delay(winner.zone_id, level)
+        return MatrixDecision(matrix.entity_id, winner.zone_id, column, level, value, superseded, text, name,
+                              delay_on=on, delay_off=off)
     value = matrix.room.get(level)
     if value is None:
         return None
+    on, off = matrix.delay(ROOM, level)
     return MatrixDecision(matrix.entity_id, ROOM, "Room occupied", level, value,
                           explanation="no active zone of this light" if not claims else
                           f"{', '.join(c.name for c in claims)} zone has no value for {name}: "
-                          "the Room occupied value applies", level_name=name)
+                          "the Room occupied value applies", level_name=name, delay_on=on, delay_off=off)
 
 
 # ------------------------------------------------------------------- setting

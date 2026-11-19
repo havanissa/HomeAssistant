@@ -1,5 +1,8 @@
 // Material Design Icons, bundled (no icon font or network access needed).
 import {
+  mdiInformationOutline,
+  mdiLightbulbOn,
+  mdiTimerOutline,
   mdiFitToScreen,
   mdiHomeMapMarker,
   mdiVectorRectangle,
@@ -254,6 +257,9 @@ export const ICONS: Record<string, string> = {
   "weather-sunny": mdiWeatherSunny,
   "swap-bold": mdiSwapHorizontalBold,
   "view-grid": mdiViewGridOutline,
+  "information-outline": mdiInformationOutline,
+  "lightbulb-on": mdiLightbulbOn,
+  "timer-outline": mdiTimerOutline,
 };
 
 export function icon(name: string, size = 24): SVGTemplateResult {

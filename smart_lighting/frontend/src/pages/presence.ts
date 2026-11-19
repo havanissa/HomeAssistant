@@ -173,11 +173,26 @@ export class SlPresence extends StoreElement {
         <footer class="presence-card-foot small">
           <span>${r.counts.sensors} sensor${r.counts.sensors === 1 ? "" : "s"}${r.counts.unavailable ? html` · <span class="tone-warning">${r.counts.unavailable} unavailable</span>` : nothing}</span>
           <span>${r.counts.overrides ? `${r.counts.overrides} timing override${r.counts.overrides > 1 ? "s" : ""}` : "Global timing"}</span>
+          ${r.counts.zones ? html`<span>${r.counts.zones} zone${r.counts.zones === 1 ? "" : "s"}${r.counts.zones_active ? ` · ${r.counts.zones_active} occupied` : ""}</span>` : nothing}
           ${r.automation.lighting_automatic ? chip("info", "Automatic lighting") : nothing}
         </footer>
         ${top.length ? html`<ul class="presence-card-warn">${top.map((d) => html`<li class="tone-${d.level}">${icon(d.level === "error" ? "error" : "warning", 16)}<span>${d.title}</span></li>`)}</ul>` : nothing}
       </a>
     </li>`;
+  }
+
+  /** App 0.9.0: every room's zones (parts of a room with their own presence detection), edited per room. */
+  private zonesCard(rooms: PresenceRoom[]): TemplateResult {
+    const rows = rooms.flatMap((r) => (((r as unknown as { zones?: Array<Record<string, unknown>> }).zones) ?? []).map((z) => ({ r, z })));
+    return html`<section class="card" id="presence-zones" data-testid="presence-zones-overview"><header class="card-head">${icon("layers")}<h3>Zones</h3></header>
+      <p class="muted small">Parts of a room with their own presence detection (a desk, a sink, a radar distance band). Zones are occupancy signals: they can keep their room occupied, and Lighting can respond to them. Open a room's Zones tab to add or change them.</p>
+      ${rows.length ? html`<div class="table-wrap"><table class="plain-table"><thead><tr><th scope="col">Room</th><th scope="col">Zone</th><th scope="col">Detection</th><th scope="col">Now</th><th scope="col"><span class="visually-hidden">Edit</span></th></tr></thead>
+        <tbody>${rows.map(({ r, z }) => html`<tr data-zone=${String(z.id)}><td>${r.name}</td><td><strong>${String(z.name)}</strong>${z.enabled === false ? html` <span class="small muted">off</span>` : nothing}${z.holds_room ? html`<span class="block small muted">holds the room</span>` : nothing}</td>
+          <td class="small">${z.detection === "radar" ? `Radar ${z.band ?? ""}` : "Room sensors"}</td>
+          <td>${z.enabled === false ? chip("neutral", "Off") : z.active ? chip("ok", "Occupied") : z.available === false ? chip("warning", "Unavailable") : chip("neutral", "Vacant")}</td>
+          <td><a class="btn btn-small" href=${`#/presence/${encodeURIComponent(r.area_id)}?tab=zones&zone=${encodeURIComponent(String(z.id))}`}>${icon("pencil", 16)}Edit</a></td></tr>`)}</tbody></table></div>`
+        : html`<p class="small muted">No zones yet. ${rooms.length ? html`<a class="text-link" href=${`#/presence/${encodeURIComponent(rooms[0].area_id)}?tab=zones`}>Add one in ${rooms[0].name}</a>` : nothing}</p>`}
+    </section>`;
   }
 
   protected render(): unknown {
@@ -188,6 +203,7 @@ export class SlPresence extends StoreElement {
       : "Occupancy of every room, as the Smart Occupancy integration decides it.", html`<div class="page-actions">
       <a class="btn" href="#/presence/engine" data-testid="presence-engine-link">${icon("swap", 20)}Engine ${chip(appDecides ? "ok" : "info", appDecides ? "App" : "Integration")}</a>
       <a class="btn" href="#/presence/diagnostics" data-testid="presence-diagnostics-link">${icon("stethoscope", 20)}Diagnostics${data ? html` ${chip(data.counts.problems ? "warning" : "ok", String(data.counts.problems))}` : nothing}</a>
+      <a class="btn" href="#presence-zones" data-testid="presence-zones-link" @click=${(e: Event) => { e.preventDefault(); this.querySelector("#presence-zones")?.scrollIntoView({ behavior: "smooth", block: "start" }); }}>${icon("layers", 20)}Zones</a>
       <a class="btn" href="#/presence/settings" data-testid="presence-settings-link">${icon("tune", 20)}Global timing</a></div>`);
     if (!data) return html`${header}${this.error ? apiProblem(this.error.message, this.error.code) : html`<div class="card loading" role="status"><span class="spinner"></span><span>Loading presence…</span></div>`}`;
     const rooms = data.rooms.filter((r) => matches(r, this.filter, this.query));
@@ -205,6 +221,7 @@ export class SlPresence extends StoreElement {
       </div>
       ${rooms.length ? html`<ul class="presence-grid" data-testid="presence-grid">${rooms.map((r) => this.card(r))}</ul>`
         : html`<div class="card empty-state">${icon("filter", 36)}<p class="muted">${data.rooms.length ? "No room matches the filter." : "No room is configured yet. Set rooms up in Rooms first."}</p></div>`}
+      ${this.zonesCard(data.rooms)}
       ${data.unconfigured.length ? html`<section class="card unconfigured-card"><header class="card-head">${icon("home")}<h3>Areas without a room configuration</h3></header>
         <p class="muted small">Their occupancy is not observed. Assign sensors in the Rooms editor to start.</p>
         <ul class="link-chips">${data.unconfigured.map((a) => html`<li><a class="btn btn-small" href=${`#/rooms/${encodeURIComponent(a.area_id)}/presence`}>${a.name}</a></li>`)}</ul></section>` : nothing}`;

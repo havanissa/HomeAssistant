@@ -11,9 +11,12 @@ from .runtime_manifest import MODULES as RUNTIME_MODULES
 
 APP_MODULES: tuple[str, ...] = (
     "app_manifest.py",
+    "brightness_delays.py",
     "comparison.py",
     "curtains/multisun.py",
     "entity_ids.py",
+    "light_identify.py",
+    "light_inspector.py",
     "prediction.py",
     "presence_api.py",
     "presence_fields.py",

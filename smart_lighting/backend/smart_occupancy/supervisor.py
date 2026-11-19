@@ -380,6 +380,10 @@ class Supervisor:
             tc = self._check(area_id, entity_id)
             tc.rule = item.rule
             tc.actual = actual_state(self.hass, entity_id)
+            if ctrl.identify.ops and ctrl.identify.covering({entity_id}):
+                # Identify (App 0.9.0) holds it for a few seconds and restores it itself: not checked meanwhile.
+                tc.result, tc.reason = PAUSED, "Being identified: checked again after the restore"
+                continue
             result, reason, desired = self._classify(area_id, item, tc, rt, settings, now)
             previous = tc.result
             tc.result, tc.reason, tc.desired = result, reason, desired
@@ -456,6 +460,12 @@ class Supervisor:
             return MISMATCH, f"Expected off, actual {describe_actual(tc.actual)}", {"state": "off"}
         if item.decision == SKIPPED:
             return NOT_SUPERVISED, item.reason, None
+        delay = (item.rule or {}).get("delay")
+        if delay or code in ("delay_on", "delay_off"):
+            # A matrix cell's Delay On / Delay Off (App 0.9.0): the light keeps its state until it ends.
+            word = "Delay On" if (delay or {}).get("action", "on") == "on" and code != "delay_off" else "Delay Off"
+            left = (delay or {}).get("remaining")
+            return WAITING, f"{word} pending{f' ({round(left)} s left)' if left is not None else ''}", None
         if item.decision == UNCHANGED and code in ("already", "zone_unchanged", "vacant_ignore", "vacant_unset",
                                                   "stays_off", "dead_band"):
             return CORRECT, item.reason, desired
