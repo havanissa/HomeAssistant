@@ -31,6 +31,18 @@ runtime fingerprint before the wizard's *Transfer control* step);
 `tests/test_host_interface.py` fails when a listed module changes. New engine
 code goes into an App-only module.
 
+Phase A6.2 (App 0.9.0) added three App-only engine modules (listed in
+`app_manifest.py`): `brightness_delays.py` (pending Delay On / Delay Off of
+brightness matrix cells; the controller's two executors consult its gate
+before they send, `async_delay_due` revalidates when a delay ends),
+`light_identify.py` (Identify: snapshot, full brightness, restore through the
+controller's `_send`, superseded by newer commands; crash journal) and
+`light_inspector.py` (the read-only `light/inspect` and the `light/identify`
+commands). The App's `zones_api.py` is Presence's zone API: it composes the
+existing zone commands (detection keys only), so there is still one zone
+record (`zones.ZoneConfig` in the lighting store) and one zone engine
+(`zone_runtime.ZoneManager`). Design and limits: `docs/A6.2-zones-inspector-delays.md`.
+
 The one file that exists twice is the companion protocol:
 `custom_components/smart_occupancy/protocol.py` (the source) and
 `backend/smart_lighting/companion_protocol.py` (the App's copy, because the
@@ -157,6 +169,12 @@ integration 0.9.0 with the curtain stores reset (no
 with `CURTAINS_MIN_SHADOW_SECONDS=60 CURTAINS_MIN_DECISIONS=1` or
 `FORECAST_MIN_SHADOW_SECONDS=60 FORECAST_MIN_MATCHES=1`; both have `--phase
 restart-check` and `--phase finish` like the lighting suite.
+`a62_checks.py` (Phase A6.2) runs right after `system_checks.py --phase fresh`
+in the same stack: a zone created and edited through Presence's commands, the
+light inspector, Identify on a light that is on and off (through the
+companion's executor, exactly two commands, no override), a brightness cell's
+Delay On and Delay Off on `light.bed_light`, and the new screens at desktop,
+tablet and phone sizes without a service call.
 Primary targets: desktop (1440, 1920 px) and tablets (768 portrait, 1024 and
 1366 landscape, with touch). Phone sizes (360, 390 px, 740 landscape) are
 kept as a regression check of the fallback layout. It fails on any Home

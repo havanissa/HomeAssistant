@@ -4,7 +4,7 @@
 # it is pinned for reproducible builds.
 FROM ghcr.io/home-assistant/base-python:3.14-alpine3.24-2026.11.0
 
-ARG BUILD_VERSION=0.8.0
+ARG BUILD_VERSION=0.9.0
 ARG BUILD_ARCH=amd64
 
 ENV PYTHONUNBUFFERED=1 \

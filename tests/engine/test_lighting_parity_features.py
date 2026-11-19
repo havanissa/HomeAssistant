@@ -5,6 +5,7 @@ See ``test_lighting_parity.py``: each scenario is recorded and compared with its
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 from unittest.mock import patch
 import uuid
@@ -20,10 +21,13 @@ from custom_components.smart_occupancy.const import VacancyAction
 from custom_components.smart_occupancy.daylight import IndoorSensor, RoomDaylight
 from custom_components.smart_occupancy.preliminary import PreliminaryTarget
 
+import pytest
+
 from . import lighting_parity as lp
 from .conftest import setup_entry
 from .test_daylight_runtime import LUX, set_lux, start as daylight_start
-from .test_lighting_parity import START, TIMING, begin, configure, devices, finish, user_context, ws_admin  # noqa: F401
+from .test_lighting_parity import (  # noqa: F401
+    PARITY_DAY, START, TIMING, begin, configure, devices, finish, user_context, ws_admin)
 from .test_lighting_runtime import MAIN_OPTS, lit, options as lit_options, set_moods  # noqa: F401
 from .test_preliminary import prelim
 from .test_switches import IEEE, NAME, TOPIC, WS, bridge, mqtt, wiser_device  # noqa: F401
@@ -45,6 +49,14 @@ async def _switch(hass, ws: WS, area: str, freezer, mappings: dict[str, Any], **
                      confirm=True))["success"]
     await lp.advance(hass, freezer, 3)
     return switch_id
+
+
+
+@pytest.fixture
+def recorded_day(freezer):
+    """The daylight scenarios' light states are created two hours before their day (as on the day they were
+    recorded): how long the lights have been off decides whether an indoor reading is trusted."""
+    freezer.move_to(PARITY_DAY - timedelta(hours=2))
 
 
 async def test_switch_event_entity(hass: HomeAssistant, lit, devices, freezer, hass_ws_client,
@@ -101,9 +113,10 @@ async def test_switch_zigbee2mqtt(hass: HomeAssistant, mqtt, lit, devices, freez
     await finish(rec)
 
 
-async def test_possible_occupancy(hass: HomeAssistant, lit, devices, freezer, hass_ws_client, hass_admin_user) -> None:
+async def test_possible_occupancy(hass: HomeAssistant, recorded_day, lit, devices, freezer, hass_ws_client,
+                                  hass_admin_user) -> None:
     freezer.move_to(START)  # (the sun: the recording must not depend on the wall clock)
-    entry, ctrl = await daylight_start(hass, lit, freezer, lux=10)
+    entry, ctrl = await daylight_start(hass, lit, freezer, when=PARITY_DAY, lux=10)
     ws = await ws_admin(hass, hass_ws_client, hass_admin_user)
     configure(ctrl, lit.area, preliminary=prelim(PreliminaryTarget(lit.lamp, 10, 2200, 0.5)))
     await lp.advance(hass, freezer, 3)
@@ -120,10 +133,10 @@ async def test_possible_occupancy(hass: HomeAssistant, lit, devices, freezer, ha
     await finish(rec)
 
 
-async def test_daylight_became_dark(hass: HomeAssistant, lit, devices, freezer, hass_ws_client,
+async def test_daylight_became_dark(hass: HomeAssistant, recorded_day, lit, devices, freezer, hass_ws_client,
                                     hass_admin_user) -> None:
     freezer.move_to(START)  # (the sun: the recording must not depend on the wall clock)
-    entry, ctrl = await daylight_start(hass, lit, freezer, lux=900,
+    entry, ctrl = await daylight_start(hass, lit, freezer, when=PARITY_DAY, lux=900,
                                        daylight=RoomDaylight(sensors=(IndoorSensor(LUX),), stable_seconds=5))
     ws = await ws_admin(hass, hass_ws_client, hass_admin_user)
     rec = await begin(hass, freezer, entry, ws, devices, "daylight_became_dark",

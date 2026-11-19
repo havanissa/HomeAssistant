@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.9.0
+
+Phase A6.2: three improvements of existing functionality. Needs the companion integration 1.0.0. Nothing changes on
+upgrade: zones, lighting rules and brightness matrices behave exactly as before; every delay is 0 s until set.
+
+- **Zones are part of Presence** (Presence → a room → **Zones**, and a Zones list on the Presence page). A zone is
+  an occupancy signal of a room - detection by some of the room's sensors or a radar distance band, its timing,
+  availability policy and room hold - and exists whether or not a light responds to it. Presence creates, edits and
+  deletes zones through its own commands (`smart_occupancy/zones/room|set|remove|radar_test`), which accept
+  detection settings only and compose the existing validated zone commands: one zone record with its stable id, one
+  zone engine, no data migration. **Lighting → a room → Zone lighting** keeps which lights respond and how
+  (targets, priority, manual changes, daylight, release) and links to Presence for detection. Saving a zone's detection
+  never sends a command: a state the edit itself causes is the new baseline (before, a rebuilt zone could switch
+  lights at once); switching a zone off ends it like a deletion. Deleting a zone that lights respond to needs a confirmation and removes its brightness matrix column and
+  delays, so a new zone with the same id starts empty; an occupied zone that is deleted still hands its lights to
+  the remaining rules at once, as before.
+- **Light inspector** - "What controls this light?" - one shared drawer opened from the room overview and lights,
+  the brightness matrix, zone lighting, the Supervisor table, the floor plan and the device lookup
+  (`smart_occupancy/lighting/light/inspect`, read only): device and capabilities, the mode, mood, occupancy, active
+  zone, ambient category, the winning rule, why, and what it won over, manual override, Priority Inputs, Room
+  Supervisor, competing automations, a pending brightness delay, and the light's recent history from the existing
+  decision and Supervisor logs. The winning rule, the last command sent and the reported state are shown apart; an
+  unattributed change says so.
+- **Identify** (`smart_occupancy/lighting/light/identify`, administrators): full brightness for about 2.5 s (on/off
+  lights and relays just on), then exactly the captured state (off, brightness, colour temperature, colour, effect).
+  Through the lighting controller's fenced command path with its own context: no manual override, no change of
+  mood, occupancy, rules or matrices, no Room Supervisor activity. While it lasts the controller plans with the
+  captured state, so a newer lighting decision, a person, a wall switch or a Priority Input supersedes it and is
+  never restored over; the light must still show what Identify set before it is restored. A group needs an explicit
+  choice (one member, or the whole group with each member restored). A small journal lets a restarted controller
+  restore a light within 2 minutes only if it has not changed since.
+- **Delay On / Delay Off per brightness matrix cell** (0-3600 s; stored as `delays` in the matrix only when set).
+  Delay On holds a switch-on the winning cell requests; Delay Off holds the switch-off that follows when the cell
+  that kept the light on stops applying while the room stays occupied. Brightness changes are never delayed; the
+  single winning rule is unchanged; a manual change, wall switch, Priority Input, Manual mood, vacancy, Observing,
+  Automatic, *Resume* and Identify supersede a pending delay; the decision is planned again and revalidated before a
+  delayed command is sent; nothing is replayed after a restart. Templates, copies and previews carry the delays.
+  Lighting store 1.10 (nothing is converted).
+- Engine tests: the four parity scenarios whose recordings carry the date they were recorded on now run on that
+  date (they failed on every other day).
+
 ## 0.8.0
 
 Phase A6.1: two extensions of existing behaviour. Needs the companion integration 1.0.0. Nothing changes on

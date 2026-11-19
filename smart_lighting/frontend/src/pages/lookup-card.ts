@@ -4,6 +4,7 @@ import { html, nothing } from "lit";
 
 import { formatState, formatTime } from "../format";
 import { icon } from "../icons";
+import { inspectLight } from "../lighting/light-inspector";
 import { loadLookup, type LookupData, type LookupKind } from "../lookup";
 import "../picker";
 import { kv, StoreElement } from "../ui";
@@ -43,7 +44,7 @@ export class SlLookupCard extends StoreElement {
     if (this.kind === "entity") {
       const e = d.entities.find((x) => x.entity_id === this.selected);
       if (!e) return nothing;
-      return kv([
+      return html`${kv([
         ["Name", e.name],
         ["Entity ID", html`<code>${e.entity_id}</code>`],
         ["State", formatState(e.state, e.unit)],
@@ -51,7 +52,7 @@ export class SlLookupCard extends StoreElement {
         ["Area", e.area],
         ["Device", e.device],
         ["Integration", e.platform],
-      ]);
+      ])}${/^(light|switch)\./.test(e.entity_id) ? html`<button type="button" class="btn btn-small" data-testid="lookup-inspect-light" @click=${() => inspectLight(e.entity_id)}>${icon("information-outline", 16)}What controls this light?</button>` : nothing}`;
     }
     if (this.kind === "device") {
       const dev = d.devices.find((x) => x.id === this.selected);

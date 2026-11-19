@@ -62,6 +62,7 @@ TRIGGER_WORDS = {
     "zone": "zone occupancy changed", "space_vacant": "shared space vacant", "supervisor": "Room Supervisor",
     "ambient": "ambient light level changed", "resumed": "automatic lighting resumed",
     "priority": "Priority Input",
+    "brightness_delay": "brightness delay ended", "identified": "Identify ended",
 }
 VACANCY_WORDS = {"turn_off": "Turn off", "vacant_mood": "Vacant mood", "leave": "Leave unchanged"}
 _SOURCE_WORDS = {

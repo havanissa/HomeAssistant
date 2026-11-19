@@ -384,7 +384,11 @@ def ws_zone_remove(hass: HomeAssistant, connection: websocket_api.ActiveConnecti
     if room.zone(msg["zone_id"]) is None:
         connection.send_error(msg["id"], websocket_api.ERR_NOT_FOUND, f"Zone {msg['zone_id']} does not exist")
         return
-    ctrl.store.async_set(ctrl.with_room(area_id, zones=tuple(z for z in room.zones if z.id != msg["zone_id"])))
+    zones = tuple(z for z in room.zones if z.id != msg["zone_id"])
+    # (App 0.9.0: its brightness matrix columns and cell delays go with it, so a new zone with the same id starts
+    # empty; a light that no other zone lists keeps its Room occupied column.)
+    brightness = {e: m.without_columns(z.id for z in zones) for e, m in room.brightness.items()}
+    ctrl.store.async_set(ctrl.with_room(area_id, zones=zones, brightness=brightness))
     connection.send_result(msg["id"], {"revision": ctrl.store.revision})
 
 

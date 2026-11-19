@@ -151,6 +151,9 @@ class ZoneManager:
         self._room_unsubs: list[CALLBACK_TYPE] = []
         self._restored: dict[str, Any] = {}
         self._running = False
+        # App 0.9.0: True while zones are rebuilt for an edit that removed none (detection or lighting settings
+        # saved, a zone added): the controller takes the resulting zone states as its baseline, sending nothing.
+        self.quiet = False
 
     # ------------------------------------------------------------ lifecycle
     def restore(self, data: Any) -> None:
@@ -190,10 +193,17 @@ class ZoneManager:
         self._timers.clear()
 
     @callback
-    def async_config_changed(self) -> None:
-        """Zones were added, removed or changed: engines of unchanged signals keep what they know."""
+    def async_config_changed(self, *, quiet: bool = False) -> None:
+        """Zones were added, removed or changed: engines of unchanged signals keep what they know.
+
+        ``quiet`` (App 0.9.0): no zone was removed - a state the edit itself changes is the new baseline.
+        """
         if self._running:
-            self._build()
+            self.quiet = quiet
+            try:
+                self._build()
+            finally:
+                self.quiet = False
 
     # ------------------------------------------------------------- building
     def _build(self) -> None:

@@ -1,11 +1,19 @@
-// Room → Zones (0.6.0 / 0.6.8): parts of a room with their own sensors (or a radar distance band) and lighting,
-// which rule controls each light now, and the room's shared space. A zone is edited in a side panel and saved with
-// ``zone/set``; a Radar Distance Zone can be tried with a test distance (``zone/radar_test``, never sends anything).
+// Zones (0.6.0 / 0.6.8; App 0.9.0 split by owner). One editor, two explicit modes:
+//
+// * ``presence`` (Presence → a room → Zones): the zone itself - name and stable id, enabled, detection (room
+//   sensors or a radar distance band), timing, availability policy, holding the room occupied - through the
+//   Presence-owned commands ``smart_occupancy/zones/set|remove|radar_test`` (detection keys only). A zone exists
+//   whether or not a light responds to it; each zone shows what responds to it, with a link to Lighting.
+// * ``lighting`` (Lighting → a room → Zone lighting rules): which lights respond to each zone and how (targets,
+//   priority between zones, manual changes, daylight, release) through ``zone/set`` with lighting keys only, which
+//   rule controls each light now, and the room's shared space. Zones are created and their detection is edited in
+//   Presence (linked). Saving sends no command in either mode.
 import { html, nothing, type TemplateResult } from "lit";
 
 import { icon } from "../icons";
 import { chip, kv, StoreElement } from "../ui";
 import { cmd, lighting } from "./api";
+import { inspectButton } from "./light-inspector";
 import {
   advancedToggle,
   card,
@@ -31,11 +39,16 @@ function radarDefaults(r: Obj | null | undefined): Obj {
     entry_delay: n(r?.entry_delay, 2), exit_delay: n(r?.exit_delay, 15), hysteresis: n(r?.hysteresis, 0.2), max_age: r?.max_age ? Number(r.max_age) : null };
 }
 
+const DETECTION = ["id", "name", "enabled", "detection", "radar", "sensors", "activation", "timing", "unavailable", "holds_room"];
+
 export class SlLpZones extends StoreElement {
   static properties = {
     room: { attribute: false }, model: { attribute: false }, host: { attribute: false }, busy: { type: Boolean }, canEdit: { type: Boolean },
+    mode: { type: String },
     draft: { state: true }, more: { state: true }, test: { state: true }, askDelete: { state: true }, space: { state: true },
   };
+  /** ``presence``: detection (Presence → Zones); ``lighting``: the zones' lighting rules (Lighting → Zone lighting rules). */
+  declare mode: "presence" | "lighting";
   declare room: RoomModel;
   declare model: EditorModel | null;
   declare host: LightingHost;
@@ -54,6 +67,19 @@ export class SlLpZones extends StoreElement {
     this.test = { distance: null, presence: true, result: null, error: null };
     this.askDelete = false;
     this.space = null;
+    this.mode = "lighting";
+  }
+
+  private get presence(): boolean {
+    return this.mode === "presence";
+  }
+
+  private zoneCmd(name: "set" | "remove" | "radar_test"): string {
+    return this.presence ? `smart_occupancy/zones/${name}` : cmd(`zone/${name}`);
+  }
+
+  private presenceLink(zoneId?: string): string {
+    return `#/presence/${encodeURIComponent(this.room.area_id)}?tab=zones${zoneId ? `&zone=${encodeURIComponent(zoneId)}` : ""}`;
   }
 
   private get z(): Obj {
@@ -61,7 +87,13 @@ export class SlLpZones extends StoreElement {
   }
 
   private send(name: string, params: Obj, done = "Saved"): Promise<boolean> {
-    return this.host.run(() => lighting(cmd(name), params), done);
+    return this.host.run(() => lighting(name.startsWith("smart_occupancy/") ? name : cmd(name), params), done);
+  }
+
+  /** Open a zone for editing (``?zone=`` from a link). */
+  openZone(zoneId: string): void {
+    const zone = (this.z.zones ?? []).find((x: Obj) => x.id === zoneId);
+    if (zone && this.canEdit) this.edit(zone);
   }
 
   private enrolled(): Set<string> {
@@ -89,27 +121,35 @@ export class SlLpZones extends StoreElement {
 
   private async save(): Promise<void> {
     const d = this.draft!;
-    const zone: Obj = {
-      name: String(d.name ?? "").trim() || "Zone", enabled: !!d.enabled, detection: d.detection ?? "sensors", priority: Number(d.priority) || 1,
-      targets: (d.targets ?? []).map((t: Obj) => ({ entity_id: t.entity_id, action: t.action ?? "on", brightness_pct: t.brightness_pct ?? null, color_temp_kelvin: t.color_temp_kelvin ?? null, transition: t.transition ?? null })),
-      unavailable: d.unavailable, holds_room: !!d.holds_room, manual: d.manual, daylight: d.daylight, on_below: d.daylight === "below" ? d.on_below ?? null : null, release: d.release,
-    };
-    if (d.id) zone.id = d.id;
-    if (zone.detection === "radar") zone.radar = radarDefaults(d.radar);
-    else {
-      zone.sensors = d.sensors ?? [];
-      zone.activation = d.activation;
-      zone.timing = Object.fromEntries(TIMING.map(([k]) => [k, d.timing?.[k] ?? null]));
+    let zone: Obj;
+    if (this.presence) {
+      // Presence owns the zone's identity and detection: nothing else is sent.
+      zone = { name: String(d.name ?? "").trim() || "Zone", enabled: !!d.enabled, detection: d.detection ?? "sensors", unavailable: d.unavailable, holds_room: !!d.holds_room };
+      if (zone.detection === "radar") zone.radar = radarDefaults(d.radar);
+      else {
+        zone.sensors = d.sensors ?? [];
+        zone.activation = d.activation;
+        zone.timing = Object.fromEntries(TIMING.map(([k]) => [k, d.timing?.[k] ?? null]));
+      }
+      for (const k of Object.keys(zone)) if (!DETECTION.includes(k)) delete zone[k];
+    } else {
+      // Lighting owns which lights respond and how.
+      zone = {
+        priority: Number(d.priority) || 1,
+        targets: (d.targets ?? []).map((t: Obj) => ({ entity_id: t.entity_id, action: t.action ?? "on", brightness_pct: t.brightness_pct ?? null, color_temp_kelvin: t.color_temp_kelvin ?? null, transition: t.transition ?? null })),
+        manual: d.manual, daylight: d.daylight, on_below: d.daylight === "below" ? d.on_below ?? null : null, release: d.release,
+      };
     }
-    const ok = await this.send("zone/set", { area_id: this.room.area_id, zone }, d.id ? "Zone saved · nothing was sent" : "Zone added · nothing was sent");
+    if (d.id) zone.id = d.id;
+    const ok = await this.send(this.zoneCmd("set"), { area_id: this.room.area_id, zone }, d.id ? "Zone saved · nothing was sent" : "Zone added · nothing was sent");
     if (ok) this.draft = null;
   }
 
   private async runTest(): Promise<void> {
     const radar = radarDefaults(this.draft?.radar);
     try {
-      const res = await lighting<Obj>(cmd("zone/radar_test"), { area_id: this.room.area_id, radar, distance_m: this.test.distance, presence: this.test.presence, active: false, unavailable: this.draft?.unavailable ?? "hold" });
-      const active = await lighting<Obj>(cmd("zone/radar_test"), { area_id: this.room.area_id, radar, distance_m: this.test.distance, presence: this.test.presence, active: true, unavailable: this.draft?.unavailable ?? "hold" });
+      const res = await lighting<Obj>(this.zoneCmd("radar_test"), { area_id: this.room.area_id, radar, distance_m: this.test.distance, presence: this.test.presence, active: false, unavailable: this.draft?.unavailable ?? "hold" });
+      const active = await lighting<Obj>(this.zoneCmd("radar_test"), { area_id: this.room.area_id, radar, distance_m: this.test.distance, presence: this.test.presence, active: true, unavailable: this.draft?.unavailable ?? "hold" });
       this.test = { ...this.test, result: { fresh: res, held: active }, error: null };
     } catch (err) {
       this.test = { ...this.test, result: null, error: err instanceof Error ? err.message : String(err) };
@@ -133,11 +173,13 @@ export class SlLpZones extends StoreElement {
     const sensors = zone.detection === "radar"
       ? (rs?.configured ? `Radar ${rs.band} · ${rs.presence_name}: ${rs.presence === true ? "detected" : rs.presence === false ? "clear" : "unavailable"} · distance ${rs.distance_text ?? "—"}` : "Radar distance zone: radar entities not chosen")
       : (zone.sensors ?? []).map((e: string) => z.sensors?.find((s: Obj) => s.entity_id === e)?.name ?? e).join(", ") || "no sensor";
-    const lights = (zone.targets ?? []).map((t: Obj) => `${z.targets?.find((x: Obj) => x.entity_id === t.entity_id)?.name ?? t.entity_id} ${enrolled.has(t.entity_id) ? "(brightness matrix)" : t.action === "off" ? "off" : t.action === "unchanged" ? "unchanged" : stateText({ state: "on", ...t })}`).join(" · ") || "no light";
+    const lights = this.presence
+      ? ((zone.lighting?.lights ?? []).length ? `Lights responding: ${zone.lighting.lights.map((l: Obj) => l.name).join(", ")}` : "No light responds to it (an occupancy signal only)")
+      : (zone.targets ?? []).map((t: Obj) => `${z.targets?.find((x: Obj) => x.entity_id === t.entity_id)?.name ?? t.entity_id} ${enrolled.has(t.entity_id) ? "(brightness matrix)" : t.action === "off" ? "off" : t.action === "unchanged" ? "unchanged" : stateText({ state: "on", ...t })}`).join(" · ") || "no light";
     const selected = this.draft?.id === zone.id;
-    return html`<li><button type="button" class="lp-zone ${selected ? "selected" : ""}" aria-pressed=${selected ? "true" : "false"} data-zone=${zone.id} ?disabled=${!this.canEdit} title=${this.canEdit ? "Edit this zone" : "Read only"} @click=${() => this.edit(zone)}>
+    return html`<li><button type="button" class="lp-zone ${selected ? "selected" : ""}" aria-pressed=${selected ? "true" : "false"} data-zone=${zone.id} ?disabled=${!this.canEdit} title=${this.canEdit ? (this.presence ? "Edit this zone" : "Edit its lighting rules") : "Read only"} @click=${() => this.edit(zone)}>
       <span class="lp-zone-icon">${icon(zone.detection === "radar" ? "radar" : "layers", 22)}</span>
-      <span class="lp-pick-main"><span class="lp-row-line"><strong>${zone.name}</strong>${chip(tone, word)}<span class="small muted">priority ${zone.priority}</span></span>
+      <span class="lp-pick-main"><span class="lp-row-line"><strong>${zone.name}</strong>${chip(tone, word)}${this.presence ? (zone.holds_room ? html`<span class="small muted">holds the room</span>` : nothing) : html`<span class="small muted">priority ${zone.priority}</span>`}</span>
         <span class="small muted">${sensors}</span><span class="small">${lights}</span></span>${this.canEdit ? icon("pencil", 20) : nothing}</button></li>`;
   }
 
@@ -215,7 +257,7 @@ export class SlLpZones extends StoreElement {
       const caps = t.capabilities ?? {};
       const relay = t.type === "relay";
       return html`<li class="lp-subcard"><label class="lp-check"><input type="checkbox" .checked=${!!cur} @change=${(e: Event) => setT(t.entity_id, (e.target as HTMLInputElement).checked ? {} : null)} />
-          <span><strong>${t.name}</strong> ${relay ? html`<span class="small muted">relay · on/off only</span>` : caps.known === false ? html`<span class="small muted">capabilities unknown</span>` : nothing}</span></label>
+          <span><strong>${t.name}</strong> ${relay ? html`<span class="small muted">relay · on/off only</span>` : caps.known === false ? html`<span class="small muted">capabilities unknown</span>` : nothing}</span></label>${inspectButton(t.entity_id, this.room.area_id, t.name)}
         ${cur && enrolled.has(t.entity_id) ? html`<p class="small muted">On/off and brightness come from its brightness matrix (this zone becomes a column there).</p>`
         : cur ? html`<div class="lp-form">
           ${selectField({ label: "Action", value: cur.action ?? "on", options: [["on", "On"], ["off", "Off"], ["unchanged", "Unchanged (claimed, left as it is)"]], onChange: (v) => setT(t.entity_id, { action: v }) })}
@@ -229,20 +271,47 @@ export class SlLpZones extends StoreElement {
 
   private form(d: Obj): TemplateResult {
     const z = this.z;
-    const lim = z.limits ?? {};
     const radarOk = (z.radar?.distance ?? []).some((x: Obj) => x.valid || x.problem === "unavailable");
     const radar = d.detection === "radar";
     return html`<aside class="inspector lp-inspector lp-zone-form" aria-label=${d.id ? `Zone ${d.name}` : "New zone"} data-testid="lighting-zone-form">
       <header class="inspector-head"><span class="inspector-icon">${icon(radar ? "radar" : "layers", 22)}</span>
         <div><h3>${d.id ? d.name : "New zone"}</h3><span class="muted small">${d.id ? `id ${d.id}` : "not saved yet"}</span></div>
         <button type="button" class="icon-btn" aria-label="Close" @click=${() => (this.draft = null)}>${icon("close")}</button></header>
+      ${this.presence ? this.detectionForm(d, radar, radarOk) : this.rulesForm(d)}
+    </aside>`;
+  }
+
+  /** Lighting → Zone lighting rules: the lights that respond to the zone and how. */
+  private rulesForm(d: Obj): TemplateResult {
+    const lim = this.z.limits ?? {};
+    return html`<section class="inspector-section"><p class="small muted">Detection (sensors, radar band, timing) is set in <a href=${this.presenceLink(d.id)}>Presence → ${this.room.name} → Zones</a>.</p>
+        <div class="lp-form lp-form-1">${numberField({ label: "Priority", value: d.priority, min: lim.priority?.[0] ?? 1, max: lim.priority?.[1] ?? 100, help: "Higher wins between zones for a light both list.", onChange: (v) => this.patch({ priority: v ?? 1 }) })}</div></section>
+      <section class="inspector-section"><h4>Lights that respond to this zone</h4>${this.targetsForm(d)}</section>
+      <section class="inspector-section"><h4>Manual changes, daylight and release</h4><div class="lp-form lp-form-1">
+          ${selectField({ label: "Manual changes", value: d.manual, options: [["respect", "Respected"], ["override", "Zone wins over earlier ones"]], onChange: (v) => this.patch({ manual: v }) })}
+          ${selectField({ label: "Switch on in daylight", value: d.daylight, options: [["room", "Only when the room needs light"], ["always", "Always (ignore light level)"], ["below", "Below its own light level"]], onChange: (v) => this.patch({ daylight: v }) })}
+          ${d.daylight === "below" ? numberField({ label: "Its light level", value: d.on_below, unit: "lx", min: lim.lux?.[0] ?? 1, max: lim.lux?.[1] ?? 5000, onChange: (v) => this.patch({ on_below: v }) }) : nothing}
+          ${selectField({ label: "When the zone ends", value: d.release, options: [["restore", "Room rules take over"], ["leave", "Lights stay as they are"]], onChange: (v) => this.patch({ release: v }) })}
+        </div></section>
+      <section class="inspector-section"><div class="row-actions lp-row">
+        <button type="button" class="btn" @click=${() => (this.draft = null)}>Cancel</button>
+        <button type="button" class="btn btn-primary" data-testid="lighting-zone-save" ?disabled=${this.busy} @click=${() => void this.save()}>${icon("save", 18)}Save lighting rules</button></div>
+        <p class="small muted">Saving sends no command: the lights follow at the zone's next change or the next lighting trigger.</p></section>`;
+  }
+
+  /** Presence → Zones: the zone's identity and detection. */
+  private detectionForm(d: Obj, radar: boolean, radarOk: boolean): TemplateResult {
+    const z = this.z;
+    const lim = z.limits ?? {};
+    const uses = d.id ? (z.zones ?? []).find((x: Obj) => x.id === d.id)?.lighting : null;
+    const hasUses = !!uses && ((uses.lights ?? []).length > 0 || (uses.brightness ?? []).length > 0);
+    return html`
       <section class="inspector-section"><div class="lp-form lp-form-1">
         <label class="lp-field"><span class="lp-label">Name</span><input type="text" maxlength="60" .value=${d.name ?? ""} @input=${(e: Event) => this.patch({ name: (e.target as HTMLInputElement).value })} /></label>
-        ${toggleField({ label: "Enabled", checked: !!d.enabled, onChange: (v) => this.patch({ enabled: v }) })}
+        ${toggleField({ label: "Enabled", checked: !!d.enabled, help: d.id ? "Switched off, the zone ends: if it is occupied, its lights follow the remaining rules at once." : undefined, onChange: (v) => this.patch({ enabled: v }) })}
         <div class="lp-field"><span class="lp-label">Detection</span>${segments<string>(d.detection ?? "sensors", [["sensors", "Room sensors", "motion-sensor"], ...(radarOk || radar ? [["radar", "Radar distance", "radar"] as [string, string, string]] : [])],
           (v) => this.patch({ detection: v, radar: v === "radar" ? radarDefaults(d.radar) : d.radar }), { label: "Detection" })}
           ${radarOk ? nothing : html`<span class="small muted">Radar distance needs a distance sensor in metres, centimetres or millimetres.</span>`}</div>
-        ${numberField({ label: "Priority", value: d.priority, min: lim.priority?.[0] ?? 1, max: lim.priority?.[1] ?? 100, help: "Higher wins between zones.", onChange: (v) => this.patch({ priority: v ?? 1 }) })}
       </div></section>
       <section class="inspector-section"><h4>${radar ? "Radar" : "Presence sensors of this zone"}</h4>
         ${radar ? this.radarForm(d) : html`<ul class="plain-list">${(z.sensors ?? []).map((s: Obj) => html`<li><label class="lp-check"><input type="checkbox" .checked=${(d.sensors ?? []).includes(s.entity_id)}
@@ -251,30 +320,30 @@ export class SlLpZones extends StoreElement {
           ${!(z.sensors ?? []).length ? html`<li class="muted small">The room has no sensors.</li>` : nothing}</ul>
           ${selectField({ label: "Occupied", value: d.activation, options: [["possible", "At the first detection"], ["confirmed", "When presence is confirmed"]], onChange: (v) => this.patch({ activation: v }) })}`}
       </section>
-      <section class="inspector-section"><h4>Lights of this zone</h4>${this.targetsForm(d)}</section>
-      <section class="inspector-section">${advancedToggle(!!d._more, () => this.patch({ _more: !d._more }), "Detection, daylight and manual changes")}
-        ${d._more ? html`<div class="lp-form lp-form-1">
+      <section class="inspector-section"><h4>Timing and availability</h4><div class="lp-form lp-form-1">
           ${toggleField({ label: "Keeps the room occupied while this zone is occupied", checked: !!d.holds_room, onChange: (v) => this.patch({ holds_room: v }) })}
           ${selectField({ label: radar ? "If the distance or radar is unavailable" : "If its sensors are unavailable", value: d.unavailable,
             options: radar ? [["hold", "Keep its state while presence is detected"], ["vacant", "Release it (after the exit delay)"], ["occupied", "Active while presence is detected"]]
               : [["hold", "Keep its last state"], ["vacant", "Treat as vacant"], ["occupied", "Occupied while the room is"]], onChange: (v) => this.patch({ unavailable: v }) })}
-          ${selectField({ label: "Manual changes", value: d.manual, options: [["respect", "Respected"], ["override", "Zone wins over earlier ones"]], onChange: (v) => this.patch({ manual: v }) })}
-          ${selectField({ label: "Switch on in daylight", value: d.daylight, options: [["room", "Only when the room needs light"], ["always", "Always (ignore light level)"], ["below", "Below its own light level"]], onChange: (v) => this.patch({ daylight: v }) })}
-          ${d.daylight === "below" ? numberField({ label: "Its light level", value: d.on_below, unit: "lx", min: lim.lux?.[0] ?? 1, max: lim.lux?.[1] ?? 5000, onChange: (v) => this.patch({ on_below: v }) }) : nothing}
-          ${selectField({ label: "When the zone ends", value: d.release, options: [["restore", "Room rules take over"], ["leave", "Lights stay as they are"]], onChange: (v) => this.patch({ release: v }) })}
-          ${radar ? nothing : TIMING.map(([k, label]) => numberField({ label, value: d.timing?.[k], placeholder: z.room_timing?.[k], unit: "s", min: lim.timing?.[k]?.[0], max: lim.timing?.[k]?.[1],
+          ${radar ? html`<p class="small muted">Entry and exit delays and hysteresis of the radar band are under “Delays, hysteresis and units” above.</p>`
+            : advancedToggle(!!d._more, () => this.patch({ _more: !d._more }), "Occupancy timing of this zone")}
+          ${!radar && d._more ? TIMING.map(([k, label]) => numberField({ label, value: d.timing?.[k], placeholder: z.room_timing?.[k], unit: "s", min: lim.timing?.[k]?.[0], max: lim.timing?.[k]?.[1],
             tag: html`<span class="inherit-tag ${d.timing?.[k] !== null && d.timing?.[k] !== undefined ? "override" : ""}">${d.timing?.[k] !== null && d.timing?.[k] !== undefined ? "zone value" : `room (${fmtSecs(z.room_timing?.[k])})`}</span>`,
-            onChange: (v) => this.patch({ timing: { ...(d.timing ?? {}), [k]: v } }) }))}
-        </div>` : nothing}</section>
+            onChange: (v) => this.patch({ timing: { ...(d.timing ?? {}), [k]: v } }) })) : nothing}
+        </div></section>
+      ${d.id ? html`<section class="inspector-section" data-testid="zone-lighting-uses"><h4>Lighting</h4>
+        ${hasUses ? html`<p class="small">${(uses.lights ?? []).length ? `Lights responding: ${uses.lights.map((l: Obj) => l.name).join(", ")}.` : ""}
+            ${(uses.brightness ?? []).length ? ` Brightness matrix cells: ${uses.brightness.map((b: Obj) => `${b.name} (${b.cells})`).join(", ")}.` : ""}</p>`
+          : html`<p class="small muted">No light responds to this zone: it is an occupancy signal of ${this.room.name} only.</p>`}
+        <a class="text-link" href=${`#/lighting/${encodeURIComponent(this.room.area_id)}/zones`}>Zone lighting rules ${icon("chevron-right", 16)}</a></section>` : nothing}
       <section class="inspector-section"><div class="row-actions lp-row">
         <button type="button" class="btn" @click=${() => (this.draft = null)}>Cancel</button>
-        <button type="button" class="btn btn-primary" data-testid="lighting-zone-save" ?disabled=${this.busy || (radar && (!d.radar?.presence || !d.radar?.distance))} @click=${() => void this.save()}>${icon("save", 18)}${d.id ? "Save zone" : "Add zone"}</button></div>
-        ${d.id ? this.askDelete ? html`<p class="lp-confirm">Delete ${d.name}? If it is active, its lights follow the remaining rules at once.
-              <button type="button" class="btn btn-danger btn-small" @click=${async () => { if (await this.send("zone/remove", { area_id: this.room.area_id, zone_id: d.id }, "Zone deleted")) this.draft = null; }}>Delete zone</button>
+        <button type="button" class="btn btn-primary" data-testid="presence-zone-save" ?disabled=${this.busy || (radar && (!d.radar?.presence || !d.radar?.distance))} @click=${() => void this.save()}>${icon("save", 18)}${d.id ? "Save zone" : "Add zone"}</button></div>
+        ${d.id ? this.askDelete ? html`<p class="lp-confirm" data-testid="zone-delete-confirm">Delete ${d.name}?${hasUses ? html` <strong>Lights respond to it:</strong> ${[...(uses.lights ?? []).map((l: Obj) => l.name), ...(uses.brightness ?? []).map((b: Obj) => `${b.name}'s matrix column`)].join(", ")} ${(uses.brightness ?? []).length ? "(those brightness values are deleted with it)" : ""}.` : ""} If it is active, its lights follow the remaining rules at once.
+              <button type="button" class="btn btn-danger btn-small" data-testid="zone-delete" @click=${async () => { if (await this.send(this.zoneCmd("remove"), { area_id: this.room.area_id, zone_id: d.id, ...(this.presence ? { confirm: true } : {}) }, "Zone deleted")) this.draft = null; }}>Delete zone</button>
               <button type="button" class="btn btn-small" @click=${() => (this.askDelete = false)}>Cancel</button></p>`
           : html`<button type="button" class="btn btn-danger btn-small lp-gap" @click=${() => (this.askDelete = true)}>${icon("delete", 16)}Delete zone…</button>` : nothing}
-        <p class="small muted">Saving sends no command: the zone acts at its next detection.</p></section>
-    </aside>`;
+        <p class="small muted">Saving sends no command: the zone's new state is used from now on, and its lights follow at the zone's next change.</p></section>`;
   }
 
   // ------------------------------------------------------------------ space
@@ -310,23 +379,44 @@ export class SlLpZones extends StoreElement {
 
   protected render(): unknown {
     const z = this.z;
-    if (!this.room.zones) return html`<p class="muted">Zones are not available for this room.</p>`;
+    if (!this.room.zones) return html`<p class="muted">Zones are not available for this room${this.presence ? " (it is not enabled, or lighting is not running)" : ""}.</p>`;
     const dis = !this.canEdit || this.busy;
     const max = z.limits?.max_zones ?? 8;
     const radarOk = (z.radar?.distance ?? []).some((x: Obj) => x.valid || x.problem === "unavailable");
     const rules: Obj[] = z.rules ?? [];
+    const list = (z.zones ?? []).length ? html`<ul class="lp-zone-list">${z.zones.map((x: Obj) => this.zoneCard(x))}</ul>` : html`<p class="muted">No zones in this room.</p>`;
+    if (this.presence) {
+      const hist: Obj[] = z.history ?? [];
+      return html`<div class="lp-split ${this.draft ? "lp-has-inspector" : ""}">
+        <div class="lp-main">
+          ${card("Zones", "layers", html`
+            <p class="small muted">Parts of ${this.room.name} where presence is detected on its own (a desk, a sink, a reading chair): by some of the room's sensors, or by a radar's distance band. A zone is an occupancy signal of the room. Lighting can respond to it (Lighting → ${this.room.name} → Zone lighting), and it can keep the room occupied. Home Assistant's areas are not changed.</p>
+            ${list}
+            ${dis || (z.zones ?? []).length >= max ? nothing : html`<div class="row-actions lp-row">
+              <button type="button" class="btn btn-small" data-testid="presence-zone-add" @click=${() => this.edit(null)}>${icon("plus", 16)}Add zone</button>
+              ${radarOk ? html`<button type="button" class="btn btn-small" data-testid="presence-radar-zone-add" @click=${() => this.edit(null, true)}>${icon("radar", 16)}Add radar distance zone</button>` : nothing}</div>`}`,
+            { wide: true, testid: "presence-zones-editor" })}
+          <div class="lp-two">
+            ${card("Recent zone changes", "history", hist.length ? html`<ul class="lp-dlist">${[...hist].reverse().map((h: Obj) => html`<li><span class="mono small">${String(h.at ?? "").slice(11, 19)}</span> <strong>${h.name}</strong> ${h.event}${h.distance !== undefined ? ` · ${h.distance} m` : ""}${h.reason ? html` <span class="small muted">${h.reason}</span>` : nothing}</li>`)}</ul>`
+              : html`<p class="muted small">No zone change recorded yet.</p>`, { testid: "presence-zone-history" })}
+            ${card("Shared space", "open-plan", z.space ? html`<p><strong>${z.space.name}</strong>: ${(z.space.rooms ?? []).map((a: string) => z.space.room_names?.[a] ?? a).join(", ")}</p>
+                <p class="small muted">Each room keeps its own occupancy and zones. How the space's lights behave is set in <a href="#/lighting/settings/spaces">Lighting settings</a>.</p>`
+              : html`<p class="muted small">${this.room.name} is not part of a shared space (<a href="#/lighting/settings/spaces">Lighting settings</a>).</p>`, { testid: "presence-zone-space" })}
+          </div>
+        </div>
+        ${this.draft ? this.form(this.draft) : nothing}
+      </div>`;
+    }
     return html`<div class="lp-split ${this.draft ? "lp-has-inspector" : ""}">
       <div class="lp-main">
-        ${card("Zones", "layers", html`
-          <p class="small muted">Optional parts of ${this.room.name} with their own sensors and lighting (a sink, a reading chair). A zone's lighting wins over the mood while it is occupied; the higher priority wins between zones. Home Assistant's areas are not changed.</p>
-          ${(z.zones ?? []).length ? html`<ul class="lp-zone-list">${z.zones.map((x: Obj) => this.zoneCard(x))}</ul>` : html`<p class="muted">No zones in this room.</p>`}
-          ${dis || (z.zones ?? []).length >= max ? nothing : html`<div class="row-actions lp-row">
-            <button type="button" class="btn btn-small" data-testid="lighting-zone-add" @click=${() => this.edit(null)}>${icon("plus", 16)}Add zone</button>
-            ${radarOk ? html`<button type="button" class="btn btn-small" @click=${() => this.edit(null, true)}>${icon("radar", 16)}Add radar distance zone</button>` : nothing}</div>`}`,
+        ${card("Zone lighting rules", "layers", html`
+          <p class="small muted">Which lights respond while a zone of ${this.room.name} is occupied, and how. A zone's lighting wins over the mood while it is occupied; the higher priority wins between zones. Select a zone to change its lighting rules.</p>
+          ${list}
+          <p class="lp-zone-links small"><a class="btn btn-small" data-testid="lighting-zones-presence-link" href=${this.presenceLink()}>${icon("motion-sensor", 16)}Add zones or change their detection in Presence</a></p>`,
           { wide: true, testid: "lighting-zones" })}
         <div class="lp-two">
           ${card("Which rule controls each light now", "list", rules.length ? html`<div class="table-wrap"><table class="plain-table lp-table"><thead><tr><th scope="col">Light</th><th scope="col">Rule</th><th scope="col">Requests</th><th scope="col">Why</th></tr></thead>
-            <tbody>${rules.map((x) => html`<tr><td>${x.name}</td><td>${x.rule ?? "—"}${x.superseded?.length ? html`<span class="block small muted">over ${x.superseded.join(", ")}</span>` : nothing}</td>
+            <tbody>${rules.map((x) => html`<tr><td><span class="cell-main">${x.name}${inspectButton(x.entity_id, this.room.area_id, x.name)}</span></td><td>${x.rule ?? "—"}${x.superseded?.length ? html`<span class="block small muted">over ${x.superseded.join(", ")}</span>` : nothing}</td>
               <td>${stateText(x.requested)}</td><td class="small muted">${x.reason}</td></tr>`)}</tbody></table></div>` : html`<p class="muted small">No rule is active.</p>`)}
           ${this.spaceCard()}
         </div>

@@ -5,6 +5,78 @@ engine and every configuration. The *Smart Occupancy & Lighting* integration
 (1.0.0, the companion) gives it native entities, a fenced way to command lights
 and covers, and compact dashboard cards.
 
+## Phase A6.2 (0.9.0): Presence zones, the light inspector and brightness delays
+
+Three improvements of existing functionality. Nothing changes on upgrade: every zone, light rule and brightness
+matrix keeps its exact behaviour; delays are 0 s (immediate) until you set them. Needs the companion
+integration 1.0.0.
+
+### Zones are part of Presence (Presence → a room → Zones)
+
+A zone is a part of a room where presence is detected on its own (a desk, a sink, a reading chair): by some of
+the room's sensors, or by a radar's distance band. It is an occupancy signal of the room - it can keep the room
+occupied, and Lighting can respond to it - and it exists whether or not any light responds to it.
+
+- **Presence → a room → Zones** creates and deletes zones and edits everything about their detection: name
+  (its id never changes), enabled, room sensors or radar distance (band, entry and exit delays, hysteresis,
+  units, the test distance), occupied at the first detection or when confirmed, its own occupancy timing, what
+  happens when its sensors are unavailable, and whether it keeps the room occupied. Each zone shows its live
+  state, what responds to it, and a link to its lighting rules. **Presence** (the main page) lists every room's
+  zones with an *Edit* link, and each room card says how many zones it has.
+- **Lighting → a room → Zone lighting** sets which lights respond to each zone and how (On with brightness,
+  colour temperature and fade, Off or Unchanged; priority between zones; manual changes; daylight; what happens
+  when the zone ends), shows which rule controls each light now, and the room's shared space. Zones are added
+  and their detection is changed in Presence (linked).
+- Saving a zone sends no command. A zone whose state changes because you edited its detection (a sensor
+  removed, a new zone that is occupied at once) is used from then on; its lights follow at the zone's next change
+  or the next lighting trigger. Switching a zone off or deleting it ends it: if it is occupied, its lights follow
+  the remaining rules at once (as a deletion always did). Deleting a zone that lights respond to asks for a
+  confirmation; its brightness matrix column (values and delays) is deleted with it.
+- Stored exactly as before (one zone record with a stable id, one zone engine): no migration.
+
+### The light inspector: what controls this light?
+
+Select the ⓘ button beside a light - in a room's lighting overview and lights, the brightness matrix, zone
+lighting, the Supervisor table, a light placed on the floor plan, or the device lookup (Diagnostics) - for one
+drawer that answers:
+
+- **What is controlling it now**: the room's Automatic / Observing mode, Manual mood, the mood, occupancy, the
+  active zone, the ambient light category, the winning rule and why, the rules it won over, a manual override
+  with its remaining time, Priority Inputs, the Room Supervisor and automations that also control it.
+- **Three things that need not agree**, side by side: what the winning rule wants, the last command Smart
+  Occupancy sent, and what the device reports. When the last change was not made by Smart Occupancy and Home
+  Assistant did not say by whom, it says exactly that.
+- **A pending brightness delay** with its condition, remaining time and what happened to earlier ones.
+- **Device**: area, device and integration, availability, state, brightness and colour, what it can do, group
+  membership, relay or on/off-only.
+- **Recent activity** from the room's decision log and Room Supervisor log, filtered to this light.
+
+**Identify** (administrators) switches the light to full brightness for about 2.5 s and then back to exactly
+what it was (off, or its brightness, colour temperature, colour or effect). It is not a manual change: no
+override is registered or cleared, and no mood, occupancy, rule or matrix changes. An on/off light or relay is
+just switched on and off again. If a person, a wall switch, a Priority Input or a newer lighting decision changes
+the light meanwhile, that wins and nothing is restored over it. A group asks you to choose one of its lights, or
+to identify the whole group (each light returns to its own state). If the App stops in the middle, it restores
+the light at its next start only if that happens within 2 minutes and the light has not changed since.
+
+### Delay On / Delay Off per brightness matrix cell (Lighting → a room → Brightness)
+
+Select a cell with a value: besides its brightness (or On / Off) it has **Delay On** and **Delay Off** in
+seconds (0-3600; 0 = at once, the default). A cell with a delay shows a small clock.
+
+- **Delay On**: when this cell would switch the light on from off, it waits that long. If the situation ends
+  first (the zone is left, the room is vacant), nothing is switched on. If another cell wins while it waits, the
+  wait continues from the same start with that cell's own delay and brightness (never a stale value).
+- **Delay Off**: when the cell that kept the light on stops applying and the light would be switched off while
+  the room is still occupied, the light keeps its state for that long. If the situation returns, or another rule
+  wants it on, nothing is switched off.
+- A change from one brightness to another is never delayed. A manual change, a wall switch, a Priority Input,
+  Manual mood, vacancy, the room set to Observing or Automatic, *Resume* and Identify act at once and end a
+  pending delay. The single winning rule per light is unchanged, and only that rule's delay applies.
+- A pending delay is shown in the light inspector and the Room Supervisor waits for it. Delays are kept in
+  templates, copies, previews, exports and backups. After a restart a pending delay is dropped, never replayed:
+  the next decision starts afresh. Saving a matrix sends no command.
+
 ## Phase A6.1 (0.8.0): multi-sensor sunlight and cross-room switch targets
 
 Both are extensions of existing behaviour and off until you configure them. They need the companion
@@ -677,8 +749,8 @@ one side produces the forecasts.
   CAD program); sensor coverage and sun analysis are not drawn (the
   integration does not know a sensor's coverage or direction).
   Live occupancy needs rooms observed by Smart Occupancy.
-- Presence: lighting zones and radar distance zones are shown, not edited
-  (they stay in the Smart Room Lighting card). The integration's presence log
+- Presence: zones are edited in Presence → a room → Zones since 0.9.0 (before:
+  shown only). The integration's presence log
   keeps the latest 400 decisions and changes while Home Assistant runs;
   older history comes from the Recorder (room state, reason and sensors), so
   decisions before the last restart show the state and reason only.

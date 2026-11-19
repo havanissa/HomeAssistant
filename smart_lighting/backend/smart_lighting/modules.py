@@ -104,10 +104,10 @@ MODULES: tuple[Module, ...] = (
     ),
     Module(
         "presence", "Presence", "motion-sensor", "feature", GUI,
-        "Occupancy of every room, sensors and their roles, occupancy timing, a live occupancy debugger and "
-        "presence diagnostics.",
-        "This App (Presence). The integration's room card (Presence tab) and options flow keep working on the same "
-        "configuration. Lighting zones and radar distance zones are still edited in the Smart Room Lighting card.",
+        "Occupancy of every room, sensors and their roles, zones (parts of a room with their own detection, radar "
+        "distance zones included), occupancy timing, a live occupancy debugger and presence diagnostics.",
+        "This App (Presence). Zones are edited in Presence → a room → Zones since App 0.9.0; which lights respond "
+        "to them is set in Lighting → a room → Zone lighting.",
         scope="Presence configuration: sensor roles, inverted and included signals, global occupancy timing and "
               "room overrides; live engine view, timeline and diagnostics; the occupancy engine (Phase A3.2: shadow "
               "comparison, reviewed handover and rollback). Stored in the integration; the integration publishes "
@@ -116,8 +116,8 @@ MODULES: tuple[Module, ...] = (
     ),
     Module(
         "lighting", "Lighting", "lightbulb-group", "feature", GUI,
-        "Automatic lighting, vacancy, daylight, ambient light levels and brightness rules, zones, shared spaces and "
-        "the Room Supervisor.",
+        "Automatic lighting, vacancy, daylight, ambient light levels and brightness rules (with Delay On / Delay "
+        "Off per cell), zone lighting rules, shared spaces, the Room Supervisor and the light inspector (Identify).",
         "This App (Lighting). Until the handover the integration's cards keep working on the same configuration; "
         "afterwards they are read-only.",
         scope="Lighting configuration and live decisions; the lighting runtime itself (Phase A4: shadow comparison, "

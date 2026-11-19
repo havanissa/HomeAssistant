@@ -860,7 +860,7 @@ async def test_level_and_matrices_survive_a_restart(hass, home, freezer, devices
     assert level(ctrl, h.area) == "bright"
     await hass.async_block_till_done()
     await wait(hass, freezer, 10, sim)
-    assert hass_storage["smart_occupancy.lighting"]["minor_version"] == 9
+    assert hass_storage["smart_occupancy.lighting"]["minor_version"] == 10  # App 0.9.0 (store 1.10: brightness cell delays)
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     ctrl = entry.runtime_data.lighting

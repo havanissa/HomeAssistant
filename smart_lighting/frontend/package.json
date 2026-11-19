@@ -1,6 +1,6 @@
 {
   "name": "smart-lighting-frontend",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "description": "Web interface of the Smart Occupancy & Lighting Home Assistant App",
   "type": "module",

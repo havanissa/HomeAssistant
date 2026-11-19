@@ -45,10 +45,15 @@ import {
   type Unit,
 } from "../presence/model";
 import { apiProblem, LiveReload } from "./presence";
+import "../lighting/lighting-pages.css";
+import "../lighting/lighting-zones";
+import { lighting } from "../lighting/api";
+import type { LightingHost, Obj } from "../lighting/lighting-model";
 
-type Tab = "live" | "timeline" | "timing" | "diagnostics";
+type Tab = "live" | "zones" | "timeline" | "timing" | "diagnostics";
 const TABS: Array<{ key: Tab; title: string; icon: string }> = [
   { key: "live", title: "Live", icon: "eye" },
+  { key: "zones", title: "Zones", icon: "layers" },
   { key: "timeline", title: "Timeline", icon: "history" },
   { key: "timing", title: "Timing", icon: "tune" },
   { key: "diagnostics", title: "Diagnostics", icon: "stethoscope" },
@@ -97,6 +102,9 @@ export class SlPresenceRoom extends StoreElement {
     changedElsewhere: { state: true },
     pick: { state: true },
     tick: { state: true },
+    zones: { state: true },
+    zonesError: { state: true },
+    zonesBusy: { state: true },
   };
   declare areaId: string;
   declare data: PresenceWorkspace | null;
@@ -118,6 +126,31 @@ export class SlPresenceRoom extends StoreElement {
   declare changedElsewhere: boolean;
   declare pick: boolean;
   declare tick: number;
+  /** App 0.9.0: the room's zones as Presence edits them (``smart_occupancy/zones/room``). */
+  declare zones: Obj | null;
+  declare zonesError: string | null;
+  declare zonesBusy: boolean;
+  private openZoneId: string | null = null;
+  private zonesTimer: number | undefined;
+  /** What the zone editor calls to run a command: busy state, notice, reload (like the lighting pages' host). */
+  private zoneHost: LightingHost = {
+    busy: false, canEdit: true, error: null,
+    run: async (action, done) => {
+      this.zonesBusy = true;
+      this.zonesError = null;
+      try {
+        await action();
+        this.notice = done ?? null;
+        await this.loadZones();
+        return true;
+      } catch (err) {
+        this.zonesError = err instanceof Error ? err.message : String(err);
+        return false;
+      } finally {
+        this.zonesBusy = false;
+      }
+    },
+  };
   private offset = 0;
   private highlight: string | null = null;
   private loadedArea: string | null = null;
@@ -152,6 +185,27 @@ export class SlPresenceRoom extends StoreElement {
     this.changedElsewhere = false;
     this.pick = false;
     this.tick = 0;
+    this.zones = null;
+    this.zonesError = null;
+    this.zonesBusy = false;
+  }
+
+  /** Presence → Zones: the zones of this room (detection, state, what responds to them). */
+  async loadZones(): Promise<void> {
+    const area = this.areaId;
+    try {
+      const res = await lighting<Obj>("smart_occupancy/zones/room", { area_id: area });
+      if (area !== this.areaId) return;
+      this.zones = res;
+      if (this.openZoneId) {
+        const id = this.openZoneId;
+        this.openZoneId = null;
+        await this.updateComplete;
+        (this.querySelector("sl-lp-zones") as unknown as { openZone?: (z: string) => void } | null)?.openZone?.(id);
+      }
+    } catch (err) {
+      if (area === this.areaId) this.zonesError = err instanceof Error ? err.message : String(err);
+    }
   }
 
   // ------------------------------------------------------------ lifecycle
@@ -174,6 +228,7 @@ export class SlPresenceRoom extends StoreElement {
     window.removeEventListener("beforeunload", this.onBeforeUnload);
     setLeaveGuard(null);
     window.clearInterval(this.timer);
+    window.clearInterval(this.zonesTimer);
     this.reloader.stop();
     live.watch([]);
   }
@@ -184,6 +239,14 @@ export class SlPresenceRoom extends StoreElement {
       this.reset();
       this.readQuery();
       void this.load();
+    }
+    if (changed.has("tab") || changed.has("areaId")) {
+      window.clearInterval(this.zonesTimer);
+      if (this.tab === "zones") {
+        void this.loadZones();
+        // (Live zone states while the tab is open; a draft in the editor is kept.)
+        this.zonesTimer = window.setInterval(() => { if (!this.zonesBusy) void this.loadZones(); }, 5000);
+      }
     }
     if (this.data) this.reloader.check();
     if (store.roomsVersion !== this.seenRooms) {
@@ -203,6 +266,8 @@ export class SlPresenceRoom extends StoreElement {
     this.notice = null;
     this.changedElsewhere = false;
     this.extra.clear();
+    this.zones = null;
+    this.zonesError = null;
   }
 
   /** ``?sensor=``, ``?tab=``, ``?setting=`` from the dashboard, the diagnostics or the floor plan. */
@@ -212,6 +277,8 @@ export class SlPresenceRoom extends StoreElement {
     history.replaceState(null, "", window.location.hash.split("?")[0]);
     const tab = q.get("tab") as Tab | null;
     if (tab && TABS.some((t) => t.key === tab)) this.tab = tab;
+    const zone = q.get("zone");
+    if (zone && /^[a-z0-9_]{1,60}$/.test(zone)) this.openZoneId = zone;
     const setting = q.get("setting");
     if (setting) {
       this.tab = "timing";
@@ -592,8 +659,9 @@ export class SlPresenceRoom extends StoreElement {
 
   private renderZones(ws: PresenceWorkspace): TemplateResult {
     const fmt = haTime(true);
-    return html`<section class="card" data-testid="presence-zones"><header class="card-head">${icon("radar")}<h3>Lighting zones</h3>${chip("neutral", "Read-only")}</header>
-      <p class="muted small">Zones belong to the lighting configuration (Smart Room Lighting card). Radar distance zones use a radial band: a distance from the radar in any direction it can see, not a position.</p>
+    return html`<section class="card" data-testid="presence-zones"><header class="card-head">${icon("radar")}<h3>Zones</h3>
+        <button type="button" class="btn btn-small" data-testid="presence-zones-edit" @click=${() => (this.tab = "zones")}>${icon("pencil", 16)}Zones</button></header>
+      <p class="muted small">Parts of this room with their own presence detection. Radar distance zones use a radial band: a distance from the radar in any direction it can see, not a position.</p>
       <ul class="zone-list">${ws.room.zones.map((z) => {
         const lr = z.live_radar;
         return html`<li class="zone ${z.active ? "active" : ""}">
@@ -610,6 +678,20 @@ export class SlPresenceRoom extends StoreElement {
             : html`<p class="small muted">Sensors: ${z.sensors.map((e) => this.nameOf(e)).join(", ") || "the room's"}${z.since ? ` · since ${fmt(z.since)}` : ""}</p>`}
         </li>`;
       })}</ul></section>`;
+  }
+
+  private renderZoneEditor(ws: PresenceWorkspace): TemplateResult {
+    const z = this.zones;
+    const canEdit = !!z?.can_edit && ws.writable !== false;
+    this.zoneHost.canEdit = canEdit;
+    this.zoneHost.busy = this.zonesBusy;
+    return html`<div class="tab-stack" data-testid="presence-zones-tab">
+      ${this.zonesError ? html`<p class="notice notice-error" role="alert">${icon("error", 20)}<span>${this.zonesError}</span></p>` : nothing}
+      ${!z ? (this.zonesError ? nothing : html`<div class="card loading" role="status"><span class="spinner" aria-hidden="true"></span><span>Loading the zones…</span></div>`)
+        : !z.available ? html`<section class="card empty-state">${icon("layers", 36)}<p class="muted">Zones are available once the room is enabled and the App runs lighting.</p></section>`
+        : html`${!canEdit ? html`<p class="notice notice-info">${icon("info", 20)}<span>Read only: only administrators can change zones.</span></p>` : nothing}
+          <sl-lp-zones mode="presence" .room=${{ area_id: ws.room.area_id, name: ws.room.name, zones: z } as never} .host=${this.zoneHost} .busy=${this.zonesBusy} .canEdit=${canEdit}></sl-lp-zones>`}
+    </div>`;
   }
 
   /** Configured band and the measured distance on one axis (0 to a bit past the band). No direction, no position. */
@@ -795,6 +877,7 @@ export class SlPresenceRoom extends StoreElement {
     let content: unknown;
     switch (this.tab) {
       case "timeline": content = html`<sl-presence-timeline .room=${ws.room} .log=${ws.log}></sl-presence-timeline>`; break;
+      case "zones": content = this.renderZoneEditor(ws); break;
       case "timing": content = this.renderTiming(ws); break;
       case "diagnostics": content = this.renderDiagnostics(ws); break;
       default: content = this.renderLive(ws);
