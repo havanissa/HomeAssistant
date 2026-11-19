@@ -177,6 +177,8 @@ class Evidence:
     glare: bool = False               # a glare-sensitive window whose glare conditions are met
     glare_text: str = ""
     in_sun: bool = False              # the window was in a sun condition at the last evaluation
+    # App 0.8.0: the window's multi-sensor sunlight result (multisun.SunResult.as_dict()); None = not used
+    multi_sun: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -295,6 +297,16 @@ def direct_sun(flags: Flags, values: Mapping[str, Any], ev: Evidence) -> dict[st
     ``likely`` (clear sky from the weather, only without a light sensor and only when allowed),
     ``not_detected`` (the sun is in front, but the light is ordinary: cloudy daylight) or
     ``uncertain`` (the sun is in front, but no trustworthy evidence)."""
+    if ev.multi_sun is not None:
+        # The window's own sunlight sensors are its sun evidence: their valid trigger is not vetoed by the
+        # geometry, the house light sensor or the weather; their absence of sunshine is not overridden either.
+        ms = ev.multi_sun
+        if ms["active"]:
+            return {"status": "confirmed", "text": ms["reason"] or "Direct sunlight detected by the window's sensors",
+                    "multi_sun": True}
+        if ms["invalid"] and not ms["above_on"] and not ms.get("any_healthy"):
+            return {"status": "uncertain", "text": ms["reason"], "multi_sun": True}
+        return {"status": "not_detected", "text": ms["reason"], "multi_sun": True}
     if not ev.exposed:
         return {"status": "not_exposed", "text": ev.exposure_text or "The sun is not in front of this window"}
     if ev.lux_status == "ok":

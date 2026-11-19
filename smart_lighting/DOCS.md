@@ -5,7 +5,61 @@ engine and every configuration. The *Smart Occupancy & Lighting* integration
 (1.0.0, the companion) gives it native entities, a fenced way to command lights
 and covers, and compact dashboard cards.
 
-## Phase A6: the App is the product (this version)
+## Phase A6.1 (0.8.0): multi-sensor sunlight and cross-room switch targets
+
+Both are extensions of existing behaviour and off until you configure them. They need the companion
+integration 1.0.0.
+
+### Multi-sensor sunlight (Curtains → a window → Automatic)
+
+Switch on *Use this window's sunlight sensors* and add one or more illuminance sensors as chips. Each chip shows
+the sensor's value and health; *Disable* keeps it in the list without using it, the bin removes it.
+
+- **Activate above**: as soon as **any** enabled sensor with a valid reading is above this level, sun protection
+  is requested (no agreement of the others needed, no averaging).
+- **Release below** and **Release delay**: protection ends only when **every** enabled sensor reads below
+  *Release below*, continuously for the delay. A sensor at or above the level, or above *Activate above*, starts
+  the countdown again. *Release below* must be lower than *Activate above*.
+- A sensor that is missing, unavailable, non-numeric, stale, stuck or implausible is never sunshine. While
+  protection is on it **prevents the release** ("Release cannot be confirmed") and the window lists it as a
+  problem, until you disable or remove it.
+- The levels are set like every other curtain rule: for this window, its room or all windows.
+- The card shows which sensor triggered it, which sensors are still above activation, which prevent the release,
+  the remaining countdown and why. *Test the rules* runs your own readings and elapsed time without saving or
+  moving anything.
+- Precedence is unchanged: sleep, night, evening privacy, manual holds (with their policy), unavailable covers,
+  competing automations and the movement limits come first, and Global Modes choose the preset. A release
+  re-evaluates the whole decision; it never forces a curtain open.
+- After a restart protection stays on and the release delay starts again: a restart never shortens it.
+- With the feature on, the window's sensors are its sunlight evidence (instead of the house's outdoor light
+  sensor and the sun geometry); with it off, the window decides exactly as before.
+
+### Cross-room switch targets (Switches → a switch → a button)
+
+For light actions (on, off, toggle, brightness steps, hold-to-dim, set brightness, set colour temperature) the
+*Lights* field holds one or more targets as chips. *Add a target…* lists **This room**, the **adjacent rooms**
+(the rooms configured as adjacent, and shared open-plan spaces; floor-plan suggestions count once you accepted
+them in Rooms) and, with the search box, every **other room**: each room's "all lights" or a single light or
+group, shown with its room ("Trappa → Stairway Lamp"). Under the chips you see a summary ("Toggle Stairway
+Lamp (Trappa)") and *Affects n lights*: the physical lights, which ones a group already covers, and what a light
+does not support (an on/off lamp never gets a brightness or colour).
+
+- The press still belongs to the switch's room. The lights in another room count as a **manual change in their
+  own room**, with that room's override time; *Resume* in that room releases it, and the next press sets it
+  again. That room's occupancy is not changed.
+- A switch press is a deliberate command: it is executed even when the other room is empty or bright.
+- Commands go through the same executor as all automatic lighting, only to configured lights; a group's members
+  are never commanded twice; a hold-to-dim run stops on release and when the App loses control.
+- Targets are resolved at every press: a renamed light follows; a removed room or light is reported, not guessed.
+- Existing mappings keep their meaning exactly.
+
+### Migrating from 0.9.0 with this version
+
+These features changed engine code that integration 0.9.0 checks before a lighting, curtain or forecast
+handover, so *Transfer control* refuses those three (occupancy still hands over). Update the integration to
+1.0.0 and continue with *Activate*: the App then takes every subsystem itself, and nothing is switched by it.
+
+## Phase A6: the App is the product
 
 This version works with the integration **0.9.0** (through its bridges, exactly
 as in A5, for the time of the migration) and with the companion **1.0.0**.

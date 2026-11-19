@@ -273,3 +273,34 @@ transition).
   nothing to retire twice without a restore first).
 - A5's parity test `test_unchanged_reports_reach_the_host` stays expected-to-fail: the curtain
   comparator's unchanged-report path is only reachable through the retired bridge.
+
+
+## 8. Phase A6.1 (App 0.8.0): multi-sensor sunlight and cross-room switch targets
+
+**Multi-sensor sunlight.** `curtains/multisun.py` (pure): `SunSensor`, `SunState` (active, triggered by, since;
+the countdown is not stored), `evaluate()` with the ANY-activate / ALL-release rules (strictly above / strictly
+below; invalid readings never activate and block a release while active), `simulate()` (read-only). The window
+has `multi_sun` and `sun_sensors`; the levels are rules `multisun_on_lux`, `multisun_off_lux`, `multisun_release`
+(group `multisun`, all scopes, `consistency()` refuses release ≥ activation). `auto._multi_sun()` judges each
+sensor with `environment.judge_lux` and feeds `Evidence.multi_sun`; `logic.direct_sun()` uses it first
+(confirmed / not detected / uncertain), so everything after it - `_solar()`, the precedence of sleep, night,
+privacy, holds, the lamp, `_act()`'s safety and limits - is unchanged. `WindowRuntime` stores the state under
+`multi_sun`; `manager.rename_entity()` follows sensor renames; `curtains/sun_sensors/simulate` is the read-only
+test; `_problems()` reports failed or missing sensors. Window documents without the keys load and serialize as
+before. Tests: `tests/engine/test_curtains_multisun.py` (17).
+
+**Cross-room switch targets.** `ButtonMapping.targets` (light / group entity ids and `room:<area_id>`; empty =
+the old single `target`, serialized only when set). `LightingController.resolve_switch_targets()` expands rooms,
+drops duplicates and members of an addressed group, and names the managing room of each light;
+`register_switch_override()` registers a light in the switch's room exactly as before and, otherwise, in the room
+that manages it with that room's override time (`switch_room` recorded). `SwitchControl._on()` resolves a mood per
+target room. `switch_websocket`: `target_options` (this room, adjacent = configured adjacency + shared spaces,
+others), `switch/preview` (read-only), validation (refused, never silently dropped), renames in
+`lighting_config.rename_entity()`. The companion allowlist needs nothing new: explicit targets are configured
+lights. Tests: `tests/engine/test_switch_cross_room.py` (5) plus the existing switch suites.
+
+**The 0.9.0 fingerprint.** Both features change modules that 0.9.0 fingerprints. `app_manifest.FINGERPRINT_0_9_0`
+is kept for reference; `transfer_control` refuses lighting / curtain / forecast handovers from 0.9.0 with
+`app_too_new` (after the safe-order check). The lighting and curtain parity recordings were re-recorded
+(`LIGHTING_RECORD=1 CURTAINS_RECORD=1`); reviewed: commands and decisions identical in all 26 scenarios, the
+answers differ only by the new fields and rules.

@@ -37,7 +37,8 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import area_registry as ar
+from homeassistant.helpers import area_registry as ar, entity_registry as er
+from homeassistant.util import dt as dt_util
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_call_later
 
@@ -175,8 +176,27 @@ def _problems(hass: HomeAssistant, window: Window, layers: list[dict[str, Any]],
         if overlap := (members(hass, layer["entity_id"]) | {layer["entity_id"]}) & others:
             out.append({"severity": "warning", "text": f"{layer['name']} shares {', '.join(sorted(overlap))} with "
                         "another window."})
-    if solar_on and window.effective_bearing is None:
+    if solar_on and window.effective_bearing is None and not window.multi_sun_active:
         out.append({"severity": "info", "text": "Sun protection is on, but the window has no direction yet."})
+    if window.multi_sun:
+        # A failed sunlight sensor is never silently ignored: while protection is active it prevents the release.
+        if not window.multi_sun_active:
+            out.append({"severity": "warning", "text": "Multi-sensor sunlight is on, but no sensor is enabled: the "
+                        "window uses its normal sun evidence."})
+        if not solar_on:
+            out.append({"severity": "info", "text": "Multi-sensor sunlight is set, but Sun protection is off for "
+                        "this window."})
+        for sensor in window.sun_sensors:
+            if not sensor.enabled:
+                continue
+            state = hass.states.get(sensor.entity_id)
+            if state is None:
+                out.append({"severity": "warning", "text": f"Sunlight sensor {sensor.entity_id} does not exist in "
+                            "Home Assistant: it can prevent the release of sun protection. Disable or remove it."})
+            elif state.state in ("unavailable", "unknown"):
+                out.append({"severity": "warning", "text": f"Sunlight sensor {state.attributes.get('friendly_name') or sensor.entity_id} "
+                            f"is {state.state}: it can prevent the release of sun protection. Disable or remove it "
+                            "if it has failed."})
     return out
 
 
@@ -194,6 +214,7 @@ def window_model(hass: HomeAssistant, mgr: CurtainManager, window: Window,
         "direction": window.direction, "bearing": window.bearing, "effective_bearing": bearing,
         "compass": compass_label(bearing), "mode": window.mode, "mode_word": MODE_WORDS[window.mode],
         "solar_protection": window.solar_protection, "privacy": window.privacy,
+        "multi_sun": window.multi_sun, "sun_sensors": [x.as_dict() for x in window.sun_sensors],
         "sleep_protection": window.sleep_protection, "solar": window.solar.as_dict(),
         "layers": layers,
         "presets": [{**p.as_dict(), "matches": preset_matches(hass, window, p, tolerance)} for p in window.presets],
@@ -434,6 +455,22 @@ def _solar_from(raw: Any, current: SolarSettings) -> SolarSettings:
     return SolarSettings(int(width), round(float(elevation), 1), obstructions, top)
 
 
+def _sun_sensors_from(hass: HomeAssistant, raw: Any) -> tuple[Any, ...]:
+    """A reviewed list of the window's sunlight sensors (App 0.8.0): existing illuminance sensors only."""
+    from . import multisun  # noqa: PLC0415
+
+    if not isinstance(raw, list) or len(raw) > multisun.MAX_SENSORS:
+        raise CurtainConfigError("invalid_sun_sensors", f"At most {multisun.MAX_SENSORS} sunlight sensors")
+    sensors = multisun.sensors_from(raw)
+    if len(sensors) != len(raw):
+        raise CurtainConfigError("invalid_sun_sensors", "Every sunlight sensor must be a sensor entity, once")
+    registry = er.async_get(hass)
+    for sensor in sensors:
+        if hass.states.get(sensor.entity_id) is None and registry.async_get(sensor.entity_id) is None:
+            raise CurtainConfigError("unknown_entity", f"{sensor.entity_id} does not exist")
+    return sensors
+
+
 def _apply_fields(hass: HomeAssistant, config: CurtainConfig, window: Window, msg: dict[str, Any]) -> Window:
     changes: dict[str, Any] = {}
     if "name" in msg:
@@ -465,6 +502,12 @@ def _apply_fields(hass: HomeAssistant, config: CurtainConfig, window: Window, ms
             changes[flag] = msg[flag]
     if "solar" in msg:
         changes["solar"] = _solar_from(msg["solar"], window.solar)
+    if "multi_sun" in msg:
+        if not isinstance(msg["multi_sun"], bool):
+            raise CurtainConfigError("invalid_flag", "multi_sun must be on or off")
+        changes["multi_sun"] = msg["multi_sun"]
+    if "sun_sensors" in msg:
+        changes["sun_sensors"] = _sun_sensors_from(hass, msg["sun_sensors"])
     window = replace(window, **changes)
     if "layers" in msg:
         window = with_layers(window, _layers_from(hass, config, window, window.window_id, msg["layers"] or []))
@@ -556,6 +599,8 @@ _WINDOW_FIELDS = {
     vol.Optional("solar"): dict,
     vol.Optional("layers"): list,
     vol.Optional("conditions"): dict,
+    vol.Optional("multi_sun"): bool,
+    vol.Optional("sun_sensors"): list,
 }
 
 
@@ -974,6 +1019,51 @@ def ws_auto_simulate(hass, mgr, msg, connection):
     return {"windows": out}
 
 
+@websocket_api.websocket_command({
+    vol.Required("type"): "smart_occupancy/curtains/sun_sensors/simulate",
+    vol.Required("window_id"): str,
+    vol.Required("readings"): {str: vol.Any(None, vol.Coerce(float), "unavailable")},
+    vol.Optional("elapsed_minutes", default=0): vol.All(vol.Coerce(float), vol.Range(min=0, max=1440)),
+    vol.Optional("then"): {str: vol.Any(None, vol.Coerce(float), "unavailable")},
+    vol.Optional("from_state", default="current"): vol.In(("current", "inactive", "active")),
+    vol.Optional("levels"): dict,
+})
+@websocket_api.async_response
+@_guard
+def ws_sun_sensors_simulate(hass, mgr, msg, connection):
+    """A read-only test of a window's multi-sensor sunlight rules: the readings now, then (optionally different
+    readings) after the elapsed time. Changes nothing, moves nothing; the window's real state is untouched."""
+    from . import multisun  # noqa: PLC0415
+
+    window = _window(mgr, msg["window_id"])
+    values, _ = mgr.config.rules_for(window)
+    levels = {"on_lux": values["multisun_on_lux"], "off_lux": values["multisun_off_lux"],
+              "release_minutes": values["multisun_release"], **(msg.get("levels") or {})}
+    if (problem := multisun.check_levels(levels["on_lux"], levels["off_lux"])) is not None:
+        raise CurtainConfigError("invalid_levels", problem)
+    rt = mgr.auto.rt(window.window_id)
+    state = {"current": rt.sun, "inactive": multisun.SunState(), "active": multisun.SunState(True, None, None)}[
+        msg["from_state"]]
+    names = {x.entity_id: x.entity_id for x in window.sun_sensors}
+    for x in window.sun_sensors:
+        if (st := hass.states.get(x.entity_id)) is not None:
+            names[x.entity_id] = str(st.attributes.get("friendly_name") or x.entity_id)
+    now = msg["readings"]
+    steps = [(0.0, now)]
+    if msg["elapsed_minutes"] > 0 or "then" in msg:
+        later = msg.get("then", now)
+        # The rules need the "after" readings to hold continuously: one step at the start of the period, one at
+        # its end.
+        if later != now:
+            steps.append((0.0, later))
+        steps.append((float(msg["elapsed_minutes"]), later))
+    results = multisun.simulate(state, steps, window.sun_sensors, on_lux=float(levels["on_lux"]),
+                                off_lux=float(levels["off_lux"]), release_minutes=float(levels["release_minutes"]),
+                                start=dt_util.utcnow(), names=names)
+    return {"window_id": window.window_id, "levels": levels, "from_state": msg["from_state"], "steps": results,
+            "result": results[-1], "saved": False}
+
+
 def _settings_change(hass: HomeAssistant, mgr: CurtainManager, msg: dict[str, Any]) -> tuple[CurtainConfig, list[Window]]:
     """The configuration after an ``auto/settings`` change and the windows it affects (not saved)."""
     scope = msg["scope"]
@@ -1018,5 +1108,6 @@ CURTAIN_HANDLERS = (
     ws_model, ws_subscribe, ws_window_create, ws_window_update, ws_window_remove, ws_preset_save,
     ws_preset_duplicate, ws_preset_delete, ws_preset_select, ws_preview, ws_apply, ws_manual_clear, ws_settings,
     ws_rescan, ws_calibration_reset, ws_auto_preview, ws_auto_enable, ws_resume, ws_auto_settings,
-    ws_automation_allow, ws_auto_simulate, *MODE_HANDLERS, *SCHEDULE_HANDLERS, *MIGRATION_HANDLERS,
+    ws_automation_allow, ws_auto_simulate, ws_sun_sensors_simulate, *MODE_HANDLERS, *SCHEDULE_HANDLERS,
+    *MIGRATION_HANDLERS,
 )

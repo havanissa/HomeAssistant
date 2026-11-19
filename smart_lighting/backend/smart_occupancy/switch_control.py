@@ -323,7 +323,9 @@ class SwitchControl:
         target = None
         if mapping is not None:
             if mapping.target and mapping.action in LIGHT_ACTIONS:
-                target = "Room lights" if mapping.target == ROOM_TARGET else self._names([mapping.target])
+                target = "Room lights" if mapping.refs == (ROOM_TARGET,) else self._names(
+                    [r for r in mapping.refs if r.startswith("light.")]) if all(
+                    r.startswith("light.") for r in mapping.refs) else ", ".join(mapping.refs)
             elif mapping.entity:
                 target = self._names([mapping.entity])
             elif mapping.mood:
@@ -336,17 +338,16 @@ class SwitchControl:
         )
 
     # --------------------------------------------------------------- targets
-    def _targets(self, area_id: str, mapping: ButtonMapping) -> tuple[list[str], list[str]]:
-        """(online targets, offline targets) of a light action."""
-        if mapping.target == ROOM_TARGET:
-            targets = list(self.ctrl.managed_room(area_id).controlled)
-        else:
-            targets = [mapping.target] if mapping.target.startswith("light.") else []
+    def _targets(self, area_id: str, mapping: ButtonMapping) -> tuple[list[str], list[str], dict[str, str | None]]:
+        """(online targets, offline targets, the room managing each) of a light action. App 0.8.0: also lights,
+        groups and whole rooms outside the switch's room (resolved at the press, from the current configuration)."""
+        resolved, _missing = self.ctrl.resolve_switch_targets(area_id, mapping.refs)
+        owners = dict(resolved)
         online, offline = [], []
-        for entity_id in targets:
+        for entity_id, _owner in resolved:
             state = self.hass.states.get(entity_id)
             (offline if state is None or state.state in _OFFLINE else online).append(entity_id)
-        return online, offline
+        return online, offline, owners
 
     def _level(self, entity_id: str) -> int | None:
         remembered = self._levels.get(entity_id)
@@ -391,7 +392,7 @@ class SwitchControl:
         _LOGGER.debug("switch_action_dispatched area=%s switch=%s action=%s mapping=%s", area_id, switch.id,
                       event.raw, mapping.describe())
         if action in LIGHT_ACTIONS:
-            online, offline = self._targets(area_id, mapping)
+            online, offline, owners = self._targets(area_id, mapping)
             if not online:
                 return _Result("No light to control" + (f" ({_plural(len(offline))} offline)" if offline else ""), False)
             note = f" · {_plural(len(offline))} offline" if offline else ""
@@ -399,7 +400,7 @@ class SwitchControl:
                 any_on = any(self.hass.states.is_state(e, "on") for e in online)
                 action = ButtonAction.OFF if any_on else ButtonAction.ON
             if action == ButtonAction.ON:
-                return await self._on(area_id, online, switch, mapping, event, context, note)
+                return await self._on(area_id, online, switch, mapping, event, context, note, owners)
             if action == ButtonAction.OFF:
                 errors = await self._lights(area_id, "turn_off", {e: {} for e in online}, context, switch, event,
                                             "Physical switch OFF requested")
@@ -455,7 +456,8 @@ class SwitchControl:
         return f"Room lights ({_plural(len(entities))})"
 
     async def _on(self, area_id: str, online: list[str], switch: SwitchConfig, mapping: ButtonMapping,
-                  event: ButtonEvent, context: Context, note: str) -> _Result:
+                  event: ButtonEvent, context: Context, note: str,
+                  owners: dict[str, str | None] | None = None) -> _Result:
         data: dict[str, dict[str, Any]] = {}
         how = ""
         if mapping.on_values == OnValues.FIXED:
@@ -470,14 +472,22 @@ class SwitchControl:
                 data[e] = values
             how = " (fixed values)"
         elif mapping.on_values == OnValues.MOOD:
-            mood, _source = self.ctrl.room_mood(area_id)
-            if mood:
-                for e in online:
-                    resolved = self.ctrl.resolve(mood, area_id, e, self.ctrl.index.profile_targets(e))
+            # Each light follows the mood and profiles of the room that manages it (App 0.8.0: a light switched
+            # from another room gets its own room's values).
+            owners = owners or {}
+            moods: dict[str, str | None] = {}
+            for e in online:
+                room = owners.get(e) or area_id
+                if room not in moods:
+                    moods[room] = self.ctrl.room_mood(room)[0]
+                if moods[room]:
+                    resolved = self.ctrl.resolve(moods[room], room, e, self.ctrl.index.profile_targets(e))
                     service, values, _req, _notes = build_command(resolved, light_capabilities(self.hass, e))
                     if service == "turn_on":
                         data[e] = values
-                how = f" ({mood})" if data else ""
+            mood = moods.get(area_id) if area_id in moods else next(iter(moods.values()), None)
+            used = sorted({m for m in moods.values() if m})
+            how = f" ({' / '.join(used)})" if data and used else ""
             if not data:
                 # No mood, Manual, or the mood switches none of them on: the person still wants light.
                 data = {e: {} for e in online}
@@ -530,7 +540,7 @@ class SwitchControl:
         try:
             async with self._locks.setdefault(key, asyncio.Lock()):
                 self._sent.pop(key, None)
-                online, _offline = self._targets(area_id, mapping)
+                online, _offline, _owners = self._targets(area_id, mapping)
                 lights = [e for e in online if light_capabilities(self.hass, e).brightness]
                 levels: dict[str, int | None] = {e: self._level(e) for e in lights}
                 while not run.stopped and not self._stopped:

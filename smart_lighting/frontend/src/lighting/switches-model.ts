@@ -37,6 +37,8 @@ export interface SwitchStatus {
 export interface Mapping {
   action: string;
   target?: string;
+  /** App 0.8.0: explicit targets, also in other rooms: lights / groups and ``room:<area_id>``. */
+  targets?: string[];
   on_values?: "mood" | "last" | "fixed";
   brightness?: number | null;
   color_temp?: number | null;
@@ -130,6 +132,8 @@ export interface SwitchesModel {
   actions: { value: string; label: string }[];
   ignored_words: Record<string, string>;
   targets: { entity_id: string; name: string | null; group: boolean }[];
+  /** App 0.8.0: every room's lights for the target picker. */
+  target_options?: { this_room: TargetRoom; adjacent: TargetRoom[]; other: TargetRoom[] };
   scenes: { entity_id: string; name: string }[];
   scripts: { entity_id: string; name: string }[];
   wled_presets: { entity_id: string; name: string | null; options: string[] }[];
@@ -354,4 +358,112 @@ export function sameMapping(a: Mapping | null, b: Mapping | null): boolean {
     return msg ? JSON.stringify(Object.entries(msg).sort(([x], [y]) => x.localeCompare(y))) : "none";
   };
   return key(a) === key(b);
+}
+
+
+// ------------------------------------------------------------ cross-room targets (App 0.8.0)
+export interface TargetLight {
+  entity_id: string;
+  name: string;
+  room: string | null;
+  room_name: string | null;
+  group: boolean;
+  members: string[];
+  online: boolean;
+  brightness: boolean;
+  color_temp: boolean;
+  on_off_only: boolean;
+}
+
+export interface TargetRoom {
+  area_id: string;
+  name: string;
+  ref: string;
+  managed: boolean;
+  lights: TargetLight[];
+}
+
+/** The references a light mapping addresses: explicit targets, else the single target (``room`` by default). */
+export function targetRefs(m: Mapping): string[] {
+  if (m.targets && m.targets.length) return m.targets;
+  return [m.target || "room"];
+}
+
+/** The mapping fields for a new set of references: the old single ``target`` when that is enough. */
+export function withTargets(refs: string[], sw: SwitchesModel): Partial<Mapping> {
+  const unique = [...new Set(refs)];
+  const own = sw.target_options?.this_room;
+  if (unique.length === 0) return { target: "room", targets: undefined };
+  if (unique.length === 1 && (unique[0] === "room" || own?.lights.some((l) => l.entity_id === unique[0]))) {
+    return { target: unique[0], targets: undefined };
+  }
+  return { target: "room", targets: unique };
+}
+
+function allRooms(sw: SwitchesModel): TargetRoom[] {
+  const o = sw.target_options;
+  return o ? [o.this_room, ...o.adjacent, ...o.other] : [];
+}
+
+/** A reference in words: "All room lights", "Stova: all lights", "Stairway Lamp (Trappa)". */
+export function refLabel(ref: string, sw: SwitchesModel): string {
+  const rooms = allRooms(sw);
+  const own = sw.target_options?.this_room;
+  if (ref === "room") return "All room lights";
+  if (ref.startsWith("room:")) {
+    const room = rooms.find((r) => r.ref === ref);
+    return `${room?.name ?? ref.slice(5)}: all lights`;
+  }
+  for (const room of rooms) {
+    const light = room.lights.find((l) => l.entity_id === ref);
+    if (light) return room.area_id === own?.area_id ? light.name : `${light.name} (${room.name})`;
+  }
+  const legacy = sw.targets.find((t) => t.entity_id === ref);
+  return legacy?.name || ref;
+}
+
+export interface PreviewRow extends TargetLight {
+  skipped: string | null;
+}
+
+/** The physical lights a mapping affects, as the controller resolves them: rooms expanded to their lights, the
+ * same light only once, members of an addressed group dropped; what each one does not support. */
+export function previewTargets(m: Mapping, sw: SwitchesModel): { rows: PreviewRow[]; dropped: string[]; missing: string[] } {
+  const rooms = allRooms(sw);
+  const own = sw.target_options?.this_room;
+  const byId = new Map<string, TargetLight>();
+  for (const room of rooms) for (const l of room.lights) if (!byId.has(l.entity_id)) byId.set(l.entity_id, l);
+  const wanted: TargetLight[] = [];
+  const missing: string[] = [];
+  for (const ref of targetRefs(m)) {
+    if (ref === "room" || ref.startsWith("room:")) {
+      const room = ref === "room" ? own : rooms.find((r) => r.ref === ref);
+      if (!room || !room.lights.length) { missing.push(ref); continue; }
+      wanted.push(...room.lights);
+    } else {
+      wanted.push(byId.get(ref) ?? { entity_id: ref, name: ref, room: null, room_name: null, group: false, members: [], online: true,
+        brightness: true, color_temp: true, on_off_only: false });
+    }
+  }
+  const seen = new Set<string>();
+  const unique = wanted.filter((l) => (seen.has(l.entity_id) ? false : (seen.add(l.entity_id), true)));
+  const covered = new Set(unique.flatMap((l) => l.members.filter((x) => x !== l.entity_id && seen.has(x))));
+  const kept = unique.filter((l) => !covered.has(l.entity_id));
+  const dimming = ["brightness_up", "brightness_down", "dim_up", "dim_down"].includes(m.action);
+  const rows = kept.map((l): PreviewRow => ({
+    ...l,
+    skipped: !l.online ? "offline" : dimming && !l.brightness ? "on/off only: not dimmed"
+      : m.action === "set_color_temp" && !l.color_temp ? "no colour temperature"
+      : m.action === "set_brightness" && !l.brightness ? "on/off only: switched on without a brightness" : null,
+  }));
+  const dropped = [...new Set(wanted.map((l) => l.entity_id))].filter((e) => covered.has(e));
+  return { rows, dropped, missing };
+}
+
+/** "Toggle Stairway Lamp (Trappa)", "Turn lights off Kamar lamp and Stova: all lights". */
+export function mappingSummary(m: Mapping, sw: SwitchesModel): string {
+  const action = sw.actions.find((a) => a.value === m.action)?.label ?? m.action;
+  if (!LIGHT_ACTIONS.includes(m.action)) return action;
+  const refs = targetRefs(m).map((r) => refLabel(r, sw));
+  return `${action} ${refs.length > 2 ? `${refs.slice(0, -1).join(", ")} and ${refs[refs.length - 1]}` : refs.join(" and ")}`;
 }

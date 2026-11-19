@@ -695,3 +695,29 @@
     grid-template-columns: minmax(0, 1fr) 5rem;
   }
 }
+
+/* App 0.8.0: multi-sensor sunlight */
+.cu-row-actions {
+  display: inline-flex;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+.cu-env-state {
+  margin-top: 0.75rem;
+}
+
+.cu-sim {
+  margin-top: 0.75rem;
+  border-top: 1px dashed var(--sl-border);
+  padding-top: 0.5rem;
+}
+
+.cu-sim summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.cu-sim-input {
+  width: 6.5rem;
+}

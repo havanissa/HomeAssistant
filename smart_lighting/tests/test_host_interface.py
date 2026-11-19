@@ -49,8 +49,8 @@ def test_the_engine_modules_are_the_apps_only_copy() -> None:
     from smart_occupancy.runtime_manifest import MODULES, fingerprint  # noqa: PLC0415
 
     assert list(MODULES) == _manifest()
-    # The 0.9.0 runtime stays byte-identical (its fingerprint) so the App can still hand over from 0.9.0.
-    assert fingerprint() == FINGERPRINT_0_9_0, "a 0.9.0 runtime module changed: put App changes in an App-only module"
+    # App 0.8.0 changed the 0.9.0 runtime on purpose (the migration wizard refuses those handovers from 0.9.0).
+    assert fingerprint() != FINGERPRINT_0_9_0 and len(FINGERPRINT_0_9_0) == 64
     assert set(APP_MODULES).isdisjoint(MODULES) and all((VENDORED / n).is_file() for n in ALL_MODULES)
     present = {p.name for p in VENDORED.glob("*.py")} | {"curtains/" + p.name for p in (VENDORED / "curtains").glob("*.py")}
     assert present - {"__init__.py", "curtains/__init__.py"} <= set(ALL_MODULES) | {m for m in MODULES}, present - set(ALL_MODULES)

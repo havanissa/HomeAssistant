@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.8.0
+
+Phase A6.1: two extensions of existing behaviour. Needs the companion integration 1.0.0. Nothing changes on
+upgrade: both features are off until you configure them.
+
+- **Multi-sensor sunlight** (Curtains → a window → Automatic → *Multi-sensor sunlight*). A window can use several
+  illuminance sensors of its own as its sunlight evidence. As soon as **any** enabled sensor reads more than
+  *Activate above*, sun protection is requested; it ends only when **every** enabled sensor reads below
+  *Release below* for the whole *Release delay*. A sensor that is missing, unavailable, non-numeric, stale, stuck
+  or implausible never counts as sunshine, and while protection is on it prevents the release (the window says
+  which sensor and why) until you disable or remove it. The levels use the usual window / room / all-windows
+  scopes; release must be lower than activation. Sleep, night, evening privacy, manual holds, unavailable covers,
+  movement limits and Global Modes keep their precedence: a release re-evaluates the whole decision. The active
+  state survives a restart; the release countdown starts again after one, so a restart never shortens it. Sensor
+  chips with live values and health, who triggered it, what prevents the release, the countdown, and a read-only
+  test with your own readings and elapsed time. Windows without the feature decide exactly as before.
+- **Cross-room switch targets** (Switches → a switch → a button → *Lights*). A light action (on, off, toggle,
+  brightness steps, hold-to-dim, set brightness, set colour temperature) can target lights outside the switch's
+  room: a light or light group, all lights of a room, or several at once. The picker groups this room, adjacent
+  rooms (configured adjacency and shared spaces) and, with a search, every other room, shows each light's room
+  ("Stairway Lamp (Trappa)"), a summary ("Toggle Stairway Lamp (Trappa)") and the physical lights that will be
+  affected. A light switched from another room counts as a manual change **in the room that manages it**, with
+  that room's override time; *Resume* there releases it, and that room's occupancy is not touched. Every command
+  goes through the same fenced executor; group members are never commanded twice; on/off-only lights never get a
+  brightness or colour. Existing mappings keep their exact meaning.
+- **Migration from 0.9.0**: these features changed engine code that integration 0.9.0 checks before a lighting,
+  curtain or forecast handover. The wizard now refuses those handovers with a clear message: update the
+  integration to 1.0.0 and continue with *Activate* (occupancy still hands over as before).
+
 ## 0.7.3
 
 - **The Rooms and Presence editors work once the App holds the configuration.** The App runs the rooms and

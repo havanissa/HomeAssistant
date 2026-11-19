@@ -369,6 +369,45 @@ export interface EnvModel {
   thermal_enabled: boolean;
   glare: { enabled: boolean; when: string; active: boolean };
   sun_evidence: string;
+  /** App 0.8.0: the window's own sunlight sensors (ANY activates, ALL below for the delay releases). */
+  multi_sun?: MultiSunModel;
+}
+
+export interface SunSensorReading {
+  entity_id: string;
+  name: string;
+  enabled: boolean;
+  status: string;
+  status_word?: string;
+  value: number | null;
+  detail?: string;
+}
+
+export interface MultiSunResult {
+  active: boolean;
+  changed: string | null;
+  triggered_by: string | null;
+  since: string | null;
+  above_on: string[];
+  blocking: string[];
+  invalid: string[];
+  countdown_started: string | null;
+  release_at: string | null;
+  remaining_seconds: number | null;
+  reason: string;
+  release_confirmable: boolean;
+}
+
+export interface MultiSunModel {
+  enabled: boolean;
+  active_source: boolean;
+  sensors: SunSensorReading[];
+  result: MultiSunResult | null;
+  levels: { on_lux: number; off_lux: number; release_minutes: number };
+}
+
+export interface MultiSunStep extends MultiSunResult {
+  minutes: number;
 }
 
 export interface AutoModel {
@@ -456,6 +495,9 @@ export interface WindowModel {
   solar_protection: boolean;
   privacy: boolean;
   sleep_protection: boolean;
+  /** App 0.8.0 */
+  multi_sun?: boolean;
+  sun_sensors?: Array<{ entity_id: string; enabled: boolean }>;
   solar: SolarSettings;
   layers: LayerModel[];
   presets: PresetModel[];

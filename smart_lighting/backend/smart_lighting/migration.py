@@ -46,6 +46,10 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 STEPS = ("inspect", "backup", "validate", "transfer_config", "transfer_control", "activate", "verify", "retire")
+def core_version(core: Any) -> str:
+    return str(getattr(core, "app_version", "") or "")
+
+
 DOMAINS = ("occupancy", "lighting", "curtains", "forecast")
 BACKUPS = 20
 MIGRATION_SCHEMA = 1
@@ -452,6 +456,17 @@ class MigrationService:
         if pending and self.mode == "legacy":
             raise MigrationError("order", f"Hand over {', '.join(pending)} first (safe order: occupancy, lighting, "
                                           "curtains, forecasts)")
+        if domain != "occupancy":
+            # App 0.8.0 changed engine modules that integration 0.9.0 fingerprints before a lighting, curtain or
+            # forecast handover (the occupancy engine is unchanged). Refused here with the way forward.
+            from smart_occupancy.app_manifest import FINGERPRINT_0_9_0  # noqa: PLC0415
+            from smart_occupancy.runtime_manifest import fingerprint  # noqa: PLC0415
+
+            if await asyncio.to_thread(fingerprint) != FINGERPRINT_0_9_0:
+                raise MigrationError("app_too_new", f"This App ({core_version(self.core)}) runs newer {domain} code "
+                                     "than Smart Occupancy & Lighting 0.9.0 accepts for a handover. Update the "
+                                     "integration to 1.0.0 (the companion) and continue with Activate: the App then "
+                                     "takes every subsystem itself; nothing is switched by the update.", 409)
         try:
             outcome = await rt.handover(user_id)
         except Exception as err:  # noqa: BLE001 - the runtimes' own refusals (readiness, moving covers)

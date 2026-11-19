@@ -112,7 +112,8 @@ COMPANION_COMMANDS: frozenset[str] = frozenset(
 #: Phase A5: the integration's curtain editor commands that only read or simulate (forwarded while it controls the
 #: curtains; answered by the App's own handlers after the handover).
 CURTAIN_READ_COMMANDS: frozenset[str] = frozenset(
-    f"smart_occupancy/curtains/{c}" for c in ("model", "preview", "auto/preview", "auto/simulate")
+    f"smart_occupancy/curtains/{c}" for c in ("model", "preview", "auto/preview", "auto/simulate",
+                                              "sun_sensors/simulate")  # App 0.8.0: read-only sunlight test
 )
 #: Phase A5: the curtain editor commands that change the configuration or a window's runtime (apply a confirmed
 #: preset, resume, enable Automatic), administrators only, forwarded with config_write() while the integration
@@ -142,7 +143,7 @@ FORECAST_BRIDGE_COMMANDS: frozenset[str] = frozenset(
 LIGHTING_READ_COMMANDS: frozenset[str] = frozenset(
     f"smart_occupancy/lighting/{c}" for c in (
         "editor", "preview", "room/activation", "brightness/preview", "priority/preview", "zone/radar_test",
-        "switch/candidates", "supervisor/room")
+        "switch/candidates", "supervisor/room", "switch/preview")  # App 0.8.0: the cross-room target preview
 )
 #: Phase A4: the lighting editor commands that change the configuration (or test a profile with real commands),
 #: administrators only, forwarded with config_write() while the integration controls lighting.

@@ -10,7 +10,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { icon } from "../icons";
 import { chip, kv, pageHeader } from "../ui";
 import { segments } from "../lighting/lighting-model";
-import { cmd, curtains, type CurtainsModel, type EnableReview, type LayerModel, type Obj, type Plan, type PresetModel, type Rule, type SimulationWindow, type WindowModel } from "../curtains/api";
+import { cmd, curtains, type CurtainsModel, type EnableReview, type LayerModel, type MultiSunModel, type MultiSunStep, type Obj, type Plan, type PresetModel, type Rule, type SimulationWindow, type WindowModel } from "../curtains/api";
 import {
   adminNotice,
   BAND_TONE,
@@ -64,12 +64,14 @@ interface ApplyState { preset_id: string; preview: boolean; plan: Plan | null; e
 interface EnableState { review: EnableReview | null; error: string | null; busy: boolean }
 interface SimState { label: string; msg: Obj; result: { windows: SimulationWindow[] } | null; error: string | null; busy: boolean }
 interface PresetDraft { preset_id: string | null; name: string; positions: Record<string, number | null> }
+/** App 0.8.0: the read-only multi-sensor sunlight test. */
+interface SunSimState { now: Record<string, string>; then: Record<string, string>; minutes: string; from: "current" | "inactive" | "active"; result: { steps: MultiSunStep[]; result: MultiSunStep } | null; error: string | null; busy: boolean }
 
 export class SlCurtainsWindow extends CurtainsElement {
   static properties = {
     ...CurtainsElement.properties, windowId: { type: String }, tab: { type: String }, model: { state: true },
     apply: { state: true }, enable: { state: true }, sim: { state: true }, presetDraft: { state: true }, scope: { state: true }, addEntity: { state: true },
-    askDelete: { state: true }, openGroups: { state: true },
+    askDelete: { state: true }, openGroups: { state: true }, sunAdd: { state: true }, sunSim: { state: true },
   };
   declare windowId: string;
   declare tab: string;
@@ -82,6 +84,8 @@ export class SlCurtainsWindow extends CurtainsElement {
   declare addEntity: string | null;
   declare askDelete: PresetModel | null;
   declare openGroups: Set<string>;
+  declare sunAdd: string;
+  declare sunSim: SunSimState;
 
   constructor() {
     super();
@@ -96,6 +100,8 @@ export class SlCurtainsWindow extends CurtainsElement {
     this.addEntity = null;
     this.askDelete = null;
     this.openGroups = new Set(["sleep", "daylight"]);
+    this.sunAdd = "";
+    this.sunSim = { now: {}, then: {}, minutes: "15", from: "current", result: null, error: null, busy: false };
   }
 
   async reload(): Promise<void> {
@@ -479,8 +485,112 @@ export class SlCurtainsWindow extends CurtainsElement {
         <h4 class="lp-h">Order of precedence</h4>
         <ol class="cu-prec small">${w.auto.precedence.map((p) => html`<li>${p.word}</li>`)}</ol>
       </section>
-      ${this.rulesForm(w, m, (g) => !ENV_GROUPS.has(g), "Automatic settings")}
+      ${this.multiSunSection(w, m)}
+      ${w.multi_sun ? this.rulesForm(w, m, (g) => g === "multisun", "Multi-sensor sunlight levels") : nothing}
+      ${this.rulesForm(w, m, (g) => !ENV_GROUPS.has(g) && g !== "multisun", "Automatic settings")}
     </div>`;
+  }
+
+  // ------------------------------------------------- multi-sensor sunlight (App 0.8.0)
+  private saveSunSensors(sensors: Array<{ entity_id: string; enabled: boolean }>, label: string): void {
+    void this.saveWindow({ sun_sensors: sensors }, label);
+  }
+
+  private multiSunSection(w: WindowModel, m: CurtainsModel): TemplateResult {
+    const can = this.canEdit;
+    const ms: MultiSunModel | undefined = w.auto.environment?.multi_sun;
+    const sensors = w.sun_sensors ?? [];
+    const res = ms?.result ?? null;
+    const shown = new Map((ms?.sensors ?? []).map((x) => [x.entity_id, x]));
+    const name = (e: string) => shown.get(e)?.name ?? e;
+    const lux = (m.entities?.lux ?? []).filter((x) => !sensors.some((s) => s.entity_id === x.entity_id));
+    const status = !w.multi_sun ? chip("neutral", "Off") : !ms?.active_source ? chip("warning", "No sensor enabled")
+      : res?.active ? chip("ok", "Sun protection requested") : chip("neutral", "No direct sunlight");
+    const remaining = res?.remaining_seconds != null ? `${Math.floor(res.remaining_seconds / 60)} min ${String(res.remaining_seconds % 60).padStart(2, "0")} s` : null;
+    return html`<section class="card wide" data-testid="curtains-multisun">
+      <header class="card-head">${icon("weather-sunny")}<h3>Multi-sensor sunlight</h3>${status}</header>
+      <p class="small muted">Optional sunlight evidence for this window. As soon as <strong>any</strong> enabled sensor reads more than “Activate above”, sun protection is requested. It ends only when <strong>every</strong> enabled sensor reads below “Release below” for the whole release delay. A sensor that is unavailable, stale, stuck or implausible is never sunshine, and while protection is on it prevents the release. Releasing re-evaluates the whole decision: sleep, night, privacy, manual holds and the movement limits still come first.</p>
+      <label class="switch-row lp-switch"><input type="checkbox" role="switch" data-testid="multisun-enabled" .checked=${!!w.multi_sun} ?disabled=${!can || this.busy}
+        @change=${(e: Event) => void this.saveWindow({ multi_sun: (e.target as HTMLInputElement).checked }, `Multi-sensor sunlight ${(e.target as HTMLInputElement).checked ? "on" : "off"}`)} />
+        <span><span>Use this window's sunlight sensors</span><span class="block small muted">${w.solar_protection ? "Replaces the outdoor light sensor and the sun geometry as this window's sunlight evidence" : "Sun protection is off for this window: switch it on above to use the sensors"}</span></span></label>
+      <ul class="cu-rows" data-testid="multisun-sensors">${sensors.length ? sensors.map((s) => {
+        const r = shown.get(s.entity_id);
+        const tone = !s.enabled ? "neutral" : r?.status === "ok" ? "ok" : r?.status === "none" ? "pending" : "warning";
+        const reading = !s.enabled ? "Disabled" : r?.status === "ok" && r.value != null ? `${Math.round(r.value)} lx` : (r?.status_word ?? r?.status ?? "—");
+        const marks = [res?.triggered_by === s.entity_id ? chip("info", "Triggered") : nothing,
+          res?.above_on.includes(s.entity_id) ? chip("warning", "Above activation") : nothing,
+          res?.blocking.includes(s.entity_id) ? chip("warning", "Prevents release") : nothing,
+          res?.active && res.invalid.includes(s.entity_id) ? chip("error", "Release cannot be confirmed") : nothing];
+        return html`<li class="cu-row" data-sensor=${s.entity_id}><span class="cu-row-main"><strong>${name(s.entity_id)}</strong><span class="small muted">${s.entity_id}${r?.detail && r.status !== "ok" ? ` · ${r.detail}` : ""}</span></span>
+          ${chip(tone, reading)} ${marks}
+          <span class="cu-row-actions">
+            <button type="button" class="btn btn-small" ?disabled=${!can || this.busy} @click=${() => this.saveSunSensors(sensors.map((x) => x.entity_id === s.entity_id ? { ...x, enabled: !x.enabled } : x), `${name(s.entity_id)} ${s.enabled ? "disabled" : "enabled"}`)}>${s.enabled ? "Disable" : "Enable"}</button>
+            <button type="button" class="btn btn-small" aria-label=${`Remove ${name(s.entity_id)}`} ?disabled=${!can || this.busy} @click=${() => this.saveSunSensors(sensors.filter((x) => x.entity_id !== s.entity_id), `${name(s.entity_id)} removed`)}>${icon("delete", 16)}</button>
+          </span></li>`;
+      }) : html`<li class="muted small">No sensor yet.</li>`}</ul>
+      ${can ? html`<div class="lp-row">
+        <input type="text" list="multisun-lux" placeholder="sensor.… (illuminance)" .value=${this.sunAdd} data-testid="multisun-add-input" @input=${(e: Event) => (this.sunAdd = (e.target as HTMLInputElement).value.trim())} />
+        <datalist id="multisun-lux">${lux.map((x) => html`<option value=${x.entity_id}>${x.name}</option>`)}</datalist>
+        <button type="button" class="btn" data-testid="multisun-add" ?disabled=${this.busy || !this.sunAdd.startsWith("sensor.") || sensors.length >= 8} @click=${() => { const e = this.sunAdd; this.sunAdd = ""; this.saveSunSensors([...sensors, { entity_id: e, enabled: true }], `${e} added`); }}>${icon("plus", 18)}Add sensor</button>
+      </div>` : nothing}
+      ${w.multi_sun && ms?.active_source ? html`<div class="cu-env-state" data-testid="multisun-state">
+        ${kv([
+          ["Now", res?.reason ?? "Not evaluated yet"],
+          ["Triggered by", res?.active && res.triggered_by ? `${name(res.triggered_by)}${res.since ? ` at ${fmt(res.since)}` : ""}` : null],
+          ["Above activation", res?.above_on.length ? res.above_on.map(name).join(", ") : res?.active ? "none" : null],
+          ["Preventing release", res?.active ? ([...res.blocking, ...res.invalid].map(name).join(", ") || "none") : null],
+          ["Release in", res?.active && remaining ? remaining : null],
+          ["Levels", ms ? `activate above ${ms.levels.on_lux} lx · release below ${ms.levels.off_lux} lx for ${ms.levels.release_minutes} min` : null],
+        ])}
+      </div>` : nothing}
+      ${w.multi_sun && sensors.length ? this.sunSimulation(w, sensors, name) : nothing}
+    </section>`;
+  }
+
+  private sunSimulation(w: WindowModel, sensors: Array<{ entity_id: string; enabled: boolean }>, name: (e: string) => string): TemplateResult {
+    const sim = this.sunSim;
+    const value = (raw: string | undefined): number | null | "unavailable" => {
+      const t = (raw ?? "").trim();
+      if (t === "" || t.toLowerCase() === "unavailable") return t === "" ? null : "unavailable";
+      const n = Number(t);
+      return Number.isFinite(n) && n >= 0 ? n : null;
+    };
+    const run = async () => {
+      this.sunSim = { ...sim, busy: true, error: null };
+      try {
+        const readings: Record<string, number | null | "unavailable"> = {};
+        const then: Record<string, number | null | "unavailable"> = {};
+        for (const s of sensors) {
+          readings[s.entity_id] = value(sim.now[s.entity_id]);
+          then[s.entity_id] = value(sim.then[s.entity_id] ?? sim.now[s.entity_id]);
+        }
+        const result = await curtains<{ steps: MultiSunStep[]; result: MultiSunStep }>(cmd("sun_sensors/simulate"), {
+          window_id: w.window_id, readings, then, elapsed_minutes: Number(sim.minutes) || 0, from_state: sim.from });
+        this.sunSim = { ...this.sunSim, result, busy: false };
+      } catch (err) {
+        this.sunSim = { ...this.sunSim, error: err instanceof Error ? err.message : String(err), busy: false };
+      }
+    };
+    const field = (which: "now" | "then", e: string) => html`<input type="text" inputmode="decimal" class="cu-sim-input" aria-label=${`${name(e)} ${which === "now" ? "now" : "after"} (lx)`} placeholder=${which === "now" ? "lx" : "same"}
+      .value=${sim[which][e] ?? ""} @input=${(ev: Event) => (this.sunSim = { ...this.sunSim, [which]: { ...this.sunSim[which], [e]: (ev.target as HTMLInputElement).value } })} />`;
+    const r = sim.result?.result;
+    return html`<details class="cu-sim" data-testid="multisun-simulation"><summary>Test the rules (read only)</summary>
+      <p class="small muted">Enter readings in lx (empty or “unavailable” = no trustworthy reading), and what they become for how long. Nothing is saved and nothing moves.</p>
+      <table class="plain-table small"><thead><tr><th scope="col">Sensor</th><th scope="col">Now</th><th scope="col">Then</th></tr></thead>
+        <tbody>${sensors.map((s) => html`<tr><th scope="row">${name(s.entity_id)}${s.enabled ? nothing : html` <span class="muted">(disabled)</span>`}</th><td>${field("now", s.entity_id)}</td><td>${field("then", s.entity_id)}</td></tr>`)}</tbody></table>
+      <div class="lp-row">
+        <label>for <input type="number" min="0" max="1440" class="cu-sim-input" .value=${sim.minutes} @input=${(e: Event) => (this.sunSim = { ...this.sunSim, minutes: (e.target as HTMLInputElement).value })} /> min</label>
+        <label>starting <select .value=${sim.from} @change=${(e: Event) => (this.sunSim = { ...this.sunSim, from: (e.target as HTMLSelectElement).value as SunSimState["from"] })}>
+          <option value="current">from the window's state now</option><option value="inactive">with protection off</option><option value="active">with protection on</option></select></label>
+        <button type="button" class="btn" data-testid="multisun-simulate" ?disabled=${sim.busy} @click=${() => void run()}>${icon("play-circle", 18)}Test</button>
+      </div>
+      ${sim.error ? html`<p class="notice notice-error">${sim.error}</p>` : nothing}
+      ${r ? html`<div data-testid="multisun-sim-result">${kv([
+        ["Result", r.active ? "Sun protection requested" : "No sun protection from the sensors"],
+        ["Why", r.reason],
+        ["Release in", r.active && r.remaining_seconds != null ? `${Math.floor(r.remaining_seconds / 60)} min ${String(r.remaining_seconds % 60).padStart(2, "0")} s` : null],
+      ])}</div>` : nothing}
+    </details>`;
   }
 
   private environmentTab(w: WindowModel, m: CurtainsModel): TemplateResult {

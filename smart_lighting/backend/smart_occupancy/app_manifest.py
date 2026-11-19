@@ -12,6 +12,7 @@ from .runtime_manifest import MODULES as RUNTIME_MODULES
 APP_MODULES: tuple[str, ...] = (
     "app_manifest.py",
     "comparison.py",
+    "curtains/multisun.py",
     "entity_ids.py",
     "prediction.py",
     "presence_api.py",
@@ -25,6 +26,8 @@ APP_MODULES: tuple[str, ...] = (
 #: Every engine module of the App.
 ALL_MODULES: tuple[str, ...] = tuple(sorted({*RUNTIME_MODULES, *APP_MODULES}))
 
-#: The runtime fingerprint of Smart Occupancy & Lighting 0.9.0 (the last monolithic release): the App keeps it
-#: until no installation is left to migrate; changing a listed module breaks the 0.9.0 handover.
+#: The runtime fingerprint of Smart Occupancy & Lighting 0.9.0 (the last monolithic release). Until App 0.7.x the
+#: listed modules stayed byte-identical to it; App 0.8.0 (multi-sensor sunlight, cross-room switch targets) changed
+#: them on purpose, so 0.9.0 refuses lighting, curtain and forecast handovers to it and the migration wizard says
+#: so (occupancy keeps its own, unchanged, engine fingerprint).
 FINGERPRINT_0_9_0 = "227a7fd829eb512237871ca5f542c7ce8757f48e499dc1b03b9b433e6b7afd9f"

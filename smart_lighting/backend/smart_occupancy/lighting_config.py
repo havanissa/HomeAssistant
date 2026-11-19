@@ -821,6 +821,8 @@ def rename_entity(config: LightingConfig, old: str, new: str) -> LightingConfig 
         for raw, m in switch.mappings.items():
             if m.target == old and m.target != ROOM_TARGET:
                 m = replace(m, target=new)
+            if old in m.targets:  # App 0.8.0: explicit (cross-room) targets
+                m = replace(m, targets=tuple(new if t == old else t for t in m.targets))
             if m.entity == old:
                 m = replace(m, entity=new)
             mappings[raw] = m
