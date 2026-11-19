@@ -494,3 +494,34 @@ async def test_a_lapsed_0_9_0_lease_never_demotes_the_companion_owned_engine(com
     core.occupancy._lease_lapsed()  # noqa: SLF001 - the timer the old bridge session scheduled
     core.occupancy._lose("the integration changed the owner", "revoked")  # noqa: SLF001 - a stale bridge event
     assert core.occupancy.mode == "authoritative" and core.occupancy.cm.owner
+
+
+async def test_a_fresh_app_next_to_the_companion_imports_the_legacy_stores(fake_ha: FakeHomeAssistant, aiohttp_client) -> None:
+    """Production finding: an App installed fresh next to companion 1.0.0 has no configuration and no engine stores;
+    Activate imports the options *and* the lighting / curtain / forecast stores from the companion's legacy export."""
+    two_sensor_room(fake_ha)
+    fake_ha.legacy_options = room_options() | {"operating_mode": "observe"}
+    fake_ha.companion = FakeCompanion(fake_ha)
+    fake_ha.rooms_api = fake_ha.presence_api = False
+    client = await start_app(fake_ha, aiohttp_client, **FAST)
+    core = client.core
+    await wait_for(lambda: core.companion.state == "present")
+    assert core.lighting.stored_config_doc() is None and core.curtains.stored_config_doc() is None
+    review = await step(client, "transfer_config", {"apply": False})
+    assert {s["key"]: s["import"] for s in review["stores"]} == {"smart_occupancy.lighting": True, "smart_occupancy.curtains": True,
+                                                                "smart_occupancy.forecast_days": True}
+    assert core.lighting.stored_config_doc() is None  # a review writes nothing
+    activated = await step(client, "activate")
+    assert activated["activated"] is True
+    await all_claimed(client)
+    lighting = core.lighting.stored_config_doc()
+    assert lighting is not None and lighting["rooms"][AREA]["control_enabled"] is True
+    curtains = core.curtains.stored_config_doc()
+    assert curtains is not None and curtains["windows"]
+    assert (fake_ha.data_dir / "predictions" / "store" / "smart_occupancy.forecast_days").is_file()
+    assert json.loads((fake_ha.data_dir / "lighting" / "store" / "smart_occupancy.lighting").read_text())["minor_version"] == 9
+    # The running controller took the imported configuration: the room is in Automatic.
+    await wait_for(lambda: core.lighting.controller is not None and core.lighting.controller.room_active(AREA), timeout=8)
+    # A second transfer never replaces the App's copies.
+    again = await step(client, "transfer_config", {"apply": True})
+    assert all(s["import"] is False for s in again["stores"]) and again["stores_imported"] == []

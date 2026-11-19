@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.1
+
+- **Transfer config imports the integration's stores too.** With the companion installed, *Transfer config*
+  (and *Activate*, which runs it when the App has no configuration) now also brings the lighting profiles,
+  switches, zones and ambient rules, the curtain windows, presets and state, and the learned forecast days and
+  settings from the companion's legacy export into the App's storage, each only when the App has no copy of
+  its own. Before, an App installed fresh next to companion 1.0.0 (or an App whose storage was reset) started
+  its engines with empty lighting, curtain and forecast configurations while the data still sat in the
+  integration's retired stores. The review of the step lists which stores would be imported and which the App
+  keeps.
+
 ## 0.7.0
 
 Phase A6: the App is the product; the integration becomes the companion. Works with

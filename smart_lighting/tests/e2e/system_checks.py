@@ -18,6 +18,8 @@ Phases (run by the driver in this order, with the Home Assistant changes between
              Assistant stops the App at once and it reclaims; a stale command never reaches a device.
 ``restart-check`` After a Home Assistant restart: the records came back as "away", the App claimed again
              (new epochs), the entities are fresh again, nothing was switched.
+``reinstall`` Companion 1.0.0 with the complete 0.9.0 data and an App with empty storage: Transfer config imports
+             the options and the engine stores, Activate claims, a light follows through the companion.
 ``fresh``    A new Home Assistant (companion added, no legacy data) and an App with empty storage: Setup → create
              the configuration, pair, import a room, the entities appear, the App claims, a light is commanded
              through the companion.
@@ -399,6 +401,50 @@ def phase_restart_check(args: argparse.Namespace, out: Path) -> None:
     check("verify after a restart: no degraded function", status == 200 and verify["result"]["ok"] and not verify["result"].get("degraded"), verify.get("result", {}).get("degraded"))
 
 
+def phase_reinstall(args: argparse.Namespace, out: Path) -> None:
+    """Companion 1.0.0 with the complete 0.9.0 data, the App installed fresh (empty storage): Transfer config
+    imports the options and the engine stores, Activate claims, the light follows."""
+    status = wait("the companion loaded", lambda: companion(args), 120, 2)
+    check("companion holds the legacy data", status["legacy"]["present"] is True and status["legacy"]["rooms"] >= 1, status["legacy"])
+    write_state(args, PC, "off")  # a previous run may have left the person in the room and the mood set
+    write_state(args, MAIN, "Nátt")
+    system = wait("the App sees the companion", lambda: (s := app("api/system"))["companion"]["state"] == "present" and s, 120, 2)
+    check("no configuration and nothing claimed", system["config_authority"] == "integration"
+          and all(v == "none" for v in system["owners"].values()), (system["config_authority"], system["owners"]))
+    setup = app("api/setup")
+    check("setup refuses to start fresh (legacy data present)", app_post("api/setup/start", {})[0] == 409, setup["config"])
+    st, review = step("transfer_config", {"apply": False})
+    plan = {x["key"]: x["import"] for x in review["result"]["stores"]}
+    check("review lists the stores to import", st == 200 and plan.get("smart_occupancy.lighting") is True, plan)
+    st, applied = step("transfer_config", {"apply": True})
+    check("options and stores imported", st == 200 and applied["result"]["authority"] == "app"
+          and "smart_occupancy.lighting" in applied["result"]["stores_imported"], applied.get("result", {}).get("stores_imported"))
+    start = len(args.watcher.events)
+    st, activated = step("activate")
+    check("activate claims every domain", st == 200 and activated["result"]["activated"] is True, activated)
+    wait("every domain owned by the App", lambda: all_owned(args), 60, 2)
+    check("nothing was switched by the import or the claims", not light_calls(args, start), light_calls(args, start)[:3])
+    wait("room entities fresh", lambda: (state(args, f"sensor.smart_occupancy_{KAMAR}_state") or {}).get("attributes", {}).get("fresh") is True, 60, 2)
+    export = http(INGRESS + "api/lighting/export", POST)  # an administrator's download (CSRF header)
+    rooms = (export.get("config") or {}).get("rooms") or {}
+    check("the App's lighting configuration came from the integration's store (room already Automatic)",
+          KAMAR in rooms and rooms[KAMAR].get("control_enabled") is True, {k: (v or {}).get("control_enabled") for k, v in rooms.items()})
+    st, body = command("room/activate", area_id=KAMAR, confirm=True)
+    check("room activated (App)", st == 200 and body.get("handled_by") == "app", body)
+    for mood, level in LEVELS.items():
+        command("profile/set", scope="light", area_id=KAMAR, mood=mood, target=LIGHT, setting={"action": "on", "brightness_pct": level})
+    write_state(args, PC, "on")
+    write_state(args, MAIN, "Dagur")
+    try:
+        wait(f"{LIGHT} at {LEVELS['Dagur']} % through the companion", lambda: pct(args) == LEVELS["Dagur"], 60)
+    except SystemExit:
+        diagnose(args, out)
+        raise
+    st, verify = step("verify")
+    check("verify ok", st == 200 and verify["result"]["ok"] is True, verify.get("result"))
+    screenshot(args, out, "reinstall-system", "settings/system/migration")
+
+
 def phase_fresh(args: argparse.Namespace, out: Path) -> None:
     status = wait("the companion loaded", lambda: companion(args), 120, 2)
     check("companion without legacy data", status["legacy"]["present"] is False, status["legacy"])
@@ -444,7 +490,7 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     parser.add_argument("--chromium", default=None)
     parser.add_argument("--ha-config", default=None)
-    parser.add_argument("--phase", default="legacy", choices=["legacy", "activate", "failure", "restart-check", "fresh"])
+    parser.add_argument("--phase", default="legacy", choices=["legacy", "activate", "failure", "restart-check", "fresh", "reinstall"])
     args = parser.parse_args()
     out = Path(args.out)
     (out / "screenshots").mkdir(parents=True, exist_ok=True)
@@ -453,7 +499,7 @@ def main() -> None:
     args.watcher.ready.wait(10)
     try:
         {"legacy": phase_legacy, "activate": phase_activate, "failure": phase_failure,
-         "restart-check": phase_restart_check, "fresh": phase_fresh}[args.phase](args, out)
+         "restart-check": phase_restart_check, "fresh": phase_fresh, "reinstall": phase_reinstall}[args.phase](args, out)
     except SystemExit:
         pass
     except Exception as err:  # noqa: BLE001

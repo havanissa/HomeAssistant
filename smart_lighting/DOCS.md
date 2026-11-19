@@ -23,7 +23,8 @@ you run the migration wizard.
 - **Migration wizard**: eight steps, each started by you and recorded:
   1. **Inspect** (changes nothing), 2. **Backup** (one file in the App's storage,
   without credentials), 3. **Validate**, 4. **Transfer config** (review, then
-  apply as a staged copy while 0.9.0 still runs), 5. **Transfer control**
+  apply as a staged copy while 0.9.0 still runs; with the companion it also
+  imports the lighting, curtain and forecast stores the App does not have yet), 5. **Transfer control**
   (occupancy → lighting → curtains → predictions, the reviewed handovers of
   A3.2–A5), 6. **Activate** (after you updated the integration to 1.0.0 and
   restarted Home Assistant: pairs, compares the staged copy with the companion's

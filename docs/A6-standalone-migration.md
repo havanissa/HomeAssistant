@@ -156,7 +156,11 @@ upgrade**. The wizard is idempotent: every step can be repeated.
    integrity, storage, companion compatibility, targets, one owner per domain, no cover moving.
 4. **Transfer config** – review (what changes, which referenced entities do not exist), then
    apply: on 0.9.0 as a *staged* copy (the integration's options still count), with the
-   companion as the authority.
+   companion as the authority. With the companion the step also imports the integration's
+   stores the App's engines read from their own storage (lighting profiles, switches, zones and
+   ambient rules; curtain windows, presets and state; the learned forecast days and settings),
+   each only when the App has no copy of its own (App 0.7.1). That is what makes an App
+   installed fresh next to companion 1.0.0, or an App whose storage was reset, complete again.
 5. **Transfer control** – the A3.2 / A4 / A5 handovers on 0.9.0 in the safe order occupancy →
    lighting → curtains → forecast (each refused unless the earlier ones are done).
 6. **Activate** – requires the companion (update the integration to 1.0.0 in HACS and restart
@@ -188,6 +192,14 @@ runtimes' `release`), or with *restore legacy* writes the retired data back.
 4. Back in the wizard: **Activate** (pairs, promotes, claims), then **Verify**.
 5. Check the dashboard and the cards for a day. Then **Retire**.
 6. Optional: remove the retired `.storage` backup later by hand (never done by software).
+
+### 4.1.1 App installed fresh next to companion 1.0.0
+
+When the integration is already 1.0.0 and the App has no configuration (a reinstall, a reset
+`/data`): run Inspect, Backup and Transfer config (review, then apply: the companion's legacy
+export supplies the options and the engine stores), then Activate, Verify and later Retire.
+Transfer control has nothing to do here (no 0.9.0 bridges); Activate claims every domain. Do
+not Retire before Activate: the companion's legacy data is the only copy until then.
 
 ### 4.2 Rollback
 
@@ -226,8 +238,11 @@ refused while the monolithic integration is installed (use the wizard).
   stale-staged-copy block and re-import, the setup refusal on a legacy installation, the
   protocol copy.
 - Frontend (vitest, 61 tests): system and dashboard helpers.
-- End-to-end on a throwaway Home Assistant (`smart_lighting/tests/e2e`): see the PR report for
-  the three scenarios (legacy migration, fresh install, failure and recovery).
+- End-to-end on a throwaway Home Assistant (`smart_lighting/tests/e2e/system_checks.py`): legacy
+  migration 0.9.0 → 1.0.0 (steps 1–8, entity ids kept, light commands through the executor, cards,
+  retire, restore), App failure and recovery (kill, revoke, Home Assistant restart), a fresh
+  installation, and (0.7.1) an App installed fresh next to companion 1.0.0 (the engine stores are
+  imported from the companion's legacy export, the room is Automatic again, the light follows).
 
 ### 6.1 Independent review (before the merge)
 
