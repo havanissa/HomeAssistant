@@ -121,6 +121,11 @@ class FakeHomeAssistant:
         # Phase A4: the integration's lighting bridge (tests/fake_lighting.py); None = an older integration.
         self.lighting: Any = None
         self.lighting_editor_calls: list[dict[str, Any]] = []
+        # Phase A5: the integration's curtain and forecast bridges (tests/fake_curtains.py, tests/fake_forecast.py).
+        self.curtains: Any = None
+        self.curtains_editor_calls: list[dict[str, Any]] = []
+        self.forecast: Any = None
+        self.forecast_editor_calls: list[dict[str, Any]] = []
 
     # -- data ---------------------------------------------------------------
     def config(self) -> dict[str, Any]:
@@ -453,6 +458,24 @@ class FakeHomeAssistant:
         elif kind.startswith("smart_occupancy/lighting/") and self.lighting is not None:
             # The integration's lighting editor commands (forwarded while it controls lighting).
             self.lighting_editor_calls.append(msg)
+            await result({"handled_by": "integration", "type": kind})
+        elif kind.startswith("smart_occupancy/curtains/bridge/"):
+            if self.curtains is None:
+                await error("unknown_command", f"Unknown command {kind}")
+            else:
+                await self.curtains.answer(ws, msg, result, error)
+        elif kind.startswith("smart_occupancy/curtains/") and self.curtains is not None:
+            # The integration's curtain editor commands (forwarded while it controls the curtains).
+            self.curtains_editor_calls.append(msg)
+            await result({"handled_by": "integration", "type": kind})
+        elif kind.startswith("smart_occupancy/forecast/bridge/"):
+            if self.forecast is None:
+                await error("unknown_command", f"Unknown command {kind}")
+            else:
+                await self.forecast.answer(ws, msg, result, error)
+        elif kind.startswith("smart_occupancy/forecast/") and self.forecast is not None:
+            # The integration's forecast commands (forwarded while it produces the forecasts).
+            self.forecast_editor_calls.append(msg)
             await result({"handled_by": "integration", "type": kind})
         elif kind in ("automation/config", "script/config"):
             await error("not_found", "Entity not found")

@@ -51,6 +51,12 @@ export interface Opening {
   offset: number;
   width: number;
   swing: "left" | "right" | null;
+  /**
+   * Phase A5: the curtain window (curtain subsystem) this window shows, or null. Only a `window` opening
+   * carries it; the floor plan is the only place the link lives (covers, presets and orientation stay
+   * in the curtain configuration). It may dangle after the curtain window is deleted.
+   */
+  curtain_window_id: string | null;
 }
 
 export interface Placement {

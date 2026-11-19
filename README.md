@@ -65,6 +65,8 @@ Every room starts in **Observe** mode. In Observe the integration plans and prev
 - shows a time in 12-hour notation (0.6.3)
 - moves a cover because a Global Modes card was selected or a mapping was saved; an Automatic window whose current target changes is moved only after the change was reviewed and confirmed, and then only through its normal safety checks (0.6.4)
 
+> **New in 0.9.0: curtains and predictions move to the Smart Lighting App (App Phase A5).** The App (0.6.0) runs this integration's own curtain and forecast code (byte-identical copies) in shadow mode. After a reviewed handover on *Curtains → Control* the App's curtain runtime commands the covers, only through this integration's fenced executor (cover services of configured covers), and the curtain card becomes read-only; a handover is refused while a cover is moving, and `smart_occupancy.curtains_return_to_integration` returns control without the App. After a handover on *Predictions → Control* the App learns and publishes the forecasts on this integration's unchanged forecast entities, from the learned data it received (nothing is retrained); `smart_occupancy.forecast_return_to_integration` returns control. Nothing changes until you hand over. Design: [docs/A5-curtains-predictions-migration.md](docs/A5-curtains-predictions-migration.md).
+>
 > **New in 0.8.0: lighting moves to the Smart Lighting App (App Phase A4).** The App (0.5.0) runs this integration's own lighting code (a byte-identical copy) in shadow mode and compares every command it would send. After a reviewed handover on *Lighting → Control* the App controls every lighting path and owns the lighting configuration; this integration's controller stops, its lighting cards become read-only, and every App command still passes this integration's fenced, allowlisted executor. The integration takes the lights back by itself if the App stops, and `smart_occupancy.lighting_return_to_integration` returns control without the App. Nothing changes until you hand over. Moods no longer need helpers: one selector or the built-in mood selector are enough. Details: [smart_lighting/DOCS.md](smart_lighting/DOCS.md), design: [docs/A4-lighting-migration.md](docs/A4-lighting-migration.md).
 
 ## Requirements
@@ -155,6 +157,22 @@ The occupancy engine is a shared package (`occupancy_core/`). The Smart Lighting
 | `smart_occupancy/engine/claim` | A reviewed handover (the same engine fingerprint, configuration revision and readiness are required; compare-and-swap on the epoch). |
 | `smart_occupancy/engine/publish`, `engine/heartbeat` | The owner's results and lease renewal. |
 | `smart_occupancy/engine/release` | Return control to the integration. |
+
+### Curtain and forecast bridges for the Smart Lighting App (0.9.0)
+
+The same pattern as the lighting bridge (0.8.0), once for each subsystem, with its own ownership record and lease. Administrators only; the App's backend sends them only through its own allowlist. Design: [docs/A5-curtains-predictions-migration.md](docs/A5-curtains-predictions-migration.md).
+
+| Command | What it does |
+|---|---|
+| `smart_occupancy/curtains/bridge/status`, `…/subscribe` | The curtain ownership record; the App's session with an exact copy of the curtain configuration and runtime state, every cover command, decision and configuration change (shadow comparison). |
+| `smart_occupancy/curtains/bridge/claim` | The reviewed handover: same code, current configuration, readiness, epoch; **refused while a cover is moving**. The manager stops and is fenced. |
+| `smart_occupancy/curtains/bridge/execute` | The App's cover command: owner session, epoch, lease, sequence, `cover.set_cover_position` / `open_cover` / `close_cover` of one configured cover, the App's context. |
+| `smart_occupancy/curtains/bridge/heartbeat`, `…/publish`, `…/release`, `…/return` | Lease renewal, the mirror (configuration and state), the App's return with its final state, any administrator's return. Service `smart_occupancy.curtains_return_to_integration`. |
+| `smart_occupancy/forecast/bridge/status`, `…/subscribe` | The forecast ownership record; the App's session with the complete learned data (validated export) and the current view. |
+| `smart_occupancy/forecast/bridge/claim` | The reviewed handover: the learned data moves, the integration stops learning and shows the App's published forecasts on its own entities. |
+| `smart_occupancy/forecast/bridge/heartbeat`, `…/publish`, `…/release`, `…/return` | Lease renewal, the published view and learned data (the rollback copy), returns. Service `smart_occupancy.forecast_return_to_integration`. No message can reach a device. |
+
+While the App owns a subsystem, that subsystem's editors (the Smart Curtains card's commands; `forecast/settings`, `connection`, `learn`, `rebuild`) refuse with `managed_by_app`; reads keep answering.
 
 ## Mood lighting (Phase 0.3)
 

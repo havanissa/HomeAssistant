@@ -27,7 +27,8 @@ def test_allowlist_has_only_the_presence_commands() -> None:
     assert "smart_occupancy/presence/set" in CONFIG_WRITE_COMMANDS
     assert {"smart_occupancy/presence/get", "smart_occupancy/presence/review",
             "history/history_during_period"} <= READ_ONLY_COMMANDS
-    assert not any(c.startswith(("call_service", "execute_script", "fire_event", "recorder/")) or "/update" in c
+    assert not any(c.startswith(("call_service", "execute_script", "fire_event", "recorder/"))
+                   or (c.endswith("/update") and not c.startswith("smart_occupancy/curtains/"))
                    for c in READ_ONLY_COMMANDS | CONFIG_WRITE_COMMANDS)
 
 

@@ -11,11 +11,13 @@ Layout of the App folder:
 | `tests/` | Backend and package tests (pytest) |
 | `tests/e2e/` | End-to-end stack: fake Supervisor + real App container + Playwright checks |
 
-## Shared lighting runtime (Phase A4)
+## Shared automation runtime (Phase A4 lighting, Phase A5 curtains and forecasts)
 
 `backend/smart_occupancy/` is a byte-identical copy of the integration's
-lighting runtime (`custom_components/smart_occupancy/runtime_manifest.py`
-lists the modules); only its `__init__.py` is the App's own. After changing any
+automation runtime (`custom_components/smart_occupancy/runtime_manifest.py`
+lists the modules: the lighting controller, the `curtains/` package, the
+forecast modules and the bridge protocols); only its `__init__.py` is the App's
+own. After changing any
 of those modules in the integration, run from the repository root:
 
 ```sh
@@ -29,7 +31,11 @@ The modules import Home Assistant's API; in the App those names come from the
 host does not provide. `backend/smart_lighting/lighting_host.py` connects one
 controller to the App's websocket client, `lighting_runtime.py` runs the bridge
 session, shadow and owner, `lighting_compare.py` compares, `lighting_api.py`
-routes the interface's lighting commands.
+routes the interface's lighting commands. Phase A5 adds the same four modules
+for curtains (`curtains_host.py`, `curtains_runtime.py`, `curtains_compare.py`,
+`curtains_api.py`) and forecasts (`forecast_host.py` — history through
+`history/history_during_period` —, `forecast_runtime.py`, `forecast_compare.py`,
+`forecast_api.py`).
 
 **Behavioural parity.** The integration's suite records scenarios with its own
 controller (`tests/test_lighting_parity*.py`, recorder in
@@ -125,6 +131,12 @@ the App container (fallback without a light command), the restarted App in
 shadow, a manual override kept across "Return control"; `--phase
 restart-check` after restarting Home Assistant (the same App resumes) and
 `--phase finish` (the administrator service).
+`curtains_checks.py` and `predictions_checks.py` (Phase A5) need the
+integration 0.9.0 with the curtain stores reset (no
+`.storage/smart_occupancy.curtains*`), the demo covers and the stack started
+with `CURTAINS_MIN_SHADOW_SECONDS=60 CURTAINS_MIN_DECISIONS=1` or
+`FORECAST_MIN_SHADOW_SECONDS=60 FORECAST_MIN_MATCHES=1`; both have `--phase
+restart-check` and `--phase finish` like the lighting suite.
 Primary targets: desktop (1440, 1920 px) and tablets (768 portrait, 1024 and
 1366 landscape, with touch). Phone sizes (360, 390 px, 740 landscape) are
 kept as a regression check of the fallback layout. It fails on any Home

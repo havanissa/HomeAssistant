@@ -180,6 +180,7 @@ class LightingBridge:
         self._running = False
         self._stopped = False
         self.fallback_error: str | None = None
+        self._fallback_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------ lifecycle
     @property
@@ -259,7 +260,12 @@ class LightingBridge:
     @callback
     def async_stop(self) -> None:
         self._running = False
-        self._stopped = True  # a later (delayed) save could overwrite the next bridge's record
+        self._stopped = True
+        if self._fallback_task is not None and not self._fallback_task.done():
+            # A fallback waiting for in-flight App commands must not start a manager for an entry that is going
+            # away (the next entry starts its own): cancel it; the old manager stays stopped and fenced.
+            self._fallback_task.cancel()
+            self._fallback_task = None  # a later (delayed) save could overwrite the next bridge's record
         if self._timer:
             self._timer()
             self._timer = None
@@ -689,7 +695,8 @@ class LightingBridge:
             return
         now = dt_util.utcnow()
         self._change_owner(S.OWNER_INTEGRATION, reason, now, by=by, detail=detail)
-        self.hass.async_create_task(self._async_start_controller(reason), "smart_occupancy lighting fallback")
+        self._busy = True  # editors wait from this instant (the task below sets it again)
+        self._fallback_task = self.hass.async_create_task(self._async_start_controller(reason), "smart_occupancy lighting fallback")
 
     async def async_fallback(self, reason: str, *, by: str | None = None, detail: str | None = None) -> bool:
         """The integration takes lighting back. Returns False when it already controls lighting."""
@@ -711,6 +718,8 @@ class LightingBridge:
                     await self._idle.wait()
             except TimeoutError:
                 _LOGGER.warning("lighting_fallback_drain_timeout: App commands still running")
+            if self._stopped:
+                return  # the entry is going away: its successor starts its own controller
             old = self.ctrl
             try:
                 self._apply_renames(old)
@@ -722,6 +731,8 @@ class LightingBridge:
             except Exception:
                 # Lighting must run again: the next controller loads what the stores hold.
                 _LOGGER.exception("lighting_fallback_mirror_failed (the integration starts from its stored copy)")
+            if self._stopped:
+                return
             old.dormant = False
             old.async_stop()
             new = LightingController(self.hass, self.coordinator)
@@ -730,6 +741,8 @@ class LightingBridge:
             except Exception:
                 _LOGGER.exception("lighting_fallback_load_failed: lighting does not run; reload the integration")
                 self._failed_fallback(old, new)
+                return
+            if self._stopped:
                 return
             now = time.monotonic()
             new.note_recent_commands({"contexts": [c for t, c in self._recent if now - t <= S.OWN_CONTEXT_SECONDS]})

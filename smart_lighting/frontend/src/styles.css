@@ -5012,3 +5012,27 @@ sl-plan-canvas {
 .setting-editor .setting-actions { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .setting-swatch { display: inline-block; width: 0.9rem; height: 0.9rem; border-radius: 50%; vertical-align: middle;
   border: 1px solid rgba(0,0,0,0.2); margin-right: 0.25rem; }
+
+/* Phase A5: curtains on the floor plan ------------------------------------------------------ */
+/* Four Configure tabs: icon over label so the 15rem panel never overflows. */
+.fp-tabs.fp-tabs-4 button { flex-direction: column; gap: 0.1rem; padding: 0.3rem 0.2rem; font-size: 0.7rem; }
+.fp-tabs.fp-tabs-4 button .badge { position: absolute; transform: translate(1.1rem, -0.9rem); }
+.fp-tabs.fp-tabs-4 button { position: relative; }
+.fp-curtains { display: flex; flex-direction: column; gap: 0.5rem; }
+.fp-cover-list li { display: flex; justify-content: space-between; gap: 0.5rem; align-items: baseline; min-width: 0; }
+.fp-cover-list li > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-bearing-compare dd strong { font-size: 1.1rem; }
+.fp-swatch.curtain { border-color: var(--sl-info); background: linear-gradient(90deg, var(--sl-info) 0 60%, transparent 60%); }
+/* The covers of a linked curtain window: a track along the opening and the covered share filled. */
+.fp-curtain-track { stroke: var(--sl-info); stroke-opacity: 0.25; stroke-linecap: butt; }
+.fp-curtain-fill { stroke: var(--sl-info); stroke-linecap: butt; }
+.fp-curtain.tone-moving .fp-curtain-fill { stroke-dasharray: 0.12 0.06; }
+.fp-curtain.tone-unknown .fp-curtain-track,
+.fp-curtain.tone-unavailable .fp-curtain-track,
+.fp-curtain.tone-none .fp-curtain-track { stroke: var(--sl-text-2); stroke-opacity: 0.6; stroke-dasharray: 0.1 0.1; }
+.fp-curtain.tone-unavailable .fp-curtain-track { stroke: var(--sl-error); }
+.fp-curtain.selected .fp-curtain-track { stroke-opacity: 0.5; }
+.fp-curtain.selected .fp-curtain-fill { stroke: var(--sl-primary); }
+.plan-canvas.mode-live .fp-opening.window,
+.plan-canvas.mode-configure .fp-opening.window,
+.plan-canvas.mode-live .fp-curtain { cursor: pointer; }

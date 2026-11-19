@@ -10,6 +10,9 @@ import { BOTTOM_NAV, FOUNDATION, leaveWarning, NAV, navigate, routeFromHash, sub
 import { store } from "./store";
 import { chip, haConnectionInfo, linkInfo, StoreElement } from "./ui";
 
+import "./pages/curtains";
+import "./pages/curtains-control";
+import "./pages/curtains-window";
 import "./pages/dashboard";
 import "./pages/diagnostics";
 import "./pages/floorplan";
@@ -20,6 +23,9 @@ import "./pages/lighting-settings";
 import "./pages/moods";
 import "./pages/switches";
 import "./pages/pending";
+import "./pages/predictions";
+import "./pages/predictions-control";
+import "./pages/predictions-room";
 import "./pages/presence";
 import "./pages/presence-room";
 import "./pages/presence-engine";
@@ -52,6 +58,9 @@ export class SlApp extends StoreElement {
     // Phase A4: Lighting (a room or the settings), Moods and Switches may hold unsaved drafts.
     if (route === "lighting" && sub[0] && sub[0] !== "control") return `lighting/${sub[0]}`;
     if (route === "moods" || route === "switches") return route;
+    // Phase A5: a curtain window's editor, the Global Modes / Schedule drafts, and the Predictions settings.
+    if (route === "curtains" && sub[0] && sub[0] !== "control") return `curtains/${sub[0]}/${sub[1] ?? ""}`;
+    if (route === "predictions" && sub[0] && sub[0] !== "control") return `predictions/${sub[0]}/${sub[1] ?? ""}`;
     return null;
   }
 
@@ -118,7 +127,7 @@ export class SlApp extends StoreElement {
 
   private isPending(key: string): boolean {
     if (FOUNDATION.has(key)) return false;
-    return (store.overview?.modules.find((m) => m.key === key)?.status ?? (["rooms", "presence", "lighting", "moods", "switches"].includes(key) ? "gui" : "pending")) === "pending";
+    return (store.overview?.modules.find((m) => m.key === key)?.status ?? "gui") === "pending";
   }
 
   private navLink(item: NavItem, variant: "side" | "sheet"): unknown {
@@ -214,6 +223,20 @@ export class SlApp extends StoreElement {
         return this.sub[0]
           ? html`<sl-room-editor .areaId=${this.sub[0]} .tab=${this.sub[1] ?? "overview"}></sl-room-editor>`
           : html`<sl-rooms></sl-rooms>`;
+      case "curtains":
+        // #/curtains (overview) · #/curtains/control · #/curtains/windows/<window_id>/<tab> (one window) ·
+        // #/curtains/<tab> for modes | schedule | environment | diagnostics | windows (list).
+        if (this.sub[0] === "control") return html`<sl-curtains-control></sl-curtains-control>`;
+        if (this.sub[0] === "windows" && this.sub[1])
+          return html`<sl-curtains-window .windowId=${this.sub[1]} .tab=${this.sub[2] ?? "overview"}></sl-curtains-window>`;
+        return html`<sl-curtains .tab=${this.sub[0] ?? "overview"}></sl-curtains>`;
+      case "predictions":
+        // #/predictions (house) · #/predictions/control · #/predictions/rooms/<area_id>/<tab> ·
+        // #/predictions/<tab> for patterns | accuracy | settings.
+        if (this.sub[0] === "control") return html`<sl-predictions-control></sl-predictions-control>`;
+        if (this.sub[0] === "rooms" && this.sub[1])
+          return html`<sl-predictions-room .areaId=${this.sub[1]} .tab=${this.sub[2] ?? "forecast"}></sl-predictions-room>`;
+        return html`<sl-predictions .tab=${this.sub[0] ?? "house"}></sl-predictions>`;
       default:
         return html`<sl-pending-module .moduleKey=${this.route}></sl-pending-module>`;
     }

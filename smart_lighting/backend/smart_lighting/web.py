@@ -33,6 +33,11 @@ the integration's acknowledged owner, the shadow comparison and its readiness
 checks (reads), and two administrator requests with the same checks: a reviewed
 handover (``handover``, needs ``"confirm": true`` and every readiness check)
 and ``release`` (return control to the integration).
+
+Phase A5 adds the curtain API (``/api/curtains...``) and the predictions API
+(``/api/predictions...``) with the same shape as the lighting API: status with
+the acknowledged owner, the editors' commands (forwarded or local), a reviewed
+handover, release / return, export, a reviewed import and backups.
 """
 
 from __future__ import annotations
@@ -49,6 +54,10 @@ from .const import APP_VERSION
 from .core import AppCore
 from .floorplan import FloorPlanError
 from .ha import HomeAssistantError
+from .curtains_api import CurtainsApiError
+from .curtains_runtime import CurtainsError
+from .forecast_api import ForecastApiError
+from .forecast_runtime import ForecastError
 from .lighting_api import LightingApiError
 from .lighting_runtime import LightingError
 from .occupancy_runtime import EngineError
@@ -591,6 +600,218 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         return web.Response(text=json.dumps(data, indent=1), content_type="application/json",
                             headers=download_name("smart-lighting-lighting", data["at"]))
 
+    # ---------------------------------------------------------- curtains (A5)
+    def curtains_runtime(request: web.Request):
+        core: AppCore = request.app[CORE_KEY]
+        if core.curtains is None or core.curtains_api is None:
+            raise RoomsError("not_connected", "The App is starting", 503)
+        return core.curtains, core.curtains_api
+
+    async def read_command(request: web.Request, api: Any) -> tuple[dict[str, Any], str | None, bool]:
+        if request.content_type != "application/json" or request.headers.get(CSRF_HEADER) != "1":
+            raise RoomsError("forbidden", "This request must come from the Smart Lighting interface", 403)
+        if request.headers.get("Origin") and not origin_allowed(request):
+            raise RoomsError("forbidden", "Cross-site requests are not allowed", 403)
+        try:
+            body = json.loads(await read_limited(request, MAX_BODY))
+        except (ValueError, UnicodeDecodeError) as err:
+            raise RoomsError("invalid_json", "The request body is not valid JSON") from err
+        if not isinstance(body, dict) or not isinstance(body.get("type"), str):
+            raise RoomsError("invalid_json", "The request needs a command type")
+        if api.is_write(body["type"]):
+            await admin_guard(request)
+        user_id, admin = await current_user(request)
+        return body, user_id, admin
+
+    @rooms_handler
+    async def curtains_status(request: web.Request) -> web.Response:
+        runtime, api = curtains_runtime(request)
+        core: AppCore = request.app[CORE_KEY]
+        acknowledged = None
+        if core.ha is not None and core.ha.connected:
+            try:
+                acknowledged = await core.ha.command("smart_occupancy/curtains/bridge/status")
+            except (HomeAssistantError, ConnectionError, TimeoutError):
+                acknowledged = None
+        data = runtime.status()
+        data["acknowledged_owner"] = acknowledged.get("state") if isinstance(acknowledged, dict) else None
+        data["integration_status"] = acknowledged
+        data["commands_go_to"] = api.where()
+        data["backups"] = runtime.backups()
+        _user_id, admin = await current_user(request)
+        data["user"] = {"is_admin": admin}
+        data["area_names"] = {a.get("area_id"): a.get("name") for a in (core.ha.areas if core.ha else [])}
+        return _json(data)
+
+    @rooms_handler
+    async def curtains_command(request: web.Request) -> web.Response:
+        _runtime, api = curtains_runtime(request)
+        body, user_id, admin = await read_command(request, api)
+        try:
+            result = await api.call(body, user_id=user_id, is_admin=admin)
+        except CurtainsApiError as err:
+            return lighting_error(err)
+        return _json({"result": result, "handled_by": api.where()})
+
+    @rooms_handler
+    async def curtains_handover(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        if body.get("confirm") is not True:
+            raise RoomsError("confirmation_required", "Confirm the handover after reviewing the readiness checks")
+        runtime, _api = curtains_runtime(request)
+        try:
+            result = await runtime.handover(request.headers.get("X-Remote-User-Id"))
+        except CurtainsError as err:
+            return lighting_error(err)
+        return _json({"result": result})
+
+    @rooms_handler
+    async def curtains_release(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        runtime, _api = curtains_runtime(request)
+        try:
+            if body.get("mode") == "return":
+                result = await runtime.return_control(request.headers.get("X-Remote-User-Id"),
+                                                      force=body.get("force") is True)
+            else:
+                result = await runtime.release(request.headers.get("X-Remote-User-Id"))
+        except CurtainsError as err:
+            return lighting_error(err)
+        return _json({"result": result})
+
+    @rooms_handler
+    async def curtains_export(request: web.Request) -> web.Response:
+        await admin_guard(request)
+        runtime, _api = curtains_runtime(request)
+        data = runtime.export()
+        return web.Response(text=json.dumps(data, indent=1), content_type="application/json",
+                            headers=download_name("smart-lighting-curtains", data["at"]))
+
+    @rooms_handler
+    async def curtains_import_review(request: web.Request) -> web.Response:
+        body = await write_guard(request, MAX_PLAN_BODY)
+        runtime, _api = curtains_runtime(request)
+        try:
+            return _json(runtime.import_review(body.get("file")))
+        except CurtainsError as err:
+            return lighting_error(err)
+
+    @rooms_handler
+    async def curtains_import(request: web.Request) -> web.Response:
+        body = await write_guard(request, MAX_PLAN_BODY)
+        runtime, _api = curtains_runtime(request)
+        try:
+            return _json(await runtime.import_apply(body.get("file"), body.get("revision"),
+                                        confirm_automatic=body.get("confirm_automatic") is True))
+        except CurtainsError as err:
+            return lighting_error(err)
+
+    @rooms_handler
+    async def curtains_backups(request: web.Request) -> web.Response:
+        runtime, _api = curtains_runtime(request)
+        return _json({"backups": runtime.backups()})
+
+    # ------------------------------------------------------- predictions (A5)
+    def forecast_runtime(request: web.Request):
+        core: AppCore = request.app[CORE_KEY]
+        if core.forecast is None or core.forecast_api is None:
+            raise RoomsError("not_connected", "The App is starting", 503)
+        return core.forecast, core.forecast_api
+
+    @rooms_handler
+    async def predictions_status(request: web.Request) -> web.Response:
+        runtime, api = forecast_runtime(request)
+        core: AppCore = request.app[CORE_KEY]
+        acknowledged = None
+        if core.ha is not None and core.ha.connected:
+            try:
+                acknowledged = await core.ha.command("smart_occupancy/forecast/bridge/status")
+            except (HomeAssistantError, ConnectionError, TimeoutError):
+                acknowledged = None
+        data = runtime.status()
+        data["acknowledged_owner"] = acknowledged.get("state") if isinstance(acknowledged, dict) else None
+        data["integration_status"] = acknowledged
+        data["commands_go_to"] = api.where()
+        data["backups"] = runtime.backups()
+        _user_id, admin = await current_user(request)
+        data["user"] = {"is_admin": admin}
+        data["area_names"] = {a.get("area_id"): a.get("name") for a in (core.ha.areas if core.ha else [])}
+        try:
+            data["house"] = runtime.house()
+        except ForecastError as err:
+            data["house"] = None
+            data["house_error"] = str(err)
+        return _json(data)
+
+    @rooms_handler
+    async def predictions_room(request: web.Request) -> web.Response:
+        runtime, _api = forecast_runtime(request)
+        try:
+            return _json(runtime.room(request.match_info["area_id"]))
+        except ForecastError as err:
+            return lighting_error(err)
+
+    @rooms_handler
+    async def predictions_command(request: web.Request) -> web.Response:
+        _runtime, api = forecast_runtime(request)
+        body, user_id, admin = await read_command(request, api)
+        try:
+            result = await api.call(body, user_id=user_id, is_admin=admin)
+        except ForecastApiError as err:
+            return lighting_error(err)
+        return _json({"result": result, "handled_by": api.where()})
+
+    @rooms_handler
+    async def predictions_handover(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        if body.get("confirm") is not True:
+            raise RoomsError("confirmation_required", "Confirm the handover after reviewing the readiness checks")
+        runtime, _api = forecast_runtime(request)
+        try:
+            result = await runtime.handover(request.headers.get("X-Remote-User-Id"))
+        except ForecastError as err:
+            return lighting_error(err)
+        return _json({"result": result})
+
+    @rooms_handler
+    async def predictions_release(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        runtime, _api = forecast_runtime(request)
+        try:
+            if body.get("mode") == "return":
+                result = await runtime.return_control(request.headers.get("X-Remote-User-Id"))
+            else:
+                result = await runtime.release(request.headers.get("X-Remote-User-Id"))
+        except ForecastError as err:
+            return lighting_error(err)
+        return _json({"result": result})
+
+    @rooms_handler
+    async def predictions_export(request: web.Request) -> web.Response:
+        await admin_guard(request)
+        runtime, _api = forecast_runtime(request)
+        data = runtime.export()
+        return web.Response(text=json.dumps(data, indent=1), content_type="application/json",
+                            headers=download_name("smart-lighting-predictions", data["at"]))
+
+    @rooms_handler
+    async def predictions_import_review(request: web.Request) -> web.Response:
+        body = await write_guard(request, MAX_IMPORT_BODY)
+        runtime, _api = forecast_runtime(request)
+        try:
+            return _json(runtime.import_review(body.get("file")))
+        except ForecastError as err:
+            return lighting_error(err)
+
+    @rooms_handler
+    async def predictions_import(request: web.Request) -> web.Response:
+        body = await write_guard(request, MAX_IMPORT_BODY)
+        runtime, _api = forecast_runtime(request)
+        try:
+            return _json(await runtime.import_apply(body.get("file"), body.get("revision")))
+        except ForecastError as err:
+            return lighting_error(err)
+
     async def live(request: web.Request) -> web.StreamResponse:
         return await request.app[HUB_KEY].handle(request)
 
@@ -642,6 +863,22 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     app.router.add_post("/api/lighting/handover", lighting_handover)
     app.router.add_post("/api/lighting/release", lighting_release)
     app.router.add_get("/api/lighting/export", lighting_export)
+    app.router.add_get("/api/curtains", curtains_status)
+    app.router.add_post("/api/curtains/command", curtains_command)
+    app.router.add_post("/api/curtains/handover", curtains_handover)
+    app.router.add_post("/api/curtains/release", curtains_release)
+    app.router.add_get("/api/curtains/export", curtains_export)
+    app.router.add_post("/api/curtains/import/review", curtains_import_review)
+    app.router.add_post("/api/curtains/import", curtains_import)
+    app.router.add_get("/api/curtains/backups", curtains_backups)
+    app.router.add_get("/api/predictions", predictions_status)
+    app.router.add_get("/api/predictions/rooms/{area_id}", predictions_room)
+    app.router.add_post("/api/predictions/command", predictions_command)
+    app.router.add_post("/api/predictions/handover", predictions_handover)
+    app.router.add_post("/api/predictions/release", predictions_release)
+    app.router.add_get("/api/predictions/export", predictions_export)
+    app.router.add_post("/api/predictions/import/review", predictions_import_review)
+    app.router.add_post("/api/predictions/import", predictions_import)
     app.router.add_route("*", "/api/{tail:.*}", api_not_found)
     assets = settings.static_dir / "assets"
     if assets.is_dir():

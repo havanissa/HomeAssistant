@@ -53,6 +53,12 @@ class Settings:
     # SL_LIGHTING_MIN_COMMANDS; tests and development only).
     lighting_min_shadow_seconds: int = 7200
     lighting_min_commands: int = 10
+    # Phase A5: the curtain and forecast comparisons required before a handover (SL_CURTAINS_MIN_SHADOW_SECONDS,
+    # SL_CURTAINS_MIN_DECISIONS, SL_FORECAST_MIN_SHADOW_SECONDS, SL_FORECAST_MIN_MATCHES; tests and development only).
+    curtains_min_shadow_seconds: int = 7200
+    curtains_min_decisions: int = 5
+    forecast_min_shadow_seconds: int = 3600
+    forecast_min_matches: int = 10
 
     @property
     def token_present(self) -> bool:
@@ -87,6 +93,10 @@ class Settings:
             "engine_min_transitions": self.engine_min_transitions,
             "lighting_min_shadow_seconds": self.lighting_min_shadow_seconds,
             "lighting_min_commands": self.lighting_min_commands,
+            "curtains_min_shadow_seconds": self.curtains_min_shadow_seconds,
+            "curtains_min_decisions": self.curtains_min_decisions,
+            "forecast_min_shadow_seconds": self.forecast_min_shadow_seconds,
+            "forecast_min_matches": self.forecast_min_matches,
         }
 
 
@@ -140,6 +150,10 @@ def load_settings(
         engine_min_transitions=_positive(env.get("SL_ENGINE_MIN_TRANSITIONS"), 20),
         lighting_min_shadow_seconds=_positive(env.get("SL_LIGHTING_MIN_SHADOW_SECONDS"), 7200),
         lighting_min_commands=_positive(env.get("SL_LIGHTING_MIN_COMMANDS"), 10),
+        curtains_min_shadow_seconds=_positive(env.get("SL_CURTAINS_MIN_SHADOW_SECONDS"), 7200),
+        curtains_min_decisions=_positive(env.get("SL_CURTAINS_MIN_DECISIONS"), 5),
+        forecast_min_shadow_seconds=_positive(env.get("SL_FORECAST_MIN_SHADOW_SECONDS"), 3600),
+        forecast_min_matches=_positive(env.get("SL_FORECAST_MIN_MATCHES"), 10),
     )
 
 

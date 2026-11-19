@@ -80,6 +80,15 @@ export interface PlacementView {
   dim?: boolean;
 }
 
+/** Phase A5: what Live mode draws over a window opening linked to a curtain window. */
+export interface CurtainOverlay {
+  /** Open position 0..100 (100 = fully open), or null when unknown. */
+  position: number | null;
+  /** ok | moving | unavailable | unknown | none */
+  tone: string;
+  title: string;
+}
+
 export interface EditDetail {
   floor: Floor;
   label: string;
@@ -119,6 +128,7 @@ export class SlPlanCanvas extends LitElement {
     rooms: { attribute: false },
     placements: { attribute: false },
     placing: { attribute: false },
+    curtains: { attribute: false },
     imageUrl: { attribute: false },
     preview: { state: true },
     error: { state: true },
@@ -140,6 +150,8 @@ export class SlPlanCanvas extends LitElement {
   declare rooms: Map<string, RoomView>;
   declare placements: PlacementView[];
   declare placing: { entity_id: string; name: string } | null;
+  /** Opening id -> curtain overlay (Live mode). */
+  declare curtains: Map<string, CurtainOverlay>;
   declare imageUrl: (id: string) => string;
   declare preview: Floor | null;
   declare error: string | null;
@@ -174,6 +186,7 @@ export class SlPlanCanvas extends LitElement {
     this.rooms = new Map();
     this.placements = [];
     this.placing = null;
+    this.curtains = new Map();
     this.imageUrl = () => "";
     this.preview = null;
     this.error = null;
@@ -346,10 +359,11 @@ export class SlPlanCanvas extends LitElement {
     return best;
   }
 
+  /** Every opening in Build; outside Build only windows (they can be linked to a curtain window and show its covers). */
   private hitOpening(floor: Floor, w: Pt): string | null {
-    if (this.mode !== "build") return null;
     const map = vertexMap(floor);
     for (const o of floor.openings) {
+      if (this.mode !== "build" && o.type !== "window") continue;
       const g = openingGeometry(floor, o, map);
       if (g && distToSegment(w, g.start, g.end) < WALL_HIT / this.view.scale) return o.id;
     }
@@ -426,9 +440,11 @@ export class SlPlanCanvas extends LitElement {
       return;
     }
     const vertex = this.hitVertex(floor, world);
-    const opening = vertex ? null : this.hitOpening(floor, world);
-    const wall = vertex || opening ? null : this.hitWall(floor, world);
-    const placement = vertex || opening || wall ? null : this.hitPlacement(world);
+    // Outside Build, device icons win over the windows behind them (icons are often placed by a window).
+    const early = this.mode !== "build" ? this.hitPlacement(world) : null;
+    const opening = vertex || early ? null : this.hitOpening(floor, world);
+    const wall = vertex || early || opening ? null : this.hitWall(floor, world);
+    const placement = early ?? (vertex || opening || wall ? null : this.hitPlacement(world));
     const room = vertex || opening || wall || placement ? null : roomAt(floor, world);
     const bg = !vertex && !opening && !wall && !placement && !room && this.hitBackground(floor, world);
     const base = floor;
@@ -438,7 +454,8 @@ export class SlPlanCanvas extends LitElement {
       if (draggable) this.drag = { kind: "vertex", id: vertex, start: at, startWorld: world, base, moved: false };
     } else if (opening) {
       this.select({ kind: "opening", id: opening });
-      if (draggable) this.drag = { kind: "opening", id: opening, start: at, startWorld: world, base, moved: false };
+      if (draggable && this.mode === "build") this.drag = { kind: "opening", id: opening, start: at, startWorld: world, base, moved: false };
+      else this.drag = { kind: "pan", start: at, view: this.view };
     } else if (wall) {
       this.select({ kind: "wall", id: wall });
       if (draggable) this.drag = { kind: "wall", id: wall, start: at, startWorld: world, base, moved: false };
@@ -800,6 +817,40 @@ export class SlPlanCanvas extends LitElement {
     })}`;
   }
 
+  /**
+   * Phase A5 (Live): the covers of a linked curtain window as a bar along the opening, on the room side.
+   * The filled part is the covered share of the window (0 % open = fully filled); the faint track is the
+   * whole opening. Unknown or unavailable: a dashed grey track and no fill.
+   */
+  private renderCurtains(floor: Floor): SVGTemplateResult | typeof nothing {
+    if (this.mode !== "live" || !this.curtains.size) return nothing;
+    const map = vertexMap(floor);
+    const s = this.view.scale;
+    const thick = Math.max(0.08, 5 / s);
+    const off = 0.14;
+    return svg`${floor.openings.map((o) => {
+      const c = this.curtains.get(o.id);
+      const g = c ? openingGeometry(floor, o, map) : null;
+      if (!c || !g) return nothing;
+      // Inside the room: the side of the wall whose probe is in a room.
+      const probe = { x: g.center.x + g.normal.x * 0.05, y: g.center.y + g.normal.y * 0.05 };
+      const n = roomAt(floor, probe) ? g.normal : { x: -g.normal.x, y: -g.normal.y };
+      const a = { x: g.start.x + n.x * off, y: g.start.y + n.y * off };
+      const b = { x: g.end.x + n.x * off, y: g.end.y + n.y * off };
+      // The covered share grows from the middle towards both ends (like a pair of curtains closing).
+      const covered = c.position === null ? 0 : Math.max(0, Math.min(1, (100 - c.position) / 100));
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      const f1 = { x: mid.x + (a.x - mid.x) * covered, y: mid.y + (a.y - mid.y) * covered };
+      const f2 = { x: mid.x + (b.x - mid.x) * covered, y: mid.y + (b.y - mid.y) * covered };
+      const selected = this.selection?.kind === "opening" && this.selection.id === o.id;
+      return svg`<g class="fp-curtain tone-${c.tone} ${selected ? "selected" : ""}" data-curtain=${o.id}>
+        <title>${c.title}</title>
+        <line x1=${a.x} y1=${a.y} x2=${b.x} y2=${b.y} class="fp-curtain-track" stroke-width=${thick}></line>
+        ${covered > 0 ? svg`<line x1=${f1.x} y1=${f1.y} x2=${f2.x} y2=${f2.y} class="fp-curtain-fill" stroke-width=${thick}></line>` : nothing}
+      </g>`;
+    })}`;
+  }
+
   private renderDims(floor: Floor): SVGTemplateResult | typeof nothing {
     if (!this.showDims) return nothing;
     const map = vertexMap(floor);
@@ -936,6 +987,7 @@ export class SlPlanCanvas extends LitElement {
               ${this.renderRooms(floor)}
               ${this.renderWalls(floor)}
               ${this.renderOpenings(floor)}
+              ${this.renderCurtains(floor)}
               ${this.renderDims(floor)}
               ${this.renderHandles(floor)}
               ${this.renderPlacements()}

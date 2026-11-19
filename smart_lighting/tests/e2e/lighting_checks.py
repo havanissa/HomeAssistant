@@ -192,7 +192,7 @@ def phase_all(args: argparse.Namespace, out: Path) -> None:
     shots = out / "screenshots"
     shots.mkdir(exist_ok=True)
     own = integration(args)
-    check("integration 0.8.0 controls lighting by default", own["owner"] == "integration" and own["integration_version"] == "0.8.0"
+    check("integration 0.9.0 controls lighting by default", own["owner"] == "integration" and own["integration_version"] == "0.9.0"
           and own["controller"] == "running", own["state"])
     data = wait("App in shadow mode", lambda: (d := lighting())["mode"] == "shadow" and d, 90)
     check("App: shadow, bridge connected, the integration acknowledged", data["bridge"] == "connected"

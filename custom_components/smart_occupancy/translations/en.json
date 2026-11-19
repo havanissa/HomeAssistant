@@ -493,6 +493,14 @@
     "lighting_return_to_integration": {
       "name": "Return lighting control to the integration",
       "description": "Administrators only. Takes lighting control back from the Smart Lighting App (its last configuration and state are kept). Nothing is switched by the change itself."
+    },
+    "curtains_return_to_integration": {
+      "name": "Return curtain control to the integration",
+      "description": "Administrators only. Takes curtain control back from the Smart Lighting App (its last configuration, manual holds and applied presets are kept). No cover is moved by the change itself."
+    },
+    "forecast_return_to_integration": {
+      "name": "Return occupancy predictions to the integration",
+      "description": "Administrators only. The integration's own forecast learns and publishes again, from everything the Smart Lighting App learned (no data is lost). Forecasts never control a device."
     }
   }
 }

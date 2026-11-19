@@ -15,10 +15,16 @@ import aiohttp
 from . import modules
 from .const import APP_NAME, APP_PHASE, APP_VERSION
 from .floorplan import FloorPlanService
+from .curtains_api import CurtainsApi
+from .curtains_runtime import CurtainRuntime
+from .forecast_api import ForecastApi
+from .forecast_runtime import ForecastRuntime
 from .ha import (
     ALLOWED_COMMANDS,
     CONFIG_WRITE_COMMANDS,
+    CURTAIN_BRIDGE_COMMANDS,
     ENGINE_COMMANDS,
+    FORECAST_BRIDGE_COMMANDS,
     LIGHTING_BRIDGE_COMMANDS,
     READ_ONLY_COMMANDS,
     HomeAssistantClient,
@@ -56,6 +62,10 @@ class AppCore:
         self.occupancy: OccupancyRuntime | None = None
         self.lighting: LightingRuntime | None = None
         self.lighting_api: LightingApi | None = None
+        self.curtains: CurtainRuntime | None = None
+        self.curtains_api: CurtainsApi | None = None
+        self.forecast: ForecastRuntime | None = None
+        self.forecast_api: ForecastApi | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._rooms_timer: asyncio.TimerHandle | None = None
         self._rooms_listeners: list = []
@@ -80,6 +90,18 @@ class AppCore:
                                         min_commands=self.settings.lighting_min_commands)
         await self.lighting.start()
         self.lighting_api = LightingApi(self.ha, self.lighting)
+        # Phase A5: the integration's curtain runtime (shadow until a reviewed handover; then covers are moved only
+        # through the integration's fenced executor) and its forecast runtime (observation only on both sides).
+        self.curtains = CurtainRuntime(self.ha, self.occupancy, self.settings.data_dir, app_version=APP_VERSION,
+                                       min_shadow_seconds=self.settings.curtains_min_shadow_seconds,
+                                       min_decisions=self.settings.curtains_min_decisions)
+        await self.curtains.start()
+        self.curtains_api = CurtainsApi(self.ha, self.curtains)
+        self.forecast = ForecastRuntime(self.ha, self.occupancy, self.settings.data_dir, app_version=APP_VERSION,
+                                        min_shadow_seconds=self.settings.forecast_min_shadow_seconds,
+                                        min_matches=self.settings.forecast_min_matches)
+        await self.forecast.start()
+        self.forecast_api = ForecastApi(self.ha, self.forecast)
         self.ha.add_listener(self._on_ha)
         await self.ha.start()
         self._tasks.append(asyncio.create_task(self._supervisor_loop(), name="supervisor-refresh"))
@@ -134,6 +156,10 @@ class AppCore:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks.clear()
+        if self.forecast is not None:
+            await self.forecast.stop()
+        if self.curtains is not None:
+            await self.curtains.stop()
         if self.lighting is not None:
             await self.lighting.stop()
         if self.occupancy is not None:
@@ -168,14 +194,37 @@ class AppCore:
             return "integration"
         return {"app": "app", "resume_pending": "app"}.get(self.lighting.integration.get("state"), "integration")
 
+    def curtains_owner(self) -> str:
+        """Which manager commands the covers, as the integration acknowledges it."""
+        if self.curtains is None:
+            return "integration"
+        return {"app": "app", "resume_pending": "app"}.get(self.curtains.integration.get("state"), "integration")
+
+    def forecast_owner(self) -> str:
+        """Which side produces the forecasts, as the integration acknowledges it."""
+        if self.forecast is None:
+            return "integration"
+        return {"app": "app", "resume_pending": "app"}.get(self.forecast.integration.get("state"), "integration")
+
     def safety(self) -> dict[str, Any]:
         sent = dict(self.ha.commands_sent) if self.ha else {}
         other_commands = sum(n for cmd, n in sent.items() if cmd not in ALLOWED_COMMANDS)
         writes = sum(n for cmd, n in sent.items() if cmd in CONFIG_WRITE_COMMANDS)
         engine = sum(n for cmd, n in sent.items() if cmd in ENGINE_COMMANDS)
         lighting_commands = sent.get("smart_occupancy/lighting/bridge/execute", 0)
+        curtain_commands = sent.get("smart_occupancy/curtains/bridge/execute", 0)
         owner = self.lighting_owner()
+        curtains_owner = self.curtains_owner()
         return {
+            # Phase A5: covers are moved only after a reviewed handover, only through the integration's fenced
+            # executor (cover services of configured covers); forecasts never command anything.
+            "curtains_owner": curtains_owner,
+            "curtains_mode": self.curtains.mode if self.curtains else None,
+            "curtain_commands_sent": curtain_commands,
+            "allowed_curtain_bridge_commands": sorted(CURTAIN_BRIDGE_COMMANDS),
+            "forecast_owner": self.forecast_owner(),
+            "forecast_mode": self.forecast.mode if self.forecast else None,
+            "allowed_forecast_bridge_commands": sorted(FORECAST_BRIDGE_COMMANDS),
             "read_only": False,
             "configuration_writes": True,
             "write_scope": "Room and presence configuration of the existing integration (sensor and light "
@@ -187,7 +236,7 @@ class AppCore:
             "recent_config_writes": list(self.ha.config_writes) if self.ha else [],
             # Phase A4: lights are commanded only after a reviewed handover, only through the integration's fenced
             # executor (allowlisted services of configured targets).
-            "device_control": owner == "app",
+            "device_control": owner == "app" or curtains_owner == "app",
             "lighting_owner": owner,
             "lighting_mode": self.lighting.mode if self.lighting else None,
             "lighting_commands_sent": lighting_commands,
@@ -329,10 +378,44 @@ class AppCore:
                 detail = rt.bridge_error
             checks.append({"key": "lighting_runtime", "title": "Lighting", "status": status, "detail": detail})
 
+        if self.curtains is not None:
+            rt = self.curtains
+            detail = {
+                "owner": "The App controls the curtains (acknowledged by the integration, through its fenced executor)",
+                "shadow": "Shadow mode: the App's curtain rules run next to the integration's and are compared; the "
+                          "integration moves the covers",
+                "standalone": "Waiting for the integration's curtain bridge",
+                "starting": "Starting",
+            }.get(rt.mode, rt.mode)
+            status = OK if rt.mode in ("shadow", "owner") else (WARNING if rt.bridge in (
+                "incompatible", "error") else INFO)
+            if rt.bridge in ("incompatible", "error", "unsupported") and rt.bridge_error:
+                detail = rt.bridge_error
+            checks.append({"key": "curtains_runtime", "title": "Curtains", "status": status, "detail": detail})
+
+        if self.forecast is not None:
+            rt = self.forecast
+            detail = {
+                "owner": "The App learns and publishes the occupancy forecasts (observation only)",
+                "shadow": "Shadow mode: the App's forecast learns next to the integration's and is compared; the "
+                          "integration publishes",
+                "standalone": "Waiting for the integration's forecast bridge",
+                "starting": "Starting",
+            }.get(rt.mode, rt.mode)
+            status = OK if rt.mode in ("shadow", "owner") else (WARNING if rt.bridge in (
+                "incompatible", "error") else INFO)
+            if rt.bridge in ("incompatible", "error", "unsupported") and rt.bridge_error:
+                detail = rt.bridge_error
+            checks.append({"key": "forecast_runtime", "title": "Predictions", "status": status, "detail": detail})
+
         safety = self.safety()
-        device = ("Lights only through the integration's fenced executor "
-                  f"({safety['lighting_commands_sent']} commands)" if safety["device_control"]
-                  else "No device control (the integration controls the lights)")
+        parts = []
+        if safety["lighting_owner"] == "app":
+            parts.append(f"lights only through the integration's fenced executor ({safety['lighting_commands_sent']} commands)")
+        if safety["curtains_owner"] == "app":
+            parts.append(f"covers only through the integration's fenced executor ({safety['curtain_commands_sent']} commands)")
+        device = ("Device control: " + "; ".join(parts)) if parts else \
+            "No device control (the integration controls the lights and the curtains)"
         checks.append(
             {
                 "key": "safety",
@@ -383,10 +466,16 @@ class AppCore:
             "rooms": self.rooms.status() if self.rooms else None,
             "floorplan": self.floorplan.status() if self.floorplan else None,
             "presence": self.presence.status() if self.presence else None,
-            "modules": modules.modules(self.occupancy_owner(), self.lighting_owner()),
-            "migration": modules.migration(self.occupancy_owner(), self.lighting_owner()),
+            "modules": modules.modules(self.occupancy_owner(), self.lighting_owner(), self.curtains_owner(),
+                                       self.forecast_owner()),
+            "migration": modules.migration(self.occupancy_owner(), self.lighting_owner(), self.curtains_owner(),
+                                           self.forecast_owner()),
             "lighting": ({"mode": self.lighting.mode, "owner": self.lighting_owner(),
                           "bridge": self.lighting.bridge} if self.lighting else None),
+            "curtains": ({"mode": self.curtains.mode, "owner": self.curtains_owner(),
+                          "bridge": self.curtains.bridge} if self.curtains else None),
+            "predictions": ({"mode": self.forecast.mode, "owner": self.forecast_owner(),
+                             "bridge": self.forecast.bridge} if self.forecast else None),
             "engine": ({"mode": self.occupancy.mode, "owner": self.occupancy_owner(),
                         "bridge": self.occupancy.bridge} if self.occupancy else None),
             "safety": self.safety(),

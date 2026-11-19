@@ -1,5 +1,6 @@
-"""Constants of Home Assistant that the lighting runtime uses (same values as Home Assistant's)."""
+"""Constants of Home Assistant that the shared runtime uses (same values as Home Assistant's)."""
 
+from enum import StrEnum
 from typing import Final
 
 MATCH_ALL: Final = "*"
@@ -16,3 +17,16 @@ STATE_ON: Final = "on"
 STATE_OFF: Final = "off"
 STATE_UNAVAILABLE: Final = "unavailable"
 STATE_UNKNOWN: Final = "unknown"
+
+PERCENTAGE: Final = "%"
+
+
+class UnitOfTemperature(StrEnum):
+    CELSIUS = "°C"
+    FAHRENHEIT = "°F"
+    KELVIN = "K"
+
+
+class EntityCategory(StrEnum):
+    CONFIG = "config"
+    DIAGNOSTIC = "diagnostic"

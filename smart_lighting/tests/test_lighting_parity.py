@@ -274,7 +274,8 @@ def model_view(reply: dict[str, Any]) -> Any:
 
     def strip(value: Any) -> Any:
         if isinstance(value, dict):
-            out = {k: strip(v) for k, v in value.items() if k not in INTEGRATION_ONLY}
+            # "version" is the integration's release string (recorded with 0.8.0): not behaviour.
+            out = {k: strip(v) for k, v in value.items() if k not in INTEGRATION_ONLY and k != "version"}
             if {"sensors", "state", "reason", "occupied"} <= set(out) and out.get("occupied") is False:
                 # A vacant zone's text says which evaluation came last; a room timer (integration) and a zone timer
                 # (App) due in the same step run in two processes. Its state is compared.

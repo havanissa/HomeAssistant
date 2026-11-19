@@ -84,19 +84,20 @@ def test_modules_and_migration() -> None:
     assert len(keys) == len(set(keys)) == 11
     features = [m for m in MODULES if m.kind == "feature"]
     assert [m.key for m in features] == ["rooms", "presence", "lighting", "moods", "switches", "curtains", "predictions"]
-    # Phases A2, A3.1/A3.2 and A4: Rooms, Presence, Lighting, Moods and Switches have their interface in the App.
+    # Phases A2, A3.1/A3.2, A4 and A5: every feature module has its interface in the App.
     assert [(m.key, m.phase) for m in features if m.status == GUI] == [
-        ("rooms", "A2"), ("presence", "A3.2"), ("lighting", "A4"), ("moods", "A4"), ("switches", "A4")]
-    assert all(m.status == PENDING and m.handled_by for m in features if m.key in ("curtains", "predictions"))
+        ("rooms", "A2"), ("presence", "A3.2"), ("lighting", "A4"), ("moods", "A4"), ("switches", "A4"),
+        ("curtains", "A5"), ("predictions", "A5")]
+    assert not [m for m in features if m.status == PENDING]
     assert all(m.status == AVAILABLE for m in MODULES if m.kind == "foundation")
     # Phase A2.1: the floor plan is an App tool; it migrates no module and counts in no migration figure.
     tools = [m for m in MODULES if m.kind == "tool"]
     assert [(m.key, m.status, m.controlled_by, m.automation_owner) for m in tools] == [
         ("floorplan", AVAILABLE, None, None)]
     m = migration()
-    assert m["current_phase"] == "A4"
+    assert m["current_phase"] == "A5"
     assert m["modules_migrated"] == 0 and m["percent"] == 0  # by default no automation has moved (occupancy too)
-    assert m["interfaces_migrated"] == 5
+    assert m["interfaces_migrated"] == 7
     presence = next(i for i in m["items"] if i["key"] == "presence")
     assert (presence["gui_owner"], presence["config_source"], presence["automation_owner"], presence["phase"]) == (
         "app", "integration", "integration", "A3.2")
@@ -116,6 +117,17 @@ def test_modules_and_migration() -> None:
         assert (item["gui_owner"], item["config_source"], item["automation_owner"]) == (
             "app", "integration", "integration")
     assert migration("app", "app")["modules_migrated"] == 4
+    # Phase A5: Curtains and Predictions each have their own acknowledged owner (configuration included).
+    cur = migration("integration", "integration", "app")
+    assert cur["modules_migrated"] == 1 and cur["controlled_by_app"] == 1
+    item = next(i for i in cur["items"] if i["key"] == "curtains")
+    assert (item["gui_owner"], item["config_source"], item["automation_owner"]) == ("app", "app", "app")
+    pre = migration("integration", "integration", "integration", "app")
+    assert next(i for i in pre["items"] if i["key"] == "predictions")["automation_owner"] == "app"
+    assert next(i for i in pre["items"] if i["key"] == "curtains")["automation_owner"] == "integration"
+    # Every automation in the App (Rooms is configuration only; it has no automation of its own).
+    assert migration("app", "app", "app", "app")["modules_migrated"] == 6
+    assert migration("app", "app", "app", "app")["controlled_by_integration"] == 1
     assert m["automatic_migration"] is False
     assert m["items"][0]["key"] == "foundation" and m["items"][0]["status"] == "done"
 
@@ -132,7 +144,7 @@ def test_one_system_in_control_per_module() -> None:
     assert (rooms.gui_owner, rooms.config_source, rooms.automation_owner) == (APP, INTEGRATION, INTEGRATION)
     presence = next(m for m in features if m.key == "presence")
     assert (presence.gui_owner, presence.config_source, presence.automation_owner) == (APP, INTEGRATION, INTEGRATION)
-    assert {m.gui_owner for m in features if m.key in ("curtains", "predictions")} == {INTEGRATION}
+    assert {m.gui_owner for m in features if m.key in ("curtains", "predictions")} == {APP}
     assert {m.gui_owner for m in features if m.key in ("lighting", "moods", "switches")} == {APP}
     assert all(m.controlled_by is None for m in MODULES if m.kind in ("foundation", "tool"))
     m = migration()

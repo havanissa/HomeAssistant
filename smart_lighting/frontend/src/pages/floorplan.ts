@@ -36,8 +36,24 @@ import {
   type PlanContext,
   type PlanStatus,
 } from "../floorplan/api";
-import type { EditDetail, Mode, PlacementView, RoomView, Selection, SlPlanCanvas, Tool } from "../floorplan/canvas";
+import type { CurtainOverlay, EditDetail, Mode, PlacementView, RoomView, Selection, SlPlanCanvas, Tool } from "../floorplan/canvas";
 import "../floorplan/canvas";
+import {
+  coverView,
+  curtainEntityIds,
+  curtainSummary,
+  fetchCurtainModel,
+  groupedWindows,
+  layerText,
+  linkedWindows,
+  MODE_WORD,
+  setWindowBearing,
+  windowAttention,
+  type CurtainModel,
+  type CurtainWindow,
+  type LinkedWindow,
+} from "../floorplan/curtains";
+import { bearingDifference, bearingText, openingOrientation } from "../floorplan/orientation";
 import {
   calibrate,
   deleteOpening,
@@ -74,6 +90,7 @@ import {
   samePlan,
   sortedFloors,
   type Floor,
+  type Opening,
   type OpeningType,
   type Placement,
   type Plan,
@@ -120,7 +137,9 @@ type Dialog =
   | { kind: "link"; roomId: string; areaId: string; others: Array<{ floor: Floor; room: Room }> }
   | { kind: "backups"; list: BackupInfo[] | null; error?: string; busy?: boolean }
   | { kind: "import"; file: unknown; review: ImportReview | null; error?: string; busy?: boolean }
-  | { kind: "replace"; placementId: string; query: string };
+  | { kind: "replace"; placementId: string; query: string }
+  /** Phase A5: apply the orientation the plan suggests to a curtain window (the floor plan's only write). */
+  | { kind: "bearing"; windowId: string; name: string; current: number | null; currentCompass: string | null; explicit: boolean; direction: string | null; suggested: number; compass: string; busy?: boolean; error?: string };
 
 function prefNumber(key: string, fallback: number): number {
   try {
@@ -190,6 +209,8 @@ export class SlFloorplan extends StoreElement {
     showDismissed: { state: true },
     paletteLimit: { state: true },
     menuOpen: { state: true },
+    curtainModel: { state: true },
+    curtainError: { state: true },
   };
   /** From the address (#/floorplan/<mode>); an empty or unknown mode is replaced by the default. */
   declare mode: Mode;
@@ -203,7 +224,7 @@ export class SlFloorplan extends StoreElement {
   declare selection: Selection | null;
   declare leftOpen: boolean;
   declare inspectorOpen: boolean;
-  declare leftTab: "devices" | "areas" | "relations";
+  declare leftTab: "devices" | "areas" | "relations" | "curtains";
   declare query: string;
   declare groups: Set<string>;
   declare hidePlaced: boolean;
@@ -235,6 +256,13 @@ export class SlFloorplan extends StoreElement {
   declare showDismissed: boolean;
   declare paletteLimit: number;
   declare menuOpen: boolean;
+  /** Phase A5: the curtain subsystem's model (windows, covers, automatic status), read for Configure and Live. */
+  declare curtainModel: CurtainModel | null;
+  declare curtainError: string | null;
+  private curtainLoading = false;
+  private curtainSeenModels = -1;
+  private curtainTimer: number | undefined;
+  private curtainReload = new LiveReload(() => this.loadCurtains(), () => this.curtainIds());
 
   private base: Plan | null = null;
   private revision = "";
@@ -285,6 +313,8 @@ export class SlFloorplan extends StoreElement {
     this.showDismissed = false;
     this.paletteLimit = PALETTE_LIMIT;
     this.menuOpen = false;
+    this.curtainModel = null;
+    this.curtainError = null;
   }
 
   // ------------------------------------------------------------ lifecycle
@@ -312,6 +342,90 @@ export class SlFloorplan extends StoreElement {
     live.watch([]);
     this.presenceReload.stop();
     window.clearInterval(this.presenceTimer);
+    this.curtainReload.stop();
+    window.clearTimeout(this.curtainTimer);
+  }
+
+  // ------------------------------------------------------------- curtains (Phase A5)
+  /** The curtain model, read once per page view and again when the curtain configuration changes. */
+  async loadCurtains(): Promise<void> {
+    if (this.curtainLoading) return;
+    this.curtainLoading = true;
+    try {
+      this.curtainModel = await fetchCurtainModel();
+      this.curtainError = null;
+      this.updateWatch();
+    } catch (err) {
+      // The curtain bridge may be unavailable (integration offline, older integration): the plan still works.
+      this.curtainError = err instanceof ApiError ? err.message : String(err);
+    } finally {
+      this.curtainLoading = false;
+    }
+  }
+
+  private curtainsOn(): boolean {
+    return this.mode === "live" || this.mode === "configure";
+  }
+
+  /** The window openings of the shown floor with their curtain windows. */
+  private links(floor = this.floor()): LinkedWindow[] {
+    return floor ? linkedWindows(floor, this.curtainModel) : [];
+  }
+
+  private curtainIds(): string[] {
+    return this.mode === "live" ? curtainEntityIds(this.links()) : [];
+  }
+
+  private curtainWindow(opening: Opening): { window: CurtainWindow | null; dangling: boolean } {
+    const window = opening.curtain_window_id ? (this.curtainModel?.windows.find((w) => w.window_id === opening.curtain_window_id) ?? null) : null;
+    return { window, dangling: Boolean(opening.curtain_window_id && this.curtainModel && !window) };
+  }
+
+  private curtainOverlays(floor: Floor): Map<string, CurtainOverlay> {
+    const out = new Map<string, CurtainOverlay>();
+    if (this.mode !== "live") return out;
+    for (const l of this.links(floor)) {
+      if (!l.window) continue;
+      const v = coverView(l.window, store.liveStates);
+      out.set(l.opening.id, { position: v.position, tone: v.tone, title: `${l.window.name} · ${v.text} · ${MODE_WORD[l.window.mode]}` });
+    }
+    return out;
+  }
+
+  /** Link a window opening to a curtain window (or unlink): a normal plan edit, undoable, saved with the plan. */
+  private linkCurtain(opening: Opening, windowId: string | null): void {
+    const floor = this.floor();
+    if (!floor || !this.writable()) return;
+    const r = updateOpening(floor, opening.id, { curtain_window_id: windowId });
+    if (r.ok) this.applyFloor(r.value, windowId ? "Link curtain window" : "Unlink curtain window");
+    else this.flash(r.error, "warning");
+  }
+
+  private openBearingDialog(window: CurtainWindow, suggested: number, compass: string): void {
+    this.dialog = {
+      kind: "bearing",
+      windowId: window.window_id,
+      name: window.name,
+      current: window.effective_bearing,
+      currentCompass: window.compass,
+      explicit: window.bearing !== null && window.bearing !== undefined,
+      direction: window.direction,
+      suggested,
+      compass,
+    };
+  }
+
+  private async applyBearing(d: Extract<Dialog, { kind: "bearing" }>): Promise<void> {
+    this.dialog = { ...d, busy: true, error: undefined };
+    try {
+      await setWindowBearing(d.windowId, d.suggested);
+      this.querySelector<HTMLDialogElement>("dialog.fp-dialog")?.close();
+      this.dialog = null;
+      this.flash(`${d.name} now faces ${bearingText(d.suggested, d.compass)} in the curtain configuration.`);
+      await this.loadCurtains();
+    } catch (err) {
+      this.dialog = { ...d, busy: false, error: err instanceof ApiError ? err.message : String(err) };
+    }
   }
 
   async loadPresence(): Promise<void> {
@@ -362,6 +476,19 @@ export class SlFloorplan extends StoreElement {
         if (!first) void this.loadPresence();
       }
     }
+    if (this.curtainsOn() && this.plan) {
+      // Phase A5: the curtain model, once per page view; again (debounced) when the curtain configuration or a cover changes.
+      if (!this.curtainModel && !this.curtainLoading && !this.curtainError) void this.loadCurtains();
+      if (store.curtainsModelsVersion !== this.curtainSeenModels) {
+        const first = this.curtainSeenModels === -1;
+        this.curtainSeenModels = store.curtainsModelsVersion;
+        if (!first) {
+          window.clearTimeout(this.curtainTimer);
+          this.curtainTimer = window.setTimeout(() => void this.loadCurtains(), 800);
+        }
+      }
+      if (this.curtainModel && this.mode === "live") this.curtainReload.check();
+    }
     if (!MODES.some((m) => m.key === this.mode) && this.plan) {
       // Default: watch a drawn home live; start drawing when there is nothing yet.
       const mode: Mode = this.plan.floors.some((f) => f.rooms.length) ? "live" : "build";
@@ -371,8 +498,10 @@ export class SlFloorplan extends StoreElement {
     if (changed.has("mode")) {
       this.tool = "select";
       this.placing = null;
-      if (this.mode === "live" && this.selection && !["room", "placement"].includes(this.selection.kind)) this.selection = null;
-      if (this.mode === "configure" && this.selection && !["room", "placement"].includes(this.selection.kind)) this.selection = null;
+      // Outside Build, rooms, device icons and windows (curtains, Phase A5) can stay selected.
+      const isWindow = this.selection?.kind === "opening" && this.floor()?.openings.find((o) => o.id === this.selection!.id)?.type === "window";
+      if (this.mode === "live" && this.selection && !["room", "placement"].includes(this.selection.kind) && !isWindow) this.selection = null;
+      if (this.mode === "configure" && this.selection && !["room", "placement"].includes(this.selection.kind) && !isWindow) this.selection = null;
       if (this.mode === "build" && this.selection?.kind === "placement") this.selection = null;
     }
     if (store.floorplanVersion !== this.seenFloorplan) {
@@ -461,6 +590,8 @@ export class SlFloorplan extends StoreElement {
       const pr = this.presenceOn() && room.area_id ? this.presenceData?.rooms.find((r) => r.area_id === room.area_id) : undefined;
       for (const s of pr?.sensors ?? []) ids.add(s.entity_id);
     }
+    // Curtains (Phase A5): the covers of linked windows, for live positions on the plan.
+    for (const id of this.curtainIds()) ids.add(id);
     const key = [...ids].sort().join(",");
     if (key !== this.watched) {
       this.watched = key;
@@ -1374,16 +1505,159 @@ export class SlFloorplan extends StoreElement {
       { key: "devices", title: "Devices", icon: "home" },
       { key: "areas", title: "Areas", icon: "link" },
       { key: "relations", title: "Relations", icon: "swap" },
+      { key: "curtains", title: "Curtains", icon: "curtains" },
     ];
     const count = this.suggestions().filter((s) => !(this.plan?.dismissed ?? []).includes(s.key) && s.changes.length).length;
+    const dangling = this.links().filter((l) => l.dangling).length;
     return html`${this.renderFloors()}
-      <nav class="tabs fp-tabs" role="tablist" aria-label="Configure">
+      <nav class="tabs fp-tabs fp-tabs-4" role="tablist" aria-label="Configure">
         ${tabs.map((t) => html`<button type="button" role="tab" aria-selected=${this.leftTab === t.key ? "true" : "false"} class=${this.leftTab === t.key ? "active" : ""} data-left-tab=${t.key} @click=${() => (this.leftTab = t.key)}>
-          ${icon(t.icon, 18)}<span>${t.title}</span>${t.key === "relations" && count ? html`<span class="badge">${count}</span>` : nothing}</button>`)}
+          ${icon(t.icon, 18)}<span>${t.title}</span>${t.key === "relations" && count ? html`<span class="badge">${count}</span>` : nothing}${t.key === "curtains" && dangling ? html`<span class="badge">${dangling}</span>` : nothing}</button>`)}
       </nav>
       <section class="panel-section" role="tabpanel">
-        ${this.leftTab === "devices" ? this.renderDevicesTab() : this.leftTab === "areas" ? this.renderAreasTab() : this.renderRelationsTab()}
+        ${this.leftTab === "devices" ? this.renderDevicesTab() : this.leftTab === "areas" ? this.renderAreasTab() : this.leftTab === "curtains" ? this.renderCurtainsTab() : this.renderRelationsTab()}
       </section>`;
+  }
+
+  /** Phase A5 (Configure): which window openings on this floor show a curtain window. */
+  private renderCurtainsTab(): TemplateResult {
+    const floor = this.floor();
+    const links = this.links(floor);
+    const linked = links.filter((l) => l.window);
+    const unlinked = links.filter((l) => !l.opening.curtain_window_id);
+    const dangling = links.filter((l) => l.dangling);
+    const selectedId = this.selection?.kind === "opening" ? this.selection.id : null;
+    const row = (l: LinkedWindow, state: unknown) => html`<li><button type="button" class="fp-room-row ${selectedId === l.opening.id ? "selected" : ""}" data-window-row=${l.opening.id}
+        @click=${() => this.select({ kind: "opening", id: l.opening.id })}>${icon("window", 18)}<span class="label">${this.openingTitle(floor, l.opening)}</span>${state}</button></li>`;
+    return html`<div class="fp-curtains" data-testid="fp-curtains-tab">
+      ${this.curtainNotice()}
+      <p class="muted small">Link a drawn window to a window of the curtain subsystem to see its covers on the plan and to suggest its orientation. The link is stored in the floor plan only; covers, presets and the automation stay in Curtains.</p>
+      ${!floor ? nothing : !links.length
+        ? html`<p class="muted small">No windows on ${floor.name}. Draw them in Build (W).</p>`
+        : html`<div class="stat-tiles fp-stats">
+              <div class="stat"><span class="stat-value">${linked.length}</span><span class="stat-label">linked</span></div>
+              <div class="stat"><span class="stat-value">${unlinked.length}</span><span class="stat-label">not linked</span></div>
+              ${dangling.length ? html`<div class="stat"><span class="stat-value tone-warning">${dangling.length}</span><span class="stat-label">need attention</span></div>` : nothing}
+            </div>
+            ${dangling.length ? html`<h4 class="fp-sub">Linked window no longer exists</h4><ul class="fp-room-list">${dangling.map((l) => row(l, chip("warning", "Missing")))}</ul>` : nothing}
+            <h4 class="fp-sub">Linked (${linked.length})</h4>
+            ${linked.length ? html`<ul class="fp-room-list">${linked.map((l) => row(l, chip(l.window!.mode === "automatic" ? "info" : "neutral", l.window!.name)))}</ul>` : html`<p class="muted small">None yet.</p>`}
+            <h4 class="fp-sub">Not linked (${unlinked.length})</h4>
+            ${unlinked.length ? html`<ul class="fp-room-list">${unlinked.map((l) => row(l, chip("neutral", "Not linked")))}</ul>` : html`<p class="muted small">Every window is linked.</p>`}`}
+      ${this.curtainModel && !this.curtainModel.windows.length ? html`<p class="muted small">The curtain subsystem has no windows yet. <a class="text-link" href="#/curtains/windows">Set them up in Curtains</a>.</p>` : nothing}
+    </div>`;
+  }
+
+  private curtainNotice(): unknown {
+    if (this.curtainError) return html`<p class="notice notice-warning small" data-testid="fp-curtains-unavailable">${icon("offline", 18)}<span>Curtain data unavailable (${this.curtainError}). Links can still be set; the windows' covers and status return when the curtain subsystem is reachable. <button type="button" class="btn" @click=${() => { this.curtainError = null; void this.loadCurtains(); }}>${icon("refresh", 16)}Try again</button></span></p>`;
+    if (!this.curtainModel) return html`<p class="muted small">Loading curtain windows…</p>`;
+    return nothing;
+  }
+
+  /** "Window · Living (2.5 m)" */
+  private openingTitle(floor: Floor | undefined, o: Opening): string {
+    const wall = floor?.walls.find((w) => w.id === o.wall_id);
+    const rooms = floor && wall ? wallRooms(floor, wall).map((r) => roomLabel(r, this.areaName)) : [];
+    return `${OPENING_LABEL[o.type]}${rooms.length ? ` · ${rooms.join(" / ")}` : ""} · ${formatLength(o.width, this.units())}`;
+  }
+
+  /** Phase A5 (Live): the curtain windows on this floor at a glance. */
+  private renderCurtainLiveSummary(): unknown {
+    const floor = this.floor();
+    const links = this.links(floor);
+    if (!floor || !links.some((l) => l.opening.curtain_window_id)) return nothing;
+    const s = curtainSummary(links, store.liveStates);
+    return html`<section class="panel-section" data-testid="fp-curtain-summary">
+      <h3 class="panel-title">${icon("curtains", 18)}Curtains</h3>
+      ${this.curtainNotice()}
+      ${this.curtainModel
+        ? html`<div class="stat-tiles fp-stats">
+              <div class="stat"><span class="stat-value">${s.automatic}</span><span class="stat-label">of ${s.linked} automatic</span></div>
+              <div class="stat"><span class="stat-value">${s.holds}</span><span class="stat-label">manual holds</span></div>
+              <div class="stat"><span class="stat-value">${s.moving}</span><span class="stat-label">moving</span></div>
+              <div class="stat"><span class="stat-value ${s.unavailable || s.dangling ? "tone-warning" : ""}">${s.unavailable + s.dangling}</span><span class="stat-label">unavailable</span></div>
+            </div>
+            ${s.attention.length ? html`<h4 class="fp-sub">Need attention</h4><ul class="fp-problem-list">${s.attention.slice(0, 8).map((a) => html`<li><button type="button" class="fp-room-row" data-attention=${a.opening.id} @click=${() => this.select({ kind: "opening", id: a.opening.id })}>
+                ${icon("curtains", 18)}<span class="label">${a.window?.name ?? this.openingTitle(floor, a.opening)}</span><span class="tone-warning small">${a.reasons[0]}</span></button></li>`)}</ul>` : html`<p class="muted small">All linked windows report normally.</p>`}`
+        : nothing}
+    </section>`;
+  }
+
+  /** Phase A5: the Curtains section of a window opening's inspector (Configure: the link and the orientation; Live: the covers now). */
+  private renderOpeningCurtains(floor: Floor, o: Opening): unknown {
+    if (o.type !== "window") return nothing;
+    const { window, dangling } = this.curtainWindow(o);
+    const wall = floor.walls.find((w) => w.id === o.wall_id);
+    const wallAreas = wall ? wallRooms(floor, wall).map((r) => r.area_id) : [];
+    const editable = this.writable() && this.mode === "configure";
+    const link = window ? html`<a class="btn" data-testid="fp-open-curtain" href=${`#/curtains/windows/${encodeURIComponent(window.window_id)}`}>${icon("curtains", 16)}Open ${window.name} in Curtains</a>` : nothing;
+    if (this.mode === "live") {
+      if (!o.curtain_window_id) return html`<section class="inspector-section" data-testid="fp-window-curtains"><h4>Curtains</h4><p class="muted small">Not linked to a curtain window. Link it under Configure → Curtains.</p></section>`;
+      if (this.curtainError || !this.curtainModel) return html`<section class="inspector-section" data-testid="fp-window-curtains"><h4>Curtains</h4>${this.curtainNotice()}</section>`;
+      if (!window) return html`<section class="inspector-section" data-testid="fp-window-curtains"><h4>Curtains</h4><p class="notice notice-warning small">${icon("warning", 18)}<span>The linked curtain window (${o.curtain_window_id}) no longer exists. Unlink or relink it under Configure → Curtains.</span></p></section>`;
+      const cover = coverView(window, store.liveStates);
+      const auto = window.auto;
+      const sun = auto?.environment?.sun;
+      const glare = auto?.environment?.glare;
+      const attention = windowAttention(window, store.liveStates);
+      const hold = auto?.hold as { policy_word?: string; reason?: string; until?: string | null } | null | undefined;
+      return html`<section class="inspector-section" data-testid="fp-window-curtains">
+        <h4>${window.name} <span class="muted small">· ${window.area_name ?? "no room"}</span></h4>
+        <p>${chip(window.mode === "automatic" ? "ok" : window.mode === "observing" ? "info" : "neutral", MODE_WORD[window.mode])} <span class="small">${cover.text}${window.current?.text && window.current.status === "preset" ? ` · ${window.current.text}` : ""}</span></p>
+        <ul class="plain-list small fp-cover-list">${window.layers.map((l) => {
+          const t = layerText(l, store.liveStates);
+          return html`<li><span>${l.kind_word ?? l.kind} <strong>${l.name}</strong></span><span class=${t.tone === "unavailable" ? "tone-warning" : t.tone === "moving" ? "tone-info" : "muted"}>${t.text}</span></li>`;
+        })}</ul>
+        ${kvRows([
+          ["Position", window.current?.text ?? null],
+          ["Automatic", auto?.status?.word ? html`<strong>${auto.status.word}</strong>${auto.status.text ? html` <span class="muted">${auto.status.text}</span>` : nothing}` : window.mode === "automatic" ? "Waiting for the first evaluation" : "Not automatic"],
+          ["Condition", auto?.status?.condition ? ((this.curtainModel.words?.conditions ?? {})[auto.status.condition] ?? auto.status.condition) : null],
+          ["Manual hold", hold ? `${hold.policy_word ?? "Held"}${hold.reason ? ` · ${hold.reason}` : ""}` : "None"],
+          ["Sun", sun?.text ?? window.exposure?.text ?? null],
+          ["Glare", glare?.enabled ? (glare.active ? "Glare protection active" : "Watching") : null],
+          ["Orientation", bearingText(window.effective_bearing, window.compass)],
+        ])}
+        ${attention.length ? html`<ul class="plain-list small">${attention.map((t) => html`<li class="tone-warning">${icon("warning", 14)} ${t}</li>`)}</ul>` : nothing}
+        ${link}
+        <p class="muted small">From the curtain subsystem (read-only here). The bar on the plan shows the covered share of the window.</p>
+      </section>`;
+    }
+    // Configure: the link and the orientation suggestion.
+    const groups = this.curtainModel ? groupedWindows(this.curtainModel, wallAreas) : [];
+    const orientation = openingOrientation(floor, o, this.plan?.building.north_deg ?? null);
+    const diff = window && orientation.bearing !== null && window.effective_bearing !== null ? bearingDifference(orientation.bearing, window.effective_bearing) : null;
+    return html`<section class="inspector-section" data-testid="fp-window-curtains">
+      <h4>Curtains</h4>
+      ${this.curtainNotice()}
+      <label class="field"><span class="field-label">Curtain window</span>
+        <select data-testid="fp-curtain-select" ?disabled=${!editable} .value=${liveValue(o.curtain_window_id ?? "")} @change=${(e: Event) => this.linkCurtain(o, (e.target as HTMLSelectElement).value || null)}>
+          <option value="" ?selected=${!o.curtain_window_id}>Not linked</option>
+          ${groups.map((g) => html`<optgroup label=${`${g.name}${wallAreas.includes(g.area_id) ? " (this wall)" : ""}`}>${g.windows.map((w) => html`<option value=${w.window_id} ?selected=${o.curtain_window_id === w.window_id}>${w.name}${w.compass ? ` · ${w.compass}` : ""}</option>`)}</optgroup>`)}
+          ${dangling ? html`<option value=${o.curtain_window_id!} selected>${o.curtain_window_id} (no longer exists)</option>` : nothing}
+          ${!this.curtainModel && o.curtain_window_id ? html`<option value=${o.curtain_window_id} selected>${o.curtain_window_id}</option>` : nothing}
+        </select></label>
+      ${dangling ? html`<p class="notice notice-warning small" data-testid="fp-curtain-dangling">${icon("warning", 18)}<span>This curtain window no longer exists. Choose another or unlink it.
+          ${editable ? html`<button type="button" class="btn" data-testid="fp-curtain-unlink" @click=${() => this.linkCurtain(o, null)}>${icon("link-off", 16)}Unlink</button>` : nothing}</span></p>` : nothing}
+      ${window ? html`<p class="small">${chip(window.mode === "automatic" ? "ok" : window.mode === "observing" ? "info" : "neutral", MODE_WORD[window.mode])} ${plural(window.layers.length, "cover", "covers")}${window.area_name ? ` · ${window.area_name}` : ""}</p>${link}` : nothing}
+      ${this.curtainModel && !this.curtainModel.windows.length ? html`<p class="muted small">The curtain subsystem has no windows yet. <a class="text-link" href="#/curtains/windows">Set them up in Curtains</a>.</p>` : nothing}
+      <h4 class="section-title">Orientation</h4>
+      ${orientation.status === "no_north"
+        ? html`<p class="small muted" data-testid="fp-orientation">Set north first (Build → Drawing aids → “Top of the plan faces”) to suggest the direction this window faces.</p>`
+        : orientation.status === "shared_wall"
+          ? html`<p class="small muted" data-testid="fp-orientation">This wall is shared between ${orientation.rooms.map((id) => roomLabel(floor.rooms.find((r) => r.id === id)!, this.areaName)).join(" and ")}, so it has no single outside: no orientation is suggested.</p>`
+          : orientation.status !== "ok"
+            ? html`<p class="small muted" data-testid="fp-orientation">The wall of this window is not part of a room, so no orientation can be suggested.</p>`
+            : html`<dl class="kv" data-testid="fp-orientation">
+                <dt>Suggested</dt><dd><strong data-testid="fp-orientation-suggested">${bearingText(orientation.bearing, orientation.compass)}</strong></dd>
+                <dt>In Curtains</dt><dd>${window ? bearingText(window.effective_bearing, window.compass) : o.curtain_window_id ? "—" : "Link a curtain window first"}</dd>
+              </dl>
+              ${window && diff !== null && diff < 1 ? html`<p class="small tone-ok">${icon("ok", 16)} The curtain window already faces this way.</p>` : nothing}
+              ${window && (diff === null || diff >= 1)
+                ? html`<button type="button" class="btn btn-primary" data-testid="fp-use-orientation" ?disabled=${!this.curtainModel?.can_edit} title=${this.curtainModel?.can_edit ? "" : "Only administrators can change the curtain configuration"}
+                    @click=${() => this.openBearingDialog(window, orientation.bearing!, orientation.compass!)}>${icon("compass", 16)}Use this orientation…</button>`
+                : nothing}`}
+      <p class="muted small">A 2D plan gives the direction a window faces, not its sun exposure: obstructions, the horizon and neighbouring buildings are set in Curtains. Nothing is applied without your confirmation.</p>
+    </section>`;
   }
 
   private renderLivePanel(): TemplateResult {
@@ -1417,6 +1691,7 @@ export class SlFloorplan extends StoreElement {
         </div>
         ${problems.length ? html`<ul class="fp-problem-list">${problems.slice(0, 8).map((d) => html`<li><button type="button" class="fp-room-row" @click=${() => this.select({ kind: "placement", id: d.p.id })}>${icon(d.r.entity?.icon ?? "puzzle", 18)}<span class="label">${d.p.label || d.r.entity?.name || d.r.entity_id}</span><span class="tone-${d.v.tone === "unknown" ? "neutral" : "warning"} small">${d.v.text}</span></button></li>`)}</ul>` : nothing}
       </section>
+      ${this.renderCurtainLiveSummary()}
       <section class="panel-section">
         <h3 class="panel-title">${icon("filter", 18)}Show</h3>
         <div class="chip-choices small-chips" role="group" aria-label="Device types">
@@ -1435,6 +1710,7 @@ export class SlFloorplan extends StoreElement {
         <ul>${roomTones.map((t) => html`<li><span class="fp-swatch room tone-${t}"></span>${ROOM_TONE_LABEL[t]}</li>`)}</ul>
         <ul>${deviceTones.map((t) => html`<li><span class="fp-swatch device tone-${t}"></span>${DEVICE_TONE_LABEL[t]}</li>`)}</ul>
         <p class="muted small">Occupancy comes from the Smart Occupancy integration's own room states. Icons are where you placed the devices: they are not measured positions, people's locations or sensor coverage. No sensor coverage is drawn: the integration does not know it. Radar distance zones are listed in a room's Presence section (configured band and measured distance).</p>
+        <ul><li><span class="fp-swatch curtain"></span>Curtain bar on a linked window: the covered share (dashed grey: position unknown or unavailable)</li></ul>
       </section>`;
   }
 
@@ -1715,6 +1991,18 @@ export class SlFloorplan extends StoreElement {
       if (r.ok) this.applyFloor(r.value, label);
       else this.flash(r.error, "warning");
     };
+    const rooms = wall ? wallRooms(floor, wall) : [];
+    const subtitle = html`<span class="muted small">${rooms.length ? `${rooms.length > 1 ? "Between " : "In "}${rooms.map((r) => roomLabel(r, this.areaName)).join(" and ")}` : `On ${floor.name}`}</span>`;
+    if (this.mode !== "build") {
+      // Configure and Live (Phase A5): the window's curtain link, orientation and covers; geometry is edited in Build.
+      const cw = o.type === "window" ? this.curtainWindow(o).window : null;
+      return this.inspectorShell(cw?.name ?? OPENING_LABEL[o.type], o.type === "opening" ? "open-plan" : o.type, html`
+        ${this.renderOpeningCurtains(floor, o)}
+        <section class="inspector-section">
+          ${kvRows([["Type", OPENING_LABEL[o.type]], ["Width", formatLength(o.width, this.units())]])}
+          <p class="muted small">Its position and size are edited in Build.</p>
+        </section>`, subtitle);
+    }
     return this.inspectorShell(OPENING_LABEL[o.type], o.type === "opening" ? "open-plan" : o.type, html`<section class="inspector-section">
         <label class="field"><span class="field-label">Type</span>
           <select data-testid="fp-opening-type" ?disabled=${!editable} @change=${(e: Event) => patch({ type: (e.target as HTMLSelectElement).value as OpeningType }, "Change opening type")}>
@@ -1732,8 +2020,9 @@ export class SlFloorplan extends StoreElement {
               </select></label>`
           : nothing}
         <p class="muted small">Drag it along the wall to move it. It stays on its wall when the wall moves. A drawn door does not make occupancy spread between rooms.</p>
+        ${o.type === "window" && o.curtain_window_id ? html`<p class="small">${chip("info", "Linked to a curtain window")} <a class="text-link" href="#/floorplan/configure">Manage it under Configure</a></p>` : nothing}
         ${editable ? html`<button type="button" class="btn btn-danger" data-testid="fp-delete-opening" @click=${() => this.deleteSelection()}>${icon("delete", 18)}Delete</button>` : nothing}
-      </section>`);
+      </section>`, subtitle);
   }
 
   private renderBackgroundInspector(floor: Floor): unknown {
@@ -1930,6 +2219,18 @@ export class SlFloorplan extends StoreElement {
             }}>${icon(e.icon, 20)}<span class="palette-text"><span class="palette-name">${e.name}</span><span class="muted small">${e.entity_id}${e.area ? ` · ${e.area}` : ""}</span></span></button></li>`)}</ul>`,
           html`<button type="button" class="btn" @click=${close}>Cancel</button>`, true);
       }
+      case "bearing":
+        return shell(`Set the orientation of ${d.name}?`, html`
+            <p>The floor plan suggests the direction this window faces from its wall and the north direction you set. Review it before it is applied:</p>
+            <dl class="kv fp-bearing-compare" data-testid="fp-bearing-compare">
+              <dt>Now in Curtains</dt><dd>${d.current === null ? "Not set" : bearingText(d.current, d.currentCompass)}${d.current !== null ? html` <span class="muted small">(${d.explicit ? "set explicitly" : `from the compass direction ${d.direction ?? ""}`})</span>` : nothing}</dd>
+              <dt>Suggested</dt><dd><strong>${bearingText(d.suggested, d.compass)}</strong></dd>
+            </dl>
+            ${d.explicit ? html`<p class="notice notice-warning small">${icon("warning", 18)}<span>This replaces the bearing that was set explicitly in the curtain configuration (${bearingText(d.current, d.currentCompass)}).</span></p>` : d.direction ? html`<p class="muted small">The bearing takes precedence over the compass direction “${d.direction}” set in Curtains.</p>` : nothing}
+            <p class="muted small">A 2D plan gives the direction only. Sun exposure also depends on obstructions, the horizon and neighbouring buildings, which are set in Curtains. Nothing else changes: no cover moves.</p>
+            ${d.error ? html`<p class="notice notice-error small">${icon("error", 18)}<span>${d.error}</span></p>` : nothing}`,
+          html`<button type="button" class="btn" ?disabled=${d.busy} @click=${close}>Cancel</button>
+            <button type="button" class="btn btn-primary" data-testid="fp-bearing-apply" ?disabled=${d.busy} @click=${() => void this.applyBearing(d)}>${d.busy ? "Applying…" : `Set to ${bearingText(d.suggested, d.compass)}`}</button>`);
     }
   }
 
@@ -1962,6 +2263,7 @@ export class SlFloorplan extends StoreElement {
             .rooms=${floor ? this.roomViews(floor) : new Map()}
             .placements=${floor ? this.placementViews(floor) : []}
             .placing=${this.mode === "configure" ? this.placing : null}
+            .curtains=${floor ? this.curtainOverlays(floor) : new Map()}
             .imageUrl=${imageUrl}
             @plan-edit=${(e: CustomEvent<EditDetail>) => this.onCanvasEdit(e)}
             @plan-select=${(e: CustomEvent<Selection | null>) => this.select(e.detail)}

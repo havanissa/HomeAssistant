@@ -158,6 +158,10 @@ export interface Overview {
   rooms?: Record<string, unknown> | null;
   /** Phase A3.2: the occupancy engine (owner as the integration acknowledges it). */
   engine?: EngineBrief | null;
+  /** Phase A4 / A5: the lighting, curtain and prediction runtimes (owner as the integration acknowledges it). */
+  lighting?: EngineBrief | null;
+  curtains?: EngineBrief | null;
+  predictions?: EngineBrief | null;
   generated_at: string;
 }
 
@@ -196,6 +200,8 @@ export type LiveMessage =
   | { type: "floorplan"; revision: string }
   | { type: "engine"; mode: string; owner: string; bridge: string }
   | { type: "lighting"; what: string; mode: string; owner: string; bridge: string }
+  | { type: "curtains"; what: string; mode: string; owner: string; bridge: string }
+  | { type: "predictions"; what: string; mode: string; owner: string; bridge: string }
   | { type: "pong" };
 
 export interface LiveState {

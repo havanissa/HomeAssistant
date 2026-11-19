@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.6.0
+
+Phase A5: Curtains and Predictions. Needs Smart Occupancy & Lighting 0.9.0.
+Nothing is migrated automatically: the integration keeps controlling the
+curtains and producing the forecasts until an administrator performs a reviewed
+handover for each.
+
+- **The integration's curtain runtime in the App.** The whole `curtains`
+  package (windows, presets, the executor with position verification, the
+  automatic rules, Global Modes, the Global Schedule, the environment and solar
+  geometry, conflicts, discovery, the 21 websocket commands) is a byte-identical
+  copy on the host interface (new: cover features, temperature units and
+  conversion, the unit system). Shadow mode by default: a fresh manager from the
+  integration's exact copy follows the same events and the published occupancy
+  and sends nothing; the comparison matches cover commands (service, cover,
+  position within 3 s) and window decisions. **Curtains → Control**: readiness
+  (2 h, 5 matched decisions, no command mismatch, no cover moving, same code and
+  configuration), the reviewed handover (backup, key-by-key check), covers moved
+  only through the integration's fenced `execute` with the App's context,
+  configuration and state in `/data/curtains/store` mirrored to the integration,
+  release / return / rollback, export and a reviewed import. A handover or a
+  return is refused while a cover is moving; a crash of the App hands the covers
+  back without a movement; a restarted App never takes control back.
+- **Curtains pages**: Overview, Windows (creation, discovery, covers, presets,
+  confirmed Apply), Global Modes (assignment matrix with review and policy),
+  Global Schedule (timeline, phases, transitions), Environment (sensor quality,
+  sun, calibration) and Diagnostics (operations, holds, blocks, conflicts, log),
+  one window workspace, on the integration's own commands (forwarded until the
+  handover, answered by the App's copy afterwards). The floor plan links drawn
+  windows to curtain windows, suggests an orientation from the wall (applied only
+  after review) and shows cover positions, modes, holds and warnings live.
+- **The integration's forecast runtime in the App.** Learning, the model, the
+  history replay, settings and the 5 websocket commands are byte-identical copies.
+  History is read through Home Assistant's `history/history_during_period`
+  (bounded, one day at a time, significant changes only), never from the
+  database; replay and model building run off the event loop. Shadow mode learns
+  alongside the integration from its handed-over days and compares predictions.
+  **Predictions → Control**: readiness, a reviewed handover that moves every
+  learned day (validated and verified), the App publishing its view to the
+  integration's unchanged forecast entities and its learned data as the rollback
+  copy, release / return / rollback without retraining, export and import.
+  Forecasts command nothing on either side.
+- **Predictions pages**: House (learning, coverage, next room, every room's
+  forecast), Room (probabilities per horizon, entry, confidence and its reasons,
+  explanation, factors), Patterns (hourly, weekly, workday / day off, movements),
+  Accuracy (Brier, baselines, calibration, daily), Settings (defaults, room
+  overrides, contexts, workday source, connections, learn and rebuild).
+- Dashboard, modules and safety report the curtain and forecast owners; live
+  updates for both; `SL_CURTAINS_MIN_*` / `SL_FORECAST_MIN_*` thresholds (tests
+  only). End-to-end suites `tests/e2e/curtains_checks.py` and
+  `predictions_checks.py`.
+- **From the independent review**: a lost connection's instance stop and the
+  next session's start are serialized (no two instances on the same store); a
+  forced `return` while a cover is moving is refused unless the user ticks
+  "Return even while a cover is moving"; a restored curtain export lists the
+  windows it would switch to Automatic and restores them as Observing unless
+  that is confirmed; a changed curtain configuration is published at once so a
+  newly added cover can be commanded right away.
+
 ## 0.5.0
 
 Phase A4: Lighting, Moods and Switches. Needs Smart Occupancy & Lighting

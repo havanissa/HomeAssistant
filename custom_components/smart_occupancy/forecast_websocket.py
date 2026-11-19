@@ -259,6 +259,9 @@ def ws_forecast_room(hass: HomeAssistant, connection: websocket_api.ActiveConnec
         return
     detail = room_detail(hass, m, msg["area_id"])
     detail["context_candidates"] = context_candidates(hass)
+    # Phase A5: while the Smart Lighting App produces the forecasts, the integration's settings are read-only.
+    detail["managed_by_app"] = bool(m.dormant)
+    detail["can_edit"] = bool(connection.user and connection.user.is_admin) and not m.dormant
     connection.send_result(msg["id"], detail)
 
 

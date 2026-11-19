@@ -21,6 +21,18 @@ before anything is sent:
   they change which engine publishes occupancy and the App's published results,
   nothing else), and :data:`SUBSCRIPTION_COMMANDS`, opened only with
   :meth:`subscribe` (the bridge session).
+* :data:`CURTAIN_BRIDGE_COMMANDS` (Phase A5) - the integration's curtain bridge,
+  sent only with :meth:`curtains_command`. Its ``execute`` is the only path from
+  the App to a cover: accepted only from the session that controls the curtains
+  (epoch, lease, sequence) and only for a cover service of a configured cover.
+  The curtain editors' commands are forwarded with :meth:`command` (reads,
+  :data:`CURTAIN_READ_COMMANDS`) and :meth:`config_write` (changes,
+  :data:`CURTAIN_WRITE_COMMANDS`) while the integration controls the curtains.
+* :data:`FORECAST_BRIDGE_COMMANDS` (Phase A5) - the integration's forecast bridge,
+  sent only with :meth:`forecast_command` (claim, heartbeat, publish, release,
+  return: they change which side produces the forecasts and what the integration
+  shows; none reaches a device). The forecast editors' commands are forwarded
+  with :meth:`command` / :meth:`config_write` while the integration produces them.
 
 There is no way to call a service directly, write a state, fire an event or
 change a Home Assistant registry through this client. Any other command raises
@@ -81,7 +93,38 @@ READ_ONLY_COMMANDS: frozenset[str] = frozenset(
         "validate_config",
         "unsubscribe_events",
         "smart_occupancy/lighting/bridge/status",
+        # Phase A5: the curtain and forecast ownership records.
+        "smart_occupancy/curtains/bridge/status",
+        "smart_occupancy/forecast/bridge/status",
     }
+)
+#: Phase A5: the integration's curtain editor commands that only read or simulate (forwarded while it controls the
+#: curtains; answered by the App's own handlers after the handover).
+CURTAIN_READ_COMMANDS: frozenset[str] = frozenset(
+    f"smart_occupancy/curtains/{c}" for c in ("model", "preview", "auto/preview", "auto/simulate")
+)
+#: Phase A5: the curtain editor commands that change the configuration or a window's runtime (apply a confirmed
+#: preset, resume, enable Automatic), administrators only, forwarded with config_write() while the integration
+#: controls the curtains.
+CURTAIN_WRITE_COMMANDS: frozenset[str] = frozenset(
+    f"smart_occupancy/curtains/{c}" for c in (
+        "window/create", "window/update", "window/remove", "preset/save", "preset/duplicate", "preset/delete",
+        "preset/select", "apply", "manual/clear", "settings", "rescan", "calibration/reset", "auto/enable", "resume",
+        "auto/settings", "automation/allow", "modes/change", "cover_preset/save", "cover_preset/delete",
+        "schedule/change", "migration/change")
+)
+#: Phase A5: the integration's curtain bridge (ownership, the owner's fenced cover commands, the mirror).
+CURTAIN_BRIDGE_COMMANDS: frozenset[str] = frozenset(
+    f"smart_occupancy/curtains/bridge/{c}" for c in ("claim", "execute", "heartbeat", "publish", "release", "return")
+)
+#: Phase A5: the forecast editor commands (reads, and the administrator-only settings).
+FORECAST_READ_COMMANDS: frozenset[str] = frozenset({"smart_occupancy/forecast/room"})
+FORECAST_WRITE_COMMANDS: frozenset[str] = frozenset(
+    f"smart_occupancy/forecast/{c}" for c in ("settings", "connection", "learn", "rebuild")
+)
+#: Phase A5: the integration's forecast bridge (ownership, the published view and learned data). No device command.
+FORECAST_BRIDGE_COMMANDS: frozenset[str] = frozenset(
+    f"smart_occupancy/forecast/bridge/{c}" for c in ("claim", "heartbeat", "publish", "release", "return")
 )
 #: Phase A4: the integration's lighting editor commands that only read or simulate (forwarded while it controls
 #: lighting; answered by the App's own handlers after the handover).
@@ -116,7 +159,7 @@ CONFIG_WRITE_COMMANDS: frozenset[str] = frozenset(
         # Phase A3.1: a room's sensors and timing overrides, or the global occupancy timing defaults.
         "smart_occupancy/presence/set",
     }
-) | LIGHTING_WRITE_COMMANDS
+) | LIGHTING_WRITE_COMMANDS | CURTAIN_WRITE_COMMANDS | FORECAST_WRITE_COMMANDS
 #: Phase A3.2: the integration's occupancy bridge. They change which engine publishes room occupancy and the
 #: App's published occupancy results; none of them can call a service or control a device.
 ENGINE_COMMANDS: frozenset[str] = frozenset(
@@ -133,9 +176,14 @@ ENGINE_COMMANDS: frozenset[str] = frozenset(
 SUBSCRIPTION_COMMANDS: frozenset[str] = frozenset({
     "smart_occupancy/engine/subscribe", "smart_occupancy/lighting/bridge/subscribe", "smart_occupancy/lighting/subscribe",
     "subscribe_trigger", "mqtt/subscribe",
+    # Phase A5: the curtain and forecast bridges and the curtain editors' change notifications.
+    "smart_occupancy/curtains/bridge/subscribe", "smart_occupancy/forecast/bridge/subscribe",
+    "smart_occupancy/curtains/subscribe",
 })
-ALLOWED_COMMANDS: frozenset[str] = (READ_ONLY_COMMANDS | LIGHTING_READ_COMMANDS | CONFIG_WRITE_COMMANDS
-                                    | ENGINE_COMMANDS | LIGHTING_BRIDGE_COMMANDS | SUBSCRIPTION_COMMANDS)
+ALLOWED_COMMANDS: frozenset[str] = (READ_ONLY_COMMANDS | LIGHTING_READ_COMMANDS | CURTAIN_READ_COMMANDS
+                                    | FORECAST_READ_COMMANDS | CONFIG_WRITE_COMMANDS | ENGINE_COMMANDS
+                                    | LIGHTING_BRIDGE_COMMANDS | CURTAIN_BRIDGE_COMMANDS | FORECAST_BRIDGE_COMMANDS
+                                    | SUBSCRIPTION_COMMANDS)
 #: Event types the App may subscribe to.
 ALLOWED_EVENT_TYPES: frozenset[str] = frozenset(
     {"state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated",
@@ -148,6 +196,11 @@ REGISTRY_EVENTS = ("area_registry_updated", "device_registry_updated", "entity_r
 OTHER_EVENTS = ("automation_reloaded", "script_reloaded", "homeassistant_started")
 #: Connected while Home Assistant starts: how often it is asked whether it runs (its start-up event may be missed).
 STARTUP_POLL_SECONDS = 5.0
+#: Phase A5: Home Assistant delivers an unchanged sensor report (``state_reported``: only ``last_reported`` moves)
+#: to filtered bus listeners only, never over the websocket. The curtain rules read ``last_reported`` to tell a
+#: steady sensor from a stale one, so the client re-reads the states this often and delivers the moved
+#: ``last_reported`` values to the runtimes (never as a state change).
+REPORTED_REFRESH_SECONDS = 60.0
 REGISTRY_DEBOUNCE = 2.0
 
 RECONNECT_DELAYS = (1, 2, 5, 10, 30)
@@ -232,13 +285,15 @@ class HomeAssistantClient:
         self.events_total = 0
         self._registry_timer: asyncio.TimerHandle | None = None
         self._event_times: deque[float] = deque()
+        self.reported_refresh_seconds = REPORTED_REFRESH_SECONDS
 
     # ------------------------------------------------------------------ API
     def add_listener(self, listener: Listener) -> Callable[[], None]:
         """Register ``listener(kind, payload)``.
 
         Kinds: status, entity (integration entity changed), state (any entity: ``(entity_id, state)``),
-        integration (report changed), config_entry (the integration's config entry changed), registries.
+        reported (an unchanged report: only ``last_reported`` moved, ``(entity_id, state)``), integration (report
+        changed), config_entry (the integration's config entry changed), registries.
         """
         self._listeners.append(listener)
         return lambda: self._listeners.remove(listener)
@@ -375,6 +430,10 @@ class HomeAssistantClient:
             raise ReadOnlyViolation(f"{command_type!r} is an occupancy bridge command; use engine_command()")
         if command_type in LIGHTING_BRIDGE_COMMANDS:
             raise ReadOnlyViolation(f"{command_type!r} is a lighting bridge command; use lighting_command()")
+        if command_type in CURTAIN_BRIDGE_COMMANDS:
+            raise ReadOnlyViolation(f"{command_type!r} is a curtain bridge command; use curtains_command()")
+        if command_type in FORECAST_BRIDGE_COMMANDS:
+            raise ReadOnlyViolation(f"{command_type!r} is a forecast bridge command; use forecast_command()")
         _, future = await self._send(command_type, params)
         return await asyncio.wait_for(future, COMMAND_TIMEOUT)
 
@@ -408,6 +467,20 @@ class HomeAssistantClient:
         """Send one of the integration's lighting bridge commands (LIGHTING_BRIDGE_COMMANDS only)."""
         if command_type not in LIGHTING_BRIDGE_COMMANDS:
             raise ReadOnlyViolation(f"{command_type!r} is not a lighting bridge command")
+        _, future = await self._send(command_type, params)
+        return await asyncio.wait_for(future, COMMAND_TIMEOUT)
+
+    async def curtains_command(self, command_type: str, **params: Any) -> Any:
+        """Send one of the integration's curtain bridge commands (CURTAIN_BRIDGE_COMMANDS only)."""
+        if command_type not in CURTAIN_BRIDGE_COMMANDS:
+            raise ReadOnlyViolation(f"{command_type!r} is not a curtain bridge command")
+        _, future = await self._send(command_type, params)
+        return await asyncio.wait_for(future, COMMAND_TIMEOUT)
+
+    async def forecast_command(self, command_type: str, **params: Any) -> Any:
+        """Send one of the integration's forecast bridge commands (FORECAST_BRIDGE_COMMANDS only)."""
+        if command_type not in FORECAST_BRIDGE_COMMANDS:
+            raise ReadOnlyViolation(f"{command_type!r} is not a forecast bridge command")
         _, future = await self._send(command_type, params)
         return await asyncio.wait_for(future, COMMAND_TIMEOUT)
 
@@ -544,6 +617,7 @@ class HomeAssistantClient:
                 helpers = [
                     asyncio.create_task(self._ping_loop(ws), name="ha-ping"),
                     asyncio.create_task(self._detection_loop(), name="ha-detection"),
+                    asyncio.create_task(self._reported_loop(), name="ha-reported"),
                 ]
                 if (self.config.get("state") or "RUNNING") != "RUNNING":
                     # Connected while Home Assistant starts: the snapshot is incomplete (see _resync_states).
@@ -646,6 +720,32 @@ class HomeAssistantClient:
                 await self._refresh_registries()
             except (ConnectionError, TimeoutError) as err:
                 _LOGGER.debug("Registry refresh skipped: %s", err)
+
+    async def _reported_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.reported_refresh_seconds)
+            try:
+                states = await self.command("get_states") or []
+            except (HomeAssistantError, ConnectionError, TimeoutError) as err:
+                _LOGGER.debug("last_reported refresh skipped: %s", err)
+                continue
+            self._deliver_reported(states)
+
+    def _deliver_reported(self, states: Any) -> int:
+        """Entities whose state and attributes are unchanged but whose ``last_reported`` moved: deliver the report."""
+        count = 0
+        for wire in states:
+            if not isinstance(wire, dict) or "entity_id" not in wire:
+                continue
+            current = self.states.get(wire["entity_id"])
+            if current is None or current.get("last_updated") != wire.get("last_updated") or \
+                    current.get("state") != wire.get("state") or current.get("attributes") != wire.get("attributes"):
+                continue
+            if (wire.get("last_reported") or "") > (current.get("last_reported") or current.get("last_updated") or ""):
+                self.states[wire["entity_id"]] = wire
+                self._notify("reported", (wire["entity_id"], wire))
+                count += 1
+        return count
 
     async def _ping_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         while True:
@@ -752,6 +852,10 @@ class HomeAssistantClient:
             # (A state change delivered meanwhile is newer than the snapshot: it stays.)
             if current == wire or (current is not None and (current.get("last_updated") or "") >
                                    (wire.get("last_updated") or "")):
+                continue
+            if current is not None and current.get("last_updated") == wire.get("last_updated") and \
+                    current.get("state") == wire.get("state") and current.get("attributes") == wire.get("attributes"):
+                self._deliver_reported([wire])  # only last_reported moved: a report, not a state change
                 continue
             self.states[entity_id] = wire
             changed.append(entity_id)

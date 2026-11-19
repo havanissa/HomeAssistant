@@ -32,6 +32,12 @@ subsystem, one lighting owner): their interfaces are in the App; the
 integration's lighting runtime runs in the App in shadow mode and, after a
 reviewed handover the integration acknowledges, controls the lights and owns the
 lighting configuration. The three count as migrated only while that is so.
+
+Phase A5 moves Curtains and Predictions the same way, each with its own
+ownership record: the curtain runtime commands covers only after its reviewed
+handover (through the integration's fenced executor); the forecast runtime
+produces the forecasts only after its handover (observation only, no device
+command on either side).
 """
 
 from __future__ import annotations
@@ -135,14 +141,23 @@ MODULES: tuple[Module, ...] = (
         phase="A4",
     ),
     Module(
-        "curtains", "Curtains", "curtains", "feature", PENDING,
-        "Windows, covers, presets, Global Modes and the Global Schedule.",
-        "The Smart Curtains card.",
+        "curtains", "Curtains", "curtains", "feature", GUI,
+        "Windows, covers, presets, Global Modes, the Global Schedule, the environment and curtain diagnostics.",
+        "This App (Curtains). Until the handover the Smart Curtains card keeps working on the same configuration; "
+        "afterwards it is read-only.",
+        scope="Curtain configuration and live decisions; the curtain runtime itself (Phase A5: shadow comparison, "
+              "reviewed handover and rollback; covers are moved only through the integration's fenced executor).",
+        phase="A5",
     ),
     Module(
-        "predictions", "Predictions", "crystal-ball", "feature", PENDING,
-        "Occupancy forecasts and their accuracy (observation only).",
-        "The forecast views of the Smart Room Lighting card and the forecast sensors.",
+        "predictions", "Predictions", "crystal-ball", "feature", GUI,
+        "Occupancy forecasts, learned patterns, accuracy and their settings (observation only).",
+        "This App (Predictions). Until the handover the integration learns and publishes; afterwards its views are "
+        "read-only and its forecast sensors show what the App publishes.",
+        scope="Forecast settings, room connections, learning, patterns and accuracy; the forecast runtime itself "
+              "(Phase A5: shadow comparison, reviewed handover with the learned data, rollback). No device is ever "
+              "commanded.",
+        phase="A5",
     ),
     Module(
         "diagnostics", "Diagnostics", "stethoscope", "foundation", AVAILABLE,
@@ -158,10 +173,13 @@ MODULES: tuple[Module, ...] = (
 LIGHTING_MODULES = ("lighting", "moods", "switches")
 
 
-def _current(occupancy_owner: str, lighting_owner: str = INTEGRATION) -> tuple[Module, ...]:
+def _current(occupancy_owner: str, lighting_owner: str = INTEGRATION, curtains_owner: str = INTEGRATION,
+             forecast_owner: str = INTEGRATION) -> tuple[Module, ...]:
     """The modules with the automation owners as the integration acknowledges them."""
     occupancy = APP if occupancy_owner == APP else INTEGRATION
     lighting = APP if lighting_owner == APP else INTEGRATION
+    curtains = APP if curtains_owner == APP else INTEGRATION
+    forecast = APP if forecast_owner == APP else INTEGRATION
     out = []
     for m in MODULES:
         if m.key == "presence":
@@ -169,25 +187,32 @@ def _current(occupancy_owner: str, lighting_owner: str = INTEGRATION) -> tuple[M
         elif m.key in LIGHTING_MODULES:
             # One owner for the whole lighting subsystem; its configuration moves with it.
             m = replace(m, automation_owner=lighting, controlled_by=lighting, config_source=lighting)
+        elif m.key == "curtains":
+            m = replace(m, automation_owner=curtains, controlled_by=curtains, config_source=curtains)
+        elif m.key == "predictions":
+            m = replace(m, automation_owner=forecast, controlled_by=forecast, config_source=forecast)
         out.append(m)
     return tuple(out)
 
 
-def modules(occupancy_owner: str = INTEGRATION, lighting_owner: str = INTEGRATION) -> list[dict[str, str | None]]:
-    return [m.as_dict() for m in _current(occupancy_owner, lighting_owner)]
+def modules(occupancy_owner: str = INTEGRATION, lighting_owner: str = INTEGRATION, curtains_owner: str = INTEGRATION,
+            forecast_owner: str = INTEGRATION) -> list[dict[str, str | None]]:
+    return [m.as_dict() for m in _current(occupancy_owner, lighting_owner, curtains_owner, forecast_owner)]
 
 
-def migration(occupancy_owner: str = INTEGRATION, lighting_owner: str = INTEGRATION) -> dict[str, object]:
+def migration(occupancy_owner: str = INTEGRATION, lighting_owner: str = INTEGRATION, curtains_owner: str = INTEGRATION,
+              forecast_owner: str = INTEGRATION) -> dict[str, object]:
     """Migration progress. Only completed work counts; nothing is estimated.
 
-    ``modules_migrated`` counts modules whose *automation* runs in the App (none
-    yet); ``interfaces_migrated`` counts modules configured in the App.
+    ``modules_migrated`` counts modules whose *automation* runs in the App;
+    ``interfaces_migrated`` counts modules configured in the App.
     """
-    features = [m for m in _current(occupancy_owner, lighting_owner) if m.kind == "feature"]
+    features = [m for m in _current(occupancy_owner, lighting_owner, curtains_owner, forecast_owner)
+                if m.kind == "feature"]
     migrated = [m for m in features if m.automation_owner == APP]
     interfaces = [m for m in features if m.gui_owner == APP]
     return {
-        "current_phase": "A4",
+        "current_phase": "A5",
         "foundation_complete": True,
         "modules_total": len(features),
         "modules_migrated": len(migrated),

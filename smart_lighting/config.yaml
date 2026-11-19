@@ -1,12 +1,12 @@
-# Home Assistant App configuration: Smart Occupancy & Lighting (Phase A3.2).
+# Home Assistant App configuration: Smart Occupancy & Lighting (Phase A5).
 name: Smart Occupancy & Lighting
-version: "0.5.0"
+version: "0.6.0"
 slug: smart_lighting
 description: >-
-  Web interface and occupancy engine for Smart Occupancy & Lighting. Room,
-  device and presence management saved in the existing integration, a live
-  occupancy debugger, an optional floor plan, and the occupancy engine (shadow
-  mode until a reviewed handover). It never controls a device.
+  Web interface and automation runtimes for Smart Occupancy & Lighting: rooms,
+  presence, an optional floor plan, and the occupancy, lighting, curtain and
+  prediction engines (shadow mode until a reviewed handover). Devices are
+  commanded only through the integration's fenced executor after a handover.
 url: https://github.com/havanissa/HomeAssistant/tree/main/smart_lighting
 arch:
   - aarch64
@@ -27,8 +27,8 @@ panel_admin: true
 
 # Home Assistant Core API through the Supervisor proxy (SUPERVISOR_TOKEN).
 # The backend sends only allowlisted websocket commands (backend/ha.py): reads,
-# the Recorder history (bounded), the integration's validated room and
-# presence configuration commands and its fenced occupancy bridge (Phase A3.2).
+# the Recorder history (bounded), the integration's validated configuration
+# commands and its fenced occupancy, lighting, curtain and forecast bridges.
 homeassistant_api: true
 # The basic Supervisor endpoints used (/addons/self/info, /info) need no
 # extra Supervisor API access.

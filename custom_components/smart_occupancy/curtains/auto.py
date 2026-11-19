@@ -197,7 +197,8 @@ class WindowRuntime:
         hold = data.get("hold")
         if isinstance(hold, Mapping) and (created := _dt(hold.get("created"))):
             rt.hold = {**hold, "created": created}
-        rt.active_since = {k: d for k, v in (data.get("active_since") or {}).items() if (d := _dt(v))}
+        since = data.get("active_since")
+        rt.active_since = {k: d for k, v in (since.items() if isinstance(since, Mapping) else ()) if (d := _dt(v))}
         rt.morning_since = _dt(data.get("morning_since"))
         eve = data.get("evening")
         if isinstance(eve, Mapping) and (when := _dt(eve.get("at"))):
@@ -216,7 +217,8 @@ class WindowRuntime:
         rt.last_move_at = _dt(data.get("last_move_at"))
         rt.last_condition = data.get("last_condition") if isinstance(data.get("last_condition"), str) else None
         rt.status = dict(data.get("status")) if isinstance(data.get("status"), Mapping) else {}
-        rt.log = [x for x in data.get("log") or () if isinstance(x, Mapping)][:LOG_LENGTH]
+        log = data.get("log")
+        rt.log = [x for x in (log if isinstance(log, list) else ()) if isinstance(x, Mapping)][:LOG_LENGTH]
         defer = data.get("defer")
         rt.defer = dict(defer) if isinstance(defer, Mapping) and isinstance(defer.get("condition"), str) else None
         return rt
@@ -529,7 +531,8 @@ class AutoCurtains:
             self.house["evening"] = {"at": dt_util.as_local(d), "reason": str(eve.get("reason") or "")}
         if isinstance(data.get("key"), list) and len(data["key"]) == 2:
             self.house["key"] = tuple(data["key"])
-        self.house["log"] = [x for x in data.get("log") or () if isinstance(x, Mapping)][:LOG_LENGTH]
+        log = data.get("log")
+        self.house["log"] = [x for x in (log if isinstance(log, list) else ()) if isinstance(x, Mapping)][:LOG_LENGTH]
 
     def house_model(self, config: CurtainConfig | None = None) -> dict[str, Any]:
         """The Global Schedule status: phase now, why, what it waits for, the next transitions, today's bar."""
@@ -1016,6 +1019,11 @@ class AutoCurtains:
             if retry_at and utc < retry_at and not resume:
                 return blocked("retry_wait", f"{name} did not complete; retrying at "
                                f"{dt_util.as_local(retry_at).strftime('%H:%M')}", retry_at)
+        if mgr.fenced:
+            # Phase A5: control is changing owner (a handover or a return): nothing is sent; the owner that
+            # takes over evaluates the window again.
+            return blocked("fenced", f"{cond} → {name} is not applied while curtain control changes owner",
+                           utc + timedelta(seconds=15))
         today = dt_util.now().date().isoformat()
         count = int(rt.moves.get("count", 0)) if rt.moves.get("date") == today else 0
         if count >= values["max_moves"] and decision.condition not in BUDGET_EXEMPT:
@@ -1066,6 +1074,11 @@ class AutoCurtains:
             and rt.log[0]["preset_name"] == preset.name
         if changed and action not in _NOT_LOGGED and not just_moved:
             self._log(window, rt, action, text, preset)
+        if changed and self.mgr.decision_observer is not None:
+            try:
+                self.mgr.decision_observer(window.window_id, {"kind": "status", **status})
+            except Exception:  # noqa: BLE001 - observation never affects a decision
+                _LOGGER.debug("curtain_decision_observer_failed", exc_info=True)
         if changed or force or rt.notified != (key, text) and (
                 rt.notified_at is None or (utc - rt.notified_at).total_seconds() >= NOTIFY_SECONDS):
             rt.notified, rt.notified_at = (key, text), utc
@@ -1083,6 +1096,11 @@ class AutoCurtains:
         rt.log = [entry, *rt.log][:LOG_LENGTH]
         _LOGGER.info("curtain_decision window=%s action=%s condition=%s text=%s", window.window_id, action,
                      entry["condition"], text)
+        if self.mgr.decision_observer is not None:
+            try:
+                self.mgr.decision_observer(window.window_id, {"kind": "log", **entry})
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("curtain_decision_observer_failed", exc_info=True)
         self.mgr.save_state()
 
     # --------------------------------------------------------------- model
