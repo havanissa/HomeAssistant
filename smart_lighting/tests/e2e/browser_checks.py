@@ -50,6 +50,9 @@ READ_ONLY = {
     "smart_occupancy/lighting/brightness/preview", "smart_occupancy/lighting/priority/preview",
     "smart_occupancy/lighting/zone/radar_test", "smart_occupancy/lighting/switch/candidates",
     "smart_occupancy/lighting/supervisor/room",
+    # Phase A5: the curtain and forecast bridge sessions (shadow mode) and the curtain pages' model read.
+    "smart_occupancy/curtains/bridge/status", "smart_occupancy/curtains/bridge/subscribe", "smart_occupancy/curtains/model",
+    "smart_occupancy/forecast/bridge/status", "smart_occupancy/forecast/bridge/subscribe",
 }
 APP_VERSION = "0.6.0"
 INTEGRATION_VERSION = "0.9.0"

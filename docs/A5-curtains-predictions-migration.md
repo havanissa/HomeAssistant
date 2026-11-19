@@ -147,6 +147,27 @@ window (not a manual change), and the windows are evaluated again only after the
 settle period — the same reconciliation as after a restart. Nothing moves because
 of the switch. A recovered App never takes ownership back by itself.
 
+Two points from the independent review of this phase:
+
+* **A return while a cover moves.** The mirror lags the App by about two seconds,
+  so a movement the App started just before a `return` may not be in it. The App
+  therefore refuses its own `return` (code `moving`) while a cover is being moved
+  unless the user forces it (checkbox in Curtains → Control), and the integration's
+  new manager treats every configured cover's reports as its own for the
+  verification and settle window whenever the mirror state is younger than
+  `RECENT_STATE_SECONDS` (5 s) or records a running operation
+  (`CurtainManager.assume_moving`). The service and the lease-expiry fallback
+  cannot wait for the App, so they rely on the second rule.
+* **Execute timeout.** The integration's executor keeps verifying a command the
+  cover platform accepts late; the App's manager receives the bridge's refusal
+  after `COMMAND_SECONDS` (15 s) and marks that item failed. Both outcomes reach
+  the household log; the covers are not commanded again by either path. This is
+  the one accepted behavioural difference between the two runtimes.
+
+A restored curtain export never switches a window to Automatic unreviewed: the
+import review lists the windows the file would switch on, and they are restored as
+Observing unless the restore confirms them (`confirm_automatic`).
+
 ### 2.4 Predictions: who learns and publishes
 
 Forecasts never command anything on either side, so the forecast bridge
@@ -168,6 +189,14 @@ them:
   learned data, which the dormant manager adopts so its read-only room view keeps
   its patterns and so that a rollback has the complete data. The forecast editors
   refuse with `managed_by_app`.
+
+After a handover the native forecast entities shift to the App's view within about
+two seconds (the App publishes right after it starts) and show no `today` summary
+until the App's first learning run (a minute after its start) — the only visible
+effect of the switch; the model and the learned days are identical on both sides.
+A published view the dormant manager cannot apply is refused and not mirrored; a
+mirrored export whose days do not validate for this model version is adopted
+without them and the fallback logs how many were dropped.
 
 **Recorder access in the App.** The App's manager uses the websocket command
 `history/history_during_period` (bounded windows, one local day at a time,
@@ -250,9 +279,17 @@ changes it; nothing moves and no forecast changes because control changes owner.
   (test) Home Assistant and replayed through the App's host in virtual time (same
   cover commands at the same instants, same decisions, same editor answers);
   forecast export/import produces identical predictions.
-* **Regression:** both complete suites; the browser checks of every module.
-* **Live:** the end-to-end suites with the real App image against a throwaway Home
-  Assistant 2026.11.1 (`tests/e2e/curtains_checks.py`, `predictions_checks.py`).
+* **Review follow-up:** a fallback parked on in-flight App commands is cancelled by
+  an entry reload (no second manager); a refused execute consumes no sequence
+  number; a return while a cover moves is refused unless forced; a restored export
+  cannot switch a window to Automatic unreviewed.
+* **Regression:** both complete suites (integration 1224 tests, App 248 + 1 expected
+  failure, frontend 56) and the browser checks of every module. One integration test
+  outside this phase, the decision log's daylight detail, depends on the real time
+  of day and fails before sunrise on `main` as well.
+* **Live (2026-11-19):** the end-to-end suites with the real App image against a
+  throwaway Home Assistant 2026.11.1 (`tests/e2e/curtains_checks.py`: 81 + 5 + 3
+  checks over a restart; `predictions_checks.py`), plus the A1 browser regression.
   **Not verified on a real Home Assistant OS installation.**
 
 ## 5. Remaining legacy dependencies (for A6)

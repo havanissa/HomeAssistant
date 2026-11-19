@@ -176,7 +176,15 @@ class RoomForecast:
 
     @classmethod
     def from_dict(cls, area_id: str, data: Any) -> RoomForecast | None:
-        """A published forecast (``as_dict``) back into the object the entities read (Phase A5)."""
+        """A published forecast (``as_dict``) back into the object the entities read (Phase A5). A malformed room
+        is dropped (None), never raised: the published view came from the other side of the bridge."""
+        try:
+            return cls._from_dict(area_id, data)
+        except (TypeError, ValueError, KeyError, AttributeError):
+            return None
+
+    @classmethod
+    def _from_dict(cls, area_id: str, data: Any) -> RoomForecast | None:
         if not isinstance(data, dict) or data.get("status") is None:
             return None
 
@@ -305,6 +313,7 @@ class ForecastManager:
         # Phase A5: dormant while the Smart Lighting App produces the forecasts (it shows what the App published);
         # the observer sees every recomputed view (the App's shadow compares, the owner publishes).
         self.dormant = False
+        self._learned_revision: str | None = None  # cached; cleared whenever days / no_data change
         self.view_observer: Callable[[dict[str, Any]], None] | None = None
         self.settings_observer: Callable[[], None] | None = None
         self.decision_sink: Callable[..., Any] | None = None
@@ -320,6 +329,7 @@ class ForecastManager:
         oldest = data.get("recorder_oldest")
         self.status.recorder_oldest = oldest if isinstance(oldest, (int, float)) else None
         self.status.last_update = data.get("last_update") if isinstance(data.get("last_update"), str) else None
+        self._learned_revision = None
 
     @callback
     def async_start(self) -> None:
@@ -435,10 +445,20 @@ class ForecastManager:
             self.status.last_update = last if isinstance(last, str) else None
             self.status.detail = f"{len(self.days)} days learned"
             self._accuracy_cache.clear()
+            self._learned_revision = None
             if save:
                 await self._settings_store.async_save(settings.as_dict())
                 await self._days_store.async_save(self._days_data())
         return len(days)
+
+    def learned_revision(self) -> str:
+        """Revision of the learned days (cached until they change)."""
+        from .forecast_sync import learned_revision  # noqa: PLC0415
+
+        if self._learned_revision is None:
+            self._learned_revision = learned_revision({"days": {k: d.as_dict() for k, d in self.days.items()},
+                                                       "no_data": sorted(self.no_data)})
+        return self._learned_revision
 
     def view(self) -> dict[str, Any]:
         """The published view: every room's forecast, the predicted next room, the learning status."""
@@ -476,6 +496,7 @@ class ForecastManager:
             self.today = None
             self.model = None
             self._accuracy_cache.clear()
+            self._learned_revision = None
             self._save_days(0)
         self._recompute()
         await self.async_learn()
@@ -717,6 +738,7 @@ class ForecastManager:
         self.status.last_update = now.isoformat(timespec="seconds")
         self.status.detail = f"{len(self.days)} days learned"
         self._accuracy_cache.clear()
+        self._learned_revision = None
         await self._async_build_model(log_changes=changed)
         self._save_days()
         _LOGGER.debug("forecast_learned days=%d new=%d queries=%d", len(self.days), len(todo), self.status.queries)
@@ -773,6 +795,7 @@ class ForecastManager:
 
     def _save_days(self, delay: float = FORECAST_SAVE_DELAY_SECONDS) -> None:
         self._days_dirty = True
+        self._learned_revision = None
         self._days_store.async_delay_save(self._days_data, delay)
 
     def _days_data(self) -> dict[str, Any]:

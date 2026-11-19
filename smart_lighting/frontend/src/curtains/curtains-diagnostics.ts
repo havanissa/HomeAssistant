@@ -25,6 +25,8 @@ interface ImportState {
   review: ImportReview | null;
   error: string | null;
   busy: boolean;
+  /** Switch the windows the file marks Automatic to Automatic (otherwise they are restored as Observing). */
+  confirmAutomatic?: boolean;
 }
 
 export class SlCurtainsDiagnostics extends StoreElement {
@@ -127,7 +129,9 @@ export class SlCurtainsDiagnostics extends StoreElement {
   private async doImport(): Promise<void> {
     const s = this.imp;
     if (!s?.review) return;
-    const ok = await this.host.run(() => applyImport(s.file, s.review!.revision), "Configuration imported");
+    const auto = s.review.automatic_windows ?? [];
+    const ok = await this.host.run(() => applyImport(s.file, s.review!.revision, auto.length > 0 && s.confirmAutomatic === true),
+      auto.length && !s.confirmAutomatic ? `Configuration imported; ${plural(auto.length, "window")} restored as Observing` : "Configuration imported");
     if (ok) { closeDialog(this, "dialog.cu-import"); this.imp = null; }
   }
 
@@ -148,6 +152,11 @@ export class SlCurtainsDiagnostics extends StoreElement {
               ${r.changes.length ? html`<ul class="change-list">${r.changes.map((c) => html`<li>${icon("check", 16)}<span>${c}</span></li>`)}</ul>` : nothing}</div>
             ${r.missing_entities.length ? html`<div class="review-block"><h3>Covers not found in Home Assistant (${r.missing_entities.length})</h3><p class="small">${r.missing_entities.map((e) => html`<code>${e}</code> `)}</p></div>` : nothing}
             ${r.dropped_entities.length ? html`<div class="review-block"><h3>Dropped (${r.dropped_entities.length})</h3><p class="small">${r.dropped_entities.map((e) => html`<code>${e}</code> `)}</p></div>` : nothing}
+            ${(r.automatic_windows ?? []).length ? html`<div class="review-block" data-testid="curtains-import-automatic"><h3>Windows the file sets to Automatic (${r.automatic_windows.length})</h3>
+              <p class="small">${r.automatic_windows.map((w) => html`<strong>${w.name ?? w.id ?? "—"}</strong> `)}</p>
+              <p class="small muted">These windows are Off or Observing now. They are restored as Observing (nothing moves on its own) unless you confirm below; you can also switch each one on afterwards with its review.</p>
+              <label class="confirm-row"><input type="checkbox" data-testid="curtains-import-confirm-automatic" .checked=${s.confirmAutomatic === true} @change=${(e: Event) => { s.confirmAutomatic = (e.target as HTMLInputElement).checked; this.requestUpdate(); }} />
+                <span>Switch them to Automatic as the file says.</span></label></div>` : nothing}
             <p class="small muted">Importing replaces the configuration (presets, assignments, schedule and settings); no cover moves because of it. A backup of the current configuration is kept in the App.</p>` : nothing}
         </div>
         <footer class="sheet-foot"><button type="button" class="btn" @click=${() => { closeDialog(this, "dialog.cu-import"); this.imp = null; }}>Cancel</button>

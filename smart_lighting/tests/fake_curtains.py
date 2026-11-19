@@ -63,6 +63,7 @@ class FakeCurtains:
         self.published: list[dict[str, Any]] = []
         self.released = 0
         self.refuse_execute: str | None = None
+        self.stall = False  # the cover starts travelling and never reports a final position (a stuck movement)
         self.fingerprint = fingerprint()
         self.core_fingerprint = core_fingerprint()
         self.history: list[dict[str, Any]] = []
@@ -207,6 +208,8 @@ class FakeCurtains:
         if target != self.position:
             await self.fake.emit_live_context(entity_id, "opening" if target > self.position else "closing",
                                               {**attrs, "current_position": self.position}, context_id)
+        if self.stall:
+            return
         self.position = target
         await self.fake.emit_live_context(entity_id, "open" if target > 0 else "closed",
                                           {**attrs, "current_position": target}, context_id)

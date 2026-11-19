@@ -399,6 +399,9 @@ async def test_owner_commands_are_fenced_and_allowlisted(hass: HomeAssistant, pi
     for what, (reply, code) in refused.items():
         assert not reply["success"] and reply["error"]["code"] == code, (what, reply)
     assert len(covers.calls) == before and r.pos(KAMAR) == 40
+    # A refused command consumed no sequence number and renewed no lease (validated before it is accepted).
+    assert bridge.last_seq == 2 and app.seq == 2 + len(refused)
+    app.seq = bridge.last_seq
     # Fencing: a stale epoch, a wrong lease, a replayed sequence, a foreign connection.
     assert (await app.execute("cover", "open_cover", {"entity_id": KAMAR}, epoch=app.epoch - 1))["error"][
         "code"] == S.REJECT_STALE_EPOCH
@@ -738,4 +741,41 @@ async def test_diagnostics_include_the_ownership(hass: HomeAssistant, pilot, hou
     assert own["owner_instance"] == app.instance[:8] and own["sessions"][0]["owner"] is True
     assert own["history"][0]["reason"] == S.REASON_HANDOVER and own["windows"] == 2
     assert diag["curtains"]["dormant"] is True and diag["curtains"]["fenced"] is True
+    assert covers.calls == []
+
+
+async def test_a_fallback_waiting_for_app_commands_is_cancelled_by_a_reload(
+        hass: HomeAssistant, pilot, house, covers, admin_ws, freezer, faroe) -> None:
+    """Review HIGH 1: a fallback parked on in-flight App commands must not start a second manager for an entry that
+    is being unloaded (the reloaded entry starts its own); the old manager stays stopped and fenced."""
+    entry, r, k, s = await started(hass, pilot, freezer, covers, admin_ws, house)
+    bridge, old = bridge_of(entry), mgr_of(entry)
+    app = FakeApp(hass, await admin_ws())
+    await app.connect()
+    assert (await app.claim())["success"]
+    await app.client.close()
+    await hass.async_block_till_done()
+    # An App command is still being executed when the lease runs out: the fallback waits for it. (No
+    # block_till_done while it waits: with the frozen clock its drain timeout would never fire.)
+    bridge._inflight = 1  # noqa: SLF001
+    bridge._idle.clear()  # noqa: SLF001
+    freezer.tick(timedelta(seconds=S.LEASE_SECONDS + 3))
+    async_fire_time_changed(hass)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert bridge.owner == S.OWNER_INTEGRATION and bridge.busy
+    task = bridge._fallback_task  # noqa: SLF001
+    assert task is not None and not task.done() and mgr_of(entry) is old and old.dormant
+    # The configuration entry is reloaded while the fallback waits.
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert task.cancelled() or task.done()
+    bridge._idle.set()  # noqa: SLF001 - the command "ends" after the unload
+    await hass.async_block_till_done()
+    # The old manager was never started again; the reloaded entry runs exactly one manager, the integration's.
+    assert not old._started and old.dormant  # noqa: SLF001
+    new_bridge, new = bridge_of(entry), mgr_of(entry)
+    assert new_bridge is not bridge and new is not old
+    assert new_bridge.owner == S.OWNER_INTEGRATION and not new.dormant and new._started  # noqa: SLF001
     assert covers.calls == []

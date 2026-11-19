@@ -119,6 +119,8 @@ class CurtainRuntime:
         self._models_handle: asyncio.TimerHandle | None = None
         self._backlog: list[dict[str, Any]] | None = None
         self._switching = False
+        self._stop_lock = asyncio.Lock()
+        self._publish_at = 0.0
         self._attempt = 0
         self._stopping = False
 
@@ -424,9 +426,12 @@ class CurtainRuntime:
         async_dispatcher_connect(inst.hass, SIGNAL_CURTAINS_UPDATED, self._models_changed)
 
     async def _stop_instance(self, *, flush: bool) -> None:
-        inst, self.instance = self.instance, None
-        if inst is not None:
-            await inst.async_stop(flush=flush)
+        # Serialized: a stop spawned by a lost connection may still be flushing the stores when the next hello
+        # starts an instance on the same files; the newer caller waits for the older stop first.
+        async with self._stop_lock:
+            inst, self.instance = self.instance, None
+            if inst is not None:
+                await inst.async_stop(flush=flush)
 
     # ---------------------------------------------------------------- owner
     def _owner_params(self) -> dict[str, Any]:
@@ -463,12 +468,13 @@ class CurtainRuntime:
 
     def _store_saved(self, key: str, data: Any) -> None:
         if key == CURTAINS_STORE_KEY:
+            # At once: a cover added to a window may be commanded right away, and the integration allows a command
+            # only for a cover of the configuration it holds.
             self._dirty.add("config")
+            self._schedule_publish(0)
         elif key == CURTAINS_STATE_STORE_KEY:
             self._dirty.add("state")
-        else:
-            return
-        self._schedule_publish(PUBLISH_DELAY)
+            self._schedule_publish(PUBLISH_DELAY)
 
     def _mark_publish(self, part: str) -> None:
         if self.mode == "owner":
@@ -476,9 +482,13 @@ class CurtainRuntime:
             self._schedule_publish(PUBLISH_DELAY)
 
     def _schedule_publish(self, delay: float) -> None:
-        if self._publish_handle is None:
-            self._publish_handle = asyncio.get_running_loop().call_later(
-                delay, lambda: self._spawn(self._publish()))
+        if self._publish_handle is not None:
+            if delay > 0 or self._publish_at <= asyncio.get_running_loop().time():
+                return
+            self._publish_handle.cancel()  # brought forward
+        loop = asyncio.get_running_loop()
+        self._publish_at = loop.time() + delay
+        self._publish_handle = loop.call_later(delay, lambda: self._spawn(self._publish()))
 
     def config_doc(self) -> dict[str, Any] | None:
         inst = self.instance
@@ -689,10 +699,23 @@ class CurtainRuntime:
         return {"writable": self.mode == "owner", "revision": S.config_revision(current),
                 "incoming_revision": S.config_revision(new), "changes": changes, "windows": len(new.get("windows") or []),
                 "missing_entities": unknown, "dropped_entities": dropped,
+                "automatic_windows": self._becoming_automatic(current, new),
                 "exported_at": doc.get("at"), "same": not changes}
 
-    async def import_apply(self, doc: Any, expected_revision: Any) -> dict[str, Any]:
-        """Restore an exported configuration into the App's own store (only while the App controls the curtains)."""
+    @staticmethod
+    def _becoming_automatic(current: dict[str, Any], new: dict[str, Any]) -> list[dict[str, Any]]:
+        """Windows the file would switch to Automatic (they move covers on their own); a restore never does that
+        without the enable review: they are restored as Observing unless the restore confirms them."""
+        now = {w.get("window_id"): w.get("mode") for w in current.get("windows") or () if isinstance(w, dict)}
+        return [{"id": w.get("window_id"), "name": w.get("name")} for w in new.get("windows") or ()
+                if isinstance(w, dict) and w.get("mode") == "automatic" and now.get(w.get("window_id")) != "automatic"]
+
+    async def import_apply(self, doc: Any, expected_revision: Any, *, confirm_automatic: bool = False) -> dict[str, Any]:
+        """Restore an exported configuration into the App's own store (only while the App controls the curtains).
+
+        Windows the file would switch to Automatic are restored as Observing unless ``confirm_automatic`` is set
+        (the review lists them): a restored file never starts moving covers unreviewed.
+        """
         from smart_occupancy.curtains.config import CurtainConfig  # noqa: PLC0415
 
         review = self.import_review(doc)
@@ -702,9 +725,17 @@ class CurtainRuntime:
                                              "integration's tools, or hand the curtains over first")
         if expected_revision != review["revision"]:
             raise CurtainsError("stale_revision", "The curtain configuration changed meanwhile; review again")
+        config = dict(doc["config"])
+        downgraded: list[str] = []
+        if review["automatic_windows"] and not confirm_automatic:
+            ids = {w["id"] for w in review["automatic_windows"]}
+            config["windows"] = [{**w, "mode": "observing"} if isinstance(w, dict) and w.get("window_id") in ids else w
+                                 for w in config.get("windows") or ()]
+            downgraded = sorted(str(i) for i in ids)
         self._backup(self.export(), "import")
-        inst.manager.async_set(CurtainConfig.from_dict(doc["config"]))
-        return {"applied": True, "revision": S.config_revision(self.config_doc() or {})}
+        inst.manager.async_set(CurtainConfig.from_dict(config))
+        return {"applied": True, "revision": S.config_revision(self.config_doc() or {}),
+                "observing_instead": downgraded}
 
     async def release(self, user_id: str | None) -> dict[str, Any]:
         if self.mode != "owner" or self.instance is None:
@@ -746,18 +777,24 @@ class CurtainRuntime:
         self._changed()
         return {"ownership": self.integration}
 
-    async def return_control(self, user_id: str | None) -> dict[str, Any]:
+    async def return_control(self, user_id: str | None, *, force: bool = False) -> dict[str, Any]:
+        """Return control without a handover of the final state. While a cover is being moved the return is
+        refused (code ``moving``) unless forced: the integration would otherwise take the movement for a manual
+        change (its mirror lags about two seconds)."""
         if self.mode == "owner" and self.instance is not None and not self._switching:
             try:
                 return await self.release(user_id)
             except CurtainsError as err:
-                if err.code == "moving":
+                if err.code == "moving" and not force:
                     raise
                 _LOGGER.warning("Release refused (%s); returning control without the final state", err)
         mgr = self.instance.manager if self.mode == "owner" and self.instance is not None else None
         if mgr is not None:
             mgr.fenced = True
-            await mgr.async_drain(S.MOVING_WAIT_SECONDS)
+            if not await mgr.async_drain(S.MOVING_WAIT_SECONDS) and not force:
+                mgr.fenced = False
+                raise CurtainsError("moving", "A cover is still being moved; wait until it has reached its position "
+                                              "(or force the return)")
         try:
             reply = await self.ha.curtains_command("smart_occupancy/curtains/bridge/return",
                                                    reason="returned from the App")

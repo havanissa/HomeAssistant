@@ -57,6 +57,13 @@ configuration), the ownership history, backups and:
   only after the settle period. A restarted or updated App does **not** take
   control back. Without the App: Developer tools → Actions →
   `smart_occupancy.curtains_return_to_integration`.
+  *Force return* is refused while a cover is being moved (the integration could
+  take that movement for a manual change); tick "Return even while a cover is
+  moving" to return anyway.
+- **Export / import** (Curtains → Diagnostics): the import is reviewed first.
+  Windows the file would switch to *Automatic* are listed and restored as
+  *Observing* unless you confirm them in the review; a restored file never
+  starts moving covers on its own.
 
 **Predictions** (House, Patterns, Accuracy, Settings, one room workspace,
 Control): the prediction status, learning progress and history coverage, the

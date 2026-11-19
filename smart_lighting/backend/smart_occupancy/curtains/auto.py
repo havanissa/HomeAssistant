@@ -197,7 +197,8 @@ class WindowRuntime:
         hold = data.get("hold")
         if isinstance(hold, Mapping) and (created := _dt(hold.get("created"))):
             rt.hold = {**hold, "created": created}
-        rt.active_since = {k: d for k, v in (data.get("active_since") or {}).items() if (d := _dt(v))}
+        since = data.get("active_since")
+        rt.active_since = {k: d for k, v in (since.items() if isinstance(since, Mapping) else ()) if (d := _dt(v))}
         rt.morning_since = _dt(data.get("morning_since"))
         eve = data.get("evening")
         if isinstance(eve, Mapping) and (when := _dt(eve.get("at"))):
@@ -216,7 +217,8 @@ class WindowRuntime:
         rt.last_move_at = _dt(data.get("last_move_at"))
         rt.last_condition = data.get("last_condition") if isinstance(data.get("last_condition"), str) else None
         rt.status = dict(data.get("status")) if isinstance(data.get("status"), Mapping) else {}
-        rt.log = [x for x in data.get("log") or () if isinstance(x, Mapping)][:LOG_LENGTH]
+        log = data.get("log")
+        rt.log = [x for x in (log if isinstance(log, list) else ()) if isinstance(x, Mapping)][:LOG_LENGTH]
         defer = data.get("defer")
         rt.defer = dict(defer) if isinstance(defer, Mapping) and isinstance(defer.get("condition"), str) else None
         return rt
@@ -529,7 +531,8 @@ class AutoCurtains:
             self.house["evening"] = {"at": dt_util.as_local(d), "reason": str(eve.get("reason") or "")}
         if isinstance(data.get("key"), list) and len(data["key"]) == 2:
             self.house["key"] = tuple(data["key"])
-        self.house["log"] = [x for x in data.get("log") or () if isinstance(x, Mapping)][:LOG_LENGTH]
+        log = data.get("log")
+        self.house["log"] = [x for x in (log if isinstance(log, list) else ()) if isinstance(x, Mapping)][:LOG_LENGTH]
 
     def house_model(self, config: CurtainConfig | None = None) -> dict[str, Any]:
         """The Global Schedule status: phase now, why, what it waits for, the next transitions, today's bar."""

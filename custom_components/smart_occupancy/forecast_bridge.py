@@ -141,6 +141,9 @@ class ForecastBridge:
         self._running = False
         self._stopped = False
         self.fallback_error: str | None = None
+        self._fallback_task: asyncio.Task[None] | None = None
+        self._adopt_task: asyncio.Task[None] | None = None
+        self._pending_export: dict[str, Any] | None = None
 
     # ------------------------------------------------------------ lifecycle
     @property
@@ -204,7 +207,11 @@ class ForecastBridge:
             mgr.dormant = True
             view = self.mirror.get("view")
             if isinstance(view, dict):
-                mgr.apply_published(view)
+                try:
+                    mgr.apply_published(S.check_view(view))
+                except Exception:  # noqa: BLE001 - the mirror is a copy of what the App sent; shown when usable
+                    _LOGGER.warning("forecast_mirror_view_invalid: the App's last published view is not shown",
+                                    exc_info=True)
 
     @callback
     def async_start(self) -> None:
@@ -219,6 +226,15 @@ class ForecastBridge:
     def async_stop(self) -> None:
         self._running = False
         self._stopped = True
+        if self._fallback_task is not None and not self._fallback_task.done():
+            # A fallback waiting for in-flight App commands must not start a manager for an entry that is going
+            # away (the next entry starts its own): cancel it; the old manager stays stopped and fenced.
+            self._fallback_task.cancel()
+            self._fallback_task = None
+        if self._adopt_task is not None and not self._adopt_task.done():
+            self._adopt_task.cancel()
+            self._adopt_task = None
+        self._pending_export = None
         if self._timer:
             self._timer()
             self._timer = None
@@ -305,8 +321,7 @@ class ForecastBridge:
             "resume_grace_seconds": S.RESUME_GRACE_SECONDS, "changed_at": _iso(self.changed_at),
             "changed_by": self.changed_by, "last_seq": self.last_seq,
             "settings_revision": self.settings_revision(), "days_learned": len(mgr.days),
-            "learned_revision": S.learned_revision({"days": {k: d.as_dict() for k, d in mgr.days.items()},
-                                                    "no_data": sorted(mgr.no_data)}),
+            "learned_revision": mgr.learned_revision(),
             "recorder_available": mgr.recorder_available(), "recorder_oldest": self.recorder_oldest(),
             "learning": mgr.status.as_dict(),
             "manager": "failed" if self.fallback_error else "dormant" if mgr.dormant else "running",
@@ -436,17 +451,18 @@ class ForecastBridge:
         mgr = self.mgr
         self._busy = True
         try:
-            # A learning run in progress finishes first (bounded by the lock); it never touches a device.
+            # A learning run in progress finishes first (bounded by the lock); it never touches a device. The lock
+            # is held until the manager is stopped and dormant: no learning run starts between the export and the
+            # handover, so what the App receives is exactly what the integration keeps.
             async with mgr._lock:  # noqa: SLF001
-                pass
-            await mgr.async_flush()
-            if self.sessions.get(session.session_id) is not session or not self._running:
-                raise BridgeError(S.REJECT_UNKNOWN_SESSION, "the bridge session ended during the handover")
-            export = mgr.export_learning()
-            view = mgr.view()
-            self.detach()
-            mgr.async_stop()
-            mgr.dormant = True
+                await mgr.async_flush()
+                if self.sessions.get(session.session_id) is not session or not self._running:
+                    raise BridgeError(S.REJECT_UNKNOWN_SESSION, "the bridge session ended during the handover")
+                export = mgr.export_learning()
+                view = mgr.view()
+                self.detach()
+                mgr.async_stop()
+                mgr.dormant = True
             now = dt_util.utcnow()
             token = secrets.token_hex(16)
             by = params.get("requested_by") if isinstance(params.get("requested_by"), str) else user_id
@@ -485,23 +501,38 @@ class ForecastBridge:
         now = dt_util.utcnow()
         mgr = self.mgr
         if view is not None:
+            # Applied first: a view the dormant manager cannot show is not kept in the mirror either (it would be
+            # applied again at every start).
+            try:
+                mgr.apply_published(view)
+            except Exception as err:  # noqa: BLE001 - the view came from the other side of the bridge
+                error = BridgeError(S.REJECT_INVALID, f"the published view could not be applied: {err}")
+                self._rejected(error, "publish")
+                raise error from err
             self.mirror = {**self.mirror, "view": view, "view_at": _iso(now), "epoch": self.epoch}
-            mgr.apply_published(view)
             self.published += 1
         if export is not None:
             self.mirror = {**self.mirror, "export": export, "export_at": _iso(now)}
-            # The dormant manager keeps the App's learned days (its read-only views and the rollback copy).
-            self.hass.async_create_task(self._async_adopt_export(mgr, export), "smart_occupancy forecast mirror")
+            # The dormant manager keeps the App's learned days (its read-only views and the rollback copy). One task
+            # adopts the latest export; a newer one published meanwhile replaces the pending one.
+            self._pending_export = export
+            if self._adopt_task is None or self._adopt_task.done():
+                self._adopt_task = self.hass.async_create_task(self._async_adopt_exports(mgr),
+                                                               "smart_occupancy forecast mirror")
         self._save_mirror()
 
-    async def _async_adopt_export(self, mgr: ForecastManager, export: dict[str, Any]) -> None:
-        if not mgr.dormant:
-            return
-        try:
-            await mgr.async_import_learning(export, save=True)
-            await mgr._async_build_model(log_changes=False)  # noqa: SLF001 - the read-only patterns follow
-        except Exception:  # noqa: BLE001 - the mirror is diagnostics and a rollback copy; never raise
-            _LOGGER.debug("forecast_mirror_adopt_failed", exc_info=True)
+    async def _async_adopt_exports(self, mgr: ForecastManager) -> None:
+        while self._pending_export is not None and mgr.dormant and not self._stopped:
+            export, self._pending_export = self._pending_export, None
+            try:
+                await mgr.async_import_learning(export, save=True)
+                if not mgr.dormant or self._stopped:
+                    return  # the owner changed meanwhile: the fallback (or the next entry) decides what is kept
+                await mgr._async_build_model(log_changes=False)  # noqa: SLF001 - the read-only patterns follow
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - the mirror is diagnostics and a rollback copy; never raise
+                _LOGGER.debug("forecast_mirror_adopt_failed", exc_info=True)
 
     @callback
     def publish(self, connection: Any, params: dict[str, Any]) -> dict[str, Any]:
@@ -535,7 +566,8 @@ class ForecastBridge:
         if self.owner != S.OWNER_APP:
             return
         self._change_owner(S.OWNER_INTEGRATION, reason, dt_util.utcnow(), by=by, detail=detail)
-        self.hass.async_create_task(self._async_start_manager(reason), "smart_occupancy forecast fallback")
+        self._busy = True  # editors wait from this instant (the task below sets it again)
+        self._fallback_task = self.hass.async_create_task(self._async_start_manager(reason), "smart_occupancy forecast fallback")
 
     async def async_fallback(self, reason: str, *, by: str | None = None, detail: str | None = None) -> bool:
         if self.owner != S.OWNER_APP:
@@ -549,12 +581,23 @@ class ForecastBridge:
         self._busy = True
         try:
             mgr = self.mgr
+            if self._adopt_task is not None and not self._adopt_task.done():
+                self._adopt_task.cancel()  # the fallback imports the final export itself
+            self._adopt_task = None
+            self._pending_export = None
             export = self.mirror.get("export")
             try:
                 if isinstance(export, dict):
-                    await mgr.async_import_learning(S.check_export(export), save=True)
+                    checked = S.check_export(export)
+                    taken = await mgr.async_import_learning(checked, save=True)
+                    if taken < len(checked.get("days") or {}):
+                        _LOGGER.warning("forecast_fallback_import_dropped days=%d of %d (not valid for this model "
+                                        "version)", len(checked.get("days") or {}) - taken,
+                                        len(checked.get("days") or {}))
             except Exception:  # noqa: BLE001 - the integration's own stored days are the fallback
                 _LOGGER.exception("forecast_fallback_import_failed (the integration starts from its stored days)")
+            if self._stopped:
+                return  # the entry is going away: its successor starts its own manager
             mgr.dormant = False
             try:
                 mgr.async_start()

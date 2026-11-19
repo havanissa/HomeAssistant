@@ -35,7 +35,7 @@ none of this changes anything.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timedelta
 import logging
 from typing import Any
@@ -138,16 +138,28 @@ class CurtainManager:
                 self._dirty = True
                 self._store.async_delay_save(self._config_data, SAVE_DELAY_SECONDS)
         state = await self._state_store.async_load() or {}
+        if not isinstance(state, Mapping):
+            _LOGGER.warning("curtains_state_invalid: the stored runtime state is not an object; starting empty")
+            state = {}
         windows = self.config.windows
-        self.last = {k: v for k, v in (state.get("last") or {}).items() if k in windows and isinstance(v, dict)}
-        self.history = {k: [x for x in v if isinstance(x, dict)][:HISTORY_LENGTH]
-                        for k, v in (state.get("history") or {}).items() if k in windows and isinstance(v, list)}
-        self.manual = {k: v for k, v in (state.get("manual") or {}).items() if k in windows and isinstance(v, dict)}
-        self.samples = [(float(a), float(b)) for a, b in state.get("samples") or ()
-                        if isinstance(a, (int, float)) and isinstance(b, (int, float))]
-        self.auto.restore(state.get("auto"))
-        self.auto.restore_sensors(state.get("sensors"))
-        self.auto.restore_house(state.get("house"))
+        # Every section is restored on its own: a damaged section starts empty (with a warning) instead of keeping
+        # the curtains from loading at all.
+        self.last = self._section(state, "last", lambda v: {k: x for k, x in v.items() if k in windows
+                                                             and isinstance(x, dict)}, {})
+        self.history = self._section(state, "history", lambda v: {
+            k: [x for x in items if isinstance(x, dict)][:HISTORY_LENGTH] for k, items in v.items()
+            if k in windows and isinstance(items, list)}, {})
+        self.manual = self._section(state, "manual", lambda v: {k: x for k, x in v.items() if k in windows
+                                                                 and isinstance(x, dict)}, {})
+        self.samples = self._section(state, "samples", lambda v: [
+            (float(a), float(b)) for a, b in v if isinstance(a, (int, float)) and isinstance(b, (int, float))], [])
+        for name, restore in (("auto", self.auto.restore), ("sensors", self.auto.restore_sensors),
+                              ("house", self.auto.restore_house)):
+            try:
+                restore(state.get(name))
+            except (TypeError, ValueError, KeyError, AttributeError) as err:
+                _LOGGER.warning("curtains_state_section_invalid section=%s error=%s; starting it empty", name, err)
+                restore(None)
         # An operation that was running when Home Assistant stopped is not resumed and never re-sent. Its
         # covers may still be travelling and report the rest of that movement: those reports are ours, not
         # a manual change.
@@ -162,6 +174,26 @@ class CurtainManager:
         for ops in self.history.values():
             for op in ops:
                 self._interrupt(op)
+
+    @staticmethod
+    def _section(state: Mapping[str, Any], name: str, parse: Callable[[Any], Any], empty: Any) -> Any:
+        value = state.get(name)
+        if value is None:
+            return empty
+        try:
+            return parse(value)
+        except (TypeError, ValueError, KeyError, AttributeError) as err:
+            _LOGGER.warning("curtains_state_section_invalid section=%s error=%s; starting it empty", name, err)
+            return empty
+
+    @callback
+    def assume_moving(self, entity_ids: Iterable[str]) -> None:
+        """Phase A5: after control changed owner, a movement the previous owner started may not be recorded: every
+        report of these covers is ours for the verification and settle window (never a manual change)."""
+        until = _now() + timedelta(seconds=self.config.settings.verify_timeout + SETTLE_SECONDS)
+        for entity_id in entity_ids:
+            for e in members(self.hass, entity_id) | {entity_id}:
+                self._ours_until[e] = max(self._ours_until.get(e, until), until)
 
     @staticmethod
     def _interrupt(op: dict[str, Any]) -> None:
@@ -208,6 +240,8 @@ class CurtainManager:
 
     async def async_import_state(self, state: Mapping[str, Any]) -> None:
         """Replace the stored runtime state (before a load; used when control changes owner)."""
+        if self._started and not self.dormant:
+            raise RuntimeError("the runtime state of a running curtain manager cannot be replaced")
         await self._state_store.async_save(dict(state))
         self._state_dirty = False
 
@@ -223,6 +257,8 @@ class CurtainManager:
     @callback
     def async_set_mirrored(self, config: CurtainConfig) -> bool:
         """The App's published configuration (only while dormant / locked): stored, nothing evaluated."""
+        if not self.locked:
+            raise RuntimeError("a mirrored configuration is only accepted by a locked (dormant) curtain manager")
         if config == self.config:
             return False
         self.config = config

@@ -124,6 +124,7 @@ class LightingRuntime:
         self._models_handle: asyncio.TimerHandle | None = None
         self._backlog: list[dict[str, Any]] | None = None  # events that arrive while a hello is processed
         self._switching = False
+        self._stop_lock = asyncio.Lock()
         self._attempt = 0
         self._stopping = False
 
@@ -463,9 +464,12 @@ class LightingRuntime:
             inst.controller.note_recent_commands(recent)
 
     async def _stop_instance(self, *, flush: bool) -> None:
-        inst, self.instance = self.instance, None
-        if inst is not None:
-            await inst.async_stop(flush=flush)
+        # Serialized: a stop spawned by a lost connection may still be flushing the stores when the next hello
+        # starts an instance on the same files; the newer caller waits for the older stop first.
+        async with self._stop_lock:
+            inst, self.instance = self.instance, None
+            if inst is not None:
+                await inst.async_stop(flush=flush)
 
     # ---------------------------------------------------------------- owner
     def _owner_params(self) -> dict[str, Any]:

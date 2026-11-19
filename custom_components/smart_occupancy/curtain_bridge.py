@@ -50,13 +50,12 @@ restarted or the integration reloaded.
 from __future__ import annotations
 
 import asyncio
-from collections import Counter, deque
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
 import secrets
-import time
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import CALLBACK_TYPE, Context, HomeAssistant, callback
@@ -83,7 +82,6 @@ STORE_VERSION = 1
 SAVE_DELAY_SECONDS = 5
 MAX_RENAMES = 50
 MAX_SESSIONS = 4
-RECENT_COMMANDS = 50
 #: Curtain websocket commands that keep answering while the App owns curtains: they only read or simulate.
 READ_ONLY_COMMANDS = frozenset({
     "smart_occupancy/curtains/model", "smart_occupancy/curtains/subscribe", "smart_occupancy/curtains/preview",
@@ -172,7 +170,6 @@ class CurtainBridge:
         self.execute_errors = 0
         self.last_execute: dict[str, Any] | None = None
         self.mirror: dict[str, Any] = {}
-        self._recent: deque[tuple[float, str]] = deque(maxlen=RECENT_COMMANDS)
         self._inflight = 0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -181,6 +178,7 @@ class CurtainBridge:
         self._running = False
         self._stopped = False
         self.fallback_error: str | None = None
+        self._fallback_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------ lifecycle
     @property
@@ -257,6 +255,11 @@ class CurtainBridge:
     def async_stop(self) -> None:
         self._running = False
         self._stopped = True
+        if self._fallback_task is not None and not self._fallback_task.done():
+            # A fallback waiting for in-flight App commands must not start a manager for an entry that is going
+            # away (the next entry starts its own): cancel it; the old manager stays stopped and fenced.
+            self._fallback_task.cancel()
+            self._fallback_task = None
         if self._timer:
             self._timer()
             self._timer = None
@@ -531,9 +534,9 @@ class CurtainBridge:
     # ------------------------------------------------------------ the owner
     async def async_execute(self, connection: Any, params: dict[str, Any]) -> dict[str, Any]:
         """One cover command of the App's manager: fenced, allowlisted, sent with the App's context."""
-        self._accept(connection, params, "execute")
         domain, service, data = params["domain"], params["service"], params["data"]
         try:
+            # Validated first: a refused command consumes no sequence number and renews no lease.
             ids = S.check_cover_command(domain, service, data, covers=S.covers_of(self.config_doc()))
         except S.ProtocolError as err:
             error = BridgeError(err.code, str(err))
@@ -544,7 +547,7 @@ class CurtainBridge:
             error = BridgeError(S.REJECT_INVALID, "invalid context id")
             self._rejected(error, "execute")
             raise error
-        self._recent.append((time.monotonic(), context_id))
+        self._accept(connection, params, "execute")
         self._inflight += 1
         self._idle.clear()
         record = {"at": _iso(dt_util.utcnow()), "domain": domain, "service": service, "entities": ids,
@@ -634,7 +637,8 @@ class CurtainBridge:
         if self.owner != S.OWNER_APP:
             return
         self._change_owner(S.OWNER_INTEGRATION, reason, dt_util.utcnow(), by=by, detail=detail)
-        self.hass.async_create_task(self._async_start_manager(reason), "smart_occupancy curtains fallback")
+        self._busy = True  # editors wait from this instant (the task below sets it again)
+        self._fallback_task = self.hass.async_create_task(self._async_start_manager(reason), "smart_occupancy curtains fallback")
 
     async def async_fallback(self, reason: str, *, by: str | None = None, detail: str | None = None) -> bool:
         """The integration takes the curtains back. Returns False when it already controls them."""
@@ -653,24 +657,48 @@ class CurtainBridge:
                     await self._idle.wait()
             except TimeoutError:
                 _LOGGER.warning("curtains_fallback_drain_timeout: App commands still running")
+            if self._stopped:
+                return  # the entry is going away: its successor starts its own manager
             old = self.mgr
+            state_at = dt_util.parse_datetime(self.mirror.get("state_at") or "") if self.mirror.get("state_at") else None
+            previous = None
             try:
                 self._apply_renames(old)
                 state = self.mirror.get("state")
                 if isinstance(state, dict):
+                    previous = await old._state_store.async_load()  # noqa: SLF001 - kept in case the mirror is unusable
                     await old.async_import_state(state)
                 await old.async_flush()
             except Exception:
                 _LOGGER.exception("curtains_fallback_mirror_failed (the integration starts from its stored copy)")
+            if self._stopped:
+                return
             old.dormant = False
             old.async_stop()
             new = CurtainManager(self.hass, self.coordinator.occupancy)
             try:
                 await new.async_load()
             except Exception:
-                _LOGGER.exception("curtains_fallback_load_failed: curtains do not run; reload the integration")
-                self._failed_fallback(old)
+                _LOGGER.exception("curtains_fallback_load_failed: the mirrored state is unusable; starting from the "
+                                  "state before it")
+                try:
+                    if previous is not None:
+                        await old.async_import_state(previous)
+                    new = CurtainManager(self.hass, self.coordinator.occupancy)
+                    await new.async_load()
+                except Exception:
+                    _LOGGER.exception("curtains_fallback_load_failed: curtains do not run; reload the integration")
+                    self._failed_fallback(old)
+                    return
+            if self._stopped:
                 return
+            # The mirror lags the App by about two seconds: a movement the App started just before the switch may not
+            # be in it. Its covers' reports must not be taken for a manual change: for a short while every configured
+            # cover's report is "ours" (as after a restart), and the windows are evaluated after the settle period.
+            if self.mirror.get("state_at") is None or state_at is None or \
+                    (dt_util.utcnow() - state_at).total_seconds() < S.RECENT_STATE_SECONDS or \
+                    S.running_operations(self.mirror.get("state")):
+                new.assume_moving(S.covers_of(new.config.as_dict()))
             self.coordinator.curtains = new
             new.async_start()
             self.attach(new)

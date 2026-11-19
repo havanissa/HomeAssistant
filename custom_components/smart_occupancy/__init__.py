@@ -238,9 +238,11 @@ def _rename_listener(hass: HomeAssistant, entry: SmartOccupancyConfigEntry):
         if data["action"] != "update" or "old_entity_id" not in data:
             return
         old, new = data["old_entity_id"], data["entity_id"]
-        if entry.runtime_data.curtain_bridge.app_owns:
-            # The App owns the curtain configuration and follows the rename itself (kept for it while it is away).
-            entry.runtime_data.curtain_bridge.note_rename(old, new)
+        curtain_bridge = entry.runtime_data.curtain_bridge
+        if curtain_bridge.app_owns or curtain_bridge.busy or entry.runtime_data.curtains.locked:
+            # The App owns the curtain configuration and follows the rename itself (kept for it while it is away);
+            # during a change of owner the rename is kept too and applied by whichever side ends up with it.
+            curtain_bridge.note_rename(old, new)
         else:
             entry.runtime_data.curtains.rename_entity(old, new)
         store = entry.runtime_data.lighting.store

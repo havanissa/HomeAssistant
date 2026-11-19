@@ -20,6 +20,7 @@ The integration keeps controlling the curtains and producing the occupancy forec
 ### Changed
 
 - `websocket.py` registers the curtain and forecast editors behind the read-only guards; `diagnostics` include both ownership records; the unload path stops whichever manager is current.
+- From the independent review of this phase: a fallback that waits for in-flight App commands is cancelled when the entry unloads (no second manager on a dead entry; `lighting_bridge` too); the curtain state restore is tolerant per section and the fallback keeps the state before an unusable mirror; a refused `execute` consumes no sequence number and renews no lease; after a return the new curtain manager treats reports of every configured cover as its own while the mirror may miss a movement the App just started; renames during a change of owner are kept for whichever side ends up with the configuration; the forecast bridge applies a published view before mirroring it (and refuses one it cannot show), adopts exports with one task, holds the manager's lock across the handover's flush / export / stop, caches `learned_revision` and logs days dropped at a fallback import.
 
 ## 0.8.0 — Lighting bridge for the Smart Lighting App (App Phase A4)
 

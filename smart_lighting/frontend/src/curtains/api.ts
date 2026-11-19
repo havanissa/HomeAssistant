@@ -145,9 +145,10 @@ export async function handover(): Promise<{ epoch: number; copy: { identical: bo
     "api/curtains/handover", { confirm: true })).result;
 }
 
-/** mode "release": the App hands back its final state; "return": the integration takes over from its mirror. */
-export async function releaseControl(mode: "release" | "return"): Promise<unknown> {
-  return (await postRooms<{ result: unknown }>("api/curtains/release", { mode })).result;
+/** mode "release": the App hands back its final state; "return": the integration takes over from its mirror
+ * (refused with code "moving" while a cover is being moved, unless forced). */
+export async function releaseControl(mode: "release" | "return", force = false): Promise<unknown> {
+  return (await postRooms<{ result: unknown }>("api/curtains/release", mode === "return" ? { mode, force } : { mode })).result;
 }
 
 export interface ImportReview {
@@ -158,6 +159,8 @@ export interface ImportReview {
   windows: number;
   missing_entities: string[];
   dropped_entities: string[];
+  /** Windows the file would switch to Automatic (restored as Observing unless confirmed). */
+  automatic_windows: { id: string | null; name: string | null }[];
   exported_at: string | null;
   same: boolean;
 }
@@ -166,8 +169,8 @@ export function reviewImport(file: unknown): Promise<ImportReview> {
   return postRooms<ImportReview>("api/curtains/import/review", { file });
 }
 
-export function applyImport(file: unknown, revision: string | null): Promise<unknown> {
-  return postRooms<unknown>("api/curtains/import", { file, revision });
+export function applyImport(file: unknown, revision: string | null, confirmAutomatic = false): Promise<{ applied: boolean; revision: string | null; observing_instead: string[] }> {
+  return postRooms<{ applied: boolean; revision: string | null; observing_instead: string[] }>("api/curtains/import", { file, revision, confirm_automatic: confirmAutomatic });
 }
 
 /** Who controls the curtains now, in words (as the integration acknowledges it). */

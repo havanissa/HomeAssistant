@@ -266,6 +266,32 @@ async def test_return_control_from_shadow_mode(curtain_app: Any, fake_ha: FakeHo
     assert rt(curtain_app).mode == "shadow" and fake_ha.curtains.released == 0
 
 
+async def test_return_while_a_cover_moves_is_refused_unless_forced(curtain_app: Any, fake_ha: FakeHomeAssistant,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review finding 3: the integration's mirror lags the App, so a return during a movement is refused (code
+    ``moving``) unless the person forces it."""
+    monkeypatch.setattr(S, "MOVING_WAIT_SECONDS", 0.3)
+    runtime = rt(curtain_app)
+    await handover(curtain_app)
+    fake_ha.curtains.stall = True
+    status, body = await command(curtain_app, type="smart_occupancy/curtains/apply", window_id=WINDOW,
+                                 preset_id="p_closed", confirm=True, expected={LAYER: 0})
+    assert status == 200 and body["handled_by"] == "app", body
+    await wait_for(lambda: runtime.moving_windows() == [WINDOW])
+    for payload in ({"mode": "return"}, {}):
+        resp = await curtain_app.post("/api/curtains/release", json=payload, headers=ADMIN_HEADERS)
+        body = await resp.json()
+        assert resp.status == 409 and body["code"] == "moving", body
+    assert runtime.mode == "owner" and fake_ha.curtains.owner == S.OWNER_APP and not runtime.manager.fenced
+    assert runtime.moving_windows() == [WINDOW]
+    resp = await curtain_app.post("/api/curtains/release", json={"mode": "return", "force": True}, headers=ADMIN_HEADERS)
+    body = await resp.json()
+    assert resp.status == 200, body
+    assert body["result"]["ownership"]["owner"] == S.OWNER_INTEGRATION and fake_ha.curtains.owner == S.OWNER_INTEGRATION
+    await wait_for(lambda: shadow_running(curtain_app))
+    assert "returned" in [e["event"] for e in runtime.ownership_log]
+
+
 # ---------------------------------------------------------------------------------------------------- reconnect
 async def test_reconnect_resumes_from_the_apps_own_store(curtain_app: Any, fake_ha: FakeHomeAssistant) -> None:
     runtime = rt(curtain_app)
@@ -384,6 +410,30 @@ async def test_export_and_import(curtain_app: Any, fake_ha: FakeHomeAssistant) -
     assert sorted(runtime.manager.config.windows) == [WINDOW, "w_other"]
     await wait_for(lambda: S.config_revision(fake_ha.curtains.config) == body["revision"], timeout=8)
     assert any("import" in b["id"] for b in runtime.backups())
+    # Review finding 4: a file that switches a window to Automatic restores it as Observing unless confirmed.
+    auto_file = dict(file)
+    auto_file["config"] = dict(file["config"])
+    auto_file["config"]["windows"] = [{**w, "mode": "automatic"} if w["window_id"] == WINDOW else w
+                                      for w in file["config"]["windows"]]
+    assert runtime.manager.config.windows[WINDOW].mode == "observing"
+    review = await (await curtain_app.post("/api/curtains/import/review", json={"file": auto_file},
+                                           headers=ADMIN_HEADERS)).json()
+    assert [w["id"] for w in review["automatic_windows"]] == [WINDOW]
+    resp = await curtain_app.post("/api/curtains/import", json={"file": auto_file, "revision": review["revision"]},
+                                  headers=ADMIN_HEADERS)
+    body = await resp.json()
+    assert resp.status == 200 and body["observing_instead"] == [WINDOW], body
+    assert runtime.manager.config.windows[WINDOW].mode == "observing"
+    review = await (await curtain_app.post("/api/curtains/import/review", json={"file": auto_file},
+                                           headers=ADMIN_HEADERS)).json()
+    resp = await curtain_app.post("/api/curtains/import", json={"file": auto_file, "revision": review["revision"],
+                                                                "confirm_automatic": True}, headers=ADMIN_HEADERS)
+    body = await resp.json()
+    assert resp.status == 200 and body["observing_instead"] == [], body
+    assert runtime.manager.config.windows[WINDOW].mode == "automatic"
+    review = await (await curtain_app.post("/api/curtains/import/review", json={"file": auto_file},
+                                           headers=ADMIN_HEADERS)).json()
+    assert review["automatic_windows"] == [] and review["same"]
 
 
 # -------------------------------------------------------------------------------------------------------- safety

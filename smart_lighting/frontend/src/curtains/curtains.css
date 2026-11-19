@@ -133,7 +133,12 @@
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  min-width: 14rem;
+  min-width: min(14rem, 100%);
+}
+
+.cu-house > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .cu-house .icon {

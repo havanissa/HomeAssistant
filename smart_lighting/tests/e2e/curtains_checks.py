@@ -331,11 +331,11 @@ def phase_all(args: argparse.Namespace, out: Path) -> None:
     status, body = app_post_status("api/curtains/handover", {"confirm": True})
     check("second handover", status == 200 and integration(args)["owner"] == "app", (status, body))
     time.sleep(95)  # (the settle window after the last operation)
-    ha(args, "/api/services/cover/set_cover_position", {"entity_id": COVER, "position": 35})  # a person's move
+    ha(args, "/api/services/cover/set_cover_position", {"entity_id": COVER, "position": 30})  # a person's move (the demo cover rounds to tens)
     settle(args)
     time.sleep(4)
     window = the_window(command("model")[1]["result"])
-    check("the App records the manual move", window["manual"] is not None and window["manual"]["to"] == 35,
+    check("the App records the manual move", window["manual"] is not None and window["manual"]["to"] == 30,
           window["manual"])
     before = len(args.watcher.events)
     ui(args, shots, "release", ui_release)
@@ -344,7 +344,7 @@ def phase_all(args: argparse.Namespace, out: Path) -> None:
           and own["history"][0]["reason"] == "released", own["history"][0])
     legacy = model_direct(args)
     check("the manual change survives the return", the_window(legacy)["manual"] is not None
-          and the_window(legacy)["manual"]["to"] == 35, the_window(legacy)["manual"])
+          and the_window(legacy)["manual"]["to"] == 30, the_window(legacy)["manual"])
     time.sleep(3)
     check("no cover moved because of the return", not cover_calls(args, before), cover_calls(args, before)[:3])
     check("editors writable again", legacy["can_edit"])

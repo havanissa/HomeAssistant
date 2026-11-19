@@ -24,9 +24,10 @@ const REASONS: Record<string, string> = {
 };
 
 export class SlCurtainsControl extends CurtainsElement {
-  static properties = { ...CurtainsElement.properties, dialog: { state: true }, understood: { state: true }, copy: { state: true } };
+  static properties = { ...CurtainsElement.properties, dialog: { state: true }, understood: { state: true }, force: { state: true }, copy: { state: true } };
   declare dialog: "handover" | "release" | "return" | null;
   declare understood: boolean;
+  declare force: boolean;
   declare copy: { identical: boolean; differences: string[] } | null;
   private timer: number | undefined;
 
@@ -34,6 +35,7 @@ export class SlCurtainsControl extends CurtainsElement {
     super();
     this.dialog = null;
     this.understood = false;
+    this.force = false;
     this.copy = null;
   }
 
@@ -50,6 +52,7 @@ export class SlCurtainsControl extends CurtainsElement {
   private async open(kind: "handover" | "release" | "return"): Promise<void> {
     this.dialog = kind;
     this.understood = false;
+    this.force = false;
     this.error = null;
     await this.updateComplete;
     this.querySelector<HTMLDialogElement>("dialog.cu-control-dialog")?.showModal();
@@ -63,7 +66,7 @@ export class SlCurtainsControl extends CurtainsElement {
   private async act(kind: "handover" | "release" | "return"): Promise<void> {
     const ok = await this.run(async () => {
       if (kind === "handover") this.copy = (await handover()).copy;
-      else await releaseControl(kind);
+      else await releaseControl(kind, kind === "return" && this.force);
     });
     if (ok) {
       this.close();
@@ -215,7 +218,10 @@ export class SlCurtainsControl extends CurtainsElement {
             <label class="confirm-row"><input type="checkbox" data-testid="curtains-understood" .checked=${this.understood} @change=${(e: Event) => (this.understood = (e.target as HTMLInputElement).checked)} />
               <span>I have reviewed the comparison and want the App to control the curtains.</span></label>`
           : kind === "release" ? html`<p>The App stops at once (nothing more is sent), hands its final configuration and state to the integration, and the integration's controller starts from them. No cover moves because of the change; manual holds are kept. The App returns to shadow mode and does not take control back by itself. The return is refused while a cover is moving.</p>`
-          : html`<p>The integration takes the curtains back from its mirror of the App's last published configuration and state, even if the App cannot hand them over. Use this when the App is not working as it should. The same happens with the service <code>smart_occupancy.curtains_return_to_integration</code>.</p>`}
+          : html`<p>The integration takes the curtains back from its mirror of the App's last published configuration and state, even if the App cannot hand them over. Use this when the App is not working as it should. The same happens with the service <code>smart_occupancy.curtains_return_to_integration</code>.</p>
+            <p class="small">The return is refused while a cover is being moved, because the integration could take that movement for a manual change.</p>
+            <label class="confirm-row"><input type="checkbox" data-testid="curtains-force" .checked=${this.force} @change=${(e: Event) => (this.force = (e.target as HTMLInputElement).checked)} />
+              <span>Return even while a cover is moving.</span></label>`}
         </div>
         <footer class="sheet-foot">
           <button type="button" class="btn" @click=${() => this.close()}>Cancel</button>

@@ -477,6 +477,8 @@ async def test_control_returns_with_the_apps_learned_days(hass: HomeAssistant, p
     assert len(fake.calls) == calls
     await tick(hass, freezer, FORECAST_START_DELAY_SECONDS + 5, step=5)
     assert len(fake.calls) == calls + 1 and fake.calls[-1][1].date() == dt_util.now().date()
+    if m._task is not None:  # noqa: SLF001 - learning runs as a background task, which block_till_done skips
+        await m._task
     assert len(m.days) == DAYS - 1 and m.status.state == "ready"
     # No device was commanded anywhere (the admin service itself is the only call, on that path).
     assert [c.data["domain"] for c in service_calls] == ([DOMAIN] if how == "service" else [])

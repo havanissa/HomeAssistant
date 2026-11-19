@@ -63,6 +63,9 @@ PROTOCOL_VERSION = 1
 MOVING_WAIT_SECONDS = DRAIN_SECONDS
 #: A cover command may take this long (the manager's own timeout for Home Assistant to accept it).
 COMMAND_SECONDS = 15.0
+#: A mirror state younger than this at a fallback may miss a movement the App just started: the new manager treats
+#: every configured cover's reports as its own for the settle window (never a manual change).
+RECENT_STATE_SECONDS = 5.0
 
 #: The only cover services the curtain executor sends (``curtains/executor.py``).
 COVER_SERVICES = frozenset({"set_cover_position", "open_cover", "close_cover"})
@@ -124,8 +127,18 @@ def check_state(state: Any) -> dict[str, Any]:
     for key in ("last", "history", "manual", "auto", "sensors", "house"):
         if key in state and state[key] is not None and not isinstance(state[key], dict):
             raise ProtocolError(REJECT_INVALID, f"state section {key} must be an object")
+    for key in ("last", "manual", "auto"):
+        if any(not isinstance(v, dict) for v in (state.get(key) or {}).values()):
+            raise ProtocolError(REJECT_INVALID, f"state section {key} must map windows to objects")
+    if any(not isinstance(v, list) or any(not isinstance(x, dict) for x in v) for v in (state.get("history") or {}).values()):
+        raise ProtocolError(REJECT_INVALID, "state section history must map windows to lists of operations")
+    if any(not isinstance(op.get("items", []), list) for op in (state.get("last") or {}).values()):
+        raise ProtocolError(REJECT_INVALID, "an operation's items must be a list")
     if "samples" in state and not isinstance(state["samples"], list):
         raise ProtocolError(REJECT_INVALID, "state section samples must be a list")
+    if any(not isinstance(x, (list, tuple)) or len(x) != 2 or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                                                                    for v in x) for x in state.get("samples") or []):
+        raise ProtocolError(REJECT_INVALID, "state section samples must hold [azimuth, sun_angle] pairs")
     if len(canonical(state)) > MAX_STATE_BYTES:
         raise ProtocolError(REJECT_INVALID, "state too large")
     return state

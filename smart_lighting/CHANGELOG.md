@@ -51,6 +51,13 @@ handover for each.
   updates for both; `SL_CURTAINS_MIN_*` / `SL_FORECAST_MIN_*` thresholds (tests
   only). End-to-end suites `tests/e2e/curtains_checks.py` and
   `predictions_checks.py`.
+- **From the independent review**: a lost connection's instance stop and the
+  next session's start are serialized (no two instances on the same store); a
+  forced `return` while a cover is moving is refused unless the user ticks
+  "Return even while a cover is moving"; a restored curtain export lists the
+  windows it would switch to Automatic and restores them as Observing unless
+  that is confirmed; a changed curtain configuration is published at once so a
+  newly added cover can be commanded right away.
 
 ## 0.5.0
 

@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 from typing import Any
+import urllib.error
 import urllib.request
 
 from playwright.sync_api import expect, sync_playwright
@@ -45,7 +46,9 @@ KAMAR = "kamar_nordur"
 PC = "input_boolean.nobara_pc"
 POST = {"X-Smart-Lighting": "1"}
 FORECAST_SENSOR = "sensor.smart_occupancy_kamar_nordur_forecast"
-LEARNING_SENSOR = "sensor.smart_occupancy_forecast_learning"
+# The learning sensor's id depends on when the integration was first installed (older installations keep the
+# id without the device prefix); resolved from the states at run time.
+LEARNING_SENSORS = ("sensor.smart_occupancy_lighting_forecast_learning", "sensor.smart_occupancy_forecast_learning")
 
 
 def app(path: str, method: str = "GET", body: Any = None) -> Any:
@@ -75,8 +78,13 @@ def ha(args: argparse.Namespace, path: str, body: Any = None) -> Any:
     return http(args.ha_url + path, headers, "POST" if body is not None else "GET", body)
 
 
-def state(args: argparse.Namespace, entity_id: str) -> dict[str, Any]:
-    return ha(args, f"/api/states/{entity_id}")
+def state(args: argparse.Namespace, entity_id: str, *, missing_ok: bool = False) -> dict[str, Any] | None:
+    try:
+        return ha(args, f"/api/states/{entity_id}")
+    except urllib.error.HTTPError as err:
+        if missing_ok and err.code == 404:
+            return None
+        raise
 
 
 def write_state(args: argparse.Namespace, entity_id: str, value: str) -> None:
@@ -179,9 +187,10 @@ def phase_all(args: argparse.Namespace, out: Path) -> None:
     check("App: same forecast code", checks["fingerprint"] == "ok", checks)
     check("the App's copy holds the integration's learned days", data["days_learned"] == own["days_learned"]
           and data["learned_revision"] == own["learned_revision"], (data["days_learned"], own["days_learned"]))
-    wait("the App read history through the API", lambda: predictions()["history_calls"] >= 1, 180, 5)
+    # (Before any long wait: with the fast test thresholds the shadow is ready after a minute.)
     status, body = app_post_status("api/predictions/handover", {"confirm": True})
     check("handover refused while not ready", status == 409 and body.get("code") == "not_ready", (status, body))
+    wait("the App read history through the API", lambda: predictions()["history_calls"] >= 1, 180, 5)
 
     # A settings change through the App while the integration owns it: forwarded, mirrored on the shadow.
     status, body = command("settings", area_id=None, values={"probability_threshold": 55})
@@ -212,7 +221,7 @@ def phase_all(args: argparse.Namespace, out: Path) -> None:
           data["last_copy"])
     check("no device command because of the handover", not device_calls(args, before), device_calls(args, before)[:3])
     wait("the App published its view", lambda: integration(args)["published"] >= 1, 60)
-    learning = state(args, LEARNING_SENSOR)
+    learning = next(s for eid in LEARNING_SENSORS if (s := state(args, eid, missing_ok=True)) is not None)
     check("the forecast learning sensor shows the App's status", learning["state"] in ("ready", "learning", "waiting"),
           learning["state"])
     reply = ha_ws(args.ha_url, args.ha_token, {"type": "smart_occupancy/forecast/settings", "area_id": None,

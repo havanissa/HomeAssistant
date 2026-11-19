@@ -671,7 +671,8 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         runtime, _api = curtains_runtime(request)
         try:
             if body.get("mode") == "return":
-                result = await runtime.return_control(request.headers.get("X-Remote-User-Id"))
+                result = await runtime.return_control(request.headers.get("X-Remote-User-Id"),
+                                                      force=body.get("force") is True)
             else:
                 result = await runtime.release(request.headers.get("X-Remote-User-Id"))
         except CurtainsError as err:
@@ -700,7 +701,8 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         body = await write_guard(request, MAX_PLAN_BODY)
         runtime, _api = curtains_runtime(request)
         try:
-            return _json(await runtime.import_apply(body.get("file"), body.get("revision")))
+            return _json(await runtime.import_apply(body.get("file"), body.get("revision"),
+                                        confirm_automatic=body.get("confirm_automatic") is True))
         except CurtainsError as err:
             return lighting_error(err)
 
