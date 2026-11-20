@@ -281,7 +281,7 @@ async def test_unknown_api_and_methods(app_client: Any) -> None:
 async def test_diagnostics_download(app_client: Any) -> None:
     resp = await app_client.get("/api/diagnostics?download=1")
     assert resp.status == 200
-    assert resp.headers["Content-Disposition"].startswith('attachment; filename="smart-lighting-diagnostics-')
+    assert resp.headers["Content-Disposition"].startswith('attachment; filename="smart-comfort-diagnostics-')
     data = await resp.json()
     assert data["runtime"]["aiohttp"] == aiohttp.__version__
     assert {"settings", "log", "checks", "safety"} <= set(data)

@@ -343,7 +343,7 @@ export class SlCurtainsWindow extends CurtainsElement {
           <span class="cu-chips">${p.preset_id === sel ? chip("info", "Selected") : nothing}${p.matches ? chip("ok", "Matches now") : nothing}</span></li>`)}</ul>` : html`<p class="muted small">No presets yet.</p>`}
       </section>
       <section class="card" data-testid="curtains-window-manual"><header class="card-head">${icon("hand")}<h3>Manual changes</h3></header>
-        ${w.manual ? html`<p>${w.manual.name}: ${pct(w.manual.from)} → ${pct(w.manual.to)}<span class="block small muted">${fmtS(w.manual.at)}, ${w.manual.source === "person" ? "by a person in Home Assistant" : "outside Smart Occupancy"}</span></p>
+        ${w.manual ? html`<p>${w.manual.name}: ${pct(w.manual.from)} → ${pct(w.manual.to)}<span class="block small muted">${fmtS(w.manual.at)}, ${w.manual.source === "person" ? "by a person in Home Assistant" : "outside Smart Comfort"}</span></p>
           ${this.canEdit ? html`<button type="button" class="btn btn-small" data-testid="curtains-manual-clear" ?disabled=${this.busy} @click=${() => void this.run(() => curtains(cmd("manual/clear"), { window_id: w.window_id }), "Manual change forgotten")}>${icon("close-circle", 16)}Clear manual change</button>` : nothing}` : html`<p class="muted">None recorded.</p>`}
         <h4 class="lp-h">Last operation</h4>
         ${op ? html`<p>${chip(OVERALL_TONE[op.status] ?? "neutral", m.words.overall[op.status] ?? op.status)} ${op.explanation}<span class="block small muted">${op.preset_name} · ${fmtS(op.finished ?? op.started)}</span></p>` : html`<p class="muted">No preset applied yet.</p>`}

@@ -137,6 +137,8 @@ export interface SupervisorInfo {
 
 export interface AppInfo {
   name: string;
+  /** Phase A7.0: "Intelligent Home Automation". */
+  subtitle?: string;
   version: string;
   phase: string;
   started_at: string;
@@ -208,6 +210,8 @@ export type LiveMessage =
   | { type: "predictions"; what: string; mode: string; owner: string; bridge: string }
   /** Phase A6: the companion, the configuration authority or an owner changed (refetch /api/system). */
   | { type: "system"; what: string }
+  /** Phase A7.0: the climate configuration ("config") or a live climate value ("states") changed (refetch). */
+  | { type: "climate"; what: string }
   | { type: "pong" };
 
 export interface LiveState {

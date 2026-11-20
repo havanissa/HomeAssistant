@@ -2,8 +2,8 @@
 // handover, the rollback and the configuration export. The owner shown is the one the integration acknowledges.
 import { html, nothing, type TemplateResult } from "lit";
 
+import { download } from "../rooms/model";
 import { icon } from "../icons";
-import { apiUrl } from "../store";
 import { chip, kv, pageHeader } from "../ui";
 import { haTime } from "../presence/components";
 import { duration } from "../presence/model";
@@ -105,7 +105,7 @@ export class SlLightingControl extends LightingElement {
           : html`<button type="button" class="btn btn-primary" data-testid="lighting-handover" ?disabled=${this.busy || !d.readiness.ready || !this.canEdit} @click=${() => void this.open("handover")}>${icon("swap", 20)}Review handover to the App…</button>
              <span class="small muted">${d.readiness.ready ? "Every readiness check passed." : "Available when every readiness check passes."}</span>`}
         <button type="button" class="btn" data-testid="lighting-return" ?disabled=${this.busy || !this.canEdit || !owner.app && d.mode !== "owner"} @click=${() => void this.open("return")} title="Also works when the App lost its connection">${icon("home-assistant", 18)}Force return</button>
-        <a class="btn" href=${apiUrl("api/lighting/export")} download data-testid="lighting-export">${icon("download", 18)}Export configuration and state</a>
+        <button type="button" class="btn" data-testid="lighting-export" @click=${() => download("api/lighting/export")}>${icon("download", 18)}Export configuration and state</button>
       </div>
     </section>`;
   }

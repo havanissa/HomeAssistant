@@ -14,7 +14,8 @@ import aiohttp
 
 from . import companion_protocol as P, modules
 from .companion_client import CompanionClient
-from .const import APP_NAME, APP_PHASE, APP_VERSION
+from .const import APP_NAME, APP_PHASE, APP_SUBTITLE, APP_VERSION
+from .climate import ClimateService
 from .core_config import CoreConfigStore
 from .core_host import CoreHost
 from .curtains_api import CurtainsApi
@@ -65,6 +66,7 @@ class AppCore:
         self.supervisor: SupervisorClient | None = None
         self.rooms: RoomsService | None = None
         self.floorplan: FloorPlanService | None = None
+        self.climate: ClimateService | None = None  # Phase A7.0: Smart Comfort's climate module (observation only)
         self.presence: PresenceService | None = None
         self.occupancy: OccupancyRuntime | None = None
         self.lighting: LightingRuntime | None = None
@@ -96,6 +98,8 @@ class AppCore:
         self.floorplan = FloorPlanService(self.ha, self.rooms, self.settings.data_dir)
         self.presence = PresenceService(self.ha, self.rooms)
         self.floorplan.load()
+        self.climate = ClimateService(self.ha, self.rooms, self.settings.data_dir)
+        self.climate.load()
         # Phase A3.2: the shared occupancy engine (shadow next to the 0.9.0 integration; the only engine with the
         # companion, A6).
         self.occupancy = OccupancyRuntime(self.ha, self.settings.data_dir, app_version=APP_VERSION,
@@ -139,6 +143,9 @@ class AppCore:
         for rt in (self.occupancy, self.lighting, self.curtains, self.forecast):
             rt.add_listener(lambda _k, d=rt: self._system_changed("runtime"))
         self.ha.add_listener(self._on_ha)
+        self.climate.occupancy, self.climate.lighting, self.climate.curtains = self.occupancy, self.lighting, \
+            self.curtains
+        await self.climate.start()
         await self.ha.start()
         await self.companion.start()
         await self.core_host.start()
@@ -245,6 +252,9 @@ class AppCore:
             mgr = self.curtains.manager if self.curtains else None
             if mgr is not None:
                 mgr.rename_entity(old, new)
+            if self.climate is not None:
+                with contextlib.suppress(Exception):
+                    await self.climate.rename(old, new)
         if self.companion is not None:
             await self.companion.renames_applied()
 
@@ -297,6 +307,8 @@ class AppCore:
         self._tasks.clear()
         if self.core_host is not None:
             await self.core_host.stop()
+        if self.climate is not None:
+            await self.climate.stop()
         if self.forecast is not None:
             await self.forecast.stop()
         if self.curtains is not None:
@@ -399,6 +411,8 @@ class AppCore:
             "engine_commands_sent": engine,
             "allowed_engine_commands": sorted(ENGINE_COMMANDS),
             "automatic_migration": False,
+            # Phase A7.0: the climate module observes only; no thermostat can be commanded by the App.
+            "heating_control": False,
             "modifies_integration": writes > 0,
             "service_calls_sent": other_commands,  # always 0: the client cannot call a service directly
             "commands_sent": sent,
@@ -514,6 +528,21 @@ class AppCore:
             elif any(n["code"].startswith("recovered") for n in fp["notices"]):
                 checks.append({"key": "floorplan", "title": "Floor plan storage", "status": WARNING,
                                "detail": "Recovered after a damaged save; see the Floor plan page"})
+
+        if self.climate is not None:
+            cs = self.climate.status()
+            if cs["read_only"]:
+                checks.append({"key": "climate", "title": "Climate (Observing)", "status": WARNING,
+                               "detail": cs["read_only"]})
+            elif cs["notices"]:
+                checks.append({"key": "climate", "title": "Climate (Observing)", "status": WARNING,
+                               "detail": cs["notices"][-1]["message"]})
+            elif cs["rooms"]:
+                obs = cs["observation"]
+                checks.append({"key": "climate", "title": "Climate (Observing)",
+                               "status": OK if obs["writable"] else WARNING,
+                               "detail": f"{cs['rooms']} rooms observed, {obs['tracked']} entities; no thermostat is "
+                                         "controlled" if obs["writable"] else obs["error"] or "Not stored"})
 
         for key, title, rt, words in (
             ("occupancy_engine", "Occupancy engine", self.occupancy,
@@ -717,7 +746,8 @@ class AppCore:
         health = self.health()
         authority = self.config_authority()
         return {
-            "app": {"name": APP_NAME, "version": APP_VERSION, "phase": APP_PHASE, "started_at": self.started_at,
+            "app": {"name": APP_NAME, "subtitle": APP_SUBTITLE, "version": APP_VERSION, "phase": APP_PHASE,
+                    "started_at": self.started_at,
                     "uptime_s": health["uptime_s"], "health": health["status"], "dev_mode": self.settings.dev_mode},
             "checks": health["checks"],
             "home_assistant": {"connection": ha.status() if ha else {"state": "not_configured", "connected": False},
@@ -727,6 +757,7 @@ class AppCore:
             "supervisor": self.supervisor.as_dict() if self.supervisor else None,
             "rooms": self.rooms.status() if self.rooms else None,
             "floorplan": self.floorplan.status() if self.floorplan else None,
+            "climate": self.climate.status() if self.climate else None,
             "presence": self.presence.status() if self.presence else None,
             "modules": modules.modules(self.occupancy_owner(), self.lighting_owner(), self.curtains_owner(),
                                        self.forecast_owner(), authority),

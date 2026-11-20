@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.10.0
+
+Phase A7.0: **Smart Comfort** and the **Climate** module (observing only). Needs the companion integration 1.0.0
+(unchanged). Nothing changes on upgrade: no thermostat is ever commanded, and every existing configuration, entity,
+backup and dashboard card keeps working.
+
+- **Smart Comfort.** The App is now called *Smart Comfort* ("Intelligent Home Automation"): App name, sidebar entry
+  and icon, brand mark, page title, onboarding, downloads and documentation. Its technical identity is unchanged:
+  the slug `smart_lighting` (so installed Apps, their data and Supervisor backups carry on), the integration domain
+  `smart_occupancy` and every entity and unique id, storage locations and formats, API routes and websocket commands.
+- **Climate** (new sidebar module; Overview, Rooms, a room, Settings):
+  - *Overview*: every climate room with its measured temperature, setpoints, the activity each device *reports*,
+    the indoor/outdoor difference, windows and doors, occupancy, thermal zone, configuration completeness, missing
+    and unavailable sensors, and how many days have been observed. Mode: **Observing**.
+  - *A room*: the primary and secondary temperature sensors with quality and age, each heating device's own reading,
+    requested setpoint, mode, reported activity, capabilities (and whether it has its own input for an external
+    sensor - shown, never used), windows and doors, occupancy, preferences, and a history chart (6 h - 30 days:
+    room, secondary sensors, each device's reading and setpoint, outdoor; lanes for reported heating, open windows
+    and occupancy; gaps stay gaps).
+  - *Settings*: units (Home Assistant's, °C or °F), comfort / setback / lowest and highest allowed targets with room
+    overrides, sensor freshness, observation (retention, Recorder history to read, re-recording of unchanged values),
+    rooms and devices (radiator valves, room thermostats, generic thermostats, several devices per room, rooms
+    without any), primary and secondary sensors from any area, windows and doors, thermal zones (single room,
+    connected rooms, open-plan, shared device or heating circuit), the outdoor source, backups, export and import.
+    One draft for all sections; nothing is stored before the changes are reviewed (validation, the list of changes,
+    warnings) and saved with the revision they were based on.
+  - *Discovery* reads Home Assistant's climate entities and their real capabilities, temperature sensors (by device
+    class and unit; a thermostat's own sensor and outdoor sensors are recognised), windows and doors, and suggests
+    rooms and thermal zones (Lighting's shared spaces, Presence's adjacent rooms). Suggestions are applied only when
+    you choose them.
+  - *Observations* for thermal learning (A7.1): every state change of the configured sensors, devices, windows,
+    occupancy, the sun and the room's curtains, in the App's own storage (`/data/climate/observations`), with the
+    original value, unit and quality; the time before the App observed an entity, and any outage, is read once from
+    the Recorder in bounded windows. No polling.
+- A thermostat's own temperature is never used as the room temperature; heating activity is only what a device
+  reports (`hvac_action`); a setpoint above the room temperature is shown as a *possible* demand, never as heating.
+- Climate configuration in `/data/climate/config.json` (schema 1): atomic writes, revisions, a backup before every
+  change (at most one per 10 minutes while editing), recovery from a damaged file, renamed entities followed by
+  registry id.
+- Observation bookkeeping: each entity's observation starts when it is first observed (or at its first Recorder
+  value); the time the App missed is recorded as a gap at once and removed only for the windows the Recorder
+  answered; charts break lines and bands at gaps and shade them; a renamed entity keeps its records.
+- Fix: the *Export* buttons of Lighting, Curtains and Predictions (Control pages), the Predictions page and
+  Settings → System were plain links that the backend refused (403, the request header was missing); they now
+  download.
+- Design, interfaces for thermal learning, prediction and control (A7.1-A7.3) and limits:
+  `docs/A7-climate-architecture.md`.
+
 ## 0.9.0
 
 Phase A6.2: three improvements of existing functionality. Needs the companion integration 1.0.0. Nothing changes on

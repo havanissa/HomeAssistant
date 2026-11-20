@@ -13,6 +13,8 @@ token. The backend forwards a small, read-only stream:
 * ``floorplan``: the stored floor plan changed (any browser session), with its new revision (Phase A2.1)
 * ``engine``: the occupancy engine's mode, acknowledged owner or bridge connection changed (Phase A3.2)
 * ``lighting`` / ``curtains`` / ``predictions``: that runtime's mode, owner or bridge changed, or its models did
+* ``climate``: the climate configuration was saved (``what: "config"``) or a live climate value moved
+  (``what: "states"``, at most once a second); the Climate pages refetch (Phase A7.0)
 
 The browser may send ``ping`` and ``{"type": "watch", "entities": [...]}``
 (entity ids only, at most 2000). Nothing it sends can change anything.
@@ -94,6 +96,8 @@ class LiveHub:
         if self.core.forecast is not None:
             self.core.forecast.add_listener(self._on_forecast)
         self.core.add_system_listener(self._on_system)
+        if self.core.climate is not None:
+            self.core.climate.add_listener(self._on_climate)
         self._tasks = [
             asyncio.create_task(self._flush_loop(), name="live-flush"),
             asyncio.create_task(self._heartbeat_loop(), name="live-heartbeat"),
@@ -142,6 +146,11 @@ class LiveHub:
             rt = self.core.forecast
             self._schedule(self._broadcast({"type": "predictions", "what": kind, "mode": rt.mode,
                                             "bridge": rt.bridge, "owner": self.core.forecast_owner()}))
+
+    def _on_climate(self, what: str) -> None:
+        """Phase A7.0: the climate configuration or a live climate value changed (refetch)."""
+        if self.clients:
+            self._schedule(self._broadcast({"type": "climate", "what": what}))
 
     def _on_system(self, what: str) -> None:
         """Phase A6: the companion, the configuration authority or a runtime's control changed (refetch System)."""

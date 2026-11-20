@@ -184,7 +184,7 @@ export class SlLightInspector extends StoreElement {
 
   private controlSection(d: Obj): TemplateResult {
     const c = d.control;
-    if (!c) return html`<section class="inspector-section"><h4>Control</h4><p class="muted">${d.configured ? "Its room is not enabled." : "Smart Occupancy does not control this light: no room manages it."}</p></section>`;
+    if (!c) return html`<section class="inspector-section"><h4>Control</h4><p class="muted">${d.configured ? "Its room is not enabled." : "Smart Comfort does not control this light: no room manages it."}</p></section>`;
     const w = c.winning;
     const kind = KIND[w?.kind] ?? w?.kind ?? "—";
     const b = w?.brightness;
@@ -206,7 +206,7 @@ export class SlLightInspector extends StoreElement {
         <div role="listitem"><span class="li-label">Winning rule wants</span><strong>${w ? stateText(w.requested) : "—"}</strong>
           <span class="small muted">${kind}${w?.decision ? ` · ${w.decision === "change" ? "differs now" : w.decision}` : ""}</span></div>
         <div role="listitem"><span class="li-label">Last command sent</span><strong>${c.last_command ? `${c.last_command.service.replace("_", " ")}${c.last_command.data?.brightness_pct !== undefined ? ` ${c.last_command.data.brightness_pct} %` : ""}` : "none recorded"}</strong>
-          <span class="small muted">${c.supervisor_command?.at ? `${fmt(c.supervisor_command.at)} · ${String(c.supervisor_command.purpose ?? "").replace("_", " ")}${c.supervisor_command.error ? ` · failed: ${c.supervisor_command.error}` : ""}` : "by Smart Occupancy"}</span></div>
+          <span class="small muted">${c.supervisor_command?.at ? `${fmt(c.supervisor_command.at)} · ${String(c.supervisor_command.purpose ?? "").replace("_", " ")}${c.supervisor_command.error ? ` · failed: ${c.supervisor_command.error}` : ""}` : "by Smart Comfort"}</span></div>
         <div role="listitem"><span class="li-label">Device reports</span><strong>${c.reported?.available === false ? "unavailable" : `${c.reported?.state ?? "—"}${c.reported?.brightness_pct !== null && c.reported?.brightness_pct !== undefined ? ` ${c.reported.brightness_pct} %` : ""}`}</strong>
           <span class="small muted">${colourText(c.reported?.colour)}</span></div>
       </div>
@@ -223,7 +223,7 @@ export class SlLightInspector extends StoreElement {
         ["Authority", c.authority?.text],
       ])}
       ${ov ? html`<p class="small">${icon("tap", 16)} Manual override (${ov.source ?? "manual"}) since ${fmt(ov.since)}${ov.remaining !== null && ov.remaining !== undefined ? ` · ${secs(ov.remaining)} left` : ov.until ? "" : " · until the room is vacant"}. Resume it in the room's lighting.</p>` : nothing}
-      ${ext ? html`<p class="small muted">Last change not made by Smart Occupancy: ${fmt(ext.at)} → ${ext.state}, by ${ext.who}.</p>` : nothing}
+      ${ext ? html`<p class="small muted">Last change not made by Smart Comfort: ${fmt(ext.at)} → ${ext.state}, by ${ext.who}.</p>` : nothing}
       ${(c.priority?.inputs ?? []).length ? html`<p class="small">Priority Inputs: ${c.priority.inputs.map((p: Obj) => `${p.name} (${p.status})`).join(", ")}${c.priority.locked ? " · locked" : ""}</p>` : nothing}
       ${c.supervisor ? html`<p class="small">Room Supervisor (${c.supervisor.mode ?? "—"}): ${c.supervisor.result ? chip(SUP[c.supervisor.result]?.[1] ?? "neutral", SUP[c.supervisor.result]?.[0] ?? c.supervisor.result) : "not checked yet"} ${c.supervisor.reason ?? ""}</p>` : nothing}
       ${(c.conflicts ?? []).filter((x: Obj) => x.enabled).map((x: Obj) => html`<p class="small ${x.acknowledged ? "muted" : "tone-warning"}">${icon("robot", 16)} ${x.name ?? x.automation} also controls it${x.acknowledged ? " (allowed)" : ": automatic lighting leaves it alone"}.</p>`)}

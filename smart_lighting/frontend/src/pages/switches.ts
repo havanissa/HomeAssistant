@@ -437,7 +437,7 @@ export class SlSwitches extends LightingElement {
           <button type="button" class="sw-seg ${on ? "" : "on"}" aria-pressed=${on ? "false" : "true"} data-mode="listen" ?disabled=${!this.canEdit || this.busy}
             @click=${() => void this.setMode(x, "listen")}>${icon("eye", 18)}<span><strong>Observing</strong><span class="block small">A press only marks the change as a person's action. Nothing is sent.</span></span></button>
           <button type="button" class="sw-seg ${on ? "on" : ""}" aria-pressed=${on ? "true" : "false"} data-mode="control" ?disabled=${!this.canEdit || this.busy || (!on && !x.can_control)}
-            @click=${() => void this.setMode(x, "control")}>${icon("tap", 18)}<span><strong>Active</strong><span class="block small">The assigned button actions are executed: Smart Lighting sends the commands.</span></span></button>
+            @click=${() => void this.setMode(x, "control")}>${icon("tap", 18)}<span><strong>Active</strong><span class="block small">The assigned button actions are executed: Smart Comfort sends the commands.</span></span></button>
         </div>
         <p class="small ${x.operating.state === "blocked" || x.operating.state === "attention" ? "tone-warning" : "muted"}">${x.operating.text}
           ${on && x.activated_at ? html` Active since ${fmt(x.activated_at)}.` : nothing}
@@ -633,7 +633,7 @@ export class SlSwitches extends LightingElement {
         const open = x.competing.filter((a) => a.enabled && !x.acknowledged.includes(a.entity_id));
         const ready = x.can_control && open.every((a) => this.ack.includes(a.entity_id));
         title = `Set ${x.name} to Active?`;
-        body = html`<p>While it is Active, each assigned button action is executed: <strong>Smart Lighting sends the light, mood, scene or script commands</strong>
+        body = html`<p>While it is Active, each assigned button action is executed: <strong>Smart Comfort sends the light, mood, scene or script commands</strong>
             when the button is pressed, whatever the room's automatic lighting mode. Executed actions count as manual changes.</p>
           <p class="muted">While Observing, a press only marks the light change as a person's action; nothing is sent.</p>
           ${x.buttons_list.some((b) => b.mapping && b.mapping.action !== "none") ? nothing : html`<p class="notice notice-warning">${icon("warning", 20)}<span>No button has an action yet: it will be Active but do nothing.</span></p>`}

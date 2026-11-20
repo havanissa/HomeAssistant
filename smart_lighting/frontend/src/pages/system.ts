@@ -7,7 +7,7 @@ import { html, nothing, type TemplateResult } from "lit";
 import { icon } from "../icons";
 import { navigate, navigatePath } from "../router";
 import { apiUrl, store } from "../store";
-import { ApiError } from "../rooms/model";
+import { ApiError, download } from "../rooms/model";
 import { chip, kv, pageHeader, StoreElement } from "../ui";
 import { haTime } from "../presence/components";
 import {
@@ -221,7 +221,7 @@ export class SlSystem extends StoreElement {
         ["Published to the companion", d.core_host?.published_at ? fmt(d.core_host.published_at) : d.core_host?.publish_error ?? "—"],
       ])}
       ${cfg.notices.map((n) => html`<p class="notice notice-warning">${n.text}</p>`)}
-      <p class="small"><a class="btn btn-small" href=${apiUrl("api/config/export")} download>${icon("download", 16)}Export configuration</a></p>
+      <p class="small"><button type="button" class="btn btn-small" @click=${() => download("api/config/export")}>${icon("download", 16)}Export configuration</button></p>
     </section>`;
   }
 
@@ -369,7 +369,7 @@ export class SlSystem extends StoreElement {
         <li>When the App reconnects it opens a fresh session, claims each subsystem again with a new epoch, re-reads Home Assistant's states and starts its engines as after a restart: nothing in flight is replayed, and the start-up settle periods pass before any rule may send.</li>
       </ul>
       <h4>Compared with the earlier hot standby</h4>
-      <p class="small">Until 0.9.0 the integration's own engines could take over when the App stopped. Those engines are gone: an App outage now means <strong>no automatic lighting, curtain or occupancy decisions until the App is back</strong>. That is a reduced capability, not a hidden fallback. Keep the App's watchdog enabled in Home Assistant (Settings → Apps → Smart Lighting) and check this page after an update.</p>
+      <p class="small">Until 0.9.0 the integration's own engines could take over when the App stopped. Those engines are gone: an App outage now means <strong>no automatic lighting, curtain or occupancy decisions until the App is back</strong>. That is a reduced capability, not a hidden fallback. Keep the App's watchdog enabled in Home Assistant (Settings → Apps → Smart Comfort) and check this page after an update.</p>
       <h4>Rollback</h4>
       <p class="small">A rollback to 0.9.0 is a deliberate software restoration: restore the legacy data here (or with the companion's <code>smart_occupancy/companion/legacy/restore</code> command), then downgrade the integration in HACS and restart Home Assistant. The App's own backups (Settings → System → Export, and every module's backups) are never deleted by the migration.</p>
     </section>`;

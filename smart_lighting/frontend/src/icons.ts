@@ -128,6 +128,12 @@ import {
   mdiWeatherSunny,
   mdiSwapHorizontalBold,
   mdiViewGridOutline,
+  mdiRadiator,
+  mdiFire,
+  mdiWindowOpenVariant,
+  mdiHomeThermometer,
+  mdiHomeAutomation,
+  mdiThermostat,
 } from "@mdi/js";
 import { svg, type SVGTemplateResult } from "lit";
 
@@ -260,6 +266,13 @@ export const ICONS: Record<string, string> = {
   "information-outline": mdiInformationOutline,
   "lightbulb-on": mdiLightbulbOn,
   "timer-outline": mdiTimerOutline,
+  // Phase A7.0: Climate and the Smart Comfort brand mark.
+  radiator: mdiRadiator,
+  fire: mdiFire,
+  "window-open": mdiWindowOpenVariant,
+  "home-thermometer": mdiHomeThermometer,
+  "home-automation": mdiHomeAutomation,
+  thermostat: mdiThermostat,
 };
 
 export function icon(name: string, size = 24): SVGTemplateResult {

@@ -5,8 +5,8 @@ import "../predictions/predictions.css";
 
 import { html, nothing, type TemplateResult } from "lit";
 
+import { download } from "../rooms/model";
 import { icon } from "../icons";
-import { apiUrl } from "../store";
 import { chip, kv, pageHeader } from "../ui";
 import { haTime } from "../presence/components";
 import { duration } from "../presence/model";
@@ -88,7 +88,7 @@ export class SlPredictionsControl extends PredictionsElement {
           : html`<button type="button" class="btn btn-primary" data-testid="predictions-handover" ?disabled=${this.busy || !d.readiness.ready || !this.canEdit} @click=${() => void this.open("handover")}>${icon("swap", 20)}Review handover to the App…</button>
              <span class="small muted">${d.readiness.ready ? "Every readiness check passed." : "Available when every readiness check passes."}</span>`}
         <button type="button" class="btn" data-testid="predictions-return" ?disabled=${this.busy || !this.canEdit || !owner.app && d.mode !== "owner"} @click=${() => void this.open("return")} title="Also works when the App lost its connection">${icon("home-assistant", 18)}Force return</button>
-        <a class="btn" href=${apiUrl("api/predictions/export")} download data-testid="predictions-export">${icon("download", 18)}Export learned data</a>
+        <button type="button" class="btn" data-testid="predictions-export" @click=${() => download("api/predictions/export")}>${icon("download", 18)}Export learned data</button>
       </div>
     </section>`;
   }

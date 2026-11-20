@@ -1,9 +1,89 @@
-# Smart Occupancy & Lighting
+# Smart Comfort
 
-The **Smart Lighting** App is the home of Smart Occupancy & Lighting: every
-engine and every configuration. The *Smart Occupancy & Lighting* integration
-(1.0.0, the companion) gives it native entities, a fenced way to command lights
-and covers, and compact dashboard cards.
+**Smart Comfort — Intelligent Home Automation** (formerly *Smart Occupancy &
+Lighting*; the sidebar entry was *Smart Lighting*) is the home of every engine
+and every configuration. The *Smart Occupancy & Lighting* integration (1.0.0,
+the companion) gives it native entities, a fenced way to command lights and
+covers, and compact dashboard cards. The integration keeps its name and its
+domain `smart_occupancy`; the App keeps its slug `smart_lighting`, so nothing
+about an existing installation, its entities or its backups changes.
+
+## Phase A7.0 (0.10.0): Smart Comfort and Climate (observing)
+
+The App is renamed **Smart Comfort** and gains a **Climate** module. Climate
+**observes only**: it never changes a thermostat. Automatic heating comes in
+later phases, only after learning, simulation and your explicit activation.
+Nothing changes on upgrade; every existing module, entity and card keeps
+working. Needs the companion integration 1.0.0.
+
+### Climate → Overview
+
+Every climate room: its measured temperature, the setpoint(s) of its heating
+devices, the activity each device *reports* ("Heating (reported)", "Idle
+(reported)" or "Activity not reported"), the difference to the outdoor
+temperature, open windows and doors, occupancy and thermal zone. Below: sensors
+that are missing, unavailable, not updated recently or implausible, and how many
+days have been observed (thermal learning needs about two weeks, see Settings).
+
+- **Room temperature** is what the room's sensors measure: the *primary sensor*,
+  or - while it is not usable - the mean of the *secondary sensors*. What a
+  radiator valve or thermostat reports about itself is shown separately as *its
+  own reading* and is never used as the room temperature.
+- **Heating activity** is only what a device reports (Home Assistant's
+  `hvac_action`). A setpoint above the room temperature is shown as a *possible*
+  heat demand, never as "heating".
+
+### Climate → Rooms and a room
+
+The Rooms table compares every room at a glance. A room's page shows each
+sensor with its quality and when it last reported, each heating device with its
+requested setpoint, own reading, mode, reported activity and capabilities
+(including whether the device has its own input for an external temperature
+sensor - Smart Comfort shows it but never uses or changes it), windows and
+doors, the room's preferences, and a **history** chart (6 hours to 30 days):
+the room's sensors, each device's reading and setpoint, the outdoor temperature,
+and lanes for reported heating, open windows and doors, and occupancy. A period
+that was not observed is shaded; an unavailable reading is a gap, never zero.
+
+### Climate → Settings
+
+One set of unsaved changes across all sections; **Review changes** shows what
+would change, problems that prevent saving and warnings (a sensor in another
+area, a sensor that belongs to a radiator valve, no outdoor source …).
+Nothing is stored before you save, and a save is refused if someone changed the
+climate configuration in another browser meanwhile.
+
+- **General:** the display unit (Home Assistant's, °C or °F; stored in °C
+  either way, sensors in °F or K are converted), comfort and setback
+  temperatures, the lowest and highest allowed targets (never outside 5-30 °C),
+  how long a sensor counts as current, and observation (keep for 90 days by
+  default; read up to 7 days of Recorder history once; re-record an unchanged
+  value every 15 minutes). The mode is **Observing**, the only mode.
+- **Rooms and devices:** add a Home Assistant area as a climate room (areas with
+  heating devices or temperature sensors are listed; adding one with its
+  suggestions fills in what Home Assistant's areas suggest). Choose heating
+  devices (radiator valves, room or generic thermostats, heaters; several per
+  room, or none - the room is then observed only), the primary sensor and
+  secondary sensors (from any area), windows and doors, and room preferences that
+  override the defaults. Each heating device belongs to one room.
+- **Thermal zones:** rooms whose heat is related - a single room, connected
+  rooms or an open-plan space - optionally with a heating device or circuit that
+  serves the whole zone. Thermal zones are not Presence zones (parts of a room
+  where people are detected). Lighting's shared spaces and Presence's adjacent
+  rooms are offered as suggestions; you confirm each grouping. Each room keeps
+  its own temperature readings.
+- **Outdoor temperature:** a sensor (preferred) or a weather entity.
+- **Backups:** export, import (reviewed) and restore (reviewed). A backup of the
+  previous version is kept before every change.
+
+### What is observed
+
+The configured sensors, heating devices, windows and doors, each climate room's
+occupancy, the sun and the room's curtains: every state change, with the
+original value, unit and quality, in the App's storage. When the App starts, after
+an outage and for a newly assigned entity, the time it did not observe is read
+once from the Recorder. This is the data the next phase (thermal learning) will
+learn from; nothing is learned or predicted yet.
 
 ## Phase A6.2 (0.9.0): Presence zones, the light inspector and brightness delays
 
@@ -685,6 +765,18 @@ one side produces the forecasts.
 - Floor plans and their images are stored in the App's data folder. Images are
   checked by their content (PNG, JPEG, WebP only; no SVG) and are only served
   through Home Assistant's Ingress, never from a public address.
+
+## Known limitations (Phase A7.0)
+
+- Climate observes only: no learning, prediction or heating control yet, and
+  no thermostat or device setting is ever changed (not even a radiator valve's
+  external-sensor input).
+- Discovery suggestions (radiator valve, outdoor sensor, "not a room
+  temperature") are guesses from names, models and device classes; check them.
+- Observations need the App running; the Recorder fills gaps only as far back as
+  it keeps history (10 days by default; at most 30 days are read).
+- The companion integration and its dashboard cards keep the name *Smart
+  Occupancy & Lighting* in this version.
 
 ## Known limitations (Phase A6)
 

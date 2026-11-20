@@ -1,4 +1,4 @@
-/* Smart Lighting App: Home Assistant-inspired design.
+/* Smart Comfort App: Home Assistant-inspired design.
    Primary targets are desktop and tablet (including landscape); the phone
    layout remains as a working fallback (everyday phone use is through the
    integration's Lovelace cards). The cascade starts from the narrow layout
@@ -5139,4 +5139,14 @@ sl-plan-canvas {
   .wizard-actions {
     margin-left: 0;
   }
+}
+
+/* Phase A7.0: the Smart Comfort brand subtitle under the product name. */
+.brand-sub {
+  display: block;
+  color: var(--sl-text-2);
+  font-size: 0.7rem;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
 }

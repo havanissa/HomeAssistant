@@ -1,12 +1,13 @@
-"""Constants for the Smart Occupancy & Lighting App backend."""
+"""Constants for the Smart Comfort App backend (formerly Smart Occupancy & Lighting)."""
 
 from __future__ import annotations
 
 from typing import Final
 
-APP_NAME: Final = "Smart Occupancy & Lighting"
-APP_VERSION: Final = "0.9.0"  # must match config.yaml (checked by the tests)
-APP_PHASE: Final = "A6.1"
+APP_NAME: Final = "Smart Comfort"
+APP_SUBTITLE: Final = "Intelligent Home Automation"
+APP_VERSION: Final = "0.10.0"  # must match config.yaml (checked by the tests)
+APP_PHASE: Final = "A7.0"
 
 # The existing custom integration this App will eventually replace. It keeps
 # running every automation. Since Phase A2 the App edits its room

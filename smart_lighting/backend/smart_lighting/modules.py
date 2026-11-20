@@ -33,6 +33,9 @@ integration's lighting runtime runs in the App in shadow mode and, after a
 reviewed handover the integration acknowledges, controls the lights and owns the
 lighting configuration. The three count as migrated only while that is so.
 
+Phase A7.0 adds Climate, the first *native* module (kind ``native``): it was never part of the integration, so
+it has no migration status and does not count in the migration progress. It observes only.
+
 Phase A5 moves Curtains and Predictions the same way, each with its own
 ownership record: the curtain runtime commands covers only after its reviewed
 handover (through the integration's fenced executor); the forecast runtime
@@ -57,7 +60,7 @@ class Module:
     key: str
     title: str
     icon: str  # mdi icon name, resolved by the frontend
-    kind: str  # "foundation" or "feature"
+    kind: str  # "foundation", "feature", "tool" or "native"
     status: str
     summary: str
     handled_by: str | None = None  # where this is configured today (text)
@@ -69,7 +72,7 @@ class Module:
     phase: str | None = None  # the App phase that moved its interface
 
     def __post_init__(self) -> None:
-        if self.kind != "feature":  # foundation and tools (the floor plan) migrate nothing
+        if self.kind != "feature":  # foundation, tools (the floor plan) and native modules (Climate) migrate nothing
             return
         automation = APP if self.status == AVAILABLE else INTEGRATION
         object.__setattr__(self, "automation_owner", self.automation_owner or automation)
@@ -158,6 +161,17 @@ MODULES: tuple[Module, ...] = (
               "(Phase A5: shadow comparison, reviewed handover with the learned data, rollback). No device is ever "
               "commanded.",
         phase="A5",
+    ),
+    Module(
+        "climate", "Climate", "thermometer", "native", AVAILABLE,
+        "Room temperatures, thermostats and their reported activity, windows and doors, thermal zones and the "
+        "observations predictive heating will learn from (Phase A7.0: observing only, no thermostat is controlled).",
+        "This App (Climate). Stored in the App's own storage; it never existed in the integration, so nothing "
+        "migrates.",
+        scope="Climate configuration (thermostats, room temperature sensors, windows and doors, the outdoor source, "
+              "comfort and setback preferences, safe bounds, thermal zones), live monitoring and the observation "
+              "history. Observing only: Smart Comfort sends no thermostat command.",
+        phase="A7.0",
     ),
     Module(
         "diagnostics", "Diagnostics", "stethoscope", "foundation", AVAILABLE,

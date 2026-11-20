@@ -57,7 +57,7 @@ export class SlSettings extends StoreElement {
       <header class="card-head">${icon("cog")}<h3>Advanced</h3></header>
       <p class="muted">
         Technical details, for troubleshooting. App options (such as the log level) are changed in Home Assistant:
-        Settings → Apps → Smart Occupancy &amp; Lighting → Configuration.
+        Settings → Apps → Smart Comfort → Configuration.
       </p>
       ${kv([
         ["Log level", s?.log_level],
@@ -100,7 +100,7 @@ export class SlSettings extends StoreElement {
         <section class="card" data-testid="about">
           <header class="card-head">${icon("lightbulb-auto")}<h3>About</h3></header>
           ${kv([
-            ["App", o?.app.name ?? "Smart Occupancy & Lighting"],
+            ["App", o?.app.name ?? "Smart Comfort"],
             ["Version", o?.app.version],
             ["Configuration", o?.config ? (o.config.authoritative ? "Kept by the App" : o.config.staged ? "Staged copy (migration in progress)" : "Kept by the integration (until migrated)") : null],
             ["Companion integration", o?.companion ? String((o.companion as { state?: string }).state ?? "—") : null],

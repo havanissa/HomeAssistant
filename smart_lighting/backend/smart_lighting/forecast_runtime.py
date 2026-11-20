@@ -629,7 +629,7 @@ class ForecastRuntime:
         try:
             export = S.check_export(export)
         except S.ProtocolError as err:
-            raise ForecastError("invalid_export", f"This is not a Smart Lighting predictions export: {err}", 400) from err
+            raise ForecastError("invalid_export", f"This is not a Smart Comfort predictions export: {err}", 400) from err
         from smart_occupancy.forecast_model import HouseDay  # noqa: PLC0415
 
         days = {k: d for k, v in export["days"].items() if (d := HouseDay.from_dict(v)) is not None}

@@ -51,6 +51,8 @@ from typing import Any
 from aiohttp import web
 
 from .const import APP_VERSION
+from .climate import ClimateError
+from .climate_model import AREA_ID
 from .core import AppCore
 from .floorplan import FloorPlanError
 from .ha import HomeAssistantError
@@ -188,7 +190,7 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         headers = None
         if request.query.get("download"):
             stamp = data["generated_at"].replace(":", "").replace("-", "")[:15]
-            headers = {"Content-Disposition": f'attachment; filename="smart-lighting-diagnostics-{stamp}.json"'}
+            headers = {"Content-Disposition": f'attachment; filename="smart-comfort-diagnostics-{stamp}.json"'}
         return _json(data, headers=headers)
 
     async def lookup(request: web.Request) -> web.Response:
@@ -224,7 +226,7 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     async def admin_guard(request: web.Request) -> None:
         """CSRF and administrator checks for every changing request (before its body is read)."""
         if request.headers.get(CSRF_HEADER) != "1":
-            raise RoomsError("forbidden", "This request must come from the Smart Lighting interface", 403)
+            raise RoomsError("forbidden", "This request must come from the Smart Comfort interface", 403)
         if request.headers.get("Origin") and not origin_allowed(request):
             raise RoomsError("forbidden", "Cross-site requests are not allowed", 403)
         service = rooms_service(request)
@@ -242,7 +244,7 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     async def write_guard(request: web.Request, limit: int = MAX_BODY) -> dict[str, Any]:
         """Checks for every changing JSON request; returns the JSON body."""
         if request.content_type != "application/json":
-            raise RoomsError("forbidden", "This request must come from the Smart Lighting interface", 403)
+            raise RoomsError("forbidden", "This request must come from the Smart Comfort interface", 403)
         await admin_guard(request)
         try:
             body = json.loads(await read_limited(request, limit))
@@ -325,6 +327,104 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         return _json(await rooms_service(request).restore(body.get("backup"), body.get("revision"),
                                                            body.get("confirmed")))
 
+    # ----------------------------------------------------------- climate (A7.0)
+    def climate_service(request: web.Request):
+        core: AppCore = request.app[CORE_KEY]
+        if core.climate is None:
+            raise ClimateError("not_connected", "The App is starting", 503)
+        return core.climate
+
+    def climate_handler(func: Any) -> Any:
+        async def handler(request: web.Request) -> web.Response:
+            try:
+                return await func(request)
+            except ClimateError as err:
+                return _json({"error": str(err), "code": err.code, **err.extra}, status=err.status)
+            except RoomsError as err:
+                return rooms_error(err)
+        return handler
+
+    @climate_handler
+    async def climate_get(request: web.Request) -> web.Response:
+        return _json(climate_service(request).document())
+
+    @climate_handler
+    async def climate_overview(request: web.Request) -> web.Response:
+        return _json(climate_service(request).overview())
+
+    @climate_handler
+    async def climate_discovery(request: web.Request) -> web.Response:
+        rooms_service(request)  # Home Assistant must be connected
+        return _json(climate_service(request).discovery())
+
+    @climate_handler
+    async def climate_room(request: web.Request) -> web.Response:
+        area_id = request.match_info["area_id"]
+        if not AREA_ID.match(area_id):
+            raise ClimateError("invalid_area", "Invalid area id")
+        return _json(climate_service(request).room_view(area_id))
+
+    @climate_handler
+    async def climate_history(request: web.Request) -> web.Response:
+        area_id = request.match_info["area_id"]
+        if not AREA_ID.match(area_id):
+            raise ClimateError("invalid_area", "Invalid area id")
+        return _json(await climate_service(request).history(area_id, request.query.get("window")))
+
+    @climate_handler
+    async def climate_review(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        return _json(await climate_service(request).review(body.get("config"), body.get("revision")))
+
+    @climate_handler
+    async def climate_save(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        service = climate_service(request)
+        result = await service.save(body.get("config"), body.get("revision"))
+        return _json({"result": result, "document": service.document()})
+
+    @climate_handler
+    async def climate_backups(request: web.Request) -> web.Response:
+        await admin_guard(request)
+        return _json({"backups": climate_service(request).backups()})
+
+    @climate_handler
+    async def climate_backup(request: web.Request) -> web.Response:
+        await admin_guard(request)
+        backup_id = request.match_info["backup_id"]
+        data = climate_service(request).backup(backup_id)
+        return _json(data, headers={"Content-Disposition": f'attachment; filename="smart-comfort-{backup_id}.json"'})
+
+    @climate_handler
+    async def climate_restore_review(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        return _json(await climate_service(request).restore_review(body.get("backup")))
+
+    @climate_handler
+    async def climate_restore(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        service = climate_service(request)
+        result = await service.restore(body.get("backup"), body.get("revision"))
+        return _json({"result": result, "document": service.document()})
+
+    @climate_handler
+    async def climate_export(request: web.Request) -> web.Response:
+        await admin_guard(request)
+        data = climate_service(request).export()
+        return _json(data, headers=download_name("smart-comfort-climate", data["exported_at"]))
+
+    @climate_handler
+    async def climate_import_review(request: web.Request) -> web.Response:
+        body = await write_guard(request, MAX_PLAN_BODY)
+        return _json(await climate_service(request).import_review(body.get("file")))
+
+    @climate_handler
+    async def climate_import(request: web.Request) -> web.Response:
+        body = await write_guard(request, MAX_PLAN_BODY)
+        service = climate_service(request)
+        result = await service.import_apply(body.get("file"), body.get("revision"))
+        return _json({"result": result, "document": service.document()})
+
     # -------------------------------------------------------- floor plan
     def floorplan_service(request: web.Request):
         core: AppCore = request.app[CORE_KEY]
@@ -382,7 +482,7 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     @rooms_handler
     async def floorplan_export(request: web.Request) -> web.Response:
         data = floorplan_service(request).export()
-        return _json(data, headers=download_name("smart-lighting-floorplan", data["exported_at"]))
+        return _json(data, headers=download_name("smart-comfort-floorplan", data["exported_at"]))
 
     @rooms_handler
     async def floorplan_import_review(request: web.Request) -> web.Response:
@@ -401,7 +501,7 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     @rooms_handler
     async def floorplan_backup(request: web.Request) -> web.Response:
         data = floorplan_service(request).backup(request.match_info["backup_id"])
-        return _json(data, headers=download_name("smart-lighting-floorplan-backup", data.get("created_at")))
+        return _json(data, headers=download_name("smart-comfort-floorplan-backup", data.get("created_at")))
 
     @rooms_handler
     async def floorplan_restore(request: web.Request) -> web.Response:
@@ -553,7 +653,7 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         """One lighting editor command (the integration's API): forwarded, or run by the App after the handover."""
         runtime, api = lighting_runtime(request)
         if request.content_type != "application/json" or request.headers.get(CSRF_HEADER) != "1":
-            raise RoomsError("forbidden", "This request must come from the Smart Lighting interface", 403)
+            raise RoomsError("forbidden", "This request must come from the Smart Comfort interface", 403)
         if request.headers.get("Origin") and not origin_allowed(request):
             raise RoomsError("forbidden", "Cross-site requests are not allowed", 403)
         try:
@@ -602,7 +702,7 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         runtime, _api = lighting_runtime(request)
         data = runtime.export()
         return web.Response(text=json.dumps(data, indent=1), content_type="application/json",
-                            headers=download_name("smart-lighting-lighting", data["at"]))
+                            headers=download_name("smart-comfort-lighting", data["at"]))
 
     # ---------------------------------------------------------- curtains (A5)
     def curtains_runtime(request: web.Request):
@@ -613,7 +713,7 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
 
     async def read_command(request: web.Request, api: Any) -> tuple[dict[str, Any], str | None, bool]:
         if request.content_type != "application/json" or request.headers.get(CSRF_HEADER) != "1":
-            raise RoomsError("forbidden", "This request must come from the Smart Lighting interface", 403)
+            raise RoomsError("forbidden", "This request must come from the Smart Comfort interface", 403)
         if request.headers.get("Origin") and not origin_allowed(request):
             raise RoomsError("forbidden", "Cross-site requests are not allowed", 403)
         try:
@@ -689,7 +789,7 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         runtime, _api = curtains_runtime(request)
         data = runtime.export()
         return web.Response(text=json.dumps(data, indent=1), content_type="application/json",
-                            headers=download_name("smart-lighting-curtains", data["at"]))
+                            headers=download_name("smart-comfort-curtains", data["at"]))
 
     @rooms_handler
     async def curtains_import_review(request: web.Request) -> web.Response:
@@ -796,7 +896,7 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         runtime, _api = forecast_runtime(request)
         data = runtime.export()
         return web.Response(text=json.dumps(data, indent=1), content_type="application/json",
-                            headers=download_name("smart-lighting-predictions", data["at"]))
+                            headers=download_name("smart-comfort-predictions", data["at"]))
 
     @rooms_handler
     async def predictions_import_review(request: web.Request) -> web.Response:
@@ -965,7 +1065,7 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         core: AppCore = request.app[CORE_KEY]
         data = core.core_config.export()
         return web.Response(text=json.dumps(data, indent=1), content_type="application/json",
-                            headers=download_name("smart-lighting-config", data["created_at"]))
+                            headers=download_name("smart-comfort-config", data["created_at"]))
 
     @rooms_handler
     async def config_import_review(request: web.Request) -> web.Response:
@@ -1042,6 +1142,20 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     app.router.add_get("/api/floorplan/backups", floorplan_backups)
     app.router.add_get("/api/floorplan/backups/{backup_id}", floorplan_backup)
     app.router.add_post("/api/floorplan/backups/{backup_id}/restore", floorplan_restore)
+    app.router.add_get("/api/climate", climate_get)
+    app.router.add_get("/api/climate/overview", climate_overview)
+    app.router.add_get("/api/climate/discovery", climate_discovery)
+    app.router.add_get("/api/climate/rooms/{area_id}", climate_room)
+    app.router.add_get("/api/climate/rooms/{area_id}/history", climate_history)
+    app.router.add_post("/api/climate/review", climate_review)
+    app.router.add_post("/api/climate/save", climate_save)
+    app.router.add_get("/api/climate/backups", climate_backups)
+    app.router.add_get("/api/climate/backups/{backup_id}", climate_backup)
+    app.router.add_post("/api/climate/restore/review", climate_restore_review)
+    app.router.add_post("/api/climate/restore", climate_restore)
+    app.router.add_get("/api/climate/export", climate_export)
+    app.router.add_post("/api/climate/import/review", climate_import_review)
+    app.router.add_post("/api/climate/import", climate_import)
     app.router.add_get("/api/presence", presence_overview)
     app.router.add_get("/api/presence/diagnostics", presence_diagnostics)
     app.router.add_post("/api/presence/review", presence_review)

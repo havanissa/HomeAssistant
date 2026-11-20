@@ -226,7 +226,7 @@ export class SlCurtains extends CurtainsElement {
       <dl class="lp-facts">
         <div><dt>Now</dt><dd>${w.current.status === "preset" ? html`<strong>${w.current.text}</strong>` : w.current.text}</dd></div>
         <div><dt>Desired</dt><dd>${w.presets.find((p) => p.preset_id === w.selected_preset)?.name ?? html`<span class="muted">none selected</span>`}</dd></div>
-        <div><dt>Manual change</dt><dd>${w.manual ? html`${w.manual.name}: ${w.manual.from ?? "—"} → ${w.manual.to ?? "—"} %<span class="small muted"> · ${fmt(w.manual.at)}, ${w.manual.source === "person" ? "by a person in Home Assistant" : "outside Smart Occupancy"}</span>` : html`<span class="muted">none</span>`}</dd></div>
+        <div><dt>Manual change</dt><dd>${w.manual ? html`${w.manual.name}: ${w.manual.from ?? "—"} → ${w.manual.to ?? "—"} %<span class="small muted"> · ${fmt(w.manual.at)}, ${w.manual.source === "person" ? "by a person in Home Assistant" : "outside Smart Comfort"}</span>` : html`<span class="muted">none</span>`}</dd></div>
         <div><dt>Last operation</dt><dd>${op ? html`${chip(OVERALL_TONE[op.status] ?? "neutral", this.model?.words.overall[op.status] ?? op.status)} <span class="small">${op.explanation}</span><span class="small muted"> · ${fmt(op.finished ?? op.started)}</span>` : html`<span class="muted">no preset applied yet</span>`}</dd></div>
       </dl>
       <footer class="lp-room-foot">

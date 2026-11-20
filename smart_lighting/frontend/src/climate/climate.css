@@ -1,0 +1,85 @@
+/* Phase A7.0: Climate pages. Colours come from the theme tokens (light and dark). */
+.cl-mode { display: flex; align-items: flex-start; gap: 0.6rem; }
+.cl-grid-rooms { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr)); }
+.cl-room-card { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.8rem 0.95rem; border: 1px solid var(--sl-divider); border-radius: var(--sl-radius); background: var(--sl-surface); min-width: 0; }
+.cl-room-card h3 { margin: 0; font-size: 1rem; font-weight: 500; display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; }
+.cl-room-card h3 a { color: inherit; text-decoration: none; display: inline-flex; align-items: center; min-height: 44px; }
+.cl-room-card h3 a:hover { text-decoration: underline; }
+.cl-temp { font-size: 2rem; font-weight: 400; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.cl-temp-small { font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.cl-figures { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 1.25rem; }
+.cl-figure { display: flex; flex-direction: column; min-width: 0; }
+.cl-figure .stat-label, .cl-label { color: var(--sl-text-2); font-size: 0.75rem; }
+.cl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.6rem; }
+.cl-device-list { display: grid; gap: 0.5rem; margin: 0; padding: 0; list-style: none; }
+.cl-device { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.25rem 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--sl-divider); border-radius: 10px; background: var(--sl-surface); }
+.cl-device .cl-figures { grid-column: 1 / -1; }
+.cl-device-name { font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
+.cl-device-meta { color: var(--sl-text-2); font-size: 0.8rem; grid-column: 1 / -1; overflow-wrap: anywhere; }
+.cl-two { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); align-items: start; }
+.cl-check-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 0.3rem; }
+.cl-check-list li { display: flex; gap: 0.45rem; align-items: flex-start; }
+.cl-problem-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 0.35rem; }
+.cl-problem-list li { display: flex; flex-wrap: wrap; gap: 0.25rem 0.6rem; align-items: center; }
+
+/* Chart */
+.cl-chart { margin: 0.25rem 0 0.25rem; min-width: 0; }
+.cl-chart svg { display: block; width: 100%; height: auto; max-width: 100%; overflow: visible; }
+.cl-axis, .cl-lane-label { fill: var(--sl-text-2); font-size: 11px; font-family: var(--sl-font); }
+.cl-lane-note { fill: var(--sl-text-2); font-size: 10px; font-style: italic; font-family: var(--sl-font); }
+.cl-grid { stroke: var(--sl-divider); stroke-width: 1; }
+.cl-unobserved { fill: var(--sl-neutral-bg); opacity: 0.6; }
+.cl-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.cl-line-room { stroke: var(--sl-primary-strong); stroke-width: 2.5; }
+.cl-line-secondary { stroke: var(--sl-primary); stroke-width: 1.5; stroke-dasharray: 2 3; }
+.cl-line-thermostat { stroke: var(--sl-warning); stroke-width: 1.5; stroke-dasharray: 6 4; }
+.cl-line-setpoint { stroke: var(--sl-warning); stroke-width: 1.5; }
+.cl-line-outdoor { stroke: var(--sl-neutral); stroke-width: 1.5; }
+/* One colour per heating device: its own reading dashed, its setpoint solid. */
+.cl-line.cl-dev-0 { stroke: var(--sl-warning); }
+.cl-line.cl-dev-1 { stroke: var(--sl-pending); }
+.cl-line.cl-dev-2 { stroke: var(--sl-error); }
+.cl-line.cl-dev-3 { stroke: var(--sl-ok); }
+.cl-tiles { grid-template-columns: repeat(auto-fit, minmax(min(100%, 10.5rem), 1fr)); }
+.cl-tiles .stat-value { white-space: nowrap; }
+.cl-lane { fill: var(--sl-neutral-bg); }
+.cl-band-heating { fill: var(--sl-error); opacity: 0.7; }
+.cl-band-open { fill: var(--sl-info); opacity: 0.75; }
+.cl-band-occupied { fill: var(--sl-ok); opacity: 0.6; }
+.cl-legend { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; margin: 0.35rem 0 0; padding: 0; list-style: none; color: var(--sl-text-2); font-size: 0.8rem; }
+.cl-legend li { display: inline-flex; align-items: center; gap: 0.35rem; }
+.cl-legend-btn { display: inline-flex; align-items: center; gap: 0.35rem; min-height: 36px; padding: 0 0.4rem; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; cursor: pointer; }
+.cl-legend-btn:hover { background: var(--sl-neutral-bg); }
+.cl-legend-btn.off { opacity: 0.45; text-decoration: line-through; }
+.cl-swatch { display: inline-block; width: 18px; height: 10px; border-radius: 2px; }
+.cl-windows { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+
+/* Settings */
+.cl-settings { display: grid; gap: 1rem; grid-template-columns: minmax(12rem, 15rem) minmax(0, 1fr); align-items: start; }
+@media (max-width: 900px) { .cl-settings { grid-template-columns: minmax(0, 1fr); } }
+.cl-side { display: flex; flex-direction: column; gap: 0.25rem; }
+.cl-side a { display: flex; align-items: center; gap: 0.5rem; min-height: 44px; padding: 0 0.75rem; border-radius: 8px; color: inherit; text-decoration: none; }
+.cl-side a.active { background: var(--sl-primary-soft); color: var(--sl-primary-strong); font-weight: 500; }
+.cl-side a:hover:not(.active) { background: var(--sl-neutral-bg); }
+.cl-form { display: grid; gap: 0.75rem 1rem; grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr)); align-items: start; }
+.cl-form .field input, .cl-form .field select, .cl-field select, .cl-field input[type="text"], .cl-field input[type="number"] {
+  min-height: var(--sl-touch); padding: 0 0.6rem; border: 1px solid var(--sl-divider); border-radius: 8px; background: var(--sl-surface); color: inherit; font: inherit; width: 100%; box-sizing: border-box; min-width: 0;
+}
+.cl-field { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+.cl-help { color: var(--sl-text-2); font-size: 0.78rem; }
+.cl-pick { display: grid; gap: 0.25rem; margin: 0; padding: 0; list-style: none; }
+.cl-pick li label { display: flex; align-items: flex-start; gap: 0.55rem; min-height: 44px; padding: 0.35rem 0.5rem; border-radius: 8px; cursor: pointer; }
+.cl-pick li label:hover { background: var(--sl-neutral-bg); }
+.cl-pick input { margin-top: 0.2rem; flex: none; }
+.cl-pick .cl-pick-body { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+.cl-room-rows { display: grid; gap: 0.5rem; }
+.cl-room-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.55rem 0.75rem; border: 1px solid var(--sl-divider); border-radius: 10px; background: var(--sl-surface); }
+.cl-room-row.active { border-color: var(--sl-primary); box-shadow: 0 0 0 1px var(--sl-primary) inset; }
+.cl-section { display: grid; gap: 0.6rem; }
+.cl-section h3, .cl-section h4 { margin: 0; }
+.cl-error { color: var(--sl-error); font-size: 0.8rem; }
+.cl-inline { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: flex-end; }
+.cl-inline .cl-field { flex: 1 1 12rem; }
+.cl-zone { display: grid; gap: 0.5rem; padding: 0.75rem; border: 1px solid var(--sl-divider); border-radius: 10px; background: var(--sl-surface); }
+.cl-suggestion { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.55rem 0.75rem; border: 1px dashed var(--sl-divider); border-radius: 10px; }
+.cl-review-path { font-family: var(--sl-mono); font-size: 0.78rem; color: var(--sl-text-2); overflow-wrap: anywhere; }

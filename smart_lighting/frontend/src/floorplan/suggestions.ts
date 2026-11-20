@@ -39,7 +39,7 @@ export interface IntegrationRooms {
 }
 
 export const ADJACENCY_HELP =
-  "In Smart Occupancy an adjacent room is extra evidence when someone leaves: after a door of this room moves, movement in an adjacent room confirms vacancy sooner, and forecasts use the connection. Occupancy never spreads from one room to another because they are adjacent.";
+  "In Smart Comfort an adjacent room is extra evidence when someone leaves: after a door of this room moves, movement in an adjacent room confirms vacancy sooner, and forecasts use the connection. Occupancy never spreads from one room to another because they are adjacent.";
 
 function roomName(room: Room, areaName: (id: string) => string): string {
   return room.name || (room.area_id ? areaName(room.area_id) : "Unnamed room");

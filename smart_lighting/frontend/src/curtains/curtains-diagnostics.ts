@@ -60,7 +60,7 @@ export class SlCurtainsDiagnostics extends StoreElement {
         out.push({ at: op.started, window: w, kind: "operation", word: this.model.words.overall[op.status] ?? op.status, tone: OVERALL_TONE[op.status] ?? "neutral", text: `${op.preset_name}: ${op.explanation}`,
           detail: op.items.map((i) => `${i.name} ${i.target === null ? "unchanged" : `${pct(i.start_position)} → ${pct(i.target)} (${this.model.words.results[i.status] ?? i.status})`}`).join(" · ") });
       }
-      if (w.manual?.at) out.push({ at: w.manual.at, window: w, kind: "manual", word: "Manual change", tone: "warning", text: `${w.manual.name}: ${pct(w.manual.from)} → ${pct(w.manual.to)}`, detail: w.manual.source === "person" ? "by a person in Home Assistant" : "outside Smart Occupancy" });
+      if (w.manual?.at) out.push({ at: w.manual.at, window: w, kind: "manual", word: "Manual change", tone: "warning", text: `${w.manual.name}: ${pct(w.manual.from)} → ${pct(w.manual.to)}`, detail: w.manual.source === "person" ? "by a person in Home Assistant" : "outside Smart Comfort" });
     }
     const seen = new Set<string>();
     return out.filter((l) => this.kinds.has(l.kind)).filter((l) => { const k = `${l.kind}|${l.window.window_id}|${l.at}|${l.text}`; if (seen.has(k)) return false; seen.add(k); return true; })

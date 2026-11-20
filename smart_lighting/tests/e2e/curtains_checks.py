@@ -191,7 +191,7 @@ def ui_handover(frame: Any) -> None:
     check("handover needs the confirmation box", confirm.is_disabled())
     dialog.locator("[data-testid=curtains-understood]").check()
     confirm.click()
-    expect(frame.locator("[data-testid=curtains-owner]")).to_contain_text("Smart Lighting App", timeout=30000)
+    expect(frame.locator("[data-testid=curtains-owner]")).to_contain_text("Smart Comfort", timeout=30000)
 
 
 def ui_release(frame: Any) -> None:

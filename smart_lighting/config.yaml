@@ -1,12 +1,13 @@
-# Home Assistant App configuration: Smart Occupancy & Lighting (Phase A6).
-name: Smart Occupancy & Lighting
-version: "0.9.0"
+# Home Assistant App configuration: Smart Comfort (Phase A7.0), formerly Smart Occupancy & Lighting.
+# The slug stays smart_lighting: it identifies the installed App, its /data folder and its backups.
+name: Smart Comfort
+version: "0.10.0"
 slug: smart_lighting
 description: >-
-  Web interface and automation runtimes for Smart Occupancy & Lighting: rooms,
-  presence, an optional floor plan, and the occupancy, lighting, curtain and
-  prediction engines (shadow mode until a reviewed handover). Devices are
-  commanded only through the integration's fenced executor after a handover.
+  Smart Comfort, intelligent home automation: rooms, presence, lighting, moods,
+  switches, curtains, occupancy predictions and climate observation, with an
+  optional floor plan. Devices are commanded only through the companion
+  integration's fenced executor; thermostats are observed, never controlled.
 url: https://github.com/havanissa/HomeAssistant/tree/main/smart_lighting
 arch:
   - aarch64
@@ -21,8 +22,8 @@ init: false
 # Home Assistant's own login. No host port is exposed.
 ingress: true
 ingress_port: 8099
-panel_icon: mdi:lightbulb-auto
-panel_title: Smart Lighting
+panel_icon: mdi:home-automation
+panel_title: Smart Comfort
 panel_admin: true
 
 # Home Assistant Core API through the Supervisor proxy (SUPERVISOR_TOKEN).

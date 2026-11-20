@@ -612,7 +612,7 @@ function logEvent(e: LogEntry, name: (id: string) => string): TimelineEvent {
       detail: items.join("; ") || null, tone: "info", source: "engine", data: e,
     };
   }
-  return { id: `log-${e.seq}`, time: e.time, kind: "start", entity_id: null, state: null, title: "Smart Occupancy started", detail: e.detail ?? null, tone: "pending", source: "engine", data: e };
+  return { id: `log-${e.seq}`, time: e.time, kind: "start", entity_id: null, state: null, title: "Smart Comfort started", detail: e.detail ?? null, tone: "pending", source: "engine", data: e };
 }
 
 /**
@@ -663,7 +663,7 @@ export function buildEvents(data: TimelineData, live: TimelineEvent[] = [], limi
         id: `rec-state-${p.t}`, time: p.t, kind: "occupancy", entity_id: stateId, state: p.s,
         title: `${was ? `${label(was)} → ` : ""}${label(p.s)}`,
         detail: info ? (reason && reason !== "unavailable" && reason !== "unknown" ? reason : null)
-          : "The room's state entity had no value (Home Assistant stopped or Smart Occupancy reloaded).",
+          : "The room's state entity had no value (Home Assistant stopped or Smart Comfort reloaded).",
         tone: info?.tone ?? "pending", source: "recorder",
       });
     }
