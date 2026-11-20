@@ -46,6 +46,7 @@ import time
 from typing import Any
 
 from . import climate_model as cm
+from .climate_learning import ThermalLearning
 from .climate_observations import KINDS, MIN_INTERVAL, ObservationStore, history_rows, intervals, numeric_series, sample, signature
 from .const import APP_VERSION, INTEGRATION_DOMAIN
 from .ha import HomeAssistantClient, HomeAssistantError, utcnow_iso
@@ -66,6 +67,7 @@ MIN_GAP = 120.0
 #: History windows of the room page (seconds).
 WINDOWS = (6 * 3600, 24 * 3600, 3 * 86400, 7 * 86400, 30 * 86400)
 OCCUPANCY_UID = re.compile(rf"^{INTEGRATION_DOMAIN}_room_(?P<area>.+)_occupied$")
+OPENING_ROLE = {"window": "Window", "door": "Door"}
 QUALITY_TEXT = {
     "ok": "OK", "stale": "Not updated recently", "unavailable": "Unavailable", "unknown": "No value",
     "missing": "Entity not found", "not_numeric": "Not a number", "wrong_unit": "Not a temperature unit",
@@ -119,6 +121,9 @@ class ClimateService:
         self.read_only_code: str | None = None if self.dir else "no_storage"
         self.notices: list[dict[str, str]] = []
         self.store = ObservationStore(self.dir / "observations" if self.dir else None)
+        # Phase A7.1: thermal learning (models in /data/climate/models; reads the observations, writes no device).
+        self.learning = ThermalLearning(self, data_dir)
+        self.learning.add_listener(self._emit)
         # Other App subsystems, read for context (attached by the core; all optional).
         self.occupancy: Any = None
         self.lighting: Any = None
@@ -182,6 +187,7 @@ class ClimateService:
             with contextlib.suppress(OSError):
                 leftover.unlink()
         self.store.load()
+        self.learning.load()
         if not self.config_path.exists():
             return
         try:
@@ -234,8 +240,10 @@ class ClimateService:
         if self.ha.connected:
             self._connected()
         self._tasks.append(asyncio.create_task(self._flush_loop(), name="climate-observations"))
+        await self.learning.start()
 
     async def stop(self) -> None:
+        await self.learning.stop()
         if self._unsubscribe:
             self._unsubscribe()
         if self._states_handle is not None:
@@ -308,6 +316,9 @@ class ClimateService:
                 out[occupancy[area_id]] = "occupancy"
             for cover in self._covers(area_id):
                 out.setdefault(cover, "cover")
+            for window in self.learning.windows(area_id):
+                for sensor in window.sun_sensors:
+                    out.setdefault(sensor, "illuminance")
         if config.get("outdoor"):
             out[config["outdoor"]["entity_id"]] = "outdoor"
         if "sun.sun" in self.ha.states:
@@ -582,7 +593,9 @@ class ClimateService:
                 "schema_version": cm.SCHEMA_VERSION, "revision": self.revision, "saved_at": self.saved_at,
                 "notices": list(self.notices), "mode": self.config["mode"], "rooms": len(self.config["rooms"]),
                 "zones": len(self.config["zones"]), "observation": {**self.store.stats(), "tracked": len(self._tracked),
-                                                                    "backfill": dict(self.backfill)}}
+                                                                    "backfill": dict(self.backfill)},
+                "learning": {**self.learning.models.stats(), "running": self.learning._running,
+                             "notices": list(self.learning.models.notices)}}
 
     def document(self) -> dict[str, Any]:
         return {"config": self.config, "revision": self.revision, "status": self.status(),
@@ -1005,7 +1018,8 @@ class ClimateService:
         for o in room["openings"]:
             state = states.get(o["entity_id"])
             reg = idx.registry.get(o["entity_id"])
-            openings.append(cm.opening_view(o["entity_id"], state, kind=cm.opening_kind(o["entity_id"], state, reg)))
+            openings.append(cm.opening_view(o["entity_id"], state, kind=cm.opening_kind(o["entity_id"], state, reg),
+                                            configured=o.get("kind")))
         temperature = cm.room_temperature(primary, secondary)
         outdoor_ref = self.config.get("outdoor")
         outdoor = cm.reading(outdoor_ref["entity_id"] if outdoor_ref else None,
@@ -1048,10 +1062,13 @@ class ClimateService:
                                      "quality": r["quality"], "text": QUALITY_TEXT.get(r["quality"], r["quality"])})
             for o in view["openings"]:
                 if o["status"] in ("unavailable", "missing"):
-                    problems.append({"area_id": area_id, "room": view["name"], "role": "Window / door",
+                    problems.append({"area_id": area_id, "room": view["name"],
+                                     "role": OPENING_ROLE.get(o["kind"] or "", "Window or door (type not set)"),
                                      "entity_id": o["entity_id"], "quality": o["status"],
                                      "text": QUALITY_TEXT.get(o["status"], o["status"])})
         rooms.sort(key=lambda r: str(r["name"]).casefold())
+        for r in rooms:
+            r["learning"] = self.learning.summary(r["area_id"])
         outdoor_ref = self.config.get("outdoor")
         outdoor = cm.reading(outdoor_ref["entity_id"] if outdoor_ref else None,
                              self.ha.states.get(outdoor_ref["entity_id"]) if outdoor_ref else None, now=now,
@@ -1069,9 +1086,9 @@ class ClimateService:
             "completeness": {"rooms": len(rooms), "ready": sum(1 for r in rooms if r["completeness"]["ready"]),
                              "score": round(sum(r["completeness"]["score"] for r in rooms) / len(rooms)) if rooms else 0},
             "learning": {"history_days": history_days, "min_history_days": self.config["prediction"]["min_history_days"],
-                         "available": False,
-                         "text": "Thermal learning comes in a later version (A7.1). Smart Comfort collects the "
-                                 "observations it will learn from."},
+                         "available": True, **self.learning.overview(),
+                         "text": "Smart Comfort learns how each room warms and cools from these observations. "
+                                 "It only observes: no thermostat is changed."},
             "status": self.status(), "generated_at": utcnow_iso(),
         }
 
@@ -1137,9 +1154,14 @@ class ClimateService:
                               data[e], start=start, end=end,
                               active=lambda r: (r.get("a") or {}).get("action") in cm.HEATING_ACTIONS, gaps=gaps.get(e)),
                           "reported": any((r.get("a") or {}).get("action") is not None for r in data[e])})
+        idx = self.rooms.index()
         for o in room["openings"]:
             e = o["entity_id"]
-            bands.append({"key": f"open:{e}", "label": f"{names[e]} open", "kind": "open", "entity_id": e,
+            what = cm.opening_view(e, self.ha.states.get(e), kind=cm.opening_kind(e, self.ha.states.get(e),
+                                                                                  idx.registry.get(e)),
+                                   configured=o.get("kind"))["kind"]
+            label = f"{OPENING_ROLE.get(what or '', 'Window or door (type not set)')} open: {names[e]}"
+            bands.append({"key": f"open:{e}", "label": label, "kind": "open", "entity_id": e, "opening": what,
                           "intervals": intervals(data[e], start=start, end=end, active=lambda r: r.get("v") == 1,
                                                 gaps=gaps.get(e))})
         if occupancy:

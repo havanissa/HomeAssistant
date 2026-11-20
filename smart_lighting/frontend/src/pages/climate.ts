@@ -6,8 +6,8 @@ import "../climate/climate.css";
 import { html, nothing, type PropertyValues, type TemplateResult } from "lit";
 
 import {
-  age, ApiError, delta, getHistory, getOverview, getRoom, QUALITY, temp, WINDOW_LABELS,
-  type History, type Overview, type Reading, type RoomView, type ThermostatView, type Unit,
+  age, ApiError, delta, getHistory, getOverview, getRoom, LEARNING_TONE, openingLabel, QUALITY, rate, rebuild, temp, WINDOW_LABELS,
+  type History, type LearningSummary, type OpeningView, type Overview, type Reading, type RoomView, type ThermostatView, type Unit,
 } from "../climate/api";
 import { historyChart, legend } from "../climate/chart";
 import { icon } from "../icons";
@@ -29,8 +29,8 @@ export function climateTabs(active: string): TemplateResult {
 
 export function observingNotice(): TemplateResult {
   return html`<p class="notice notice-info cl-mode" data-testid="climate-observing">${icon("observe", 20)}<span><strong>Observing.</strong>
-    Smart Comfort watches temperatures and heating devices and collects the observations predictive heating will learn from.
-    It does not change any thermostat: automatic heating comes in a later version, only after learning, simulation and your explicit activation.</span></p>`;
+    Smart Comfort watches temperatures and heating devices and learns how each room warms and cools from them.
+    It does not change any thermostat: automatic heating comes in a later version, only after simulation and your explicit activation.</span></p>`;
 }
 
 export function problemText(err: unknown): TemplateResult {
@@ -54,6 +54,47 @@ export function setpoint(t: ThermostatView, unit: Unit): string {
   if (t.target_c !== null) return temp(t.target_c, unit);
   if (t.target_low_c !== null || t.target_high_c !== null) return `${temp(t.target_low_c, unit)} – ${temp(t.target_high_c, unit)}`;
   return "—";
+}
+
+/** Monitoring | Thermal learning, inside one climate room. */
+export function roomTabs(areaId: string, active: "monitoring" | "learning"): TemplateResult {
+  const base = `#/climate/rooms/${encodeURIComponent(areaId)}`;
+  return html`<nav class="cl-subtabs" aria-label="Room views">
+    <a href=${base} class=${active === "monitoring" ? "active" : ""} aria-current=${active === "monitoring" ? "page" : "false"} data-subtab="monitoring">${icon("home-thermometer", 18)}Monitoring</a>
+    <a href="${base}/learning" class=${active === "learning" ? "active" : ""} aria-current=${active === "learning" ? "page" : "false"} data-subtab="learning">${icon("chart", 18)}Thermal learning</a>
+  </nav>`;
+}
+
+/** "Window open: Stova window" — what it is (set by a person or Home Assistant's device class), and which. */
+export function openingChip(o: OpeningView): TemplateResult {
+  const name = o.name ?? o.entity_id;
+  const what = openingLabel(o.kind);
+  const kindIcon = o.kind === "door" ? "door-open" : "window-open";
+  return html`<span class="chip chip-info" data-testid="climate-open-chip" data-entity=${o.entity_id} title=${o.kind ? `${what} (${o.kind_source === "configured" ? "set in Climate settings" : "Home Assistant device class"})` : "Set whether this is a window or a door in Climate → Settings → Rooms and devices"}>${icon(kindIcon, 14)}<span class="chip-label">${what} open: ${name}</span></span>`;
+}
+
+export function learningChip(l: LearningSummary): TemplateResult {
+  return chip(LEARNING_TONE[l.status] ?? "neutral", l.validity.state === "invalidated" ? "Model invalidated" : l.status_text);
+}
+
+/** The thermal-learning summary on a room card (Overview). */
+export function learningSummary(l: LearningSummary, unit: Unit, areaId: string): TemplateResult {
+  const progress = l.usable_days ?? 0;
+  return html`<div class="cl-learn" data-testid="climate-room-learning" data-status=${l.status}>
+    <div class="cl-row">${learningChip(l)}${l.running ? html`<span class="small muted"><span class="spinner"></span> training…</span>` : l.queued ? html`<span class="small muted">queued</span>` : nothing}
+      ${l.validity.state === "outdated" ? chip("warning", "Outdated") : nothing}</div>
+    <div class="cl-learn-row"><span>Usable history <strong>${l.usable_days !== null ? `${progress.toFixed(1)} of ${l.min_history_days} days` : `${l.observed_days.toFixed(1)} days observed`}</strong></span>
+      ${l.confidence ? html`<span>Confidence <strong>${l.confidence.level} (${l.confidence.score})</strong></span>` : nothing}</div>
+    ${l.heating || l.cooling ? html`<div class="cl-learn-row">
+      ${l.heating ? html`<span>Heating <strong>${l.heating.value !== null ? `${rate(l.heating.value, unit)}${l.heating.basis === "inferred" ? " (inferred)" : ""}` : "unavailable"}</strong></span>` : nothing}
+      ${l.cooling?.time_constant_h ? html`<span>Time constant <strong>${l.cooling.time_constant_h.toFixed(0)} h</strong></span>` : nothing}
+      ${l.accuracy ? html`<span>Accuracy (${l.accuracy.horizon_min / 60} h) <strong>${delta(l.accuracy.mae, unit).replace("+", "")}</strong> vs. ${delta(l.accuracy.persistence_mae, unit).replace("+", "")} persistence</span>` : nothing}
+    </div>` : nothing}
+    ${l.trained_at ? html`<span class="small muted">Last trained ${haTime(false)(l.trained_at)}</span>` : nothing}
+    ${l.validity.state === "invalidated" ? html`<span class="small tone-warning">${l.validity.reasons[0]}</span>` : nothing}
+    ${l.prerequisites.filter((p) => p.blocking).map((p) => html`<span class="small tone-warning">${p.text}</span>`)}
+    <a class="text-link small" href="#/climate/rooms/${encodeURIComponent(areaId)}/learning" data-testid="climate-learning-link">Thermal learning details</a>
+  </div>`;
 }
 
 /** Refetch on live climate changes, at most once a second. */
@@ -82,16 +123,33 @@ abstract class ClimateElement extends StoreElement {
 
 // ------------------------------------------------------------------ overview
 export class SlClimate extends ClimateElement {
-  static properties = { tab: { type: String }, data: { state: true }, error: { state: true } };
+  static properties = { tab: { type: String }, data: { state: true }, error: { state: true }, busy: { state: true }, actionError: { state: true } };
   declare tab: string;
   declare data: Overview | null;
   declare error: unknown;
+  declare busy: boolean;
+  declare actionError: unknown;
 
   constructor() {
     super();
     this.tab = "overview";
     this.data = null;
     this.error = null;
+    this.busy = false;
+    this.actionError = null;
+  }
+
+  private async rebuildAll(): Promise<void> {
+    this.busy = true;
+    try {
+      await rebuild(null);
+      this.actionError = null;
+      await this.reload();
+    } catch (err) {
+      this.actionError = err;
+    } finally {
+      this.busy = false;
+    }
   }
 
   async reload(): Promise<void> {
@@ -117,11 +175,12 @@ export class SlClimate extends ClimateElement {
       </div>
       <div class="cl-row">
         ${devices.length ? devices.map((d) => heatingChip(d)) : chip("neutral", "No heating device: observed only")}
-        ${r.any_open ? html`<span class="chip chip-info">${icon("window-open", 14)}<span class="chip-label">Window or door open</span></span>` : nothing}
+        ${r.openings.filter((o) => o.status === "open").map((o) => openingChip(o))}
         ${r.occupancy ? chip(r.occupancy.occupied ? "ok" : "neutral", r.occupancy.occupied ? "Occupied" : r.occupancy.occupied === false ? "Vacant" : "Occupancy unknown") : nothing}
         ${r.zone ? chip("info", `Zone: ${r.zone.name}`) : nothing}
       </div>
       ${r.demand ? html`<p class="small muted">${icon("info", 14)} ${r.demand.text}</p>` : nothing}
+      ${r.learning ? learningSummary(r.learning, unit, r.area_id) : nothing}
     </article>`;
   }
 
@@ -151,10 +210,16 @@ export class SlClimate extends ClimateElement {
             ? html`<ul class="cl-problem-list">${d.problems.map((p) => html`<li>${chip(QUALITY[p.quality]?.tone ?? "warning", p.text)}<span>${p.room ? html`<strong>${p.room}</strong> · ` : nothing}${p.role}</span><span class="mono small muted">${p.entity_id}</span></li>`)}</ul>`
             : html`<p class="muted">Every assigned sensor reports a current, plausible value.</p>`}
         </section>
-        <section class="card pad" data-testid="climate-learning"><h3>Observations</h3>
+        <section class="card pad" data-testid="climate-learning"><h3>Thermal learning</h3>
           <p>${d.learning.history_days} of ${d.learning.min_history_days} days observed for the shortest room history.</p>
           <div class="progress"><span style="width:${Math.min(100, Math.round((100 * d.learning.history_days) / Math.max(1, d.learning.min_history_days)))}%"></span></div>
-          <p class="small muted">${d.learning.text} ${d.status.observation.tracked} entities are recorded; ${(d.status.observation.bytes / 1048576).toFixed(1)} MB stored${d.status.observation.backfill.state === "running" ? "; reading the Recorder's history…" : ""}.</p>
+          ${d.learning.counts ? html`<div class="cl-row" style="margin-top:0.5rem" data-testid="climate-learning-counts">${Object.entries(d.learning.counts).map(([k, n]) => chip(LEARNING_TONE[k] ?? "neutral", `${n} · ${d.learning.statuses?.[k] ?? k}`))}</div>` : nothing}
+          <p class="small muted">${d.learning.text} ${d.status.observation.tracked} entities are recorded; ${(d.status.observation.bytes / 1048576).toFixed(1)} MB stored${d.status.observation.backfill.state === "running" ? "; reading the Recorder's history…" : ""}.
+            Rooms are trained automatically about once a day when new observations exist.</p>
+          ${d.learning.running ? html`<p class="small" role="status"><span class="spinner"></span> Training ${d.rooms.find((r) => r.area_id === d.learning.running)?.name ?? d.learning.running}…</p>` : nothing}
+          <div class="cl-actions"><button type="button" class="btn" data-testid="climate-rebuild-all" ?disabled=${this.busy} @click=${() => void this.rebuildAll()}>${icon("refresh", 18)}Rebuild all models</button></div>
+          ${this.actionError ? problemText(this.actionError) : nothing}
+          ${(d.learning.notices ?? []).map((n) => html`<p class="notice notice-warning">${icon("warning", 18)}<span>${n.message}</span></p>`)}
           ${d.status.observation.error ? html`<p class="notice notice-warning">${icon("warning", 18)}<span>${d.status.observation.error}</span></p>` : nothing}
         </section>
       </div>
@@ -166,7 +231,7 @@ export class SlClimate extends ClimateElement {
     const unit = d.unit;
     if (!d.rooms.length) return this.overviewTab(d);
     return html`<div class="table-wrap card" data-testid="climate-rooms-table"><table class="plain-table">
-      <thead><tr><th>Room</th><th>Room temperature</th><th>Thermostat reports</th><th>Setpoint</th><th>Mode / activity</th><th>Occupancy</th><th>Windows / doors</th><th>Sensors</th></tr></thead>
+      <thead><tr><th>Room</th><th>Room temperature</th><th>Thermostat reports</th><th>Setpoint</th><th>Mode / activity</th><th>Occupancy</th><th>Windows / doors</th><th>Sensors</th><th>Learning</th></tr></thead>
       <tbody>${d.rooms.map((r) => html`<tr>
         <td><a class="text-link" href="#/climate/rooms/${encodeURIComponent(r.area_id)}">${r.name}</a></td>
         <td>${temp(r.temperature.value_c, unit)}${r.temperature.source === "secondary" ? html` <span class="small muted">(secondary)</span>` : nothing}</td>
@@ -174,8 +239,9 @@ export class SlClimate extends ClimateElement {
         <td>${r.thermostats.length ? r.thermostats.map((t) => setpoint(t, unit)).join(" · ") : "—"}</td>
         <td>${r.thermostats.length ? html`<span class="cl-row">${r.thermostats.map((t) => html`<span class="small">${t.hvac_mode ?? "—"}</span>${heatingChip(t)}`)}</span>` : html`<span class="muted">no device</span>`}</td>
         <td>${r.occupancy ? (r.occupancy.occupied ? "Occupied" : r.occupancy.occupied === false ? "Vacant" : "Unknown") : "—"}</td>
-        <td>${r.openings.length ? `${r.openings.filter((o) => o.status === "open").length} of ${r.openings.length} open` : "—"}</td>
+        <td>${r.openings.length ? (r.openings.some((o) => o.status === "open") ? r.openings.filter((o) => o.status === "open").map((o) => `${openingLabel(o.kind)} open: ${o.name ?? o.entity_id}`).join(" · ") : `${r.openings.length} closed`) : "—"}</td>
         <td>${qualityChip(r.primary)} <span class="small muted">${age(r.primary.age_s)}</span></td>
+        <td>${r.learning ? html`<a class="text-link" href="#/climate/rooms/${encodeURIComponent(r.area_id)}/learning">${learningChip(r.learning)}</a>` : "—"}</td>
       </tr>`)}</tbody></table></div>`;
   }
 
@@ -302,6 +368,7 @@ export class SlClimateRoom extends ClimateElement {
     return html`${pageHeader(r.name, "Climate of this room: what its sensors measure and what its heating devices report.", back)}
       ${observingNotice()}
       ${climateTabs("rooms")}
+      ${roomTabs(this.areaId, "monitoring")}
       ${this.error ? problemText(this.error) : nothing}
       ${!r.area_exists ? html`<p class="notice notice-warning">${icon("warning", 20)}<span>This area no longer exists in Home Assistant.</span></p>` : nothing}
       <div class="stat-tiles cl-tiles" data-testid="climate-room-tiles">
@@ -332,7 +399,8 @@ export class SlClimateRoom extends ClimateElement {
           </ul>
         </section>
         <section class="card pad cl-section"><h3>Windows and doors</h3>
-          ${r.openings.length ? html`<ul class="cl-problem-list">${r.openings.map((o) => html`<li>${icon(o.status === "open" ? (o.kind === "door" ? "door-open" : "window-open") : o.kind === "door" ? "door" : "window", 18)}<strong>${o.name ?? o.entity_id}</strong>
+          ${r.openings.length ? html`<ul class="cl-problem-list" data-testid="climate-openings-list">${r.openings.map((o) => html`<li data-entity=${o.entity_id}>${icon(o.status === "open" ? (o.kind === "door" ? "door-open" : "window-open") : o.kind === "door" ? "door" : "window", 18)}<span>${openingLabel(o.kind)}:</span><strong>${o.name ?? o.entity_id}</strong>
+              ${o.kind ? nothing : html`<a class="text-link small" href="#/climate/settings/rooms?room=${encodeURIComponent(r.area_id)}">set the type</a>`}
               ${chip(o.status === "open" ? "info" : o.status === "closed" ? "ok" : "error", o.status === "open" ? "Open" : o.status === "closed" ? "Closed" : o.status === "missing" ? "Entity not found" : o.status === "unknown" ? "No value" : "Unavailable")}
               ${o.since ? html`<span class="small muted">since ${when(o.since)}</span>` : nothing}</li>`)}</ul>`
             : html`<p class="muted">None assigned.</p>`}

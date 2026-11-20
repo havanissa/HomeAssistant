@@ -134,6 +134,7 @@ import {
   mdiHomeThermometer,
   mdiHomeAutomation,
   mdiThermostat,
+  mdiChartBellCurveCumulative,
 } from "@mdi/js";
 import { svg, type SVGTemplateResult } from "lit";
 
@@ -273,6 +274,8 @@ export const ICONS: Record<string, string> = {
   "home-thermometer": mdiHomeThermometer,
   "home-automation": mdiHomeAutomation,
   thermostat: mdiThermostat,
+  // Phase A7.1: thermal learning.
+  chart: mdiChartBellCurveCumulative,
 };
 
 export function icon(name: string, size = 24): SVGTemplateResult {

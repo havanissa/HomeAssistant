@@ -88,7 +88,7 @@ def phase_all(args: argparse.Namespace, out: Path) -> None:
     before = thermostat_states(args)
     ov = app("api/overview")
     check("branding: Smart Comfort with its subtitle", ov["app"]["name"] == "Smart Comfort"
-          and ov["app"]["subtitle"] == "Intelligent Home Automation" and ov["app"]["version"] == "0.10.0", ov["app"])
+          and ov["app"]["subtitle"] == "Intelligent Home Automation" and ov["app"]["version"] == "0.11.0", ov["app"])
     check("the Climate module is native and observing", any(m["key"] == "climate" and m["kind"] == "native"
                                                             for m in ov["modules"]) and ov["safety"]["heating_control"] is False)
     check("migration counts unchanged (seven modules)", ov["migration"]["modules_total"] == 7, ov["migration"]["modules_total"])

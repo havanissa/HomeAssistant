@@ -44,11 +44,11 @@ from .climate_model import PLAUSIBLE, as_float, climate_unit, to_celsius
 
 _LOGGER = logging.getLogger(__name__)
 
-KINDS = ("room_temp", "thermostat", "outdoor", "opening", "occupancy", "sun", "cover")
+KINDS = ("room_temp", "thermostat", "outdoor", "opening", "occupancy", "sun", "cover", "illuminance")
 #: The least time between two records of a kind whose attributes move continuously (seconds).
 MIN_INTERVAL = {"sun": 600.0}
 MAX_STORE_BYTES = 300 * 1024 * 1024
-MAX_GAPS = 50
+MAX_GAPS = 1000  # A7.1: was 50; a forgotten gap would look observed to the learner
 MAX_READ_DAYS = 31
 SEED_LOOKBACK_DAYS = 2
 
@@ -133,6 +133,17 @@ def sample(kind: str, entity_id: str, state: dict[str, Any] | None, *, ha_unit: 
     elif kind == "sun":
         rec["a"] = {"elevation": _num(attrs.get("elevation"), 1), "azimuth": _num(attrs.get("azimuth"), 1)}
         rec["v"] = rec["a"]["elevation"]
+    elif kind == "illuminance":
+        # A7.1: the curtain windows' own sunlight sensors (lux), evidence that the sun actually shines.
+        rec["u"] = attrs.get("unit_of_measurement") or ""
+        if rec["q"] == "ok":
+            number = as_float(raw)
+            if number is None:
+                rec["q"] = "not_numeric"
+            elif number < 0:
+                rec["q"] = "implausible"
+            else:
+                rec["v"] = round(number, 1)
     elif kind == "cover":
         rec["a"] = {"position": _num(attrs.get("current_position"), 0)}
         rec["v"] = rec["a"]["position"]

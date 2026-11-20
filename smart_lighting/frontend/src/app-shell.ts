@@ -12,6 +12,7 @@ import { chip, haConnectionInfo, linkInfo, StoreElement } from "./ui";
 
 import "./pages/climate";
 import "./pages/climate-settings";
+import "./pages/climate-learning";
 import "./pages/curtains";
 import "./pages/curtains-control";
 import "./pages/curtains-window";
@@ -236,8 +237,9 @@ export class SlApp extends StoreElement {
           return html`<sl-predictions-room .areaId=${this.sub[1]} .tab=${this.sub[2] ?? "forecast"}></sl-predictions-room>`;
         return html`<sl-predictions .tab=${this.sub[0] ?? "house"}></sl-predictions>`;
       case "climate":
-        // #/climate (overview) · #/climate/rooms · #/climate/rooms/<area_id> · #/climate/settings/<section>.
+        // #/climate (overview) · #/climate/rooms · #/climate/rooms/<area_id>[/learning] · #/climate/settings/<section>.
         if (this.sub[0] === "settings") return html`<sl-climate-settings .section=${this.sub[1] ?? "general"}></sl-climate-settings>`;
+        if (this.sub[0] === "rooms" && this.sub[1] && this.sub[2] === "learning") return html`<sl-climate-learning .areaId=${this.sub[1]}></sl-climate-learning>`;
         if (this.sub[0] === "rooms" && this.sub[1]) return html`<sl-climate-room .areaId=${this.sub[1]}></sl-climate-room>`;
         return html`<sl-climate .tab=${this.sub[0] === "rooms" ? "rooms" : "overview"}></sl-climate>`;
       default:

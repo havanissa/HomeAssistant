@@ -5,7 +5,7 @@ the Home Assistant sidebar as **Smart Comfort**. (Its slug stays `smart_lighting
 its backups carry on unchanged.)
 
 The App runs every subsystem — room occupancy, lighting (moods, switches, daylight, ambient rules), curtains,
-predictions and, since 0.10.0, **climate observation** — and holds every configuration. The *Smart Occupancy &
+predictions and, since 0.10.0, **climate observation** (and since 0.11.0 thermal learning) — and holds every configuration. The *Smart Occupancy &
 Lighting* integration **1.0.0** is its companion: native entities, a fenced executor for the App's light and cover
 commands, ownership records and the compact dashboard cards. Nothing is migrated automatically:
 **Settings → Migration & System** moves an existing 0.9.0 installation in eight reviewed steps, and

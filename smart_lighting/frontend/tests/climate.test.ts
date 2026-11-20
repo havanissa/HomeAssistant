@@ -25,3 +25,21 @@ describe("climate units", () => {
     expect(slugify("!!!", new Set())).toBe("zone");
   });
 });
+
+// Phase A7.1
+import { openingLabel, rate } from "../src/climate/api";
+
+describe("thermal learning helpers", () => {
+  it("names what an opening is, or says the type is not set", () => {
+    expect(openingLabel("window")).toBe("Window");
+    expect(openingLabel("door")).toBe("Door");
+    expect(openingLabel(null)).toBe("Window or door (type not set)");
+    expect(openingLabel("opening")).toBe("Window or door (type not set)");
+  });
+  it("shows rates as differences in the display unit", () => {
+    expect(rate(1.5, "°C")).toBe("+1.50 °C/h");
+    expect(rate(1.5, "°F")).toBe("+2.70 °F/h");
+    expect(rate(-0.2, "°C", 1)).toBe("-0.2 °C/h");
+    expect(rate(null, "°C")).toBe("—");
+  });
+});

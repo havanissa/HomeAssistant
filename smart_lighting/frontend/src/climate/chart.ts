@@ -4,12 +4,13 @@
 // never zero; a device that does not report its activity gets a lane that says so.
 import { html, nothing, svg, type TemplateResult } from "lit";
 
-import { toDisplay, type Band, type History, type Series, type Unit } from "./api";
+import { toDisplay, type Band, type History, type Series, type Unit, type ValidationChart } from "./api";
 
 const CLS: Record<Series["kind"], string> = {
   room: "cl-line-room", secondary: "cl-line-secondary", thermostat: "cl-line-thermostat", setpoint: "cl-line-setpoint", outdoor: "cl-line-outdoor",
+  model: "cl-line-model", persistence: "cl-line-persistence",
 };
-const BAND_CLS: Record<Band["kind"], string> = { heating: "cl-band-heating", open: "cl-band-open", occupied: "cl-band-occupied" };
+const BAND_CLS: Record<Band["kind"], string> = { heating: "cl-band-heating", open: "cl-band-open", occupied: "cl-band-occupied", excluded: "cl-band-excluded" };
 
 /** The line's class: its kind, and for a heating device's own reading and setpoint the device's colour. */
 function seriesClass(h: History, s: Series): string {
@@ -86,7 +87,7 @@ export function historyChart(h: History, unit: Unit, hidden: Set<string>): Templ
       })}
       ${lanes.map((b, i) => {
         const top = lanesTop + i * (laneH + laneGap);
-        return svg`<text class="cl-lane-label" x=${L - 6} y=${top + laneH - 3} text-anchor="end">${b.kind === "heating" ? "heat" : b.kind === "open" ? "open" : "occ."}</text>
+        return svg`<text class="cl-lane-label" x=${L - 6} y=${top + laneH - 3} text-anchor="end">${b.kind === "heating" ? "heat" : b.kind === "open" ? (b.opening === "door" ? "door" : b.opening === "window" ? "window" : "open") : b.kind === "excluded" ? "excl." : "occ."}</text>
           <rect class="cl-lane" x=${L} y=${top} width=${pw} height=${laneH} rx="3"><title>${b.label}${b.kind === "heating" && !b.reported ? " (this device does not report its activity)" : ""}</title></rect>
           ${b.kind === "heating" && !b.reported ? svg`<text class="cl-lane-note" x=${L + 6} y=${top + laneH - 3}>activity not reported by this device</text>` : nothing}
           ${b.intervals.map(([a, z]) => svg`<rect class=${BAND_CLS[b.kind]} x=${x(a)} y=${top} width=${Math.max(1, x(z) - x(a))} height=${laneH} rx="2"><title>${b.label}: ${fmt.format(new Date(a * 1000))}–${fmt.format(new Date(z * 1000))}</title></rect>`)}`;
@@ -103,4 +104,48 @@ export function legend(h: History, hidden: Set<string>, toggle: (key: string) =>
       <li class="cl-legend-band"><span class="cl-swatch cl-band-open"></span>window / door open</li>
       <li class="cl-legend-band"><span class="cl-swatch cl-band-occupied"></span>occupied</li>` : nothing}
   </ul>`;
+}
+
+// ---------------------------------------------------- thermal learning (A7.1)
+/** The held-out reconstruction: measured temperature (solid) and the model's paths (dashed), each restarted from
+ * the measured temperature; persistence dotted. A historical reconstruction on data the model never saw, not a
+ * forecast. Lines break at nulls, so nothing crosses an excluded or unobserved period (shaded). */
+export function validationChart(c: ValidationChart, unit: Unit, timeZone: string | null): TemplateResult {
+  const h: History = {
+    area_id: "", window: c.to - c.from, windows: [], start: c.from, end: c.to, unit, observed_from: null, gaps: {}, records: 1,
+    backfill: { state: "done", done_at: null, error: null, windows: 0, records: 0, entities: 0 }, source: "", time_zone: timeZone,
+    series: [
+      { key: "actual", label: "Measured room temperature", kind: "room", entity_id: "", points: c.actual },
+      { key: "model", label: `Model reconstruction (restarted every ${c.restart_hours} h)`, kind: "model", entity_id: "", points: c.model },
+      { key: "persistence", label: "Persistence baseline (no change)", kind: "persistence", entity_id: "", points: c.persistence },
+    ],
+    bands: [{ key: "excluded", label: "Excluded from learning (window open, unknown state, sensor problem, not observed)", kind: "excluded", entity_id: "", intervals: c.excluded }],
+  };
+  return historyChart(h, unit, new Set());
+}
+
+/** Prediction error over the same held-out period (model and persistence), symmetric around zero. */
+export function errorChart(c: ValidationChart, unit: Unit, timeZone: string | null): TemplateResult {
+  const W = 760, L = 48, R = 12, T = 10, plotH = 140;
+  const span = Math.max(1, c.to - c.from);
+  const x = (t: number) => L + ((t - c.from) / span) * (W - L - R);
+  const scale = unit === "°F" ? 1.8 : 1;
+  const all = [...c.error_model, ...c.error_persistence].map((p) => p[1]).filter((v): v is number => v !== null).map((v) => Math.abs(v * scale));
+  const lim = Math.max(0.5, Math.ceil((all.length ? Math.max(...all) : 1) * 2) / 2);
+  const y = (v: number) => T + (1 - (v + lim) / (2 * lim)) * plotH;
+  const fmt = formatter(timeZone, span);
+  const ticksX = Array.from({ length: 5 }, (_, i) => c.from + (span * i) / 4);
+  const pts = (p: Array<[number, number | null]>) => p.map(([t, v]) => [t, v === null ? null : v * scale] as [number, number | null]);
+  return html`<figure class="cl-chart" data-testid="climate-error-chart">
+    <svg viewBox="0 0 ${W} ${T + plotH + 24}" role="img" aria-label="Prediction error">
+      ${[-lim, 0, lim].map((v) => svg`<line class=${v === 0 ? "cl-zero" : "cl-grid"} x1=${L} x2=${W - R} y1=${y(v)} y2=${y(v)}></line>
+        <text class="cl-axis" x=${L - 6} y=${y(v) + 4} text-anchor="end">${v > 0 ? "+" : ""}${v}°</text>`)}
+      ${c.excluded.filter(([a, z]) => z > c.from && a < c.to).map(([a, z]) => svg`<rect class="cl-unobserved" x=${x(Math.max(a, c.from))} y=${T} width=${Math.max(1, x(Math.min(z, c.to)) - x(Math.max(a, c.from)))} height=${plotH}></rect>`)}
+      ${ticksX.map((t, i) => svg`<text class="cl-axis" x=${x(t)} y=${T + plotH + 16} text-anchor=${i === 0 ? "start" : i === 4 ? "end" : "middle"}>${fmt.format(new Date(t * 1000))}</text>`)}
+      <path class="cl-line cl-line-persistence" d=${path(pts(c.error_persistence), x, y, false, c.to)}><title>Persistence error</title></path>
+      <path class="cl-line cl-line-model" d=${path(pts(c.error_model), x, y, false, c.to)}><title>Model error</title></path>
+    </svg>
+    <figcaption class="cl-legend"><span><svg width="26" height="10" aria-hidden="true"><path class="cl-line cl-line-model" d="M1,5 L25,5"></path></svg>model − measured</span>
+      <span><svg width="26" height="10" aria-hidden="true"><path class="cl-line cl-line-persistence" d="M1,5 L25,5"></path></svg>persistence − measured</span></figcaption>
+  </figure>`;
 }

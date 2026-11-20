@@ -8,6 +8,51 @@ covers, and compact dashboard cards. The integration keeps its name and its
 domain `smart_occupancy`; the App keeps its slug `smart_lighting`, so nothing
 about an existing installation, its entities or its backups changes.
 
+## Phase A7.1 (0.11.0): Thermal learning
+
+Climate now **learns how each room warms and cools** from the observations it
+collects. It still only observes: no thermostat, setpoint or device setting is
+ever changed.
+
+**Climate → Overview** shows, per room, the learning status, how many days of
+*usable* history there are (of the minimum set in Settings → General), the
+learned heating response, the thermal inertia (time constant), the model's
+confidence and its accuracy compared with simply assuming the temperature stays
+the same. **Climate → a room → Thermal learning** shows the details:
+
+- **Measurements**: what the sensors measured (gaps are shaded, never drawn over).
+- **Learned behaviour**: each estimate with its confidence and why. An estimate
+  the data cannot support is shown as *Unavailable* with the reason, for example
+  "No window direction is known for this room" for solar gain, or that the
+  devices do not report whether they are heating.
+- **Accuracy**: the model was trained on the earlier part of the history and
+  tested on the latest quarter, which it never saw. The chart is a historical
+  reconstruction, not a forecast; the errors are compared with persistence.
+- **Evidence and diagnostics**: usable days, heating and cooling episodes, time
+  left out and why (open windows and doors, unknown states, sensor problems,
+  periods that were not observed), the terms that were tested.
+- **Rebuild model**, **Export** (model and diagnostics), **Reset learned model**
+  (asks first; the observations and the configuration are kept).
+
+Good to know:
+
+- A room needs about two weeks of usable history (Settings → General). Time with
+  an open window, an unavailable sensor or an unknown heating state does not
+  count. A new installation starts learning after a day; before the minimum the
+  model is marked *preliminary*.
+- Devices that report whether they are heating (`hvac_action`) give the best
+  results. Without it, the heating response is *inferred* from the setpoints, at
+  reduced confidence.
+- Solar gain needs the window's direction (Curtains → the window). Without an
+  outdoor temperature source the outdoor influence cannot be estimated.
+- Changing a room's sensor, heating device, thermal zone or the outdoor source
+  makes its model invalid (shown with the reason); it is rebuilt automatically.
+  Renaming an entity in Home Assistant does not.
+- Models are rebuilt about once a day when new observations exist.
+- **Window or door?** Climate now says "Window open: …" or "Door open: …". If
+  Home Assistant does not say what an opening sensor is, set it in Climate →
+  Settings → Rooms and devices.
+
 ## Phase A7.0 (0.10.0): Smart Comfort and Climate (observing)
 
 The App is renamed **Smart Comfort** and gains a **Climate** module. Climate

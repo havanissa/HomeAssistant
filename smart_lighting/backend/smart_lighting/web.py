@@ -425,6 +425,56 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
         result = await service.import_apply(body.get("file"), body.get("revision"))
         return _json({"result": result, "document": service.document()})
 
+    # ------------------------------------------------- thermal learning (A7.1)
+    def learning_area(request: web.Request, value: Any) -> str:
+        if not isinstance(value, str) or not AREA_ID.match(value):
+            raise ClimateError("invalid_area", "Invalid area id")
+        if value not in climate_service(request).config["rooms"]:
+            raise ClimateError("not_configured", "This room is not configured for climate", 404)
+        return value
+
+    @climate_handler
+    async def learning_overview(request: web.Request) -> web.Response:
+        return _json(climate_service(request).learning.overview())
+
+    @climate_handler
+    async def learning_room(request: web.Request) -> web.Response:
+        area_id = learning_area(request, request.match_info["area_id"])
+        return _json(climate_service(request).learning.room(area_id))
+
+    @climate_handler
+    async def learning_rebuild(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        area = body.get("area_id")
+        area_id = None if area is None else learning_area(request, area)
+        learning = climate_service(request).learning
+        queued = learning.request(area_id, user=request.headers.get("X-Remote-User-Id"))
+        return _json({"queued": queued, "learning": learning.overview()})
+
+    @climate_handler
+    async def learning_reset(request: web.Request) -> web.Response:
+        body = await write_guard(request)
+        area_id = body.get("area_id")
+        if not isinstance(area_id, str) or not AREA_ID.match(area_id):
+            raise ClimateError("invalid_area", "Invalid area id")
+        if body.get("confirm") is not True:
+            raise ClimateError("confirm_required", "Resetting a learned model must be confirmed. The observations "
+                               "and the configuration are kept.", 409)
+        learning = climate_service(request).learning
+        try:
+            archived = await learning.reset(area_id)
+        except KeyError as err:
+            raise ClimateError("not_configured", "This room has no climate configuration or model", 404) from err
+        return _json({"reset": True, "archived": archived, "learning": learning.summary(area_id)
+                      if area_id in climate_service(request).config["rooms"] else None})
+
+    @climate_handler
+    async def learning_export(request: web.Request) -> web.Response:
+        await admin_guard(request)
+        area_id = learning_area(request, request.match_info["area_id"])
+        data = climate_service(request).learning.export(area_id)
+        return _json(data, headers=download_name("smart-comfort-thermal-" + re.sub(r"[^A-Za-z0-9_-]", "_", area_id), data["exported_at"]))
+
     # -------------------------------------------------------- floor plan
     def floorplan_service(request: web.Request):
         core: AppCore = request.app[CORE_KEY]
@@ -1147,6 +1197,11 @@ def build_app(settings: Settings, core: AppCore | None = None) -> web.Applicatio
     app.router.add_get("/api/climate/discovery", climate_discovery)
     app.router.add_get("/api/climate/rooms/{area_id}", climate_room)
     app.router.add_get("/api/climate/rooms/{area_id}/history", climate_history)
+    app.router.add_get("/api/climate/learning", learning_overview)
+    app.router.add_get("/api/climate/rooms/{area_id}/learning", learning_room)
+    app.router.add_get("/api/climate/rooms/{area_id}/learning/export", learning_export)
+    app.router.add_post("/api/climate/learning/rebuild", learning_rebuild)
+    app.router.add_post("/api/climate/learning/reset", learning_reset)
     app.router.add_post("/api/climate/review", climate_review)
     app.router.add_post("/api/climate/save", climate_save)
     app.router.add_get("/api/climate/backups", climate_backups)

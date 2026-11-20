@@ -24,7 +24,7 @@ Configuration (``/data/climate/config.json``, format ``smart_comfort.climate``):
                            "capabilities": {...}}],      # a snapshot taken when it was saved
           "primary_sensor": {"entity_id": "sensor.x", "uid": "..."} | null,
           "secondary_sensors": [{"entity_id": ..., "uid": ...}],
-          "openings": [{"entity_id": "binary_sensor.window", "uid": ...}],
+          "openings": [{"entity_id": "binary_sensor.window", "uid": ..., "kind": "window" | "door" | null}],
           "overrides": {"comfort_c": null, "setback_c": null, "min_target_c": null, "max_target_c": null,
                         "stale_minutes": null}
         }
@@ -107,6 +107,8 @@ FEATURE_TURN_ON = 256
 HVAC_ACTIONS = {"off", "heating", "cooling", "drying", "idle", "fan", "preheating", "defrosting"}
 HEATING_ACTIONS = {"heating", "preheating"}
 OPENING_CLASSES = {"window": "window", "door": "door", "opening": "opening", "garage_door": "door"}
+#: What a person can say an opening sensor is when Home Assistant's device class does not (A7.1).
+OPENING_KINDS = {"window": "Window", "door": "Door"}
 #: Plausible readings (°C). Outside them a reading is kept but marked implausible.
 PLAUSIBLE = {"indoor": (-20.0, 50.0), "outdoor": (-60.0, 60.0), "target": (0.0, 40.0)}
 OUTDOOR_WORDS = ("outdoor", "outside", "exterior", "external_temp", "garden", "uti", "úti", "ute", "ude", "aussen",
@@ -379,6 +381,14 @@ def validate(raw: Any) -> dict[str, Any]:
             primary_room[primary] = area_id
         room["openings"] = _refs(v, f"{path}.openings", room_raw.get("openings"), ("binary_sensor",),
                                  LIMITS["openings"])
+        raw_kinds = {item.get("entity_id"): item.get("kind") for item in room_raw.get("openings") or []
+                     if isinstance(item, dict)} if isinstance(room_raw.get("openings"), list) else {}
+        for ref in room["openings"]:
+            kind = raw_kinds.get(ref["entity_id"])
+            if kind is not None and kind not in OPENING_KINDS:
+                v.err(f"{path}.openings", f"{ref['entity_id']}: the type must be window or door")
+                kind = None
+            ref["kind"] = kind  # None: use Home Assistant's device class
         room["overrides"] = _temps(v, f"{path}.overrides", room_raw.get("overrides"), optional=True)
         merged = {**out["defaults"], **{k: x for k, x in room["overrides"].items() if x is not None}}
         if any(x is not None for x in room["overrides"].values()):
@@ -758,12 +768,18 @@ def thermostat_view(entity_id: str, state: dict[str, Any] | None, *, now: float,
     }
 
 
-def opening_view(entity_id: str, state: dict[str, Any] | None, *, kind: str | None) -> dict[str, Any]:
+def opening_view(entity_id: str, state: dict[str, Any] | None, *, kind: str | None,
+                 configured: str | None = None) -> dict[str, Any]:
+    """An opening's state and what it is: the type a person set (``configured``), else Home Assistant's device
+    class (``kind``: window, door or the generic "opening"), else not known (``kind_source`` none)."""
     raw = (state or {}).get("state")
     status = "missing" if state is None else "open" if raw == "on" else "closed" if raw == "off" else \
         "unavailable" if raw == "unavailable" else "unknown"
+    resolved = configured if configured in OPENING_KINDS else kind if kind in OPENING_KINDS else None
+    source = "configured" if configured in OPENING_KINDS else "device_class" if resolved else "none"
     return {"entity_id": entity_id, "name": ((state or {}).get("attributes") or {}).get("friendly_name"),
-            "kind": kind, "status": status, "since": (state or {}).get("last_changed")}
+            "kind": resolved, "kind_source": source, "device_class_kind": kind, "status": status,
+            "since": (state or {}).get("last_changed")}
 
 
 def room_temperature(primary: dict[str, Any], secondary: list[dict[str, Any]]) -> dict[str, Any]:

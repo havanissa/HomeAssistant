@@ -83,3 +83,21 @@
 .cl-zone { display: grid; gap: 0.5rem; padding: 0.75rem; border: 1px solid var(--sl-divider); border-radius: 10px; background: var(--sl-surface); }
 .cl-suggestion { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.55rem 0.75rem; border: 1px dashed var(--sl-divider); border-radius: 10px; }
 .cl-review-path { font-family: var(--sl-mono); font-size: 0.78rem; color: var(--sl-text-2); overflow-wrap: anywhere; }
+
+/* Phase A7.1: thermal learning */
+.cl-line-model { stroke: var(--sl-pending); stroke-width: 2; stroke-dasharray: 7 4; }
+.cl-line-persistence { stroke: var(--sl-neutral); stroke-width: 1.5; stroke-dasharray: 1.5 3.5; }
+.cl-band-excluded { fill: var(--sl-neutral); opacity: 0.45; }
+.cl-zero { stroke: var(--sl-text-2); stroke-width: 1; }
+.cl-learn { display: grid; gap: 0.35rem; padding-top: 0.45rem; border-top: 1px solid var(--sl-divider); }
+.cl-learn-row { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; align-items: baseline; font-size: 0.85rem; }
+.cl-learn-row strong { font-weight: 500; font-variant-numeric: tabular-nums; }
+.cl-params td:first-child { font-weight: 500; }
+.cl-params td { vertical-align: top; }
+.cl-params .cl-why { color: var(--sl-text-2); font-size: 0.8rem; }
+.cl-explain { margin: 0; padding-left: 1.1rem; display: grid; gap: 0.3rem; }
+.cl-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.cl-pre { max-height: 60vh; overflow: auto; font-family: var(--sl-mono); font-size: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sl-neutral-bg); padding: 0.6rem; border-radius: 8px; margin: 0; }
+.cl-subtabs { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0.25rem 0 0.75rem; }
+.cl-subtabs a { display: inline-flex; align-items: center; gap: 0.35rem; min-height: 40px; padding: 0 0.8rem; border-radius: 999px; border: 1px solid var(--sl-divider); color: inherit; text-decoration: none; }
+.cl-subtabs a.active { background: var(--sl-primary-soft); color: var(--sl-primary-strong); border-color: var(--sl-primary); font-weight: 500; }
