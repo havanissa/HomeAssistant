@@ -6,7 +6,7 @@ from typing import Final
 
 APP_NAME: Final = "Smart Comfort"
 APP_SUBTITLE: Final = "Intelligent Home Automation"
-APP_VERSION: Final = "0.10.0"  # must match config.yaml (checked by the tests)
+APP_VERSION: Final = "0.11.0"  # must match config.yaml (checked by the tests)
 APP_PHASE: Final = "A7.0"
 
 # The existing custom integration this App will eventually replace. It keeps

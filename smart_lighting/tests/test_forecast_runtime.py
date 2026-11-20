@@ -165,7 +165,10 @@ async def test_handover_then_the_app_publishes(forecast_app: Any, fake_ha: FakeH
     view = next(p["view"] for p in fake.published if p.get("view") is not None)
     assert sorted(export["days"]) == hello_days and export["schema"] == S.EXPORT_SCHEMA
     assert set(view) <= S.VIEW_SECTIONS and AREA in view["rooms"] and view["days_learned"] == LEARNED_DAYS
-    assert runtime.counters["views_published"] >= 1 and runtime.counters["exports_published"] >= 1
+    # The fake records a publish when it handles it; the App counts it once the reply arrives: wait for that
+    # (asserting at once raced with the reply: the A7.0 "flaky" failure, exports_published still 0).
+    await wait_for(lambda: runtime.counters["views_published"] >= 1 and runtime.counters["exports_published"] >= 1,
+                   timeout=8)
     house = runtime.house()
     assert house["source"] == "app" and house["rooms"][0]["now"] is not None and house["rooms"][0]["shadow_now"] is None
     body = await (await forecast_app.get("/api/predictions")).json()

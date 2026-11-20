@@ -1,12 +1,12 @@
 # Home Assistant App configuration: Smart Comfort (Phase A7.0), formerly Smart Occupancy & Lighting.
 # The slug stays smart_lighting: it identifies the installed App, its /data folder and its backups.
 name: Smart Comfort
-version: "0.10.0"
+version: "0.11.0"
 slug: smart_lighting
 description: >-
   Smart Comfort, intelligent home automation: rooms, presence, lighting, moods,
-  switches, curtains, occupancy predictions and climate observation, with an
-  optional floor plan. Devices are commanded only through the companion
+  switches, curtains, occupancy predictions, climate observation and thermal
+  learning, with an optional floor plan. Devices are commanded only through the companion
   integration's fenced executor; thermostats are observed, never controlled.
 url: https://github.com/havanissa/HomeAssistant/tree/main/smart_lighting
 arch:

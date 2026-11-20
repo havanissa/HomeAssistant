@@ -26,9 +26,11 @@ export interface RoomConfig {
   thermostats: ThermostatRef[];
   primary_sensor: Ref | null;
   secondary_sensors: Ref[];
-  openings: Ref[];
+  openings: OpeningRef[];
   overrides: Targets;
 }
+/** A7.1: a person can say what an opening sensor is when Home Assistant's device class does not. */
+export interface OpeningRef extends Ref { kind?: "window" | "door" | null }
 export interface Zone {
   id: string;
   name: string;
@@ -97,7 +99,16 @@ export interface ThermostatView {
   capabilities_changed: boolean;
   shared: boolean;
 }
-export interface OpeningView { entity_id: string; name: string | null; kind: string | null; status: "open" | "closed" | "unavailable" | "unknown" | "missing"; since: string | null }
+export interface OpeningView {
+  entity_id: string;
+  name: string | null;
+  /** window | door (set by a person, or from Home Assistant's device class), null when not known. */
+  kind: "window" | "door" | null;
+  kind_source: "configured" | "device_class" | "none";
+  device_class_kind: string | null;
+  status: "open" | "closed" | "unavailable" | "unknown" | "missing";
+  since: string | null;
+}
 export interface CompletenessItem { key: string; ok: boolean; required: boolean; text: string }
 export interface RoomView {
   area_id: string;
@@ -118,6 +129,7 @@ export interface RoomView {
   targets: Targets;
   completeness: { score: number; ready: boolean; items: CompletenessItem[] };
   covers: string[];
+  learning?: LearningSummary;
 }
 export interface Problem { area_id: string | null; room: string | null; role: string; entity_id: string; quality: string; text: string }
 export interface Overview {
@@ -129,12 +141,12 @@ export interface Overview {
   problems: Problem[];
   zones: Zone[];
   completeness: { rooms: number; ready: number; score: number };
-  learning: { history_days: number; min_history_days: number; available: boolean; text: string };
+  learning: { history_days: number; min_history_days: number; available: boolean; text: string } & Partial<LearningOverview>;
   status: Status;
   generated_at: string;
 }
-export interface Series { key: string; label: string; kind: "room" | "secondary" | "thermostat" | "setpoint" | "outdoor"; entity_id: string; points: Array<[number, number | null]> }
-export interface Band { key: string; label: string; kind: "heating" | "open" | "occupied"; entity_id: string; intervals: Array<[number, number]>; reported?: boolean }
+export interface Series { key: string; label: string; kind: "room" | "secondary" | "thermostat" | "setpoint" | "outdoor" | "model" | "persistence"; entity_id: string; points: Array<[number, number | null]> }
+export interface Band { key: string; label: string; kind: "heating" | "open" | "occupied" | "excluded"; entity_id: string; intervals: Array<[number, number]>; reported?: boolean; opening?: string | null }
 export interface History {
   area_id: string;
   window: number;
@@ -286,3 +298,131 @@ export function slugify(name: string, taken: Set<string>): string {
 export function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
+
+// ------------------------------------------------------- thermal learning (A7.1)
+export type LearningStatus = "no_data" | "collecting" | "insufficient" | "learning" | "low" | "moderate" | "high" | "unidentifiable" | "error";
+export interface Prerequisite { key: string; text: string; blocking: boolean }
+export interface LearningSummary {
+  area_id: string;
+  status: LearningStatus;
+  status_text: string;
+  queued: boolean;
+  running: boolean;
+  observed_days: number;
+  usable_days: number | null;
+  min_history_days: number;
+  ready: boolean;
+  validity: { state: "none" | "valid" | "outdated" | "invalidated"; reasons: string[]; keys?: string[] };
+  prerequisites: Prerequisite[];
+  last_attempt: { started_at: string | null; finished_at: string | null; result: string | null; error: string | null; reason: string | null; kept: string | null } | null;
+  problem: { code: string; message: string } | null;
+  trained_at: string | null;
+  preliminary: boolean | null;
+  heating?: { value: number | null; basis: "reported" | "inferred" | null; confidence: string | null; reason: string | null };
+  cooling?: { time_constant_h: number | null; k_per_h: number | null; reference: "outdoor" | "fixed"; confidence: string | null };
+  confidence?: { level: string; score: number };
+  accuracy?: { horizon_min: number; mae: number; rmse: number; persistence_mae: number; origins: number };
+}
+export interface LearningOverview {
+  rooms: Record<string, LearningSummary>;
+  counts: Record<string, number>;
+  running: string | null;
+  queued: string[];
+  notices: Array<{ code: string; message: string; area_id?: string }>;
+  store: { models: number; bytes: number; writable: boolean; error: string | null };
+  algorithm: string;
+  statuses: Record<string, string>;
+}
+export interface ModelParam {
+  value: number | null;
+  unit: string;
+  available: boolean;
+  se: number | null;
+  confidence: "none" | "low" | "moderate" | "high";
+  basis: string | null;
+  reason: string | null;
+  text: string | null;
+}
+export interface Metrics { mae: number; rmse: number; bias: number; n: number }
+export interface HorizonResult { available: boolean; origins: number; reason?: string; model?: Metrics; persistence?: Metrics; passive?: Metrics | null; skill?: number | null }
+export interface ValidationChart {
+  from: number; to: number;
+  actual: Array<[number, number | null]>;
+  model: Array<[number, number | null]>;
+  persistence: Array<[number, number | null]>;
+  error_model: Array<[number, number | null]>;
+  error_persistence: Array<[number, number | null]>;
+  excluded: Array<[number, number]>;
+  restart_hours: number;
+}
+export interface ThermalModelDoc {
+  format: string; schema: number; algorithm: string; area_id: string; trained_at: string; app_version?: string;
+  status: string; preliminary: boolean; reason?: string; training_seconds?: number; config_revision?: string;
+  structure: { reference: "outdoor" | "fixed"; reference_c: number | null; heating: "reported" | "inferred" | null; solar: boolean; night: boolean; coupling: string[] };
+  parameters: Record<string, ModelParam>;
+  dynamics: { lag_min: number; tau_min: number; identifiable?: boolean; reason?: string | null };
+  data: { from: number | null; to: number | null; split?: number; train?: { from: number; to: number; blocks: number }; test?: { from: number; to: number }; grid_s: number; block_s: number; min_history_days: number };
+  evidence: Evidence;
+  selection?: Array<{ term: string; accepted: boolean; gain?: number; reason?: string; removed?: boolean; rmse_without?: number; rmse_with?: number }>;
+  stability?: { windows: number; cv: Record<string, number>; values?: Record<string, number[]> };
+  validation: null | {
+    from: number; to: number; usable_hours: number; coverage: number; headline: string | null;
+    horizons: Record<string, HorizonResult>;
+    conditions: Record<string, Record<string, { origins: number; model_mae: number; persistence_mae: number }>>;
+    chart: ValidationChart;
+  };
+  confidence: { level: string; score: number; factors: Array<{ key: string; value: number; weight: number; text: string }>; note?: string; capped?: string };
+  uncertainty: Record<string, { q50: number; q80: number; q95: number; n: number }>;
+  explanations: string[];
+  fit?: { rmse_c_per_h: number; blocks: number; residual_autocorrelation: number };
+}
+export interface Evidence {
+  calendar_days: number; observed_hours: number; usable_hours: number; usable_days: number;
+  excluded: Record<string, number>; excluded_text: Record<string, string>;
+  episodes: Record<"heating" | "passive" | "solar", { count: number; hours: number }>;
+  open_windows: { count: number; hours: number };
+  secondary_hours: number; discontinuities: number; heat_basis: string; solar_basis: string; inferred_demand_hours: number;
+  reference: string; outdoor_hours: number;
+  heating_rates?: Array<{ bin: string; episodes: number; median_rate_c_per_h: number }>;
+  cooling_rates?: Array<{ bin: string; episodes: number; median_rate_c_per_h: number }>;
+  heating_median_rate_c_per_h?: number | null;
+  passive_median_rate_c_per_h?: number | null;
+  after_heating?: { stops: number; median_change_c: number; share_warming: number } | null;
+}
+export interface LearningRoom {
+  summary: LearningSummary;
+  model: ThermalModelDoc | null;
+  attempt: Record<string, unknown> & { diagnostic?: { evidence?: Evidence; reason?: string; status?: string }; previous?: { result: string | null; finished_at: string | null; error: string | null } | null };
+  entities: Record<string, string>;
+  recorder_gaps: Record<string, Array<[number, number]>>;
+  recorder_gap_hours: number;
+  coverage: Record<string, { from: number; to: number } | null>;
+  algorithm: string;
+  schema: number;
+  unit: Unit;
+  names: Record<string, string>;
+}
+
+export const getLearning = (): Promise<LearningOverview> => getRooms<LearningOverview>("api/climate/learning");
+export const getRoomLearning = (areaId: string): Promise<LearningRoom> => getRooms<LearningRoom>(`api/climate/rooms/${encodeURIComponent(areaId)}/learning`);
+export const rebuild = (areaId: string | null): Promise<{ queued: string[] }> => postRooms("api/climate/learning/rebuild", { area_id: areaId });
+export const resetModel = (areaId: string): Promise<{ reset: boolean; archived: boolean }> => postRooms("api/climate/learning/reset", { area_id: areaId, confirm: true });
+export const learningExportUrl = (areaId: string): string => `api/climate/rooms/${encodeURIComponent(areaId)}/learning/export`;
+
+/** A rate in °C/h shown in the display unit (a difference: no 32° offset). */
+export function rate(cph: number | null | undefined, unit: Unit, digits = 2): string {
+  if (cph === null || cph === undefined) return "—";
+  const v = unit === "°F" ? cph * 1.8 : cph;
+  return `${v > 0 ? "+" : ""}${v.toFixed(digits)} ${unit}/h`;
+}
+
+export const OPENING_LABEL: Record<string, string> = { window: "Window", door: "Door" };
+/** "Window", "Door", or that the type is not known (Home Assistant's device class does not say). */
+export function openingLabel(kind: string | null | undefined): string {
+  return (kind && OPENING_LABEL[kind]) || "Window or door (type not set)";
+}
+
+export const LEARNING_TONE: Record<string, "ok" | "warning" | "error" | "neutral" | "info"> = {
+  no_data: "neutral", collecting: "info", insufficient: "warning", learning: "info", low: "warning", moderate: "ok",
+  high: "ok", unidentifiable: "warning", error: "error",
+};

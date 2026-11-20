@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.11.0
+
+Phase A7.1: **thermal learning** in Climate (still observing only). Needs the companion integration 1.0.0
+(unchanged). Nothing changes on upgrade: no thermostat is ever commanded, the climate configuration and the
+observations are kept, and every existing module keeps working.
+
+- **A thermal model per room**, learned from the observations A7.0 collects: how fast the room warms while its
+  devices *report* heating (and the delay and the warming that continues after they stop), how it cools towards the
+  outdoor temperature (its thermal inertia), the direct sun through windows whose direction is set in Curtains
+  (with the covers' positions and the windows' own light sensors), a day/night difference and the exchange with the
+  other rooms of its thermal zone. A term is kept only when it improves predictions on data the fit did not see;
+  everything else is shown as *unavailable* with the reason. Devices that do not report activity get an
+  *inferred* heating estimate, kept apart and at reduced confidence. No energy savings are claimed.
+- **Honest data handling**: temperatures in °C on a 5-minute grid with explicit freshness limits; nothing is
+  interpolated across gaps or stale stretches; open windows and doors (plus 30 minutes) and unknown states are left
+  out; sudden jumps and sensor-source changes break the series; the primary/secondary sensor policy of A7.0 is used
+  and a thermostat's own reading never is. Every excluded hour is counted by reason.
+- **Validation and confidence**: the last quarter of the usable history is held out; the model is simulated 1 h and
+  3 h ahead there and compared with persistence and a passive model (MAE, RMSE, by condition). Confidence combines
+  usable history, episodes, sensor quality, parameter precision, stability between periods and the held-out skill;
+  the uncertainty band is the empirical held-out error.
+- **Learning status for every room**: no data, collecting, insufficient usable history (a preliminary model may be
+  shown), learning, model available (low / moderate / high confidence), unable to identify a reliable model, error.
+  Readiness follows *Settings → General → minimum history* in **usable** days, not calendar days.
+- **Climate → Overview**: each room card shows its learning status, usable history, heating response, time constant,
+  confidence, accuracy against persistence and when it was trained; *Rebuild all models*.
+- **Climate → a room → Thermal learning** (new): measurements, the learned behaviour with confidence per parameter,
+  the held-out reconstruction and error charts (a historical reconstruction, not a forecast), evidence and
+  diagnostics (usable days, heating and cooling episodes, excluded time, recorded gaps, the terms tested, the model
+  version); *Rebuild model*, *Training diagnostics*, *Model details*, *Export*, *Reset learned model* (confirmed;
+  the observations and the configuration are kept).
+- **Models are stored** in `/data/climate/models` (versioned, atomic writes, the previous versions kept, damaged
+  files recovered, a newer App's model never overwritten). Training runs in the background (one room at a time, never
+  on the App's event loop), on request, about once a day when new observations exist, and after a configuration
+  change. A changed sensor, heating device, thermal zone or outdoor source invalidates a model (shown, with the
+  reason); a renamed entity does not.
+- **Windows and doors are named**: "Window open: Stova window" or "Door open: …". When Home Assistant does not say
+  what an opening sensor is, Climate → Settings → Rooms and devices lets you set it (window or door).
+- Prepared for A7.2: a validated model can be loaded and evaluated (temperature change over an interval under
+  assumed outdoor temperature and heating, with uncertainty and structured "unavailable" answers). No prediction or
+  preheating is shown yet.
+- Fixed: the intermittent `test_forecast_runtime.py::test_handover_then_the_app_publishes` failure (the test asserted
+  the App's publish counter before the reply had arrived).
+
 ## 0.10.0
 
 Phase A7.0: **Smart Comfort** and the **Climate** module (observing only). Needs the companion integration 1.0.0

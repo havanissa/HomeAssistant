@@ -323,7 +323,7 @@ def test_observation_records_and_series(tmp_path: Path) -> None:
 async def test_fresh_installation_without_climate_devices(app_client: Any) -> None:
     overview = await (await app_client.get("/api/climate/overview")).json()
     assert overview["mode"] == "observing" and overview["rooms"] == [] and overview["problems"] == []
-    assert overview["learning"]["available"] is False
+    assert overview["learning"]["available"] is True and overview["learning"]["rooms"] == {}  # A7.1
     discovery = await (await app_client.get("/api/climate/discovery")).json()
     assert discovery["thermostats"] == [] and discovery["suggestions"]["rooms"] == {}
     doc = await (await app_client.get("/api/climate")).json()

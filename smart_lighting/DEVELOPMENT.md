@@ -56,6 +56,24 @@ only read commands. Tests: `tests/test_climate.py`; e2e `tests/e2e/a7_checks.py`
 `docs/A7-climate-architecture.md`. The product name changed to Smart Comfort;
 the slug, the domain and every technical identifier did not.
 
+Phase A7.1 (App 0.11.0) adds thermal learning, App-only as well:
+`climate_prep.py` (reads the observation store's day files in one pass and
+aligns them on a 5-minute grid with bounded holding; classifies every step),
+`climate_fit.py` (30-minute block regression, constrained least squares,
+rolling-origin term selection, held-out simulation, confidence; standard
+library only), `climate_thermal_model.py` (the model document and the pure
+interface A7.2 will use: `load_model`, `simulate`, `estimate_change`,
+`evaluate`), `climate_model_store.py` (`/data/climate/models`) and
+`climate_learning.py` (`ThermalLearning`: fingerprints and invalidation,
+scheduling, one fit at a time in a worker thread, views). Routes
+`/api/climate/learning`, `/api/climate/rooms/<area>/learning[/export]`,
+`POST /api/climate/learning/rebuild|reset`; page
+`pages/climate-learning.ts`. Tests: `tests/test_thermal_learning.py` (synthetic
+rooms from `tests/thermal_sim.py` with known coefficients); e2e
+`tests/e2e/a71_checks.py` (after `a7_checks.py --phase all`; it seeds 16
+synthetic days into the App's store, then `--phase restart-check`). Design:
+`docs/A7-climate-architecture.md` §8.
+
 The one file that exists twice is the companion protocol:
 `custom_components/smart_occupancy/protocol.py` (the source) and
 `backend/smart_lighting/companion_protocol.py` (the App's copy, because the

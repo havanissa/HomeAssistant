@@ -310,8 +310,19 @@ export class SlClimateSettings extends StoreElement {
           areaId, (id) => room.secondary_sensors.some((s) => s.entity_id === id), (id, on) => set((r) => { r.secondary_sensors = this.toggle(r.secondary_sensors, id, on, () => ({ entity_id: id })); }), "climate-secondary")}
       </details>
       <h4>Windows and doors</h4>
-      ${this.pickList(d.openings.map((o) => ({ entity_id: o.entity_id, name: o.name, area_id: o.area_id, area: o.area, note: `${o.kind} · ${o.status}` })),
+      ${this.pickList(d.openings.map((o) => ({ entity_id: o.entity_id, name: o.name, area_id: o.area_id, area: o.area, note: `${o.kind === "window" ? "window" : o.kind === "door" ? "door" : "type not set"} · ${o.status}` })),
         areaId, (id) => room.openings.some((o) => o.entity_id === id), (id, on) => set((r) => { r.openings = this.toggle(r.openings, id, on, () => ({ entity_id: id })); }), "climate-openings")}
+      ${room.openings.length ? html`<div class="cl-form" data-testid="climate-opening-kinds">${room.openings.map((o, i) => {
+        const found = d.openings.find((x) => x.entity_id === o.entity_id);
+        const fromHa = found && (found.kind === "window" || found.kind === "door") ? found.kind : null;
+        const unknown = !o.kind && !fromHa;
+        return html`<label class="cl-field"><span class="field-label">What is ${this.entityName(o.entity_id)}?</span>
+          <select data-testid="climate-opening-kind" data-entity=${o.entity_id} @change=${(e: Event) => { const v = (e.target as HTMLSelectElement).value; set((r) => { r.openings[i].kind = v === "window" || v === "door" ? v : null; }); }}>
+            <option value="" ?selected=${!o.kind}>${fromHa ? `From Home Assistant: ${fromHa === "window" ? "Window" : "Door"}` : "Not set (Home Assistant does not say)"}</option>
+            <option value="window" ?selected=${o.kind === "window"}>Window</option>
+            <option value="door" ?selected=${o.kind === "door"}>Door</option>
+          </select>${unknown ? html`<span class="cl-help tone-warning">Home Assistant does not say whether this is a window or a door; choose one so Climate can name it.</span>` : nothing}</label>`;
+      })}</div>` : nothing}
       <details ?open=${Object.values(room.overrides).some((v) => v !== null)}><summary>Room preferences (override the defaults)</summary>
         <div class="cl-form">
           ${this.tempField("Comfort", room.overrides.comfort_c, setO("comfort_c"), { inherit: c.defaults.comfort_c })}
