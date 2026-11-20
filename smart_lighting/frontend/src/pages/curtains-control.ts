@@ -4,8 +4,8 @@
 import "../curtains/curtains.css";
 import { html, nothing, type TemplateResult } from "lit";
 
+import { download } from "../rooms/model";
 import { icon } from "../icons";
-import { apiUrl } from "../store";
 import { chip, kv, pageHeader } from "../ui";
 import { haTime } from "../presence/components";
 import { duration } from "../presence/model";
@@ -110,7 +110,7 @@ export class SlCurtainsControl extends CurtainsElement {
           : html`<button type="button" class="btn btn-primary" data-testid="curtains-handover" ?disabled=${this.busy || !d.readiness.ready || !this.canEdit} @click=${() => void this.open("handover")}>${icon("swap", 20)}Review handover to the App…</button>
              <span class="small muted">${d.readiness.ready ? "Every readiness check passed." : "Available when every readiness check passes."}</span>`}
         <button type="button" class="btn" data-testid="curtains-return" ?disabled=${this.busy || !this.canEdit || !owner.app && d.mode !== "owner"} @click=${() => void this.open("return")} title="Also works when the App lost its connection">${icon("home-assistant", 18)}Force return</button>
-        <a class="btn" href=${apiUrl("api/curtains/export")} download data-testid="curtains-export">${icon("download", 18)}Export configuration and state</a>
+        <button type="button" class="btn" data-testid="curtains-export" @click=${() => download("api/curtains/export")}>${icon("download", 18)}Export configuration and state</button>
       </div>
     </section>`;
   }

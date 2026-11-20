@@ -201,7 +201,7 @@ export class SlLighting extends LightingElement {
         </div>
         <div class="lp-room-grid" data-testid="lighting-rooms">${rooms.map((r) => this.roomCard(r.area_id, r.name))}
           ${!rooms.length ? html`<p class="muted">No room matches this filter.</p>` : nothing}</div>`
-        : html`<div class="card empty-state"><p><strong>No room uses Smart Lighting yet.</strong></p>
+        : html`<div class="card empty-state"><p><strong>No room uses Smart Comfort lighting yet.</strong></p>
             <p class="muted">Enable a room in the Rooms editor; its lights then appear here in Observing mode.</p>
             <a class="btn" href="#/rooms">${icon("floor-plan", 20)}Rooms</a></div>`}`;
   }

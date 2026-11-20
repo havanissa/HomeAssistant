@@ -51,6 +51,9 @@ class Store {
   predictionsModelsVersion = 0;
   /** Phase A6: bumped when the companion, the configuration authority or any owner changes. */
   systemVersion = 0;
+  /** Phase A7.0: bumped when a live climate value moves; climateConfigVersion when the climate configuration changes. */
+  climateVersion = 0;
+  climateConfigVersion = 0;
   private listeners = new Set<Listener>();
 
   subscribe(listener: Listener): () => void {
@@ -128,6 +131,10 @@ class Store {
         break;
       case "system":
         this.systemVersion += 1;
+        break;
+      case "climate":
+        if (message.what === "config") this.climateConfigVersion += 1;
+        this.climateVersion += 1;
         break;
       case "entities": {
         if (!this.overview) return;

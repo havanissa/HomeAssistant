@@ -343,7 +343,7 @@ class FloorPlanService:
     def _unpack(doc: Any) -> tuple[Any, dict[str, Any]]:
         """(plan, images) from an export file, a backup file or a bare plan."""
         if not isinstance(doc, dict):
-            raise FloorPlanError("invalid_file", "This file is not a Smart Lighting floor plan")
+            raise FloorPlanError("invalid_file", "This file is not a Smart Comfort floor plan")
         if doc.get("format") == fm.EXPORT_FORMAT:
             images = doc.get("images") or {}
             if not isinstance(images, dict) or len(images) > fm.LIMITS["floors"]:
@@ -353,7 +353,7 @@ class FloorPlanService:
             return doc.get("plan"), {}
         if doc.get("format") == fm.FORMAT:
             return doc, {}
-        raise FloorPlanError("invalid_file", "This file is not a Smart Lighting floor plan")
+        raise FloorPlanError("invalid_file", "This file is not a Smart Comfort floor plan")
 
     def _decode_images(self, images: dict[str, Any]) -> dict[str, bytes]:
         out: dict[str, bytes] = {}

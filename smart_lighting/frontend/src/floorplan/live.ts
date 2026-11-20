@@ -91,7 +91,7 @@ export const ROOM_TONE_LABEL: Record<RoomTone, string> = {
   vacant: "Vacant",
   uncertain: "Uncertain",
   unavailable: "Occupancy unavailable",
-  not_observed: "Not observed by Smart Occupancy",
+  not_observed: "Not observed by Smart Comfort",
   not_linked: "Not linked to an area",
 };
 

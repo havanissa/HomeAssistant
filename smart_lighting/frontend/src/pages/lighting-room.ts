@@ -774,7 +774,7 @@ export class SlLightingRoom extends LightingElement {
     return html`<div class="room-editor lp-room" data-area=${r.area_id}>
       ${this.renderHead(r)}
       ${controlBanner(this.status)}
-      ${!r.enabled ? html`<p class="notice notice-warning">${icon("warning", 20)}<span>This room is not enabled for Smart Occupancy: enable it in the Rooms editor.</span></p>` : nothing}
+      ${!r.enabled ? html`<p class="notice notice-warning">${icon("warning", 20)}<span>This room is not enabled for Smart Comfort: enable it in the Rooms editor.</span></p>` : nothing}
       ${r.diagnostics?.manual_mode ? html`<p class="notice notice-warning">${icon("warning", 20)}<span><strong>Manual control — automatic lighting paused.</strong> Main Mood is Manual. Choose another mood to resume.</span></p>` : nothing}
       ${!this.canEdit ? html`<p class="notice" role="status">${icon("info", 20)}<span>Read only: only Home Assistant administrators can change lighting.</span></p>` : nothing}
       ${this.error && !this.dialog ? problemNotice(this.error) : nothing}

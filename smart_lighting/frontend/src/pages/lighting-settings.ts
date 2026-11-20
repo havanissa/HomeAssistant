@@ -92,7 +92,7 @@ export class SlLightingSettings extends LightingElement {
   }
 
   private needsRoom(): TemplateResult {
-    return html`<p class="notice notice-info">${icon("info", 20)}<span>These defaults are shown once a room uses Smart Lighting: enable a room in the <a href="#/rooms">Rooms editor</a>.</span></p>`;
+    return html`<p class="notice notice-info">${icon("info", 20)}<span>These defaults are shown once a room uses Smart Comfort lighting: enable a room in the <a href="#/rooms">Rooms editor</a>.</span></p>`;
   }
 
   // ---------------------------------------------------------------- general
@@ -350,7 +350,7 @@ export class SlLightingSettings extends LightingElement {
         <section class="lp-settings-main" aria-label=${current.title}>
           <h3 class="lp-settings-title">${current.title}</h3>
           ${content}
-          ${this.ref ? nothing : html`<p class="small muted">${plural(m.rooms.length, "room")} use Smart Lighting.</p>`}
+          ${this.ref ? nothing : html`<p class="small muted">${plural(m.rooms.length, "room")} use Smart Comfort lighting.</p>`}
         </section>
       </div>`;
   }

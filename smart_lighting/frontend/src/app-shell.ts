@@ -10,6 +10,8 @@ import { BOTTOM_NAV, leaveWarning, NAV, navigate, routeFromHash, subPath, type N
 import { store } from "./store";
 import { chip, haConnectionInfo, linkInfo, StoreElement } from "./ui";
 
+import "./pages/climate";
+import "./pages/climate-settings";
 import "./pages/curtains";
 import "./pages/curtains-control";
 import "./pages/curtains-window";
@@ -63,6 +65,8 @@ export class SlApp extends StoreElement {
     // Phase A5: a curtain window's editor, the Global Modes / Schedule drafts, and the Predictions settings.
     if (route === "curtains" && sub[0] && sub[0] !== "control") return `curtains/${sub[0]}/${sub[1] ?? ""}`;
     if (route === "predictions" && sub[0] && sub[0] !== "control") return `predictions/${sub[0]}/${sub[1] ?? ""}`;
+    // Phase A7.0: the climate settings hold one draft across their sections.
+    if (route === "climate" && sub[0] === "settings") return "climate/settings";
     return null;
   }
 
@@ -231,6 +235,11 @@ export class SlApp extends StoreElement {
         if (this.sub[0] === "rooms" && this.sub[1])
           return html`<sl-predictions-room .areaId=${this.sub[1]} .tab=${this.sub[2] ?? "forecast"}></sl-predictions-room>`;
         return html`<sl-predictions .tab=${this.sub[0] ?? "house"}></sl-predictions>`;
+      case "climate":
+        // #/climate (overview) · #/climate/rooms · #/climate/rooms/<area_id> · #/climate/settings/<section>.
+        if (this.sub[0] === "settings") return html`<sl-climate-settings .section=${this.sub[1] ?? "general"}></sl-climate-settings>`;
+        if (this.sub[0] === "rooms" && this.sub[1]) return html`<sl-climate-room .areaId=${this.sub[1]}></sl-climate-room>`;
+        return html`<sl-climate .tab=${this.sub[0] === "rooms" ? "rooms" : "overview"}></sl-climate>`;
       default:
         return html`<sl-dashboard></sl-dashboard>`;
     }
@@ -259,8 +268,8 @@ export class SlApp extends StoreElement {
             >
               ${icon(this.railExpanded ? "menu-open" : "menu")}
             </button>
-            <span class="brand-mark">${icon("lightbulb-auto")}</span>
-            <span class="brand-text">Smart Lighting</span>
+            <span class="brand-mark">${icon("home-automation")}</span>
+            <span class="brand-text">Smart Comfort<span class="brand-sub">${overview?.app.subtitle ?? "Intelligent Home Automation"}</span></span>
           </div>
           <nav class="nav" aria-label="Modules">${NAV.map((item) => this.navLink(item))}</nav>
           <div class="sidebar-foot">
@@ -270,7 +279,7 @@ export class SlApp extends StoreElement {
         <div class="scrim" @click=${() => (this.railExpanded = false)}></div>
         <div class="main">
           <header class="topbar">
-            <span class="topbar-mark">${icon("lightbulb-auto", 22)}</span>
+            <span class="topbar-mark">${icon("home-automation", 22)}</span>
             <h1 class="page-title">${active.title}</h1>
             <span class="topbar-status" data-testid="connection-pill" title=${`App link: ${link.label}`}>
               ${chip(ha.tone, ha.label)}

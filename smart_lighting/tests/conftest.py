@@ -131,6 +131,11 @@ class FakeHomeAssistant:
         self.integration_version = "0.6.8"
         self.legacy_options: dict[str, Any] | None = None
         self.service_calls: list[dict[str, Any]] = []
+        # Phase A7.0: extra areas, registry entries and devices a test adds (climate devices, temperature sensors).
+        self.extra_areas: list[dict[str, Any]] = []
+        self.extra_registry: list[dict[str, Any]] = []
+        self.extra_devices: list[dict[str, Any]] = []
+        self.unit_temperature = "°C"
 
     # -- data ---------------------------------------------------------------
     def config(self) -> dict[str, Any]:
@@ -142,7 +147,7 @@ class FakeHomeAssistant:
             "country": "FO",
             "language": "en",
             "currency": "DKK",
-            "unit_system": {"length": "km", "temperature": "°C"},
+            "unit_system": {"length": "km", "temperature": self.unit_temperature},
             "components": ["http", "websocket_api", "smart_occupancy", "light"]
             + (["recorder", "history"] if self.history_components else []),
             "safe_mode": False,
@@ -373,12 +378,12 @@ class FakeHomeAssistant:
             else:
                 await error("not_found", "Integration not found")
         elif kind == "config/entity_registry/list":
-            await result(self.registry())
+            await result(self.registry() + self.extra_registry)
         elif kind == "config/area_registry/list":
             await result([{"area_id": "kamar_nordur", "name": "Kamar Norður"}, {"area_id": "stova", "name": "Stova"},
-                          {"area_id": "uti", "name": "Úti"}])
+                          {"area_id": "uti", "name": "Úti"}, *self.extra_areas])
         elif kind == "config/device_registry/list":
-            await result(self.devices())
+            await result(self.devices() + self.extra_devices)
         elif kind == "config/floor_registry/list":
             await result(self.floors)
         elif kind == "config/label_registry/list":

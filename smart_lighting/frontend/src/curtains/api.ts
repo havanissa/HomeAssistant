@@ -176,7 +176,7 @@ export function applyImport(file: unknown, revision: string | null, confirmAutom
 /** Who controls the curtains now, in words (as the integration acknowledges it). */
 export function ownerLabel(acknowledged: string | null | undefined): { app: boolean; label: string } {
   const app = acknowledged === "app" || acknowledged === "resume_pending";
-  return { app, label: app ? "The Smart Lighting App" : "The integration" };
+  return { app, label: app ? "Smart Comfort" : "The integration" };
 }
 
 // ------------------------------------------------------------------ the model (smart_occupancy/curtains/model)

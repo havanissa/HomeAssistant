@@ -89,7 +89,7 @@ class OnboardingService:
         legacy_installed = bool(core.ha and core.ha.integration and core.ha.integration.detected
                                 and companion is not None and companion.state == "absent")
         steps = [
-            {"key": "app", "title": "Install the Smart Lighting App", "done": True, "detail": f"Version {core.app_version}"},
+            {"key": "app", "title": "Install the Smart Comfort App", "done": True, "detail": f"Version {core.app_version}"},
             {"key": "companion", "title": "Install and pair the companion integration",
              "done": bool(companion and companion.trusted), "optional": True,
              "detail": ("Paired" if companion and companion.trusted else "Connected, not paired" if companion and

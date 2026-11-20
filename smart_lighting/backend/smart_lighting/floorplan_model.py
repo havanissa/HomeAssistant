@@ -127,7 +127,7 @@ def migrate(doc: Any) -> tuple[dict[str, Any], list[int]]:
     not be overwritten by this version) and ``invalid_format`` for anything else.
     """
     if not isinstance(doc, dict) or doc.get("format") != FORMAT:
-        raise PlanError("invalid_format", "This is not a Smart Lighting floor plan")
+        raise PlanError("invalid_format", "This is not a Smart Comfort floor plan")
     version = doc.get("version")
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
         raise PlanError("invalid_format", "The floor plan has no valid format version")
@@ -386,7 +386,7 @@ def _floor(value: Any, path: str, seen: set[str]) -> dict[str, Any]:
 def validate(doc: Any) -> dict[str, Any]:
     """A clean copy of a current-version plan, or PlanError. Applies the limits and every reference check."""
     if not isinstance(doc, dict) or doc.get("format") != FORMAT or doc.get("version") != SCHEMA_VERSION:
-        raise PlanError("invalid_format", "This is not a current Smart Lighting floor plan")
+        raise PlanError("invalid_format", "This is not a current Smart Comfort floor plan")
     building = doc.get("building") or {}
     if not isinstance(building, dict):
         raise PlanError("invalid_building", "must be an object", "building")

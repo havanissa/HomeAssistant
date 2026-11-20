@@ -182,10 +182,10 @@ async def ingress(request: web.Request) -> web.StreamResponse:
 
 
 async def panel(request: web.Request) -> web.Response:
-    page = f"""<!doctype html><html><head><meta charset="utf-8"><title>Smart Lighting - Home Assistant</title>
+    page = f"""<!doctype html><html><head><meta charset="utf-8"><title>Smart Comfort - Home Assistant</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>html,body{{margin:0;height:100%;overflow:hidden}}iframe{{border:0;width:100%;height:100%;display:block}}</style></head>
-<body><iframe id="ingress" src="/api/hassio_ingress/{INGRESS_TOKEN}/" title="Smart Lighting" allow="fullscreen"></iframe></body></html>"""
+<body><iframe id="ingress" src="/api/hassio_ingress/{INGRESS_TOKEN}/" title="Smart Comfort" allow="fullscreen"></iframe></body></html>"""
     return web.Response(text=page, content_type="text/html")
 
 

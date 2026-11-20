@@ -33,7 +33,8 @@ def test_only_one_app_config_in_repository() -> None:
 
 
 def test_required_identity() -> None:
-    assert CONFIG["name"] == "Smart Occupancy & Lighting"
+    # Phase A7.0: branded Smart Comfort; the slug is unchanged (installed Apps, /data and backups keep working).
+    assert CONFIG["name"] == "Smart Comfort"
     assert CONFIG["slug"] == "smart_lighting"
     # Supervisor rules (supervisor/apps/const.py RE_SLUG, SLUG_MAX_LENGTH).
     assert re.fullmatch(r"[-_.A-Za-z0-9]+", CONFIG["slug"]) and len(CONFIG["slug"]) <= 60
@@ -46,8 +47,8 @@ def test_required_identity() -> None:
 def test_ingress_panel() -> None:
     assert CONFIG["ingress"] is True
     assert CONFIG["ingress_port"] == DEFAULT_PORT
-    assert CONFIG["panel_title"] == "Smart Lighting"
-    assert CONFIG["panel_icon"] == "mdi:lightbulb-auto"
+    assert CONFIG["panel_title"] == "Smart Comfort"
+    assert CONFIG["panel_icon"] == "mdi:home-automation"
     assert CONFIG.get("panel_admin", True) is True
 
 
@@ -145,6 +146,6 @@ def test_frontend_navigation_matches_modules() -> None:
     assert [k for k, _ in nav_keys] == [m.key for m in MODULES]
     assert [t for _, t in nav_keys] == [
         "Dashboard", "Rooms", "Floor plan", "Presence", "Lighting", "Moods", "Switches", "Curtains", "Predictions",
-        "Diagnostics", "Settings",
+        "Climate", "Diagnostics", "Settings",
     ]
     assert dict(nav_keys) == {m.key: m.title for m in MODULES}

@@ -289,7 +289,7 @@ class CoreConfigStore:
     def import_review(self, document: Any, *, entity_exists: Callable[[str], bool] | None = None) -> dict[str, Any]:
         """What an import would change (room by room), and the entities it references that do not exist."""
         if not isinstance(document, dict) or document.get("format") != EXPORT_FORMAT:
-            raise CoreConfigError("invalid_import", "This is not a Smart Lighting core configuration export")
+            raise CoreConfigError("invalid_import", "This is not a Smart Comfort core configuration export")
         options = validate_options(document.get("options"))
         current = self.options or {}
         changes = []

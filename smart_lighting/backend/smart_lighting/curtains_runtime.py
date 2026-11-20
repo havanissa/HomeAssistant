@@ -732,7 +732,7 @@ class CurtainRuntime:
         from smart_occupancy.curtains.config import CurtainConfig  # noqa: PLC0415
 
         if not isinstance(doc, dict) or doc.get("schema") != EXPORT_SCHEMA or not isinstance(doc.get("config"), dict):
-            raise CurtainsError("invalid_export", "This is not a Smart Lighting curtain export", 400)
+            raise CurtainsError("invalid_export", "This is not a Smart Comfort curtain export", 400)
         try:
             incoming = CurtainConfig.from_dict(doc["config"])
         except (TypeError, ValueError, KeyError, AttributeError) as err:

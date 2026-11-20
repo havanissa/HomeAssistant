@@ -5,8 +5,8 @@ import "../predictions/predictions.css";
 
 import { html, nothing, type PropertyValues, type TemplateResult } from "lit";
 
+import { download } from "../rooms/model";
 import { icon } from "../icons";
-import { apiUrl } from "../store";
 import { setLeaveGuard } from "../router";
 import { chip, kv, pageHeader } from "../ui";
 import { haTime } from "../presence/components";
@@ -357,7 +357,7 @@ export class SlPredictions extends PredictionsElement {
         <section class="card"><header class="card-head">${icon("export")}<h3>Export and import</h3></header>
           <p class="muted small">The learned days and settings as a file. Importing replaces the learned days (a backup is kept); it is possible only while the App produces the forecasts.</p>
           <div class="pr-actions">
-            <a class="btn ${this.canEdit ? "" : "disabled"}" href=${apiUrl("api/predictions/export")} download data-testid="predictions-export" aria-disabled=${this.canEdit ? "false" : "true"} @click=${(e: Event) => { if (!this.canEdit) e.preventDefault(); }}>${icon("download", 18)}Export learned data</a>
+            <button type="button" class="btn" data-testid="predictions-export" ?disabled=${!this.canEdit} @click=${() => download("api/predictions/export")}>${icon("download", 18)}Export learned data</button>
             <label class="btn file-btn ${d ? "disabled" : ""}" data-testid="predictions-import">${icon("file-upload", 18)}Import a file…<input type="file" accept="application/json,.json" ?disabled=${d} @change=${(e: Event) => void this.chooseImport(e)} /></label>
           </div>
         </section>

@@ -17,6 +17,7 @@ export const NAV: NavItem[] = [
   { key: "switches", title: "Switches", icon: "light-switch" },
   { key: "curtains", title: "Curtains", icon: "curtains" },
   { key: "predictions", title: "Predictions", icon: "crystal-ball" },
+  { key: "climate", title: "Climate", icon: "home-thermometer" },
   { key: "diagnostics", title: "Diagnostics", icon: "stethoscope" },
   { key: "settings", title: "Settings", icon: "cog" },
 ];

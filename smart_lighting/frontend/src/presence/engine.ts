@@ -134,9 +134,9 @@ export interface EngineStatus {
 export function ownerInfo(state: string | null | undefined): { label: string; tone: CheckLevel | "neutral"; app: boolean } {
   switch (state) {
     case "app":
-      return { label: "Smart Lighting App", tone: "ok", app: true };
+      return { label: "Smart Comfort", tone: "ok", app: true };
     case "resume_pending":
-      return { label: "Smart Lighting App (reconnecting after a restart)", tone: "warning", app: true };
+      return { label: "Smart Comfort (reconnecting after a restart)", tone: "warning", app: true };
     case "integration":
       return { label: "Smart Occupancy integration", tone: "info", app: false };
     default:

@@ -167,7 +167,7 @@ def ui_handover(frame: Any, page: Any) -> None:
     check("handover needs the confirmation box", confirm.is_disabled())
     dialog.locator("[data-testid=engine-understood]").check()
     confirm.click()
-    expect(frame.locator("[data-testid=engine-owner] .engine-owner")).to_contain_text("Smart Lighting App", timeout=20000)
+    expect(frame.locator("[data-testid=engine-owner] .engine-owner")).to_contain_text("Smart Comfort", timeout=20000)
 
 
 def ui_release(frame: Any, page: Any) -> None:

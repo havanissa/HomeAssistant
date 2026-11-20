@@ -43,6 +43,19 @@ existing zone commands (detection keys only), so there is still one zone
 record (`zones.ZoneConfig` in the lighting store) and one zone engine
 (`zone_runtime.ZoneManager`). Design and limits: `docs/A6.2-zones-inspector-delays.md`.
 
+Phase A7.0 (App 0.10.0, *Smart Comfort*) adds the Climate module, App-only as
+well: `climate_model.py` (pure rules: configuration schema, units, discovery,
+reading quality), `climate_observations.py` (the observation store:
+append-only daily JSONL, coverage, gaps, Recorder rows, chart series) and
+`climate.py` (`ClimateService`: storage, discovery, live views, the recorder on
+Home Assistant's state stream, the Recorder gap fill, renames); routes
+`/api/climate/...`, frontend `pages/climate*.ts` and `src/climate/`. It sends
+only read commands. Tests: `tests/test_climate.py`; e2e `tests/e2e/a7_checks.py`
+(phases `all`, `restart-check`, `app-outage`; run after `system_checks.py
+--phase fresh`). Design and the interfaces for A7.1-A7.3:
+`docs/A7-climate-architecture.md`. The product name changed to Smart Comfort;
+the slug, the domain and every technical identifier did not.
+
 The one file that exists twice is the companion protocol:
 `custom_components/smart_occupancy/protocol.py` (the source) and
 `backend/smart_lighting/companion_protocol.py` (the App's copy, because the

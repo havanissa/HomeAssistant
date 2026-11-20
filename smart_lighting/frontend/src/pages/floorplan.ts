@@ -1186,7 +1186,7 @@ export class SlFloorplan extends StoreElement {
           tone: problem ? "problem" : room.area_id ? "linked" : "unlinked",
           title,
           subtitle: !room.area_id ? "Not linked" : !areaKnown ? "Area deleted in Home Assistant" : room.name !== this.areaName(room.area_id) ? `Area: ${this.areaName(room.area_id)}` : "Linked",
-          detail: room.area_id && areaKnown ? (cfg?.enabled ? "Observed by Smart Occupancy" : "Not observed by Smart Occupancy") : null,
+          detail: room.area_id && areaKnown ? (cfg?.enabled ? "Observed by Smart Comfort" : "Not observed by Smart Comfort") : null,
         });
       } else {
         const l = roomLive(areaKnown ? room.area_id : null, this.ctx, store.liveStates);
@@ -1485,11 +1485,11 @@ export class SlFloorplan extends StoreElement {
             : s.areas.length < 2
               ? html`<p class="muted small">Link both rooms to Home Assistant areas to use this.</p>`
               : !s.changes.length && !s.unobserved.length
-                ? html`<p class="small tone-ok">${icon("ok", 16)} Already adjacent in Smart Occupancy.</p>`
+                ? html`<p class="small tone-ok">${icon("ok", 16)} Already adjacent in Smart Comfort.</p>`
                 : html`<div class="row-actions">${s.changes.map((c) => html`<button type="button" class="btn btn-primary" data-review-adjacent=${`${c.area_id}:${c.add}`} ?disabled=${!writable}
                       title=${writable ? "" : "The integration is not running or cannot be written"} @click=${() => this.openRoomsEditor(c.area_id, "presence", { adjacent: c.add })}>
                       ${icon("eye", 16)}Review: ${this.areaName(c.area_id)} → ${this.areaName(c.add)}</button>`)}</div>
-                  ${s.unobserved.length ? html`<p class="muted small">${s.unobserved.map((a) => this.areaName(a)).join(", ")} ${s.unobserved.length === 1 ? "is" : "are"} not observed by Smart Occupancy, so adjacency is not used there.</p>` : nothing}`}
+                  ${s.unobserved.length ? html`<p class="muted small">${s.unobserved.map((a) => this.areaName(a)).join(", ")} ${s.unobserved.length === 1 ? "is" : "are"} not observed by Smart Comfort, so adjacency is not used there.</p>` : nothing}`}
           <div class="row-actions">
             ${s.rooms.length ? html`<button type="button" class="btn" @click=${() => (this.floorId = s.floor_id, this.select({ kind: "room", id: s.rooms[0] }))}>${icon("eye", 16)}Show</button>` : nothing}
             <button type="button" class="btn" ?disabled=${!this.writable()} @click=${() => this.plan && this.applyPlan({ ...this.plan, dismissed: dismissed.has(s.key) ? this.plan.dismissed.filter((k) => k !== s.key) : [...this.plan.dismissed, s.key] }, dismissed.has(s.key) ? "Restore suggestion" : "Dismiss suggestion")}>
@@ -1736,7 +1736,7 @@ export class SlFloorplan extends StoreElement {
   private presenceRoomSection(areaId: string | null): unknown {
     if (!this.presenceOn() || !areaId) return nothing;
     const pr = this.presenceData?.rooms.find((r) => r.area_id === areaId);
-    if (!pr) return html`<section class="inspector-section" data-testid="fp-room-presence"><h4>Presence</h4><p class="muted small">This area has no room configuration in Smart Occupancy.</p>
+    if (!pr) return html`<section class="inspector-section" data-testid="fp-room-presence"><h4>Presence</h4><p class="muted small">This area has no room configuration in Smart Comfort.</p>
       <a class="btn" href=${`#/rooms/${encodeURIComponent(areaId)}/presence`}>${icon("floor-plan", 16)}Set it up in Rooms</a></section>`;
     const cd = countdown(pr, this.presenceOffset);
     const radar = pr.zones.filter((z) => z.detection === "radar" && z.radar);
@@ -1898,7 +1898,7 @@ export class SlFloorplan extends StoreElement {
           r.area_name = null;
         })}>${icon("link-off", 16)}Unlink this part</button>` : nothing}
         ${room.area_id && known
-          ? html`<p class="small">${cfg?.configured ? (cfg.enabled ? chip("ok", "Observed by Smart Occupancy") : chip("pending", "Configured, not observed")) : chip("neutral", "Not configured in Smart Occupancy")}
+          ? html`<p class="small">${cfg?.configured ? (cfg.enabled ? chip("ok", "Observed by Smart Comfort") : chip("pending", "Configured, not observed")) : chip("neutral", "Not configured in Smart Comfort")}
               ${cfg?.lighting ? chip(cfg.lighting === "automatic" ? "info" : "neutral", cfg.lighting === "automatic" ? "Lighting: Automatic" : "Lighting: Observing") : nothing}</p>
             <div class="row-actions"><button type="button" class="btn" data-testid="fp-open-room" @click=${() => this.openRoomsEditor(room.area_id!, "overview")}>${icon("pencil", 16)}Open in the Rooms editor</button></div>`
           : nothing}

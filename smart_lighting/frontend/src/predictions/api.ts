@@ -431,5 +431,5 @@ export const applyImport = (file: unknown, revision: string | null): Promise<{ a
 /** Who produces the forecasts now, in words (as the integration acknowledges it). */
 export function ownerLabel(acknowledged: string | null | undefined): { app: boolean; label: string } {
   const app = acknowledged === "app" || acknowledged === "resume_pending";
-  return { app, label: app ? "The Smart Lighting App" : "The integration" };
+  return { app, label: app ? "Smart Comfort" : "The integration" };
 }

@@ -353,6 +353,42 @@ export async function postRooms<T>(path: string, body: unknown): Promise<T> {
   return parse<T>(response);
 }
 
+/** A GET that needs an administrator (the backend checks the CSRF header, so a plain link cannot be used). */
+export async function getAdmin<T>(path: string): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(path), { cache: "no-store", credentials: "same-origin", headers: { "X-Smart-Lighting": "1" } });
+  } catch (err) {
+    throw new ApiError(`The App cannot be reached (${String(err)})`, "network", 0);
+  }
+  return parse<T>(response);
+}
+
+/** Download an administrator-only export (fetched with the CSRF header) under the file name the backend gives. */
+export async function downloadApi(path: string): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(apiUrl(path), { cache: "no-store", credentials: "same-origin", headers: { "X-Smart-Lighting": "1" } });
+  } catch (err) {
+    throw new ApiError(`The App cannot be reached (${String(err)})`, "network", 0);
+  }
+  if (!response.ok) await parse(response);
+  const name = /filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") ?? "")?.[1] ?? "smart-comfort-export.json";
+  const url = URL.createObjectURL(await response.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/** For an export button: download, or say why it failed. */
+export function download(path: string): void {
+  downloadApi(path).catch((err: unknown) => window.alert(`The export failed: ${err instanceof Error ? err.message : String(err)}`));
+}
+
 export function downloadJson(data: unknown, filename: string): void {
   const blob = new Blob([JSON.stringify(data, null, 1)], { type: "application/json" });
   const url = URL.createObjectURL(blob);

@@ -1,4 +1,4 @@
-# Smart Occupancy & Lighting App.
+# Smart Comfort App (formerly Smart Occupancy & Lighting; slug smart_lighting).
 # Built on the device by the Supervisor (config.yaml has no `image:`).
 # Since Supervisor 2026.04 the base image must be named here explicitly;
 # it is pinned for reproducible builds.
@@ -24,8 +24,8 @@ RUN chmod a+x /etc/s6-overlay/s6-rc.d/smart-lighting/run \
               /etc/s6-overlay/s6-rc.d/smart-lighting/finish
 
 LABEL \
-    io.hass.name="Smart Occupancy & Lighting" \
-    io.hass.description="Web interface for Smart Occupancy & Lighting" \
+    io.hass.name="Smart Comfort" \
+    io.hass.description="Smart Comfort: intelligent home automation" \
     io.hass.url="https://github.com/havanissa/HomeAssistant/tree/main/smart_lighting" \
     io.hass.type="app" \
     io.hass.version="${BUILD_VERSION}" \

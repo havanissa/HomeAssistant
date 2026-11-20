@@ -81,7 +81,7 @@ def test_integration_report_ignores_other_domains() -> None:
 
 def test_modules_and_migration() -> None:
     keys = [m.key for m in MODULES]
-    assert len(keys) == len(set(keys)) == 11
+    assert len(keys) == len(set(keys)) == 12
     features = [m for m in MODULES if m.kind == "feature"]
     assert [m.key for m in features] == ["rooms", "presence", "lighting", "moods", "switches", "curtains", "predictions"]
     # Phases A2, A3.1/A3.2, A4 and A5: every feature module has its interface in the App.
@@ -94,6 +94,10 @@ def test_modules_and_migration() -> None:
     tools = [m for m in MODULES if m.kind == "tool"]
     assert [(m.key, m.status, m.controlled_by, m.automation_owner) for m in tools] == [
         ("floorplan", AVAILABLE, None, None)]
+    # Phase A7.0: Climate is native to the App (never in the integration): no migration status, observing only.
+    native = [m for m in MODULES if m.kind == "native"]
+    assert [(m.key, m.status, m.controlled_by, m.automation_owner, m.phase) for m in native] == [
+        ("climate", AVAILABLE, None, None, "A7.0")]
     m = migration()
     assert m["current_phase"] == "A6"
     assert m["modules_migrated"] == 0 and m["percent"] == 0  # by default no automation has moved (occupancy too)
@@ -146,7 +150,7 @@ def test_one_system_in_control_per_module() -> None:
     assert (presence.gui_owner, presence.config_source, presence.automation_owner) == (APP, INTEGRATION, INTEGRATION)
     assert {m.gui_owner for m in features if m.key in ("curtains", "predictions")} == {APP}
     assert {m.gui_owner for m in features if m.key in ("lighting", "moods", "switches")} == {APP}
-    assert all(m.controlled_by is None for m in MODULES if m.kind in ("foundation", "tool"))
+    assert all(m.controlled_by is None for m in MODULES if m.kind in ("foundation", "tool", "native"))
     m = migration()
     assert m["controlled_by_integration"] == 7 and m["controlled_by_app"] == 0
     assert all(i["controlled_by"] in (INTEGRATION, APP) for i in m["items"][1:])

@@ -1,4 +1,4 @@
-"""Smart Occupancy & Lighting App backend (Phase A1: read-only foundation)."""
+"""Smart Comfort App backend (formerly Smart Occupancy & Lighting): web interface, engines, climate observation."""
 
 from .const import APP_VERSION
 

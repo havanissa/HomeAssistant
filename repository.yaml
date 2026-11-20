@@ -2,6 +2,6 @@
 # Lets this GitHub repository be added under Settings -> Apps -> App store ->
 # Repositories. It sits alongside the HACS integration (custom_components/),
 # which is not affected by it.
-name: Smart Occupancy & Lighting Apps
+name: Smart Comfort Apps
 url: https://github.com/havanissa/HomeAssistant
 maintainer: havanissa
