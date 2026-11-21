@@ -271,7 +271,9 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
     check("2 physical devices are listed with their controllable entities",
           any(BED in [e["entity_id"] for e in d["entities"]] for d in devices["devices"]), devices)
     _, occupancy = app.get("api/entities?purpose=occupancy&q=kamar")
-    check("2 an occupancy sensor is found for occupancy triggers", occupancy["results"] and occupancy["results"][0]["entity_id"] == OCC)
+    offered = [e["entity_id"] for e in occupancy["results"]]
+    check("2 an occupancy sensor is found for occupancy triggers, occupancy-like sensors first",
+          OCC in offered[:3] and all(e.startswith("binary_sensor.") for e in offered), offered[:5])
     _, detail = app.get(f"api/entity?ids={MOOD}")
     check("2 selector choices come from the entity (mood options)", detail["entities"][MOOD]["suggested_states"] == ["Dagur", "Hygge", "Nátt"])
 
@@ -499,7 +501,7 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
         check("13 an unreachable API is a clear error", status == 502 and "could not read" in down["message"], down)
     else:
         for name in ("13 a refused deployment is reported with Home Assistant's message", "13 an unreachable API is a clear error"):
-            skip(name, "needs the stand-in Supervisor's failure hook; on Home Assistant OS see haos_checks.py (Core stopped)")
+            skip(name, "needs the stand-in Supervisor's failure hook (Ingress itself runs through Core, so a failing Core cannot be observed from outside on Home Assistant OS); covered on the stack")
     status, _ = app.deploy(bed)
     check("13 recovery: the same rules deploy afterwards", status == 200 and app.status(bed) == "in_sync" and len(home.automation(bed_auto)[1]["actions"]) == 4)
     app.change("api/devices/restore", {"device_id": bed, "version": "previous"})

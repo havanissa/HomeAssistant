@@ -41,6 +41,10 @@ FAST = {"correlation_window": 5, "exit_confirmation": 20, "inactivity_timeout": 
         "trigger_stuck_after": 1800, "presence_stuck_after": 0, "startup_hold": 15}
 
 
+class Stuck(Exception):
+    """The room did not reach the state the next step needs."""
+
+
 class Sod:
     """Smart Occupancy Detection's own interface through Ingress (only to shorten and restore its timing)."""
 
@@ -63,6 +67,16 @@ class Sod:
         before = settings["config"]["timing"] if "config" in settings else settings["timing"]
         status, review = self.call("api/timing/review", {"timing": timing})
         status, saved = self.call("api/timing/save", {"timing": timing, "expected_revision": review["revision"]})
+        assert status == 200, saved
+        return before
+
+    def room_timing(self, area_id: str, timing: dict[str, int]) -> dict[str, int]:
+        """Replace the room's own timing overrides (they win over the global timing). Returns the previous ones."""
+        _, view = self.call(f"api/rooms/{area_id}")
+        config = view["config"]
+        before = dict(config.get("timing") or {})
+        status, saved = self.call("api/rooms/save", {"area_id": area_id, "room": {**config, "timing": timing},
+                                                     "expected_revision": view["revision"]})
         assert status == 200, saved
         return before
 
@@ -108,12 +122,15 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
     other = "binary_sensor.sod_stova_occupied"
     app, sod = App(), Sod()
 
-    def become(on: bool, timeout: float = 120) -> float | None:
+    def become(on: bool, timeout: float = 150) -> float:
         """Drive the room's sensors and wait for Smart Occupancy Detection's decision."""
         set_motion(on)
         if not on:
             service("input_boolean.turn_off", "input_boolean.nobara_pc")
-        return seconds_until(occ, "on" if on else "off", timeout)
+        took = seconds_until(occ, "on" if on else "off", timeout)
+        if took is None:  # everything after this would test nothing
+            raise Stuck(f"Smart Occupancy Detection did not report the room {'occupied' if on else 'vacant'} within {timeout:.0f} s: {state(occ)}")
+        return took
 
     # ------------------------------------------------- the real thing is there
     info = haos.sup(f"/addons/{SOD_SLUG}/info")
@@ -125,10 +142,15 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
     check("S0 the App is paired and publishing", connected["state"] == "on" and connected["attributes"].get("paired") is True, connected)
     note("S0 versions", f"Smart Occupancy Detection {info['version']}, Automation Builder {haos.sup(f'/addons/{haos.SLUG}/info')['version']}, Core {haos.sup('/core/info')['version']}")
     original_timing = sod.timing(FAST)
+    original_room = sod.room_timing(args.room, {})
     try:
         return scenario(app, args, occ, other, become)
+    except Stuck as err:
+        check("the scenario could not go on", False, err)
+        return 1
     finally:
         try:
+            sod.room_timing(args.room, original_room)
             sod.timing(original_timing)
             print("Smart Occupancy Detection's timing was put back", flush=True)
         except Exception as err:  # noqa: BLE001
@@ -142,8 +164,8 @@ def scenario(app: App, args: Any, occ: str, other: str, become: Any) -> int:  # 
     check("S1 the occupancy picker offers Smart Occupancy Detection's entity (as any other binary sensor)", occ in [e["entity_id"] for e in found["results"]], [e["entity_id"] for e in found["results"]][:6])
     drop(False)
     service("input_number.set_value", "input_number.test_lux", value=40)
-    left = become(False)
-    check("S1 the room is vacant to begin with (decided by Smart Occupancy Detection)", left is not None, state(occ))
+    become(False, 300)
+    check("S1 the room is vacant to begin with (decided by Smart Occupancy Detection)", state(occ)["state"] == "off", state(occ))
     service("light.turn_off", LAMP)
     status, created = app.change("api/devices/create", {"name": "SOD lamp", "targets": [LAMP]})
     device_id = created["device_id"]
@@ -164,8 +186,9 @@ def scenario(app: App, args: Any, occ: str, other: str, become: Any) -> int:  # 
     view = app.device(device_id)
     config_yaml = view["yaml"]
     check("S1 rechecks are generated for the two occupancy rules only", config_yaml.count("alias: 'Recheck: ") == 2 and "Recheck: No occupancy involved" not in config_yaml)
+    flat = " ".join(config_yaml.replace("''", "'").split())
     check("S1 Automation Builder contains no occupancy logic: the automation only reads the entity's state and “fresh”",
-          f"state_attr('{occ}', 'fresh')" in config_yaml and "smart_occupancy" not in config_yaml.replace(occ, ""))
+          f"state_attr('{occ}', 'fresh') != false" in flat and "confidence" not in flat and "possible_" not in flat, flat[:300])
     status, deployed = app.deploy(device_id)
     deployed_at = time.monotonic()
     check("S1 one native automation for the three rules is deployed", status == 200 and deployed["deployed"] and len(view["live"]["automations"]) == 1, deployed)
@@ -215,7 +238,7 @@ def scenario(app: App, args: Any, occ: str, other: str, become: Any) -> int:  # 
     drop(False)
     took = seconds_until(LAMP, "on", 20)
     total = None if took is None else time.monotonic() - t0
-    check("S4 lost through the 2-second check; the 15-second recheck turned the lamp on", still_off and total is not None and 10 <= total <= 22, total)
+    check("S4 lost through the 2-second check; the 15-second recheck turned the lamp on", still_off and total is not None and 10 <= total <= 22, (still_off, total))
     become(False, 150)
     wait_state(LAMP, "off", 5)
     # periodic reconciliation: down through both rechecks
@@ -226,7 +249,7 @@ def scenario(app: App, args: Any, occ: str, other: str, become: Any) -> int:  # 
     still_off = state(LAMP)["state"] == "off"
     drop(False)
     took = seconds_until(LAMP, "on", 75)
-    check("S5 lost through both rechecks; the periodic reconciliation (every minute) turned the lamp on", still_off and took is not None, took)
+    check("S5 lost through both rechecks; the periodic reconciliation (every minute) turned the lamp on", still_off and took is not None, (still_off, took))
     # manual intervention: a person switches the lamp off in the occupied room
     time.sleep(2)
     service("light.turn_off", LAMP)

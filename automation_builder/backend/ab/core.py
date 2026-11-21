@@ -201,7 +201,7 @@ class AppCore:
                     else {"status": "off", "text": "Disabled, not in Home Assistant"})
         if not wanted:
             return {"status": "pending", "text": "Disabled here, still running in Home Assistant until you deploy"}
-        strip = lambda r: {k: v for k, v in r.items() if k not in ("name", "imported_from")}  # noqa: E731
+        strip = lambda r: {k: v for k, v in r.items() if k != "imported_from"}  # noqa: E731
         if strip(deployed) != strip(rule):
             return {"status": "pending", "text": "Changed since the last deployment"}
         home = next((a for a in analysis["automations"] if rule["id"] in a["rule_ids"]), None)
@@ -429,7 +429,11 @@ class AppCore:
         for device in clean["devices"].values():  # a confirmation belongs to a conflict that still exists
             keys = {c["key"] for c in conflict_check.analyse(device)}
             device["acknowledged"] = [k for k in device["acknowledged"] if k in keys]
-        return self.store.save(clean, expected_revision=expected_revision, reason=reason, by=by)
+        saved = self.store.save(clean, expected_revision=expected_revision, reason=reason, by=by)
+        keep = {r["id"] for d in clean["devices"].values() for r in d["rules"]} | {
+            r["id"] for record in self.deploys.records.values() for r in (record.get("device") or {}).get("rules", [])}
+        self.observer.stats.forget(keep)  # observations of rules that exist nowhere anymore
+        return saved
 
     def _check_targets(self, targets: Any, index: Index, own_device: str | None = None) -> None:
         if not isinstance(targets, list):

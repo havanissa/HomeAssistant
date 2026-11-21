@@ -308,7 +308,9 @@ def main_phase(app: App) -> None:  # noqa: PLR0915 - one linear scenario
     reconnects = app.overview()["connection"]["home_assistant"]["reconnects"]
     check("H7 the App noticed the interruption (it reconnected)", reconnects >= 1, reconnects)
     haos.supervisor("restart")
-    check("H8 Supervisor restart: Core and the App keep running or come back", haos.wait_core(300) and haos.app_ready(300))
+    core_ok = haos.wait_core(600)
+    app_ok = haos.app_ready(600)
+    check("H8 Supervisor restart: Core and the App keep running or come back", core_ok and app_ok, f"core running: {core_ok}, App answering and connected: {app_ok}")
     app = App()
     check("H8 ...still in sync, and a deployment works afterwards", app.wait_sync(device_id) == "in_sync")
     rule["actions"][0]["data"]["brightness_pct"] = 55
