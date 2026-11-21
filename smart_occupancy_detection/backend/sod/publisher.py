@@ -31,7 +31,9 @@ from pathlib import Path
 import secrets
 from typing import Any
 
-from . import protocol as P
+from collections import deque
+
+from . import compat, protocol as P
 from .ha import COMPANION_SUBSCRIPTION, HomeAssistantClient, HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
@@ -76,8 +78,14 @@ class CompanionLink:
         self.last_published: dict[str, Any] | None = None
         self.last_publish_at: str | None = None
         self.last_error: str | None = None
-        self.counters = {"publishes": 0, "heartbeats": 0, "refused": 0, "claims": 0}
+        self.counters = {"publishes": 0, "heartbeats": 0, "refused": 0, "claims": 0, "auto_pairs": 0}
+        self.last_ok_at: str | None = None  # the last message the companion accepted
+        self.errors: deque[dict[str, Any]] = deque(maxlen=20)
+        self.companion_status: dict[str, Any] = {}
+        self.compatibility: dict[str, Any] = {"level": "unknown", "message": None}
+        self._status_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self._pair_lock = asyncio.Lock()  # pair, automatic pair and unpair never overlap
         self._publish_handle: asyncio.TimerHandle | None = None
         self._heartbeat: asyncio.Task[None] | None = None
         self._retry: asyncio.TimerHandle | None = None
@@ -131,6 +139,8 @@ class CompanionLink:
                 handle.cancel()
         if self._heartbeat:
             self._heartbeat.cancel()
+        if self._status_task:
+            self._status_task.cancel()
         for task in list(self._tasks):
             task.cancel()
         if self.lease_token and self.session_id and self.ha.connected:
@@ -141,7 +151,17 @@ class CompanionLink:
     def add_listener(self, listener: Callable[[], None]) -> None:
         self._listeners.append(listener)
 
+    def _error(self, code: str, message: str) -> None:
+        self.last_error = f"{code}: {message}"
+        self.errors.appendleft({"at": _now(), "code": code, "message": message[:300]})
+
+    def _ok(self) -> None:
+        self.last_ok_at = _now()
+
     def _set(self, state: str, detail: str | None = None) -> None:
+        if state in ("error", "not_installed", "not_set_up", "incompatible", "busy") and \
+                (state, detail) != (self.state, self.detail):
+            self._error(state, detail or state)
         if (state, detail) != (self.state, self.detail):
             self.state, self.detail = state, detail
             for listener in list(self._listeners):
@@ -195,7 +215,7 @@ class CompanionLink:
             if self.session_id is not None or not self.ha.connected or self._stopping:
                 return
             try:
-                await self.ha.command("manifest/get", integration=P.DOMAIN)
+                manifest = await self.ha.command("manifest/get", integration=P.DOMAIN) or {}
             except HomeAssistantError:
                 self._set("not_installed", "The Smart Occupancy Detection integration is not installed in Home "
                                            "Assistant.")
@@ -206,7 +226,7 @@ class CompanionLink:
                 self._retry_later()
                 return
             try:
-                await self.ha.command(f"{P.DOMAIN}/status")
+                status = await self.ha.command(f"{P.DOMAIN}/status") or {}
             except HomeAssistantError as err:
                 # Its commands exist once its config entry is set up ("unknown_command" before; "not_loaded" while
                 # the entry is not loaded).
@@ -217,6 +237,12 @@ class CompanionLink:
                 return
             except (ConnectionError, TimeoutError) as err:
                 self._set("waiting", str(err) or type(err).__name__)
+                self._retry_later()
+                return
+            self.companion_status = dict(status)
+            self.compatibility = compat.check(status.get("version") or manifest.get("version"), status.get("protocol"))
+            if self.compatibility["level"] == "incompatible":
+                self._set("incompatible", self.compatibility["message"])
                 self._retry_later()
                 return
             params: dict[str, Any] = {"protocol": P.PROTOCOL_VERSION, "app_version": self.app_version,
@@ -241,9 +267,20 @@ class CompanionLink:
             self.session_id = event.get("session_id") if isinstance(event.get("session_id"), str) else None
             self.paired = bool(event.get("paired"))
             self.trusted = bool(event.get("trusted"))
-            self.companion = {k: event.get(k) for k in ("companion_version", "protocol", "epoch", "paired_at")}
+            self.companion = {k: event.get(k) for k in ("companion_version", "protocol", "epoch", "paired_at",
+                                                        "fresh_store")}
             if self.trusted:
                 self._spawn(self.claim())
+            elif not self.paired and self.token and event.get("fresh_store") is True:
+                # This App was paired before and the integration was removed and added again (its store has never
+                # been paired): pair again by itself. Never after an explicit unpair or a replacement (the store
+                # remembers those), and never with an integration that cannot tell (0.1.0).
+                self._spawn(self._auto_pair())
+            elif self.paired and self.token:
+                # Another App installation was paired since: this one was replaced and forgets its token.
+                self._spawn(asyncio.to_thread(self._store_token, None))
+                self._set("pair_mismatch", "The companion is paired with another App installation (this one was "
+                                           "replaced). Pair again in Settings to publish from this App.")
             elif self.paired:
                 self._set("pair_mismatch", "The companion is paired with another App installation (or this App "
                                            "was reinstalled). Pair again in Settings to publish from this App.")
@@ -257,6 +294,8 @@ class CompanionLink:
             # Another session was paired or claimed: this one may no longer publish.
             self.lease_token = self.epoch = None
             self.trusted = bool(event.get("trusted", False))
+            if not self.trusted and self.token:
+                self._spawn(asyncio.to_thread(self._store_token, None))  # replaced by another App: forget the token
             self._set("pair_mismatch" if not self.trusted else "waiting", event.get("detail") or "Publishing was "
                                                                                                   "stopped by the companion.")
             if self.trusted:
@@ -270,14 +309,20 @@ class CompanionLink:
         return {"session_id": self.session_id, "epoch": self.epoch, "lease_token": self.lease_token, "seq": self.seq}
 
     # ------------------------------------------------------------- pairing
-    async def pair(self, *, replace: bool, user_id: str | None) -> dict[str, Any]:
+    async def pair(self, *, replace: bool, user_id: str | None, automatic: bool = False) -> dict[str, Any]:
+        async with self._pair_lock:
+            return await self._pair(replace=replace, user_id=user_id, automatic=automatic)
+
+    async def _pair(self, *, replace: bool, user_id: str | None, automatic: bool) -> dict[str, Any]:
         if self.session_id is None:
             await self._open()
         if self.session_id is None:
             raise LinkError(self.state, self.detail or "The companion integration is not reachable")
         try:
-            result = await self._send("pair", session_id=self.session_id, replace=bool(replace),
-                                      requested_by=user_id)
+            params: dict[str, Any] = {"session_id": self.session_id, "replace": bool(replace), "requested_by": user_id}
+            if automatic:
+                params["automatic"] = True
+            result = await self._send("pair", **params)
         except HomeAssistantError as err:
             raise LinkError(err.code, err.message) from err
         token = (result or {}).get("pairing_token")
@@ -289,20 +334,37 @@ class CompanionLink:
         await self.claim()
         return {"paired": True, "state": self.state}
 
+    async def _auto_pair(self) -> None:
+        try:
+            await self.pair(replace=False, user_id=None, automatic=True)
+        except LinkError as err:
+            self._set("not_paired", f"Pairing again automatically failed ({err}); pair in Settings.")
+            return
+        self.counters["auto_pairs"] += 1
+        _LOGGER.warning("The integration had lost its pairing (removed and added again?): paired again automatically")
+
     async def unpair(self, *, user_id: str | None) -> dict[str, Any]:
-        if self.session_id is not None:
-            try:
-                await self._send("unpair", session_id=self.session_id, requested_by=user_id)
-            except HomeAssistantError as err:
-                raise LinkError(err.code, err.message) from err
-        await asyncio.to_thread(self._store_token, None)
-        self.paired = self.trusted = False
+        """Unpair (when this App is the paired one) and always forget the token here ("Forget pairing")."""
+        async with self._pair_lock:
+            was_trusted, companion_paired = self.trusted, self.paired
+            if self.session_id is not None and self.trusted:
+                try:
+                    await self._send("unpair", session_id=self.session_id, requested_by=user_id)
+                except HomeAssistantError as err:
+                    raise LinkError(err.code, err.message) from err
+            await asyncio.to_thread(self._store_token, None)
+        self.trusted = False
+        self.paired = companion_paired and not was_trusted  # still paired, with another App
         self.lease_token = self.epoch = None
         if self._heartbeat:
             self._heartbeat.cancel()
             self._heartbeat = None
-        self._set("not_paired", "Unpaired: the occupancy entities keep their last state and show that they are not "
-                                "fresh.")
+        if self.paired:
+            self._set("pair_mismatch", "This App forgot its pairing; the companion stays paired with another App "
+                                       "installation.")
+        else:
+            self._set("not_paired", "Unpaired: the occupancy entities keep their last state and show that they are "
+                                    "not fresh.")
         return {"paired": False}
 
     # -------------------------------------------------------------- lease
@@ -317,7 +379,7 @@ class CompanionLink:
         try:
             result = await self._send("claim", session_id=self.session_id)
         except HomeAssistantError as err:
-            self.last_error = f"{err.code}: {err.message}"
+            self._error(err.code, err.message)
             if err.code == P.REJECT_UNKNOWN_SESSION:
                 self._reopen("The companion no longer knows this session")
                 return
@@ -334,6 +396,9 @@ class CompanionLink:
         finally:
             self._claiming = False
         self.epoch, self.lease_token, self.seq = result["epoch"], result["lease_token"], 0
+        self._ok()
+        if self._status_task is None or self._status_task.done():
+            self._status_task = asyncio.get_running_loop().create_task(self._status_loop())
         self.last_published = None
         self.counters["claims"] += 1
         self._set("publishing", None)
@@ -356,7 +421,7 @@ class CompanionLink:
 
     def _lost(self, err: HomeAssistantError) -> None:
         self.counters["refused"] += 1
-        self.last_error = f"{err.code}: {err.message}"
+        self._error(err.code, err.message)
         self.lease_token = self.epoch = None
         self.last_published = None
         _LOGGER.warning("The companion refused a message (%s: %s); claiming again", err.code, err.message)
@@ -403,13 +468,14 @@ class CompanionLink:
                     self._lost(err)
                 else:
                     self.counters["refused"] += 1
-                    self.last_error = f"{err.code}: {err.message}"
+                    self._error(err.code, err.message)
                     _LOGGER.error("The companion refused the snapshot: %s", err)
                 return
             except (ConnectionError, TimeoutError) as err:
                 self.last_error = str(err) or type(err).__name__
                 return
             self.last_published = copy.deepcopy(snapshot)
+            self._ok()
             self.deleted -= set(deleted)
             self.last_publish_at = _now()
             self.counters["publishes"] += 1
@@ -423,13 +489,23 @@ class CompanionLink:
                 try:
                     await self._send("heartbeat", **self._fence())
                     self.counters["heartbeats"] += 1
+                    self._ok()
                 except HomeAssistantError as err:
                     if err.code in P.LOST_CODES or err.code == P.REJECT_SEQUENCE:
                         self._lost(err)
                         return
-                    self.last_error = f"{err.code}: {err.message}"
+                    self._error(err.code, err.message)
                 except (ConnectionError, TimeoutError) as err:
                     self.last_error = str(err) or type(err).__name__
+
+    async def _status_loop(self) -> None:
+        """The companion's own view (its version, freshness, last accepted snapshot), read once a minute."""
+        while self.session_id is not None and not self._stopping:
+            try:
+                self.companion_status = dict(await self.ha.command(f"{P.DOMAIN}/status") or {})
+            except (HomeAssistantError, ConnectionError, TimeoutError):
+                pass
+            await asyncio.sleep(60)
 
     def status(self) -> dict[str, Any]:
         return {
@@ -437,5 +513,9 @@ class CompanionLink:
             "has_token": bool(self.token), "paired_at": self.paired_at, "epoch": self.epoch,
             "publishing": self.lease_token is not None, "last_publish_at": self.last_publish_at,
             "last_error": self.last_error, "companion": self.companion, "counters": dict(self.counters),
+            "last_ok_at": self.last_ok_at, "errors": list(self.errors), "compatibility": self.compatibility,
+            "companion_version": self.companion_status.get("version") or self.companion.get("companion_version"),
+            "companion_view": {k: self.companion_status.get(k) for k in (
+                "fresh", "epoch", "published_at", "lease_until", "rooms", "disabled", "orphaned", "protocol")},
             "instance": self.instance_id[:8],
         }

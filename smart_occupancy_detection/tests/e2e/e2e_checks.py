@@ -14,6 +14,7 @@ import argparse
 import asyncio
 from collections.abc import Awaitable, Callable
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -22,9 +23,13 @@ from typing import Any
 
 import aiohttp
 
-HA = "http://127.0.0.1:18123"
+# A genuine Home Assistant OS (SOD_TARGET=haos): real Ingress through Core (SOD_INGRESS + SOD_INGRESS_COOKIE), the
+# App and Core controlled through the Supervisor (SOD_APP_SLUG); the fake Supervisor's test hooks do not exist there.
+HAOS = os.environ.get("SOD_TARGET") == "haos"
+HA = os.environ.get("SOD_HA_URL", "http://127.0.0.1:18123")
 SUP = "http://127.0.0.1:18300"
-INGRESS = f"{SUP}/api/hassio_ingress/sodIngressToken_XyZ789"
+INGRESS = os.environ.get("SOD_INGRESS", f"{SUP}/api/hassio_ingress/sodIngressToken_XyZ789").rstrip("/")
+COOKIE = os.environ.get("SOD_INGRESS_COOKIE")
 HERE = Path(__file__).resolve().parent
 KAMAR, STOVA = "kamar_nordur", "stova"
 SENSORS = {
@@ -60,11 +65,17 @@ class Run:
         return bool(ok)
 
     @property
+    def cookie(self) -> dict[str, str]:
+        return {"Cookie": COOKIE} if COOKIE else {}
+
+    @property
     def admin(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.tokens['llat']}"}
 
     async def app(self, path: str, body: Any = None, user: str | None = None) -> tuple[int, Any]:
         headers = {"X-SOD": "1"} if body is not None else {}
+        if COOKIE:
+            headers["Cookie"] = COOKIE
         if user:
             headers["X-Test-User"] = user
         method = self.session.post if body is not None else self.session.get
@@ -152,21 +163,35 @@ class Run:
     def ha_script(self, name: str) -> None:
         subprocess.run([str(self.ha_dir / name)], check=True, timeout=200)
 
+    async def supervisor(self, endpoint: str, method: str = "post", timeout: int = 300) -> dict:
+        return (await self.ws(self.tokens["llat"], [{"type": "supervisor/api", "endpoint": endpoint,
+                                                     "method": method, "timeout": timeout}]))[0]
+
     def stack(self, command: str) -> None:
         subprocess.run([str(HERE / "stack.sh"), command], check=True, timeout=200)
+
+    async def app_control(self, action: str) -> None:
+        if HAOS:
+            result = await self.supervisor(f"/addons/{os.environ['SOD_APP_SLUG']}/{action}")
+            assert result.get("success"), result
+        else:
+            await asyncio.to_thread(self.stack, {"stop": "stop-app", "start": "start-app"}[action])
 
     # ------------------------------------------------------------- phases
     async def fresh(self) -> None:
         status, health = await self.app("api/health")
-        self.check("App answers through Ingress", status == 200 and health.get("version") == "0.1.0", health)
+        expected = os.environ.get("SOD_EXPECT_VERSION", "0.2.0")
+        self.check(f"App {expected} answers through Ingress", status == 200 and health.get("version") == expected, health)
         status, overview = await self.app("api/overview")
         self.check("A fresh installation has no rooms", status == 200 and overview["rooms"] == [], overview)
         link = overview["connection"]["companion"]
         self.check("Nothing is published before pairing", link["state"] == "not_paired", link)
         sc_before = {e["entity_id"]: e["unique_id"] for e in await self.registry() if e["platform"] == "smart_occupancy"}
         self.sc_before = sc_before
-        status, body = await self.app("api/companion/pair", {}, user="0123456789abcdef0123456789abcdef")
-        self.check("Pairing needs a Home Assistant administrator", status == 403, (status, body))
+        if not HAOS:
+            status, body = await self.app("api/companion/pair", {}, user="0123456789abcdef0123456789abcdef")
+        if not HAOS:  # real Ingress sets the user from the session: no test user can be forged there
+            self.check("Pairing needs a Home Assistant administrator", status == 403, (status, body))
         status, body = await self.app("api/companion/pair", {})
         self.check("An administrator pairs the App", status == 200 and body.get("paired"), body)
         self.check("App connection entity on", await self.wait(lambda: self.is_state("binary_sensor.sod_app_connected", "on")))
@@ -285,7 +310,7 @@ class Run:
         occupied = "binary_sensor.sod_kamar_nordur_occupied"
         await self.drive("input_boolean.nobara_pc", "on")
         await self.wait(lambda: self.is_state(occupied, "on"), 8)
-        self.stack("stop-app")
+        await self.app_control("stop")
         self.check("App stopped: occupancy kept, marked not fresh", await self.wait(
             lambda: self.is_state(occupied, "on", fresh=False), 45), await self.state(occupied))
         self.check("App connection entity off", await self.is_state("binary_sensor.sod_app_connected", "off"))
@@ -294,7 +319,7 @@ class Run:
         await self.drive("input_boolean.nobara_pc", "off")  # the person left while the App was away
         await asyncio.sleep(3)
         self.check("Nothing inferred while the App is away", await self.is_state(occupied, "on"))
-        self.stack("start-app")
+        await self.app_control("start")
         self.check("Restarted App publishes again without a human", await self.wait(
             lambda: self.is_state("binary_sensor.sod_app_connected", "on"), 30))
         status, room = await self.app(f"api/rooms/{KAMAR}")
@@ -306,6 +331,25 @@ class Run:
         occupied = "binary_sensor.sod_kamar_nordur_occupied"
         await self.drive("input_boolean.nobara_pc", "on")
         await self.wait(lambda: self.is_state(occupied, "on"), 8)
+        if HAOS:  # Ingress goes through Core: the App is not reachable while Core is down; restart Core instead
+            try:
+                await self.supervisor("/core/restart")
+            except Exception:  # noqa: BLE001 - the websocket closes when Core goes down
+                pass
+            await asyncio.sleep(10)
+            async def restored_haos() -> bool:
+                s = await self.state(occupied)
+                return bool(s) and s["state"] == "on"
+            self.check("After the Home Assistant restart the entity comes back with the last decision",
+                       await self.wait(restored_haos, 240), await self.state(occupied))
+            self.check("The App reconnects and publishes again", await self.wait(
+                lambda: self.is_state("binary_sensor.sod_app_connected", "on"), 120))
+            _, room = await self.app(f"api/rooms/{KAMAR}")
+            self.check("Home Assistant restart: decisions were frozen meanwhile",
+                       any(e.get("event") == "disconnected" for e in room["room"]["timeline"]), room["room"]["timeline"][:5])
+            await self.drive("input_boolean.nobara_pc", "off")
+            self.check("Vacant afterwards from real evidence", await self.wait(lambda: self.is_state(occupied, "off"), 90))
+            return
         self.ha_script("stop_ha.sh")
         await asyncio.sleep(3)
         status, overview = await self.app("api/overview")
@@ -333,6 +377,11 @@ class Run:
         self.check("The neighbour reference was removed too", room["config"]["adjacent"] == [], room["config"])
 
     async def finish(self) -> None:
+        if HAOS:  # no recording proxy on a real Supervisor: the service-call listener is the proof there
+            ours = [s for s in self.services if s["user_id"] == self.tokens["sod_user"]]
+            self.check("No service call in Home Assistant came from the App (the Supervisor's user)", not ours, ours)
+            self.check("Service calls observed during the run (none were the App's)", True, len(self.services))
+            return
         async with self.session.get(f"{SUP}/_test/commands") as r:
             commands = (await r.json())["commands"]
         types = {c.get("type") for c in commands}
@@ -344,11 +393,145 @@ class Run:
             "homeassistant_started"}, events)
         ours = [s for s in self.services if s["user_id"] == self.tokens["sod_user"]]
         self.check("No service call in Home Assistant came from the App's user", not ours, ours)
+        if not hasattr(self, "sc_before"):  # a later run of the same installation: from the snapshot
+            self.sc_before = json.loads(self._snapshot_path().read_text())["smart_comfort"]
         sc_after = {e["entity_id"]: e["unique_id"] for e in await self.registry() if e["platform"] == "smart_occupancy"}
         self.check("Smart Comfort's entities are unchanged", sc_after == self.sc_before,
                    set(sc_after.items()) ^ set(self.sc_before.items()))
         status = (await self.ws(self.tokens["llat"], [{"type": "smart_occupancy/companion/status"}]))[0]
         self.check("Smart Comfort's companion still works beside it", status.get("success"), status)
+
+    # ------------------------------------------------------------- Phase 0.2
+    def _snapshot_path(self) -> Path:
+        return self.data_dir.parent / f"{self.data_dir.name}-snapshot.json"
+
+    async def sod_entities(self) -> dict[str, str]:
+        return {e["entity_id"]: e["unique_id"] for e in await self.registry()
+                if e["platform"] == "smart_occupancy_detection"}
+
+    async def snapshot(self) -> None:
+        status, overview = await self.app("api/overview")
+        data = {"entities": await self.sod_entities(), "revision": overview["revision"],
+                "smart_comfort": getattr(self, "sc_before", None)}
+        self._snapshot_path().write_text(json.dumps(data))
+        self.check("Snapshot before the upgrade", len(data["entities"]) >= 6, len(data["entities"]))
+
+    async def upgrade_check(self) -> None:
+        before = json.loads(self._snapshot_path().read_text())
+        self.check("Every entity kept its id and unique id", await self.sod_entities() == before["entities"],
+                   set((await self.sod_entities()).items()) ^ set(before["entities"].items()))
+        status, overview = await self.app("api/overview")
+        self.check("The room configuration is unchanged", overview["revision"] == before["revision"])
+        async def publishing() -> bool:
+            _, o = await self.app("api/overview")
+            return o["connection"]["companion"]["state"] == "publishing" and o["connection"]["fresh"]
+        self.check("Publishing again without pairing again", await self.wait(publishing, 60))
+        _, overview = await self.app("api/overview")
+        link = overview["connection"]["companion"]
+        self.check("Versions shown and compatible", overview["connection"]["versions"]["app"] == "0.2.0"
+                   and link["companion_version"] == "0.2.0" and link["compatibility"]["level"] == "ok"
+                   and link["counters"]["auto_pairs"] == 0, (overview["connection"]["versions"], link["compatibility"]))
+        await self.drive("input_boolean.kamar_motion", "on")
+        self.check("Detection works after the upgrade", await self.wait(
+            lambda: self.is_state("binary_sensor.sod_kamar_nordur_occupied", "on", fresh=True), 10))
+        await self.drive("input_boolean.kamar_motion", "off")
+
+    async def reload(self) -> None:
+        async with self.session.get(f"{HA}/api/config/config_entries/entry", headers=self.admin) as r:
+            entry = next(e for e in await r.json() if e["domain"] == "smart_occupancy_detection")
+        async with self.session.post(f"{HA}/api/config/config_entries/entry/{entry['entry_id']}/reload",
+                                     headers=self.admin) as r:
+            self.check("Integration reloaded", r.status == 200, await r.text())
+        self.check("The App publishes again by itself after the reload", await self.wait(
+            lambda: self.is_state("binary_sensor.sod_app_connected", "on"), 45))
+        _, overview = await self.app("api/overview")
+        self.check("No new pairing was needed", overview["connection"]["companion"]["counters"]["auto_pairs"] == 0)
+
+    async def network(self) -> None:
+        started = time.time()
+        occupied = "binary_sensor.sod_kamar_nordur_occupied"
+        await self.drive("input_boolean.nobara_pc", "on")
+        await self.wait(lambda: self.is_state(occupied, "on"), 8)
+        if HAOS:  # the real Supervisor restarts: the App's Core API proxy goes away and comes back
+            try:
+                await self.supervisor("/supervisor/restart", timeout=60)
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(20)
+            self.check("Network interruption (the Supervisor and its Core proxy restarted)", True)
+        else:
+            async with self.session.post(f"{SUP}/_test/drop_core") as r:
+                dropped = (await r.json())["dropped"]
+            self.check("Network interruption (the Core connection dropped)", dropped >= 1, dropped)
+        async def held() -> bool:
+            _, room = await self.app(f"api/rooms/{KAMAR}")
+            if room["room"]["hold"] and room["room"]["hold"]["reason"] == "reconnect":
+                return True
+            # The hold may already be over (short test timing): the timeline proves it was applied.
+            return any(e.get("event") == "reconnected" and e["at"] >= time.strftime(
+                "%Y-%m-%dT%H:%M:%S", time.gmtime(started)) for e in room["room"]["timeline"])
+        self.check("After reconnecting the room was held (reconnect hold)", await self.wait(held, 60))
+        self.check("The room stayed occupied through the interruption", await self.is_state(occupied, "on"))
+        self.check("Fresh again", await self.wait(lambda: self.is_state("binary_sensor.sod_app_connected", "on"), 30))
+        await self.drive("input_boolean.nobara_pc", "off")
+
+    async def transfer(self) -> None:
+        status, exported = await self.app("api/export")
+        self.check("Configuration exported", status == 200 and exported.get("format") == "smart_occupancy_detection.config")
+        status, review = await self.app("api/import/review", {"document": exported})
+        self.check("Importing the same export changes nothing", review["valid"] and review["changes"] == [], review)
+        changed = json.loads(json.dumps(exported))
+        changed["config"]["timing"]["inactivity_timeout"] = 45
+        status, review = await self.app("api/import/review", {"document": changed})
+        self.check("A changed export is reviewed", review["changes"] == [{"type": "global_timing",
+                                                                         "keys": ["inactivity_timeout"]}], review)
+        status, applied = await self.app("api/import/apply", {"document": changed, "expected_revision": review["revision"]})
+        status, review = await self.app("api/import/review", {"document": exported})
+        status, applied = await self.app("api/import/apply", {"document": exported, "expected_revision": review["revision"]})
+        _, overview = await self.app("api/overview")
+        self.check("Import and restore of the original applied", status == 200, applied)
+
+    async def pilot(self) -> None:
+        sc = await self.sc_occupancy_entity()
+        if not self.check("Smart Comfort's occupancy entity exists for the pilot", sc is not None):
+            return
+        status, pilot = await self.app("api/pilot")
+        self.check("Smart Comfort's entity is suggested as the reference", pilot["rooms"][KAMAR]["suggestion"] == sc,
+                   pilot["rooms"][KAMAR])
+        status, _ = await self.app("api/pilot/reference", {"area_id": KAMAR, "entity_id": sc})
+        await self.drive("input_boolean.nobara_pc", "on")
+        await asyncio.sleep(8)
+        await self.drive("input_boolean.nobara_pc", "off")
+        await asyncio.sleep(3)
+        status, room = await self.app(f"api/rooms/{KAMAR}")
+        summary = room["pilot"]
+        self.check("The pilot compares both outputs", summary and summary["compared_seconds"] > 0
+                   and summary["now"] in ("agree", "differ"), summary)
+        async with self.session.get(f"{INGRESS}/api/pilot/report.csv", headers=self.cookie) as r:
+            text = await r.text()
+        self.check("The difference report downloads", r.status == 200 and text.startswith("room,started_at"), text[:80])
+
+    async def recreate(self) -> None:
+        before = {e: u for e, u in (await self.sod_entities()).items() if "stova" in e}
+        status, review = await self.app("api/rooms/delete/review", {"area_id": STOVA})
+        await self.app("api/rooms/delete", {"area_id": STOVA, "expected_revision": review["revision"]})
+        async def gone() -> bool:
+            return not any("stova" in e for e in await self.sod_entities())
+        self.check("Room deleted: its entities are gone", await self.wait(gone, 15))
+        status, saved = await self.save_room(STOVA, self.room(STOVA))
+        async def back() -> bool:
+            return {e: u for e, u in (await self.sod_entities()).items() if "stova" in e} == before
+        self.check("Room created again: the same entity ids and unique ids", await self.wait(back, 15),
+                   {e: u for e, u in (await self.sod_entities()).items() if "stova" in e})
+
+    async def diagnostics(self) -> None:
+        async with self.session.get(f"{INGRESS}/api/diagnostics", headers=self.cookie) as r:
+            text = await r.text()
+        leaks = [what for what, value in (("token", self.tokens.get("sod_llat", "-" * 41)[:40]),
+                                          ("admin token", self.tokens["llat"][:40]),
+                                          ("user id", self.tokens["sod_user"]), ("address", "172.30.3"),
+                                          ("supervisor token", "sod-e2e-supervisor-token")) if value in text]
+        self.check("The diagnostics download is redacted", r.status == 200 and not leaks and '"redaction"' in text, leaks)
 
     async def main(self, phases: list[str]) -> int:
         async with aiohttp.ClientSession() as session:

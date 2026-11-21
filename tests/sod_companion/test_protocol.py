@@ -134,3 +134,21 @@ async def test_release(hass, app):
     await app.publish({KAMAR: view()})
     await app.ws.call("release", **app.fence())
     assert hass.states.get("binary_sensor.sod_app_connected").state == "off"
+
+
+async def test_the_store_tells_whether_it_was_ever_paired(hass, ws, areas):
+    """A fresh store (the integration added again) lets a previously paired App pair by itself; an unpair is
+    remembered, so it never does after that."""
+    await setup_sod(hass)
+    a = App(await ws())
+    assert (await a.open())["fresh_store"] is True
+    await a.ws.call("pair", session_id=a.session_id, automatic=True)
+    hub = hass.config_entries.async_entries(DOMAIN)[0].runtime_data
+    assert hub.pairing["automatic"] is True
+    await a.ws.call("unpair", session_id=a.session_id)
+    b = App(await ws())
+    assert (await b.open())["fresh_store"] is False
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    c = App(await ws())
+    assert (await c.open())["fresh_store"] is False  # remembered across reloads

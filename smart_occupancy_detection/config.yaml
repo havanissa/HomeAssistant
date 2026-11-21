@@ -1,7 +1,7 @@
 # Home Assistant App configuration: Smart Occupancy Detection.
 # Independent of Smart Comfort (slug smart_lighting): its own slug, /data folder, backups and versions.
 name: Smart Occupancy Detection
-version: "0.1.0"
+version: "0.2.0"
 slug: smart_occupancy_detection
 description: >-
   Room occupancy detection from the sensors you already have (motion, mmWave

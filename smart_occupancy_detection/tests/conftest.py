@@ -56,6 +56,9 @@ class FakeCompanion:
         self.views: dict[str, Any] = {}
         self.disabled: dict[str, str] = {}
         self.publishes = 0
+        self.version = "0.2.0"
+        self.ever_paired = False
+        self.protocol = 1
 
     def session(self, params: dict[str, Any], send: Callable[[dict], None]) -> None:
         session_id = secrets.token_hex(16)
@@ -65,7 +68,8 @@ class FakeCompanion:
         self._trusted = getattr(self, "_trusted", {})
         self._trusted[session_id] = trusted
         send({"type": "hello", "session_id": session_id, "paired": bool(self.pairing_hash), "trusted": trusted,
-              "companion_version": "0.1.0", "protocol": 1, "epoch": self.epoch})
+              "companion_version": self.version, "protocol": 1, "epoch": self.epoch,
+              "fresh_store": not self.ever_paired})
 
     def command(self, kind: str, params: dict[str, Any]) -> Any:
         session_id = params.get("session_id")
@@ -76,6 +80,8 @@ class FakeCompanion:
                 raise HomeAssistantError(P.REJECT_ALREADY_PAIRED, "already paired")
             token = secrets.token_hex(16)
             self.pairing_hash = P.token_hash(token)
+            self.ever_paired = True
+            self.automatic = bool(params.get("automatic"))
             for s in self._trusted:
                 self._trusted[s] = s == session_id
             return {"pairing_token": token}
@@ -187,7 +193,8 @@ class FakeHA:
         if command_type == f"{P.DOMAIN}/status":
             if not self.companion.loaded:
                 raise HomeAssistantError("unknown_command", "Unknown command.")
-            return {"paired": bool(self.companion.pairing_hash)}
+            return {"paired": bool(self.companion.pairing_hash), "version": self.companion.version,
+                    "protocol": self.companion.protocol, "fresh": self.companion.lease is not None}
         if command_type.startswith(P.DOMAIN + "/"):
             return self.companion.command(command_type.split("/", 1)[1], params)
         return None

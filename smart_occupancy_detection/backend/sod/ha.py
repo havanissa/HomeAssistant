@@ -21,7 +21,7 @@ The reconnect, start-up and ping handling are those of Smart Comfort's client
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
 import contextlib
 from datetime import UTC, datetime
@@ -124,6 +124,7 @@ class HomeAssistantClient:
         self.devices: list[dict[str, Any]] = []
         self.entity_registry: list[dict[str, Any]] = []
         self.commands_sent: Counter[str] = Counter()
+        self.history: deque[dict[str, Any]] = deque(maxlen=20)  # connection changes (for diagnostics)
         self.events_total = 0
 
     # ------------------------------------------------------------------ API
@@ -141,7 +142,7 @@ class HomeAssistantClient:
             "state": self.state, "connected": self.connected, "ha_version": self.ha_version,
             "connected_since": self.connected_since, "last_disconnect": self.last_disconnect,
             "last_error": self.last_error, "reconnects": self.reconnects, "latency_ms": self.latency_ms,
-            "events_total": self.events_total,
+            "events_total": self.events_total, "history": list(self.history),
         }
 
     async def start(self) -> None:
@@ -190,6 +191,8 @@ class HomeAssistantClient:
 
     def _set_state(self, state: str, error: str | None = None) -> None:
         changed = state != self.state or error != self.last_error
+        if changed and state in ("connected", "disconnected", "auth_failed"):
+            self.history.appendleft({"at": utcnow_iso(), "state": state, "error": error})
         self.state = state
         if error is not None or state == "connected":
             self.last_error = error

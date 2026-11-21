@@ -25,7 +25,15 @@ case "${1:-}" in
   up)
     : "${HA_URL:?set HA_URL}" "${HA_TOKEN:?set HA_TOKEN}" "${DATA_DIR:?set DATA_DIR}"
     docker rm -f sod-test-app sod-test-supervisor >/dev/null 2>&1 || true
-    docker build -q --build-arg BUILD_VERSION=0.1.0 --build-arg BUILD_ARCH=amd64 -t "$IMAGE" "$APP_DIR" >/dev/null
+    # SOURCE_REF: build the image of an earlier release from git (upgrade tests), else the working tree.
+    if [[ -n "${SOURCE_REF:-}" ]]; then
+      SRC="$(mktemp -d)"
+      git -C "$APP_DIR/.." archive "$SOURCE_REF" smart_occupancy_detection | tar -x -C "$SRC"
+      docker build -q --build-arg BUILD_ARCH=amd64 -t "$IMAGE" "$SRC/smart_occupancy_detection" >/dev/null
+      rm -rf "$SRC"
+    else
+      docker build -q --build-arg BUILD_VERSION=0.2.0 --build-arg BUILD_ARCH=amd64 -t "$IMAGE" "$APP_DIR" >/dev/null
+    fi
     docker network inspect "$NET" >/dev/null 2>&1 \
       || docker network create --driver bridge --subnet 172.30.32.0/23 --gateway 172.30.32.1 "$NET" >/dev/null
     docker run -d --name sod-test-supervisor --network "$NET" --ip 172.30.33.250 --network-alias sod-supervisor \

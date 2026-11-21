@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 APP_NAME: Final = "Smart Occupancy Detection"
-APP_VERSION: Final = "0.1.0"  # must match config.yaml and CHANGELOG.md (checked by the tests)
+APP_VERSION: Final = "0.2.0"  # must match config.yaml and CHANGELOG.md (checked by the tests)
 
 DEFAULT_PORT: Final = 8099
 # Every Ingress request reaches the App from the Supervisor at this address.

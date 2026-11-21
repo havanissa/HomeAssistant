@@ -21,7 +21,9 @@ from . import config as C, discovery, smart_comfort_import
 from .const import APP_NAME, APP_VERSION
 from .ha import HomeAssistantClient, utcnow_iso
 from .logbuffer import BufferHandler
+from .pilot import Pilot
 from .publisher import CompanionLink
+from .redact import Redactor, personal_names
 from .runtime import OccupancyRuntime
 from .settings import Settings
 
@@ -38,6 +40,7 @@ class AppCore:
         self.ha: HomeAssistantClient | None = None
         self.runtime: OccupancyRuntime | None = None
         self.link: CompanionLink | None = None
+        self.pilot: Pilot | None = None
         self._admins: tuple[float, dict[str, bool]] | None = None
 
     async def start(self) -> None:
@@ -47,7 +50,9 @@ class AppCore:
         self.link = CompanionLink(self.ha, self.runtime.published_rooms, self.settings.data_dir,
                                   app_version=APP_VERSION, can_publish=self._can_publish)
         self.runtime.add_listener(lambda _areas: self.link.schedule_publish() if self.link else None)
+        self.pilot = Pilot(self.ha, self.runtime, self.settings.data_dir)
         await self.runtime.start()
+        await self.pilot.start()
         await self.link.start()
         await self.ha.start()
         _LOGGER.info("%s %s started (engine %s, self-test %s)", APP_NAME, APP_VERSION, ENGINE_VERSION,
@@ -56,6 +61,8 @@ class AppCore:
     async def stop(self) -> None:
         if self.link:
             await self.link.stop()
+        if self.pilot:
+            await self.pilot.stop()
         if self.runtime:
             await self.runtime.stop()
         if self.ha:
@@ -292,10 +299,36 @@ class AppCore:
 
     # ------------------------------------------------------------ diagnostics
     def connection(self) -> dict[str, Any]:
-        return {"home_assistant": self.ha.status() if self.ha else None,
-                "companion": self.link.status() if self.link else None}
+        link = self.link.status() if self.link else None
+        return {"home_assistant": self.ha.status() if self.ha else None, "companion": link,
+                "versions": {"app": APP_VERSION, "engine": ENGINE_VERSION,
+                             "companion": (link or {}).get("companion_version")},
+                # Fresh: the App sees Home Assistant and its results reach the entities right now.
+                "fresh": bool(self.ha and self.ha.connected and link and link.get("publishing")
+                              and self.runtime and not self.runtime.suspended)}
+
+    def set_pilot_reference(self, area_id: Any, entity_id: Any) -> dict[str, Any]:
+        if self.pilot is None:
+            raise C.ConfigError("not_ready", "Not started yet", 503)
+        if not isinstance(area_id, str) or area_id not in (self.store.config.get("rooms") or {}):
+            raise C.ConfigError("unknown_room", "This room is not configured", 404)
+        try:
+            self.pilot.set_reference(area_id, entity_id)
+        except ValueError as err:
+            raise C.ConfigError("invalid", str(err)) from err
+        return self.pilot.overview()
 
     def diagnostics(self) -> dict[str, Any]:
+        """The downloadable package, redacted (``redact.py``: no secrets, user ids, addresses or personal entities)."""
+        raw = self._diagnostics_raw()
+        redactor = self.redactor()
+        return {"redaction": "Secrets, user ids, IP addresses, URLs and personal entities (person, device_tracker, "
+                             "notify) with their names are removed or replaced by pseudonyms.", **redactor(raw)}
+
+    def redactor(self) -> Redactor:
+        return Redactor(personal_names(self.ha.states if self.ha else {}))
+
+    def _diagnostics_raw(self) -> dict[str, Any]:
         runtime = self.runtime
         return {
             "app": {"name": APP_NAME, "version": APP_VERSION, "engine": ENGINE_VERSION, "derived_from": DERIVED_FROM,
@@ -308,5 +341,7 @@ class AppCore:
                               "backups": len(self.store.backups())},
             "rooms": [runtime.room_view(a, detail=True) for a in self.store.config["rooms"]] if runtime else [],
             "commands_sent": dict(self.ha.commands_sent) if self.ha else {},
+            "pilot": self.pilot.overview() if self.pilot else None,
+            "timeline": runtime.timeline.recent(None, 200) if runtime else [],
             "log": self.buffer.entries("info")[-150:] if self.buffer else [],
         }

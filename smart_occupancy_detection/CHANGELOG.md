@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0
+
+Distribution, compatibility, diagnostics and pilot readiness. The detection rules are unchanged.
+
+- The companion integration has its own HACS repository: https://github.com/havanissa/smart-occupancy-detection
+  (HACS → Custom repositories → Integration). Companion 0.2.0.
+- Settings → Connection shows the App, integration and engine versions, checks that they are compatible (with what to
+  update when they are not), the last successful communication, whether the data in Home Assistant is fresh (also as
+  the integration sees it) and the recent connection errors.
+- Room pages show why a room is held (start-up, reconnect, changed sensors) and each sensor's data age.
+- Changes are saved as you make them (no separate review step); deleting a room, imports and restores still ask first.
+- When the integration was removed and added again, the App pairs again by itself (not after an explicit unpair).
+- Pilot comparison: compare a room with Smart Comfort's occupancy entity and log every difference longer than a minute
+  with timestamps, sensor evidence and an explanation; download the log as CSV or JSON. Observation only.
+- Diagnostics download is redacted (secrets, user ids, addresses, people).
+
 ## 0.1.0
 
 First release of Smart Occupancy Detection, a standalone App that only detects room occupancy.

@@ -77,6 +77,9 @@ class Hub:
         self._store: Store[dict[str, Any]] = Store(hass, STORE_VERSION, STORE_KEY)
         self.sessions: dict[str, Session] = {}
         self.pairing: dict[str, Any] | None = None
+        #: An administrator unpaired (or another App replaced the pairing) at least once: an App must not pair
+        #: again by itself. A fresh store (the integration was added again) has never been paired.
+        self.ever_paired = False
         self.epoch = 0
         self.lease_session: str | None = None
         self.lease_hash: str | None = None
@@ -100,6 +103,7 @@ class Hub:
         pairing = data.get("pairing")
         if isinstance(pairing, dict) and isinstance(pairing.get("hash"), str):
             self.pairing = pairing
+        self.ever_paired = bool(data.get("ever_paired")) or self.pairing is not None
         epoch = data.get("epoch")
         self.epoch = epoch if isinstance(epoch, int) and epoch >= 0 else 0
         try:
@@ -117,7 +121,7 @@ class Hub:
                 self.history.append(item)
 
     def _data(self) -> dict[str, Any]:
-        return {"pairing": self.pairing, "epoch": self.epoch, "views": self.views, "disabled": self.disabled,
+        return {"pairing": self.pairing, "ever_paired": self.ever_paired, "epoch": self.epoch, "views": self.views, "disabled": self.disabled,
                 "orphaned": self.orphaned, "published_at": _iso(self.published_at), "app_version": self.app_version,
                 "history": list(self.history)}
 
@@ -202,7 +206,10 @@ class Hub:
                      session.instance_id[:8], session.app_version, trusted)
         return session, {"type": "hello", "session_id": session.session_id, "companion_version": VERSION,
                          "protocol": P.PROTOCOL_VERSION, "paired": self.paired, "trusted": trusted,
-                         "epoch": self.epoch, "paired_at": (self.pairing or {}).get("paired_at")}
+                         "epoch": self.epoch, "paired_at": (self.pairing or {}).get("paired_at"),
+                         # Never paired in this store (the integration was added fresh): an App that was paired
+                         # before may pair again by itself. False after an explicit unpair.
+                         "fresh_store": not self.ever_paired}
 
     @callback
     def close_session(self, session_id: str) -> None:
@@ -237,7 +244,8 @@ class Hub:
         now = dt_util.utcnow()
         by = user_id or (params.get("requested_by") if isinstance(params.get("requested_by"), str) else None)
         self.pairing = {"hash": P.token_hash(token), "paired_at": _iso(now), "by": by,
-                        "instance": session.instance_id[:8]}
+                        "instance": session.instance_id[:8], "automatic": bool(params.get("automatic"))}
+        self.ever_paired = True
         if self.lease_session is not None and self.lease_session != session.session_id:
             self._clear_lease("paired_again")
         for other in self.sessions.values():
