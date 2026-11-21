@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.1
+
+Room-first usability. The automations and how rules are combined are unchanged, except for the optional default.
+
+- **Add a device in three steps: room → device → entities.** Rooms are Home Assistant's areas (plus
+  "Unassigned"); only the devices of the chosen room are listed, then only that device's controllable
+  entities. Nothing is ticked for you; going back keeps what you ticked, so entities of several devices or rooms
+  can still be combined on purpose. After "Add device" an empty rule opens straight away.
+- **Overview by room.** Expandable groups with the number of devices and rules, each device with its status,
+  and "+ Add device" that starts in that room. A device whose entities are in several rooms is listed once,
+  under "Multiple rooms"; it keeps its one automation. Rooms only organise the page.
+- **"Only show entities from this room"** in the rule editor's entity pickers, on by default when the device
+  belongs to exactly one room. It can be unticked at any time; rules across rooms work as before, and the
+  entity that is chosen now is always listed.
+- **Default rule (optional).** One per device, below its rules: actions that run when one of the device's rules
+  was triggered and none of the rules matched. It has no trigger of its own, never runs periodically or in
+  addition to a rule that matched, can be disabled, and can be told to do nothing while a manual override
+  signal is on. It compiles into the device's own native automation. A device without a default generates
+  exactly the automation it did before.
+- Friendly names first, entity ids as secondary text; icons for rooms, devices and kinds of entities.
+
 ## 0.2.0
 
 Blueprint export, more building blocks, import of existing automations and rule-level diagnostics. Validated on

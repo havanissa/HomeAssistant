@@ -183,8 +183,27 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         await require_admin(request)
         purpose = request.query.get("purpose", "any")
         core._require_ha()  # noqa: SLF001
-        return _json({"results": core.index().search(request.query.get("q", "")[:100],
-                                                     purpose if purpose in SEARCH_PURPOSES else "any")})
+        index = core.index()
+        area = request.query.get("area") or None
+        keep = request.query.get("keep") or None
+        return _json({"results": index.search(request.query.get("q", "")[:100],
+                                              purpose if purpose in SEARCH_PURPOSES else "any",
+                                              area=area if area in index.areas else None, keep=keep)})
+
+    async def rooms(request: web.Request) -> web.Response:
+        await require_admin(request)
+        core._require_ha()  # noqa: SLF001
+        return _json({"rooms": core.index().rooms(request.query.get("q", "")[:100])})
+
+    async def room_devices(request: web.Request) -> web.Response:
+        await require_admin(request)
+        core._require_ha()  # noqa: SLF001
+        index = core.index()
+        area = request.query.get("area") or None
+        if area is not None and area not in index.areas:
+            raise ConfigError("unknown_room", "This room does not exist in Home Assistant (anymore).", 404)
+        return _json({"area_id": area, "name": index.areas.get(area, "Unassigned"),
+                      "devices": index.room_devices(area, request.query.get("q", "")[:100])})
 
     async def entity(request: web.Request) -> web.Response:
         await require_admin(request)
@@ -261,6 +280,7 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         "/api/devices/deploy": lambda d, u: core.deploy(d.get("device_id"), d.get(rev), d.get("plan_hash"),
                                                         d.get("overwrite") is True, u),
         "/api/rules/preview": lambda d, u: core.preview_rule(d.get("device_id"), d.get("rule")),
+        "/api/default/preview": lambda d, u: core.preview_default(d.get("device_id"), d.get("default_rule")),
         "/api/rules/save": lambda d, u: core.save_rule(d.get("device_id"), d.get("rule"), d.get(rev), u),
         "/api/rules/delete": lambda d, u: core.delete_rule(d.get("device_id"), d.get("rule_id"), d.get(rev), u),
         "/api/rules/move": lambda d, u: core.move_rule(d.get("device_id"), d.get("rule_id"), d.get("direction"),
@@ -290,6 +310,8 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
     r.add_get("/api/entities", entities)
     r.add_get("/api/entity", entity)
     r.add_get("/api/ha-devices", ha_devices)
+    r.add_get("/api/rooms", rooms)
+    r.add_get("/api/room-devices", room_devices)
     r.add_get("/api/all-devices", all_devices)
     r.add_get("/api/device-automations", device_automations)
     r.add_get("/api/notify-targets", notify_targets)

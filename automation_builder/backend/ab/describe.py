@@ -223,3 +223,9 @@ def rule(r: dict[str, Any], names: Names, targets: list[str]) -> dict[str, str]:
     then_text = ", then ".join(action(a, names, targets, r["triggers"]) for a in r["actions"]) or "…"
     text = f"IF {if_text}" + (f" AND {and_text}" if and_text else "") + f" THEN {then_text}"
     return {"if": if_text, "and": and_text, "then": then_text, "text": text}
+
+
+def default_rule(default: dict[str, Any], names: Names, targets: list[str]) -> dict[str, str]:
+    then_text = ", then ".join(action(a, names, targets) for a in default["actions"]) or "…"
+    unless = f" (not while {names(default['override_entity'])} is on)" if default.get("override_entity") else ""
+    return {"then": then_text, "text": f"DEFAULT (no rule matched){unless} THEN {then_text}"}

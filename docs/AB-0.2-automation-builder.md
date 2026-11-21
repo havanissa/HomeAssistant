@@ -346,3 +346,75 @@ registry change; traces only of its own automations.
 5. Import: several rules from one automation (per trigger id), `for_each` and `stop`, "replace the original"
    as an explicit, reversible step.
 6. Cross-device and unmanaged-automation overlap analysis.
+
+## 7. 0.2.1: room-first usability and the Default Rule
+
+A focused usability release on the same engine; no phase of its own.
+
+| Change | Where |
+|---|---|
+| Rooms = Home Assistant areas: `area_of`, `room_of`, `rooms`, `room_devices`, room filter and `keep` in `search` | `ab/discovery.py`; `GET /api/rooms`, `/api/room-devices`, `/api/entities?area=&keep=` |
+| Overview groups (`rooms` in the overview; each device in exactly one group: its room, "Multiple rooms" or "Unassigned") | `ab/core.py` `_room_groups` |
+| Three-step "Add a device", room groups, picker filter, icons | `static/app.js`, `static/ui.js`, `static/editor.js` |
+| Default Rule: `device["default_rule"] = {enabled, actions, override_entity}` (absent unless configured) | `ab/model.py`, `ab/compiler.py` `_with_default`, `ab/describe.py`, `POST /api/default/preview` |
+
+**Default Rule, compiled.** Without an enabled default the output is unchanged (pinned by tests). With one, the
+shared automation's top-level actions become
+
+```
+- if:   [ or( rule 1's trigger check and conditions, rule 2's ..., also those of the device's waiting rules ) ]
+  then: [ the rule blocks exactly as before ]
+  else: [ if: [ started by a rule's trigger (not a recheck or the periodic check), override signal off ]
+          then: [ default actions ] ]
+- the occupancy recheck blocks, as before
+```
+
+The match is evaluated once, before any action, so a rule that changes the state its own condition reads
+cannot make the default fire afterwards. Triggers of waiting rules are added to the shared automation only so
+that the default can see them; those rules still run in their own automations. The default must not wait
+(validated), so the shared automation stays `queued`. Rule diagnostics follow the rules into the wrapper
+(`blocks[].path`). The default itself has no diagnostics entry and its values are not offered as blueprint
+inputs (the blueprint contains it as fixed actions).
+
+**Rooms.** A managed device's room is derived from the areas of its controlled entities at display time; nothing
+is stored, so moving an entity to another area in Home Assistant moves the device in the Overview. Rooms never
+enter the compiler.
+
+### Results (2026-11-21, Home Assistant Core 2026.11.1)
+
+| Suite | Environment | Result |
+|---|---|---|
+| `automation_builder`: `pytest` | unit, fake Home Assistant | 160 passed |
+| `scripts/run_tests.py tests/automation_builder` (incl. `test_default_rule.py`) | Home Assistant's own parser and engine | 45 passed |
+| `e2e_checks.py` / `browser_checks.py` | stack, fresh installation, real Core | 87 of 87 / 103 of 103 |
+| `e2e_02_checks.py` / `browser_02_checks.py` | stack | 87 of 87 / 121 of 121 |
+| `e2e_03_checks.py` (rooms, room filter, Default Rule in the real Home Assistant) | stack | 39 of 39 |
+| `browser_03_checks.py` (room groups, three steps, picker filter, default editor; desktop light/dark, tablet, phone) | stack | 93 of 93 |
+| Smart Occupancy Detection: App / companion | regression | 678 passed / 38 passed |
+| Smart Comfort: companion / engine | regression | 43 passed / 1261 passed |
+| Smart Comfort: App `pytest` | regression | 326 passed, 1 xfailed, **1 failed** (see below) |
+
+The failing Smart Comfort test is `test_forecast_runtime.py::test_shadow_learns_through_history_and_compares`.
+Smart Comfort was not changed (no file under `smart_lighting/` differs from `main`), and the same suite passed
+with 327 earlier the same day. The test compares a history window that starts at 21:00 UTC of the previous day
+with the wall clock and allows 26 hours, so it fails when run after 23:01 UTC (this run: 23:27). It is a
+time-of-day dependency of that test, left untouched here.
+
+0.2.1 was **not** run on Home Assistant OS: the test VM had been restored to its snapshot after 0.2.0. The
+changes are in the interface, in discovery reads that 0.2.0 already used on Home Assistant OS, and in the
+compiler's output, which was verified in Home Assistant's own engine and against a real Core on the stack.
+The test home's rooms are created by `prepare.py` (demo devices assigned to areas).
+
+Found and fixed on the way: long unbroken ids (an automation's entity id in the "last deployment" notice)
+widened the device page on a phone.
+
+### Limitations of 0.2.1
+
+* The room of a managed device is derived, not chosen: a device with entities in several rooms is always under
+  "Multiple rooms" (no primary room can be picked).
+* Rooms without managed devices are not shown on the Overview; start "Add a device" at the top for them.
+* The room filter covers entity pickers; the device pickers of device triggers and conditions list all devices.
+* The default must finish at once (no waits), has no execution diagnostics of its own, and its values are not
+  blueprint inputs. With no enabled rule it never runs.
+* Two rules that can run together and set the same entity differently (as in the motion / late example) are
+  still a conflict to confirm once ("Confirm this order"); the default does not change that.

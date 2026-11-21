@@ -120,16 +120,17 @@ def interpret(trace: dict[str, Any], blocks: list[dict[str, Any]], rules: dict[s
     started = (trace.get("timestamp") or {}).get("start")
     out = []
     for block in blocks:
-        base = f"action/{block['index']}"
+        base = block.get("path") or f"action/{block['index']}"
         gate = _result(steps, f"{base}/if/condition/0")
         if not gate or gate.get("result") is not True:
             continue  # the run was started by a trigger of another rule
         rule = rules.get(block["rule_id"])
+        depth = base.count("/") + 3
         conditions = sorted(int(p.rsplit("/", 1)[1]) for p in steps
-                            if p.startswith(f"{base}/if/condition/") and p.count("/") == 4)
+                            if p.startswith(f"{base}/if/condition/") and p.count("/") == depth)
         try:  # how many conditions the block has (a trace stops at the first that is false)
-            total = len(trace["config"]["actions"][block["index"]]["if"])
-        except (KeyError, IndexError, TypeError):
+            total = len(trace["config"]["actions"][block["index"]]["if"]) if "path" not in block else max(conditions) + 1
+        except (KeyError, IndexError, TypeError, ValueError):
             total = (max(conditions) + 1) if conditions else 1
         blocked = None
         for position in conditions[1:]:

@@ -1,7 +1,7 @@
 // Automation Builder - the pages: Overview, Devices, one device (rules, conflicts, deployment), Settings.
 // Rules are saved as soon as they change. Nothing reaches Home Assistant until "Deploy" is pressed.
 
-import { api, ask, change, chip, clock, enc, errorText, esc, notes, pickEntity, renderBanners, session, toast, view } from "./ui.js";
+import { api, ask, change, chip, clock, enc, errorText, esc, icon, notes, pickEntity, renderBanners, session, toast, view } from "./ui.js";
 import { editorPage } from "./editor.js";
 import { blueprintPage, importListPage, importPage, moodPage } from "./pages.js";
 
@@ -22,7 +22,7 @@ view.addEventListener("input", (e) => {
 });
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const targetNames = (targets) => targets.map((t) => esc(t.name)).join(", ");
+const controllable = (n) => `${n} controllable ${n === 1 ? "entity" : "entities"}`;
 
 async function loadShell() {
   const data = await api("api/overview");
@@ -38,9 +38,9 @@ function deviceCard(d) {
   const warn = d.warnings ? `<div class="warn-line">⚠ ${plural(d.warnings, "warning")}${d.blocking ? ` (${plural(d.blocking, "conflict")} to resolve)` : ""}${d.turned_off ? " · the automation is turned off in Home Assistant" : ""}</div>` : "";
   return `<a class="card device" href="#/devices/${enc(d.id)}">
     <div class="row"><span class="name">${esc(d.name)}</span><span class="spacer"></span>${chip(d.enabled ? d.status : "nothing", d.enabled ? d.status_text : "Disabled")}</div>
-    <div class="sub">Controls ${targetNames(d.targets)}</div>
+    <div class="sub">Controls ${d.targets.map((x) => `${icon(x.domain)}${esc(x.name)}`).join(", ")}</div>
     <div class="sub">${d.rules_enabled} of ${plural(d.rules, "rule")} enabled · ${plural(d.automations, "automation")}${d.last_sync ? ` · deployed ${esc(clock(d.last_sync))}` : ""}</div>
-    ${rules || more ? `<ul class="rules-mini">${rules}${more}</ul>` : `<div class="sub">No rules yet.</div>`}${warn}</a>`;
+    ${rules || more ? `<ul class="rules-mini">${rules}${more}${d.default ? `<li>DEFAULT: when no rule matched</li>` : ""}</ul>` : `<div class="sub">No rules yet.</div>`}${warn}</a>`;
 }
 
 function orphanList(orphans) {
@@ -71,8 +71,24 @@ async function overviewPage(token) {
     return;
   }
   const t = data.totals;
+  const byId = Object.fromEntries(data.devices.map((d) => [d.id, d]));
+  const closed = new Set(JSON.parse(sessionStorage.getItem("ab-rooms-closed") || "[]"));
+  const groups = data.rooms.map((g) => {
+    const devices = g.device_ids.map((id) => byId[id]);
+    const add = g.kind === "multiple" ? "" : `<a class="button" data-add-room href="#/devices/new/${enc(g.kind === "room" ? g.area_id : "unassigned")}">+ Add device</a>`;
+    const hint = g.kind === "multiple" ? `<p class="muted small">These devices control entities in more than one room. Each is listed once, here, and still has one automation of its own.</p>`
+      : g.kind === "unassigned" ? `<p class="muted small">Entities that have no area in Home Assistant.</p>` : "";
+    return `<details class="room" data-room="${esc(g.key)}" ${closed.has(g.key) ? "" : "open"}><summary><span class="room-name">${icon(g.kind === "room" ? "room" : g.kind)}${esc(g.name)}</span>
+        <span class="muted small">${plural(devices.length, "device")} · ${plural(g.rules, "rule")}${g.warnings ? ` · ${plural(g.warnings, "warning")}` : ""}</span><span class="spacer"></span>${add}</summary>
+      ${hint}<div class="grid">${devices.map(deviceCard).join("")}</div></details>`;
+  }).join("");
   view.innerHTML = `<h1>Overview <span class="muted small">${plural(t.devices, "device")} · ${plural(t.rules, "rule")} · ${plural(t.automations, "automation")}${t.warnings ? ` · ${plural(t.warnings, "warning")}` : ""}</span><span class="spacer"></span><a class="button primary" href="#/devices/new">Add a device</a></h1>
-    ${orphanList(data.orphans)}<div class="grid">${data.devices.map(deviceCard).join("")}</div>`;
+    ${orphanList(data.orphans)}<div id="rooms">${groups}</div>
+    <p class="muted small">Rooms are Home Assistant's areas. They only organise this page: every device has its own automation, whichever room it is listed in.</p>`;
+  view.querySelectorAll("details.room").forEach((el) => el.addEventListener("toggle", () => {
+    const now = [...view.querySelectorAll("details.room:not([open])")].map((d) => d.dataset.room);
+    sessionStorage.setItem("ab-rooms-closed", JSON.stringify(now));
+  }));
 }
 
 // ------------------------------------------------------------------ devices
@@ -81,92 +97,139 @@ async function devicesPage(token) {
   if (token !== navToken) return;
   page = { act: {}, chg: {} };
   const rows = data.devices.map((d) => `<tr><td><a href="#/devices/${enc(d.id)}">${esc(d.name)}</a>${d.enabled ? "" : ` <span class="badge">disabled</span>`}</td>
-    <td>${d.targets.map((t) => `${esc(t.name)} <span class="mono">${esc(t.entity_id)}</span>`).join("<br>")}</td>
+    <td>${esc(d.room.name)}</td>
+    <td>${d.targets.map((t) => `${icon(t.domain)}${esc(t.name)} <span class="mono">${esc(t.entity_id)}</span>`).join("<br>")}</td>
     <td>${d.rules_enabled} / ${d.rules}</td><td>${chip(d.status, d.status_text)}</td>
     <td>${d.warnings ? `<span class="badge warn">${plural(d.warnings, "warning")}</span>` : ""}</td></tr>`).join("");
   view.innerHTML = `<h1>Devices <span class="spacer"></span><a class="button" href="#/import">Import an automation</a><a class="button primary" href="#/devices/new">Add a device</a></h1>
-    <div class="card">${data.devices.length ? `<div class="tscroll"><table><thead><tr><th>Device</th><th>Controls</th><th>Rules on</th><th>Automation</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<p class="muted">No devices are managed yet.</p>`}</div>
+    <div class="card">${data.devices.length ? `<div class="tscroll"><table><thead><tr><th>Device</th><th>Room</th><th>Controls</th><th>Rules on</th><th>Automation</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<p class="muted">No devices are managed yet.</p>`}</div>
     <p class="muted small">A device here is what one automation controls: one entity, or several entities you chose to control together. A physical Home Assistant device can have several outputs; you choose exactly which ones.</p>`;
 }
 
-// A search over Home Assistant's devices (each with its controllable entities) and single entities.
-async function newDevicePage(token) {
+// Add a device in three steps: room -> device -> entities. Only the choices of one step are shown at a time;
+// going back keeps what was ticked, so entities of several devices or rooms can be combined on purpose.
+async function newDevicePage(token, presetArea) {
   await loadShell();
   if (token !== navToken) return;
-  const chosen = new Map();  // entity_id -> view
-  let haDevice = null;
+  const chosen = new Map();  // entity_id -> entity (with the Home Assistant device it came from)
+  let step = 1;
+  let room = null;           // { area_id, name }
+  let device = null;         // the Home Assistant device (or the "entities without a device" entry) of step 3
+  let rooms = [];
+  let devices = [];
   let nameEdited = false;
+  let name = "";
   let seq = 0;
-  view.innerHTML = `<h1>Add a device</h1>
-    <div class="two"><div><div class="card">
-      <h2>1. What should be controlled?</h2>
-      <input type="search" id="q" data-inp="q" placeholder="Search devices and entities (name, area, entity id)" autocomplete="off">
-      <div id="found"><p class="muted">Loading…</p></div></div></div>
-    <div><div class="card">
-      <h2>2. Selected</h2><div id="chosen"></div>
-      <div class="field"><label for="name">Name</label><input type="text" id="name" data-inp="name" maxlength="80"></div>
-      <div class="actions"><button class="primary" id="create" data-act="create" disabled>Add device</button><a class="button" href="#/devices">Cancel</a></div>
-      <p class="muted small">Only the entities you tick are controlled, never a whole area or every output of a device.</p>
-    </div></div></div>`;
-  const nameInput = view.querySelector("#name");
+  const key = (r) => (r.area_id === null ? "unassigned" : r.area_id);
 
-  function showChosen() {
-    const list = [...chosen.values()];
-    view.querySelector("#chosen").innerHTML = list.length
-      ? `<ul class="plain">${list.map((e) => `<li class="row"><span>${esc(e.name)} <span class="mono">${esc(e.entity_id)}</span></span><span class="spacer"></span><button class="link" data-act="drop" data-id="${esc(e.entity_id)}">Remove</button></li>`).join("")}</ul>`
-      : `<p class="muted">Nothing selected yet.</p>`;
-    view.querySelector("#create").disabled = !list.length;
-    if (!nameEdited) nameInput.value = list.length === 1 ? list[0].name : (haDevice && haDevice.name) || (list[0] && list[0].name) || "";
-    view.querySelectorAll("#found input[type=checkbox]").forEach((c) => { c.checked = chosen.has(c.dataset.id); });
-  }
-  const row = (e, device) => `<label class="pick"><input type="checkbox" data-chg="tick" data-id="${esc(e.entity_id)}" data-device="${esc(device || "")}">
-    <span>${esc(e.name)} <span class="badge">${esc(e.domain_label)}</span><br><span class="mono">${esc(e.entity_id)}</span></span><span class="spacer"></span><span class="muted small">${esc(e.state ?? "")}</span></label>`;
-  let last = { devices: [], results: [] };
-  async function search() {
-    const mine = ++seq;
-    const input = view.querySelector("#q");
-    if (!input || token !== navToken) return;  // the page was left while a search was still scheduled
-    const q = enc(input.value);
-    try {
-      const [devices, single] = await Promise.all([api(`api/ha-devices?q=${q}`), api(`api/entities?purpose=target&q=${q}`)]);
-      if (mine !== seq || token !== navToken) return;
-      last = { devices: devices.devices, results: single.results.filter((e) => !e.device_id) };
-      const blocks = last.devices.map((d) => `<div class="hadevice"><div class="row"><strong>${esc(d.name)}</strong><span class="muted small">${esc([d.area, d.model].filter(Boolean).join(" · "))}</span></div>${d.entities.map((e) => row(e, d.device_id)).join("")}</div>`).join("");
-      const loose = last.results.length ? `<div class="hadevice"><div class="row"><strong>Entities without a device</strong></div>${last.results.map((e) => row(e)).join("")}</div>` : "";
-      view.querySelector("#found").innerHTML = blocks + loose || `<p class="muted">Nothing controllable found.</p>`;
-      showChosen();
-    } catch (err) {
-      if (mine === seq) view.querySelector("#found").innerHTML = `<div class="notice error">${esc(err.message)}</div>`;
+  const crumbs = () => `<nav class="crumbs" aria-label="Selection path">
+      <button type="button" class="link" data-act="to-rooms" ${step === 1 ? "disabled" : ""}>${icon("room")}${room ? esc(room.name) : "Room"}</button><span aria-hidden="true">›</span>
+      <button type="button" class="link" data-act="to-devices" ${step < 3 ? "disabled" : ""}>${icon("device")}${device ? esc(device.name) : "Device"}</button><span aria-hidden="true">›</span>
+      <span class="${step === 3 ? "" : "muted"}">${icon("light")}Entities</span></nav>`;
+
+  function stepHtml() {
+    if (step === 1) {
+      return `<h2>1. Which room?</h2><input type="search" id="q" data-inp="q" placeholder="Search rooms" autocomplete="off" aria-label="Search rooms">
+        <div class="choices" id="rooms-list">${rooms.length ? rooms.map((r, i) => `<button type="button" class="choice" data-act="room" data-i="${i}" data-room="${esc(key(r))}">${icon(r.unassigned ? "unassigned" : "room")}
+          <span><strong>${esc(r.name)}</strong><br><span class="muted small">${r.entities ? `${plural(r.devices, "device")} · ${controllable(r.entities)}` : "nothing to control here"}</span></span><span class="spacer"></span><span aria-hidden="true">›</span></button>`).join("") : `<p class="muted">No room found.</p>`}</div>
+        <p class="muted small">Rooms are the areas of Home Assistant. “Unassigned” holds what has no area.</p>`;
     }
+    if (step === 2) {
+      return `<h2>2. Which device in ${esc(room.name)}?</h2><input type="search" id="q" data-inp="q" placeholder="Search devices in this room" autocomplete="off" aria-label="Search devices">
+        <div class="choices" id="devices-list">${devices.length ? devices.map((d, i) => {
+    const picked = d.entities.filter((e) => chosen.has(e.entity_id)).length;
+    return `<button type="button" class="choice" data-act="device" data-i="${i}" data-device="${esc(d.device_id || "loose")}">${icon(d.device_id ? "device" : "loose")}
+          <span><strong>${esc(d.name)}</strong>${picked ? ` <span class="badge">${picked} selected</span>` : ""}<br><span class="muted small">${esc(d.model || "")}${d.model ? " · " : ""}${d.domains.map((x) => icon(x)).join("")} ${controllable(d.entities.length)}</span></span><span class="spacer"></span><span aria-hidden="true">›</span></button>`;
+  }).join("") : `<p class="muted">Nothing controllable found in this room.</p>`}</div>
+        <div class="actions"><button type="button" data-act="to-rooms">← Rooms</button></div>`;
+    }
+    return `<h2>3. What should be controlled on ${esc(device.name)}?</h2>
+      <div id="entities-list">${device.entities.map((e) => `<label class="pick"><input type="checkbox" data-chg="tick" data-id="${esc(e.entity_id)}" ${chosen.has(e.entity_id) ? "checked" : ""}>${icon(e.domain)}
+        <span><strong>${esc(e.name)}</strong> <span class="badge">${esc(e.domain_label)}</span>${e.area && room && e.area !== room.name ? ` <span class="badge">${esc(e.area)}</span>` : ""}<br><span class="mono">${esc(e.entity_id)}</span></span><span class="spacer"></span><span class="muted small">${esc(e.state ?? "")}</span></label>`).join("")}</div>
+      <p class="muted small">Nothing is ticked for you. Only what you tick is controlled, never every output of a device.</p>
+      <div class="actions"><button type="button" data-act="to-devices">← Devices in ${esc(room.name)}</button></div>`;
+  }
+
+  function sideHtml() {
+    const list = [...chosen.values()];
+    if (!nameEdited) name = list.length === 1 ? list[0].name : (list.length && list.every((e) => e.from === list[0].from) && list[0].from) || (list[0] && list[0].name) || "";
+    return `<h2>Selected</h2>${list.length ? `<ul class="plain" id="chosen">${list.map((e) => `<li class="row">${icon(e.domain)}<span>${esc(e.name)}<br><span class="mono">${esc(e.entity_id)}</span></span><span class="spacer"></span><button type="button" class="link" data-act="drop" data-id="${esc(e.entity_id)}">Remove</button></li>`).join("")}</ul>` : `<p class="muted" id="chosen">Nothing selected yet.</p>`}
+      <div class="field"><label for="name">Name</label><input type="text" id="name" data-inp="name" maxlength="80" value="${esc(name)}"></div>
+      <div class="actions"><button class="primary" id="create" data-act="create" ${list.length ? "" : "disabled"}>Add device</button><a class="button" href="#/">Cancel</a></div>
+      <p class="muted small">Next you get an empty rule to fill in. Nothing reaches Home Assistant before you deploy.</p>`;
+  }
+
+  function draw(focus) {
+    view.innerHTML = `<h1>Add a device</h1>${crumbs()}
+      <div class="two"><div><div class="card" id="wizard" data-step="${step}">${stepHtml()}</div></div><div><div class="card" id="selected">${sideHtml()}</div></div></div>`;
+    if (focus) { const q = view.querySelector("#q"); if (q) q.focus(); }
+  }
+  const redrawSide = () => { view.querySelector("#selected").innerHTML = sideHtml(); };
+
+  async function loadRooms(q = "") {
+    const mine = ++seq;
+    const data = await api(`api/rooms?q=${enc(q)}`);
+    if (mine !== seq || token !== navToken) return false;
+    rooms = data.rooms;
+    return true;
+  }
+  async function loadDevices(q = "") {
+    const mine = ++seq;
+    const data = await api(`api/room-devices?q=${enc(q)}${room.area_id === null ? "" : `&area=${enc(room.area_id)}`}`);
+    if (mine !== seq || token !== navToken) return false;
+    devices = data.devices;
+    if (!room.name) room.name = data.name;
+    return true;
+  }
+  const fail = (err) => { const box = view.querySelector("#wizard"); if (box) box.insertAdjacentHTML("beforeend", `<div class="notice error">${esc(errorText(err))}</div>`); };
+  // Typing in a search box replaces the list only, so the box keeps the focus and the cursor.
+  async function refine(value) {
+    try {
+      if (step === 1 && await loadRooms(value)) { const fresh = document.createElement("div"); fresh.innerHTML = stepHtml(); view.querySelector("#rooms-list").replaceWith(fresh.querySelector("#rooms-list")); }
+      if (step === 2 && await loadDevices(value)) { const fresh = document.createElement("div"); fresh.innerHTML = stepHtml(); view.querySelector("#devices-list").replaceWith(fresh.querySelector("#devices-list")); }
+    } catch (err) { fail(err); }
   }
   let timer = null;
   page = {
-    inp: { q: () => { clearTimeout(timer); timer = setTimeout(search, 200); }, name: () => { nameEdited = true; } },
+    inp: {
+      q: (el) => { clearTimeout(timer); timer = setTimeout(() => { if (token === navToken) refine(el.value); }, 200); },
+      name: (el) => { nameEdited = true; name = el.value; },
+    },
     chg: {
       tick: (el) => {
-        const id = el.dataset.id;
-        if (el.checked) {
-          const all = [...last.devices.flatMap((d) => d.entities), ...last.results];
-          chosen.set(id, all.find((e) => e.entity_id === id));
-          haDevice = last.devices.find((d) => d.device_id === el.dataset.device) || haDevice;
-        } else chosen.delete(id);
-        showChosen();
+        const entity = device.entities.find((e) => e.entity_id === el.dataset.id);
+        if (el.checked) chosen.set(entity.entity_id, { ...entity, from: device.device_id ? device.name : null, ha_device_id: device.device_id });
+        else chosen.delete(entity.entity_id);
+        redrawSide();
       },
     },
     act: {
-      drop: (el) => { chosen.delete(el.dataset.id); showChosen(); },
+      room: async (el) => {
+        room = rooms[Number(el.dataset.i)];
+        try { if (await loadDevices()) { step = 2; draw(true); } } catch (err) { fail(err); }
+      },
+      device: (el) => { device = devices[Number(el.dataset.i)]; step = 3; draw(); },
+      "to-rooms": async () => { try { if (await loadRooms()) { step = 1; device = null; draw(true); } } catch (err) { fail(err); } },
+      "to-devices": async () => { try { if (await loadDevices()) { step = 2; draw(true); } } catch (err) { fail(err); } },
+      drop: (el) => { chosen.delete(el.dataset.id); draw(); },
       create: async () => {
-        const targets = [...chosen.keys()];
-        const devices = new Set([...chosen.values()].map((e) => e.device_id || ""));
+        const list = [...chosen.values()];
+        const from = new Set(list.map((e) => e.ha_device_id || ""));
         try {
-          const result = await change("api/devices/create", { name: nameInput.value, targets, ha_device_id: devices.size === 1 ? [...devices][0] || null : null });
-          location.hash = `#/devices/${enc(result.device_id)}`;
+          const result = await change("api/devices/create", { name, targets: list.map((e) => e.entity_id), ha_device_id: from.size === 1 ? [...from][0] || null : null });
+          location.hash = `#/rules/${enc(result.device_id)}/new`;  // straight into an empty rule
         } catch (err) { toast(errorText(err)); }
       },
     },
   };
-  showChosen();
-  await search();
+  try {
+    if (presetArea) {
+      room = { area_id: presetArea === "unassigned" ? null : presetArea, name: presetArea === "unassigned" ? "Unassigned" : "" };
+      if (await loadDevices()) { step = 2; draw(true); }
+    } else if (await loadRooms()) draw(true);
+  } catch (err) {
+    if (token === navToken) { room = null; step = 1; rooms = []; draw(); fail(err); }
+  }
 }
 
 // ------------------------------------------------------------------ one device
@@ -253,6 +316,19 @@ function ruleDiagnostics(r, d) {
       </dl>${checks}
       <p class="muted small">Read from Home Assistant's traces. “Executed” means Home Assistant accepted the actions; the verification compares what the entity <em>reports</em> a few seconds later, which is not proof of what a physical device did.</p></details></div>`;
 }
+// The optional fallback of a device, below its rules.
+function defaultHtml(d, summary) {
+  const rule = d.default_rule;
+  if (!rule) {
+    return `<div class="rule default" id="default-rule"><div class="row"><span class="name">Default</span><span class="badge">optional</span><span class="spacer"></span><a class="button" href="#/default/${enc(d.id)}">Add a default</a></div>
+      <p class="muted small">What this device does when one of its rules' triggers fired and none of the rules matched. Nothing is configured.</p></div>`;
+  }
+  return `<div class="rule default ${rule.enabled ? "" : "disabled"}" id="default-rule"><div class="row"><label class="switch"><input type="checkbox" data-chg="default-enabled" ${rule.enabled ? "checked" : ""} aria-label="Default enabled"></label>
+      <a class="name" href="#/default/${enc(d.id)}">Default</a><span class="spacer"></span><a class="button" href="#/default/${enc(d.id)}">Edit</a></div>
+    <div class="ifthen"><span class="kw">DEFAULT</span><span>one of the triggers above fired and no rule matched${rule.override_entity ? " (and the manual override signal is off)" : ""}</span><span class="kw">THEN</span><span>${esc(summary ? summary.then : "…")}</span></div>
+    ${d.rules.some((r) => r.enabled) ? "" : `<p class="muted small">It never runs while no rule is enabled: it has no trigger of its own.</p>`}</div>`;
+}
+
 const entityLabel = (d, id) => ((d.entities.find((e) => e.entity_id === id) || {}).name || id);
 
 async function devicePage(deviceId, token) {
@@ -303,7 +379,8 @@ ${(data.rule_diagnostics[r.id] || {}).advanced ? `<span class="badge">advanced</
       <div class="two"><div>
         <div class="card"><div class="row"><h2>Rules</h2><span class="spacer"></span><a class="button" href="#/mood/${enc(d.id)}" title="One rule per value of a dropdown helper">From a dropdown helper…</a><a class="button primary" href="#/rules/${enc(d.id)}/new">Add rule</a></div>
           ${rules || `<p class="muted">No rules yet. A rule is: IF a trigger happens AND conditions hold THEN actions run.</p>`}
-          ${d.rules.length > 1 ? `<p class="muted small">Rules that match the same trigger run in this order.</p>` : ""}</div>
+          ${d.rules.length > 1 ? `<p class="muted small">Rules that match the same trigger run in this order.</p>` : ""}
+          ${defaultHtml(d, data.default_summary)}</div>
         <div class="card" id="checks"><h2>Conflicts and notes</h2>${anything || `<p class="muted">Nothing to report.</p>`}</div>
         ${plan ? planHtml(plan) : ""}
       </div><div>
@@ -319,8 +396,10 @@ ${(data.rule_diagnostics[r.id] || {}).advanced ? `<span class="badge">advanced</
         <div class="card"><h2>Device</h2>
           <div class="field"><label for="dev-name">Name</label><input type="text" id="dev-name" data-chg="name" maxlength="80" value="${esc(d.name)}"></div>
           <div class="field"><label for="dev-enabled">Enabled</label><label class="switch"><input type="checkbox" id="dev-enabled" data-chg="enabled" ${d.enabled ? "checked" : ""}> <span class="muted small">Off: the automation is removed at the next deployment, the rules are kept.</span></label></div>
+          <div class="field"><label>Room</label><span id="dev-room">${icon(data.room.kind === "room" ? "room" : data.room.kind)}${esc(data.room.name)}${data.room.kind === "multiple" ? ` <span class="muted small">(${esc(data.room.areas.map((a) => a.name).join(", "))}${data.room.partly_unassigned ? ", unassigned" : ""})</span>` : ""}</span>
+            <div class="help">From the areas of the controlled entities in Home Assistant. It only decides where the device is listed.</div></div>
           <h3>Controlled entities</h3>
-          <ul class="plain">${data.targets.map((t) => `<li class="row"><span>${esc(t.name)} <span class="badge">${esc(t.domain_label)}</span><br><span class="mono">${esc(t.entity_id)}</span></span><span class="spacer"></span><span class="muted small">${t.exists ? esc(t.state ?? "") : "missing"}</span>${data.targets.length > 1 ? `<button class="link" data-act="target-drop" data-id="${esc(t.entity_id)}">Remove</button>` : ""}</li>`).join("")}</ul>
+          <ul class="plain">${data.targets.map((t) => `<li class="row">${icon(t.domain)}<span>${esc(t.name)} <span class="badge">${esc(t.domain_label)}</span><br><span class="mono">${esc(t.entity_id)}</span></span><span class="spacer"></span><span class="muted small">${t.exists ? esc(t.state ?? "") : "missing"}</span>${data.targets.length > 1 ? `<button class="link" data-act="target-drop" data-id="${esc(t.entity_id)}">Remove</button>` : ""}</li>`).join("")}</ul>
           <div class="actions"><button data-act="target-add">Add an entity</button></div>
           ${data.ha_device ? `<p class="muted small">Chosen from the Home Assistant device “${esc(data.ha_device)}”.</p>` : ""}
           <span class="save-status" id="dev-status"></span>
@@ -336,6 +415,7 @@ ${(data.rule_diagnostics[r.id] || {}).advanced ? `<span class="badge">advanced</
     chg: {
       name: (el) => patch({ name: el.value }, "Saved."),
       enabled: (el) => patch({ enabled: el.checked }, "Saved. Deploy to apply it in Home Assistant."),
+      "default-enabled": (el) => patch({ default_rule: { ...data.device.default_rule, enabled: el.checked } }, "Saved. Deploy to apply it in Home Assistant."),
       "rule-enabled": (el) => {
         const rule = data.device.rules.find((r) => r.id === el.dataset.id);
         act(() => change("api/rules/save", { device_id: deviceId, rule: { ...rule, enabled: el.checked } }), "Saved. Deploy to apply it in Home Assistant.");
@@ -510,16 +590,17 @@ async function route() {
   const token = ++navToken;
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   const section = parts[0] || "overview";
-  const NAV = { blueprint: "devices", mood: "devices" };
+  const NAV = { blueprint: "devices", mood: "devices", default: "rules" };
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === (NAV[section] || section)));
   page = { act: {}, chg: {} };
   const current = () => token === navToken;
   try {
     if (section === "overview") await overviewPage(token);
-    else if (section === "devices" && parts[1] === "new") await newDevicePage(token);
+    else if (section === "devices" && parts[1] === "new") await newDevicePage(token, parts[2] || null);
     else if (section === "devices" && parts[1]) await devicePage(parts[1], token);
     else if (section === "devices") await devicesPage(token);
     else if (section === "rules" && parts[1] && parts[2]) { await loadShell(); if (current()) page = await editorPage(parts[1], parts[2] === "new" ? null : parts[2], current) || page; }
+    else if (section === "default" && parts[1]) { await loadShell(); if (current()) page = await editorPage(parts[1], "default", current) || page; }
     else if (section === "rules") await rulesPage(token);
     else if (section === "blueprint" && parts[1]) { await loadShell(); if (current()) page = await blueprintPage(parts[1], current) || page; }
     else if (section === "import" && parts[1]) { await loadShell(); if (current()) page = await importPage(parts[1], current) || page; }

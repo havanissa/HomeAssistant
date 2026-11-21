@@ -100,10 +100,24 @@ const PURPOSE_TITLE = {
   time: "Choose a date/time helper", select: "Choose a dropdown helper",
 };
 
+// Small pictures for rooms, devices and the domains of entities (text glyphs: no image files, no inline styles).
+const ICONS = {
+  room: "🚪", unassigned: "❔", multiple: "🏠", device: "📦", loose: "🧩", light: "💡", switch: "🔌", input_boolean: "🔘", fan: "🌀",
+  cover: "🪟", climate: "🌡️", humidifier: "💧", lock: "🔒", valve: "🚰", siren: "🚨", media_player: "🔊", vacuum: "🧹",
+  water_heater: "♨️", number: "🔢", input_number: "🔢", select: "📋", input_select: "📋", button: "⏺️", input_button: "⏺️",
+  scene: "🎬", script: "📜", binary_sensor: "📟", sensor: "📈", event: "🎛️", person: "🧑", sun: "☀️", automation: "⚙️",
+};
+export const icon = (kind) => `<span class="ico" aria-hidden="true">${ICONS[kind] || "▫️"}</span>`;
+
 // The entity picker: search by name, area, device or entity id. Resolves the chosen entity (or null).
-export function pickEntity(purpose = "any") {
+// options.room = {area_id, name} offers "Only show entities from this room"; options.only is its state (and
+// options.onToggle hears changes); options.keep is the entity chosen now: it stays listed whatever the filter.
+export function pickEntity(purpose = "any", options = {}) {
   return new Promise((resolve) => {
+    const room = options.room || null;
+    let only = Boolean(room && options.only);
     openDialog(`<h2>${esc(PURPOSE_TITLE[purpose] || PURPOSE_TITLE.any)}</h2>
+      ${room ? `<label class="pick-room"><input type="checkbox" id="pick-room" ${only ? "checked" : ""}> Only show entities from this room <span class="muted">(${esc(room.name)})</span></label>` : ""}
       <input type="search" id="pick-q" placeholder="Search by name, area, device or entity id" autocomplete="off">
       <div class="results" id="pick-results"><div class="muted">Searching…</div></div>
       <div class="actions"><button data-d="cancel">Cancel</button></div>`, true);
@@ -115,19 +129,21 @@ export function pickEntity(purpose = "any") {
     const search = async () => {
       const mine = ++seq;
       try {
-        const data = await api(`api/entities?purpose=${enc(purpose)}&q=${enc(input.value)}`);
+        const data = await api(`api/entities?purpose=${enc(purpose)}&q=${enc(input.value)}${only ? `&area=${enc(room.area_id)}` : ""}${options.keep ? `&keep=${enc(options.keep)}` : ""}`);
         if (mine !== seq) return;
         found = data.results;
-        box.innerHTML = found.length ? found.map((e, i) => `<button class="result" data-i="${i}">
-            <span><strong>${esc(e.name)}</strong> <span class="muted small">${esc([e.area, e.device_name].filter(Boolean).join(" · "))}</span><br><span class="mono">${esc(e.entity_id)}</span></span>
+        box.innerHTML = found.length ? found.map((e, i) => `<button class="result" data-i="${i}" ${e.current ? "data-current" : ""}>${icon(e.domain)}
+            <span><strong>${esc(e.name)}</strong> <span class="muted small">${esc([e.area, e.device_name].filter(Boolean).join(" · "))}</span>${e.current ? ` <span class="badge">chosen now</span>` : ""}<br><span class="mono">${esc(e.entity_id)}</span></span>
             <span class="spacer"></span><span class="badge">${esc(e.state ?? "?")}${e.unit ? " " + esc(e.unit) : ""}</span></button>`).join("")
-          : `<div class="muted">Nothing found.</div>`;
+          : `<div class="muted">${only ? `Nothing found in ${esc(room.name)}. Untick the box above to see entities from every room.` : "Nothing found."}</div>`;
       } catch (err) {
         if (mine === seq) box.innerHTML = `<div class="notice error">${esc(err.message)}</div>`;
       }
     };
     let timer = null;
     input.oninput = () => { clearTimeout(timer); timer = setTimeout(search, 200); };
+    const toggle = dialog.querySelector("#pick-room");
+    if (toggle) toggle.onchange = () => { only = toggle.checked; if (options.onToggle) options.onToggle(only); search(); };
     dialog.onclick = (e) => {
       const result = e.target.closest("[data-i]");
       if (result) return done(found[Number(result.dataset.i)]);

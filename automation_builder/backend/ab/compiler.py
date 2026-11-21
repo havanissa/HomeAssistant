@@ -43,7 +43,7 @@ from typing import Any
 import yaml
 
 from . import catalog
-from .model import action_entities, condition_leaves, rule_recheck, simple_template, waits
+from .model import action_entities, active_default, condition_leaves, rule_recheck, simple_template, waits
 
 AUTOMATION_PREFIX = "automation_builder_"
 QUEUE_MAX = 20
@@ -582,16 +582,70 @@ def _blocks(rule: dict[str, Any], triggers: _Triggers, device: dict[str, Any], s
     return blocks
 
 
+def _with_default(device: dict[str, Any], default: dict[str, Any], rule_blocks: list[tuple[str, dict[str, Any]]],
+                  others: list[dict[str, Any]], triggers: _Triggers, variables: dict[str, Input]
+                  ) -> tuple[dict[str, Any], list[str]]:
+    """The shared automation's rules with the device's default behind them.
+
+        if    any rule of the device matches (its trigger started this run and its conditions hold)
+        then  the rule blocks, exactly as without a default (each checks itself, in the listed order)
+        else  if the run was started by a trigger of a rule (not by an occupancy recheck): the default actions
+
+    "Does any rule match" is asked once, before any action runs - an action of a rule can change the very
+    states the rules' conditions look at. ``others`` are the device's waiting rules: they run in their own
+    automations, but their triggers and conditions count here too, so the default stays quiet when one of them
+    matches. Returns the wrapper and the ids of every trigger that can call for the default.
+    """
+    matches, ordinary = [], []
+    for block in (b for _rule_id, kind, b in rule_blocks if kind == "rule"):
+        checks = block["if"]
+        matches.append(checks[0] if len(checks) == 1 else {"condition": "and", "conditions": list(checks)})
+    for rule in others:
+        ctx = _Ctx(device["targets"], variables)
+        alternatives = []
+        for trigger in rule["triggers"]:
+            kind, native, extra = _trigger(trigger)
+            alternatives.append((triggers.add(kind, native), extra))
+        ctx.alternatives = alternatives
+        checks = [_gate(alternatives), *_conditions(rule["conditions"], ctx)]
+        matches.append(checks[0] if len(checks) == 1 else {"condition": "and", "conditions": checks})
+    ordinary = [t["id"] for t in triggers.items if not t["id"].startswith(("recheck_", "periodic_"))]
+    fallback: list[dict[str, Any]] = [{"condition": "trigger", "id": ordinary}]
+    if default["override_entity"]:
+        fallback.append({"condition": "state", "entity_id": default["override_entity"], "state": "off"})
+    wrapper = {"alias": "Rules, or the default when none matches",
+               "if": [matches[0] if len(matches) == 1 else {"condition": "or", "conditions": matches}],
+               "then": [b for _rule_id, kind, b in rule_blocks if kind == "rule"],
+               "else": [{"alias": "Default", "if": fallback, "then": _sequence(default["actions"], _Ctx(device["targets"], variables))}]}
+    return wrapper, ordinary
+
+
 def _automation(device: dict[str, Any], rules: list[dict[str, Any]], settings: dict[str, Any], *, mode: str,
-                separate: dict[str, Any] | None, notes: list[dict[str, Any]]) -> dict[str, Any]:
+                separate: dict[str, Any] | None, notes: list[dict[str, Any]],
+                default: dict[str, Any] | None = None, others: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     triggers = _Triggers()
     actions: list[dict[str, Any]] = []
     blocks: list[dict[str, Any]] = []
     variables: dict[str, Input] = {}
-    for rule in rules:
-        for kind, block in _blocks(rule, triggers, device, settings, notes, variables):
-            blocks.append({"rule_id": rule["id"], "kind": kind, "index": len(actions)})
-            actions.append(block)
+    if default is None:
+        for rule in rules:
+            for kind, block in _blocks(rule, triggers, device, settings, notes, variables):
+                blocks.append({"rule_id": rule["id"], "kind": kind, "index": len(actions)})
+                actions.append(block)
+    else:
+        found = [(rule["id"], kind, block) for rule in rules
+                 for kind, block in _blocks(rule, triggers, device, settings, notes, variables)]
+        wrapper, _ordinary = _with_default(device, default, found, others or [], triggers, variables)
+        actions.append(wrapper)
+        position = 0
+        for rule_id, kind, block in found:
+            if kind == "rule":  # inside the wrapper's "then"
+                blocks.append({"rule_id": rule_id, "kind": kind, "index": 0, "path": f"action/0/then/{position}"})
+                position += 1
+        for rule_id, kind, block in found:
+            if kind == "recheck":  # rechecks stay at the top level: they never call for the default
+                blocks.append({"rule_id": rule_id, "kind": kind, "index": len(actions)})
+                actions.append(block)
     periodic = [t["id"] for t in triggers.items if t["id"].startswith("periodic_")]
     relevant: list[dict[str, Any]] = []
     for rule in rules:  # the periodic check runs only while an occupancy rule's state is current
@@ -600,7 +654,7 @@ def _automation(device: dict[str, Any], rules: list[dict[str, Any]], settings: d
                      "state": "on" if trigger.get("to") == "occupied" else "off"}
             if trigger["type"] == "occupancy" and state not in relevant:
                 relevant.append(state)
-    names = "; ".join(rule["name"] for rule in rules)
+    names = "; ".join([*(rule["name"] for rule in rules), *(["Default"] if default else [])])
     alias = (f"{device['name']}: {separate['name']} (Automation Builder)" if separate
              else f"{device['name']} (Automation Builder)")
     config: dict[str, Any] = {
@@ -640,9 +694,16 @@ def compile_device(device: dict[str, Any], settings: dict[str, Any]) -> dict[str
                                      "“for …” survives better and blocks nothing."})
         (separate if waits(rule) else shared).append(rule)
     automations = []
-    if shared:
-        main = _automation(device, shared, settings, mode="queued", separate=None, notes=notes)
-        main["reason"] = f"{len(shared)} rule{'s' if len(shared) != 1 else ''} in one automation"
+    default = active_default(device) if rules else None
+    if device["enabled"] and active_default(device) and not rules:
+        notes.append({"level": "info", "code": "default_without_rules", "rule_id": None,
+                      "message": "The default never runs while no rule is enabled: it has no trigger of its own."})
+    if shared or default:
+        main = _automation(device, shared, settings, mode="queued", separate=None, notes=notes, default=default,
+                           others=separate)
+        main["reason"] = (f"{len(shared)} rule{'s' if len(shared) != 1 else ''} in one automation"
+                          + (", with the default for when none of the device's rules matches" if default else ""))
+        main["default"] = bool(default)
         automations.append(main)
     for rule in separate:
         own = _automation(device, [rule], settings, mode=rule["retrigger"], separate=rule, notes=notes)
