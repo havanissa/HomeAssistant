@@ -140,8 +140,14 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                     frame.locator("h1", has_text="New rule").wait_for()
                     frame.locator("#rule-name").fill("GUI rule")
                     frame.locator('button[data-act="add-trigger"]').click()
-                    check("flow: an incomplete rule is not saved", "Not saved yet" in (frame.locator("#save-status").text_content() or "")
-                          or "new rule" in (frame.locator("#save-status").text_content() or "").lower())
+                    try:
+                        frame.locator("#save-status", has_text="Not saved yet").wait_for(timeout=5000)
+                    except Exception:  # noqa: BLE001 - reported by the check below
+                        pass
+                    status_text = frame.locator("#save-status").text_content() or ""
+                    created = next(d for d in overview()["devices"] if d["targets"][0]["entity_id"] == CEILING)
+                    check("flow: an incomplete rule is not saved", "Not saved yet" in status_text and created["rules"] == 0,
+                          f"{status_text!r}, rules: {created['rules']}")
                     frame.locator("button.entity.unset").first.click()
                     frame.locator("#pick-q").fill("Test motion")
                     frame.locator("button.result", has_text="binary_sensor.test_motion").click()

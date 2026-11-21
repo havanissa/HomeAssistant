@@ -106,14 +106,14 @@ def test_container_files():
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_interface_scripts_parse():
-    for name in ("app.js", "ui.js", "editor.js"):
+    for name in ("app.js", "ui.js", "editor.js", "pages.js"):
         subprocess.run(["node", "--check", str(STATIC / name)], check=True)
 
 
 def test_interface_has_no_inline_styles_or_scripts():
     """The Content-Security-Policy allows neither: everything is in app.css and the script files."""
     html = (STATIC / "index.html").read_text()
-    js = "".join((STATIC / name).read_text() for name in ("app.js", "ui.js", "editor.js"))
+    js = "".join((STATIC / name).read_text() for name in ("app.js", "ui.js", "editor.js", "pages.js"))
     assert ' style="' not in js and "<style" not in html and "onclick=" not in js + html
     assert "innerHTML" in js and "esc(" in js
 

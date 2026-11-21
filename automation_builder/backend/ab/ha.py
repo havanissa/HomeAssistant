@@ -8,15 +8,23 @@ reads and event subscriptions only - states, registries, the user list for the
 administrator check, ``validate_config`` (Home Assistant's own check of
 triggers, conditions and actions; it changes nothing), ``automation/config``
 (the configuration an automation entity runs), ``search/related`` (which
-automations reference an entity), ``trace/list`` and ``get_services``.
+automations reference an entity), ``trace/list`` and ``trace/get`` (for this
+App's own automations only), ``get_services``, and the three
+``device_automation/*/list`` commands (what triggers, conditions and actions
+Home Assistant offers for a device).
+
+One websocket command writes: ``blueprint/save``, the command Home Assistant's
+own blueprint import uses. It is limited to automation blueprints in the App's
+own folder (``blueprints/automation/automation_builder/<name>.yaml``, see
+:func:`check_params`) and is only sent when the user presses "Install".
 
 **HTTP** (``http://supervisor/core/api``), :class:`AutomationConfigApi`: only
 ``/config/automation/config/<id>``, and only for ids that start with
 ``automation_builder_``. This is the endpoint Home Assistant's own automation
 editor uses to read, save and delete an automation in ``automations.yaml``.
 
-There is no way to call a service, write a state, fire an event or change a
-registry through this module: Automation Builder never controls a device
+There is no way to call a service, write a state, fire an event, change a
+registry or turn an automation on or off through this module: Automation Builder never controls a device
 itself. The automations it deploys do, inside Home Assistant.
 
 The reconnect, start-up and ping handling are those of Smart Occupancy
@@ -57,7 +65,30 @@ ALLOWED_COMMANDS: frozenset[str] = frozenset({
     "automation/config",
     "search/related",
     "trace/list",
+    "trace/get",
+    "device_automation/trigger/list",
+    "device_automation/condition/list",
+    "device_automation/action/list",
+    "blueprint/list",
+    "blueprint/save",
 })
+#: Where this App may save a blueprint: its own folder below ``blueprints/automation``, nothing else.
+BLUEPRINT_PATH = re.compile(r"automation_builder/[a-z0-9_]{1,80}\.yaml")
+
+
+def check_params(command_type: str, params: dict[str, Any]) -> None:
+    """The limits on the parameters of the allowlisted commands that could reach beyond this App's own things."""
+    if command_type == "subscribe_events" and params.get("event_type") not in ALLOWED_EVENT_TYPES:
+        raise NotAllowed(f"Subscribing to {params.get('event_type')!r} is not allowed")
+    if command_type in ("trace/list", "trace/get") and (
+            params.get("domain") != "automation" or not is_managed_id(params.get("item_id"))):
+        raise NotAllowed("Only the traces of this App's own automations are read")
+    if command_type.startswith("blueprint/") and params.get("domain") != "automation":
+        raise NotAllowed("Only automation blueprints are handled")
+    if command_type == "blueprint/save" and (
+            not isinstance(params.get("path"), str) or not BLUEPRINT_PATH.fullmatch(params["path"])
+            or "source_url" in params):
+        raise NotAllowed(f"{params.get('path')!r} is not a blueprint file of this App")
 ALLOWED_EVENT_TYPES: frozenset[str] = frozenset({
     "state_changed", "area_registry_updated", "device_registry_updated", "entity_registry_updated",
     "homeassistant_started",
@@ -128,6 +159,7 @@ class HomeAssistantClient:
         self.areas: list[dict[str, Any]] = []
         self.devices: list[dict[str, Any]] = []
         self.entity_registry: list[dict[str, Any]] = []
+        self.services: dict[str, Any] = {}
         self.commands_sent: Counter[str] = Counter()
         self.history: deque[dict[str, Any]] = deque(maxlen=20)  # connection changes (for diagnostics)
         self.events_total = 0
@@ -192,8 +224,7 @@ class HomeAssistantClient:
     async def _send(self, command_type: str, params: dict[str, Any]) -> tuple[int, asyncio.Future[Any]]:
         if command_type not in ALLOWED_COMMANDS:
             raise NotAllowed(f"Command {command_type!r} is not allowed")
-        if command_type == "subscribe_events" and params.get("event_type") not in ALLOWED_EVENT_TYPES:
-            raise NotAllowed(f"Subscribing to {params.get('event_type')!r} is not allowed")
+        check_params(command_type, params)
         ws = self._ws
         if ws is None or ws.closed:
             raise ConnectionError("Not connected to Home Assistant")
@@ -320,6 +351,10 @@ class HomeAssistantClient:
             self.devices = devices
         if entities is not None:
             self.entity_registry = entities
+        try:
+            self.services = await self.command("get_services") or {}
+        except HomeAssistantError as err:
+            _LOGGER.debug("Could not read the services: %s", err)
 
     async def _ping_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         while True:

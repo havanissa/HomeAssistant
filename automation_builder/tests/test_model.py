@@ -56,7 +56,7 @@ def test_invalid_triggers(trigger, message):
     (B.c_state("light.x", None), "Choose a state"),
     (B.c_numeric("sensor.x"), "Give a threshold"),
     (B.c_time(), "time range"),
-    ({"type": "template", "value": "{{ 1 }}"}, "Unsupported condition type"),
+    ({"type": "zone", "value": "home"}, "Unsupported condition type"),
     (B.any_of(), "at least one condition"),
 ])
 def test_invalid_conditions(condition, message):
@@ -71,7 +71,7 @@ def test_invalid_conditions(condition, message):
     (B.call("light.turn_on", entity_id="light.all"), "Leave entity_id out"),
     (B.call("light.turn_on", rgb_color=[1, 2, 3], color_temp_kelvin=2700), "one way to set the colour"),
     (B.delay(0), "whole number of seconds"),
-    ({"type": "choose"}, "Unsupported action type"),
+    ({"type": "stop"}, "Unsupported action type"),
 ])
 def test_invalid_actions(action, message):
     assert message in problems(lambda: B.device(1, "L", [LAMP], [B.rule(1, "A", [B.state("binary_sensor.m")], [action])]))

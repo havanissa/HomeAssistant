@@ -160,3 +160,44 @@ button.result:hover, button.result:focus-visible { background: var(--info-bg); }
 .dialog-body { margin: 8px 0; overflow-wrap: anywhere; }
 .badge { white-space: normal; }
 h1 .small { font-weight: 400; }
+/* ------------------------------------------------------------ Phase 0.2 */
+nav { flex-wrap: wrap; }
+.nest { border-left: 3px solid var(--line); margin: 10px 0 0 2px; padding: 2px 0 2px 10px; }
+.nest > .row { margin-bottom: 6px; }
+.nest > .actions { margin-top: 8px; }
+.part.nested { background: transparent; border-style: solid; border-color: var(--accent); }
+.part.nested > .line:empty { display: none; }
+.line:empty { display: none; }
+.branch { border: 1px dashed var(--line); border-radius: 10px; padding: 8px 10px; margin-top: 10px; }
+.kw.small { font-size: 11px; padding: 1px 6px; }
+.days.stack { flex-direction: column; align-items: flex-start; }
+input.short { width: 5em; }
+input.long { width: min(26em, 100%); }
+select { max-width: 100%; }
+optgroup { font-style: normal; color: var(--muted); }
+.diag { margin-top: 8px; }
+.diag details { margin-top: 2px; }
+.diag details > summary { font-size: 13px; font-weight: 400; color: var(--muted); min-height: 44px; display: flex; align-items: center; }
+.diag details[open] > summary { color: var(--text); }
+.diag .kv { margin-top: 4px; }
+.ent.missing, .ent.unavailable { color: var(--error); }
+.dot.good { background: var(--occupied); }
+.bp-input { border-top: 1px solid var(--line); padding: 4px 0; }
+.bp-input.on { background: var(--info-bg); border-radius: 8px; padding: 4px 10px; margin: 4px 0; border-top: 0; }
+.bp-fields { padding: 0 0 8px 30px; display: grid; gap: 6px; }
+.bp-fields input[type=text] { flex: 1 1 12em; min-width: 0; }
+.button.disabled { opacity: .5; pointer-events: none; }
+#mood-table select { min-width: 10em; }
+.field textarea { min-height: 60px; }
+@media (max-width: 640px) {
+  .top { gap: 8px; padding: 8px 12px; }
+  nav a { padding: 10px 10px; }
+  main { padding: 12px; }
+  #banners { padding: 0 12px; }
+  .card { padding: 12px; }
+  .nest { padding-left: 8px; }
+  .part { padding: 8px; }
+  .bp-fields { padding-left: 0; }
+  .kv { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .kv dd { margin-bottom: 6px; }
+}

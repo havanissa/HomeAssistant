@@ -7,8 +7,14 @@ form **IF** something happens **AND/OR** conditions hold **THEN** do this.
   combined; a rule that cannot share an automation safely gets its own, with the reason.
 - Works for anything Home Assistant can control: lights, switches and relays, fans, covers, climate, locks, valves,
   helpers and more. You choose exactly which entities a device's rules control.
-- Triggers: entity state, numeric threshold, time of day, sunrise/sunset, room occupancy. Conditions: state, number,
-  time, combined with AND/OR.
+- Triggers: entity state, numeric threshold, time of day, sunrise/sunset, room occupancy, and under "More":
+  buttons and remotes, device triggers, templates, events and others. Conditions combine with AND/OR/NOT.
+  Actions can branch, wait (with a time limit), repeat, set variables, notify and run scripts.
+- **Export as blueprint**: turn a device's automation into a native Home Assistant blueprint and choose which
+  values become inputs.
+- **Import**: analyse an existing automation and copy it into rules when it can be represented faithfully.
+- Per rule: last triggered, executed, blocked (and by which condition), and whether the entity reports what the
+  rule commanded.
 - Occupancy is optional. A rule that uses an occupancy sensor gets automatic rechecks generated into its
   automation; a mood helper (`input_select`) is used like any other entity.
 - Nothing reaches Home Assistant until you press **Deploy**: the automation is validated by Home Assistant, shown

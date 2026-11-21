@@ -15,7 +15,7 @@ from typing import Any
 
 from . import catalog
 from .compiler import _trigger, canonical
-from .model import action_entities, has_delay
+from .model import action_entities, sub_sequences, waits, walk_actions
 
 
 
@@ -66,16 +66,44 @@ def _exclusive(a: dict[str, Any], b: dict[str, Any]) -> bool:
     return False
 
 
+WAITS = ("delay", "wait_trigger", "wait_condition")
+
+
 def _effects(rule: dict[str, Any], targets: list[str]) -> dict[str, list[dict[str, Any]]]:
-    """Per controlled entity: what the rule does to it before any delay (the part that runs at the trigger)."""
+    """Per controlled entity: what the rule does to it before any wait (the part that runs at the trigger).
+
+    An action inside a branch or a repeat only *may* run: it is marked ``conditional``.
+    """
     out: dict[str, list[dict[str, Any]]] = {}
-    for action in rule["actions"]:
-        if action["type"] == "delay":
-            break
-        kind = catalog.effect(action["action"], action["data"])
-        for entity_id in action_entities(action, targets):
-            out.setdefault(entity_id, []).append({"action": action["action"], "data": action["data"], **kind})
+
+    def visit(actions: list[dict[str, Any]], conditional: bool) -> bool:
+        for action in actions:
+            if action["type"] in WAITS or (action["type"] == "script" and action["wait"]):
+                return False
+            if action["type"] == "service":
+                kind = catalog.effect(action["action"], action["data"])
+                for entity_id in action_entities(action, targets):
+                    out.setdefault(entity_id, []).append({"action": action["action"], "data": action["data"],
+                                                          "conditional": conditional, **kind})
+            for _key, inner in sub_sequences(action):
+                visit(inner, True)
+        return True
+
+    visit(rule["actions"], False)
     return out
+
+
+def _late(rule: dict[str, Any], targets: list[str]) -> set[str]:
+    """The controlled entities a waiting rule acts on *after* a wait."""
+    found: set[str] = set()
+    waited = False
+    for action in walk_actions(rule["actions"]):
+        if action["type"] in WAITS or (action["type"] == "script" and action["wait"]) \
+                or (action["type"] == "repeat" and action["mode"] != "count"):
+            waited = True
+        elif waited and action["type"] == "service":
+            found.update(action_entities(action, targets))
+    return found
 
 
 def _pair(a: dict[str, Any], b: dict[str, Any], entity_id: str, ea: dict[str, Any], eb: dict[str, Any],
@@ -84,6 +112,14 @@ def _pair(a: dict[str, Any], b: dict[str, Any], entity_id: str, ea: dict[str, An
     both = f"“{a['name']}” and “{b['name']}” can run at the same moment"
     order = (f"Home Assistant runs them in the listed order, so “{b['name']}” has the last word. Give them "
              "conditions that exclude each other, or confirm that this order is what you want.")
+    if ea["conditional"] or eb["conditional"]:
+        different = (ea["action"], ea["data"]) != (eb["action"], eb["data"])
+        opposite = ea["kind"] == "state" and eb["kind"] == "state" and not set(ea["states"]) & set(eb["states"])
+        if opposite or "non_idempotent" in (ea["kind"], eb["kind"]) or (ea["action"] == eb["action"] and different):
+            return ("possible_overlap", "warning",
+                    f"{both}, and both can act on {name} ({ea['action']} and {eb['action']}), depending on a branch "
+                    f"inside a rule. When both do, “{b['name']}” has the last word.")
+        return None
     if ea["kind"] == "non_idempotent" or eb["kind"] == "non_idempotent":
         if ea["action"] == eb["action"]:
             return ("double_toggle", "blocking",
@@ -119,10 +155,19 @@ def analyse(device: dict[str, Any], describe_entity: Any = None) -> list[dict[st
                       "entity_id": entity_id, "acknowledged": level == "blocking" and key in acknowledged})
 
     for rule in rules:
-        if has_delay(rule):
+        if waits(rule):
+            late = _late(rule, device["targets"])
+            for other in rules:
+                shared = sorted(late & {e for a in walk_actions(other["actions"])
+                                        for e in action_entities(a, device["targets"])}) if other is not rule else []
+                if shared:
+                    add("late_action", "warning",
+                        f"“{rule['name']}” acts on {', '.join(name_of(e) for e in shared)} after a wait. If "
+                        f"“{other['name']}” runs meanwhile, the later action still follows and has the last word.",
+                        sorted([rule["id"], other["id"]]), shared[0])
             continue
         for entity_id, effects in _effects(rule, device["targets"]).items():
-            states = [e["states"] for e in effects if e["kind"] == "state"]
+            states = [e["states"] for e in effects if e["kind"] == "state" and not e["conditional"]]
             if any(not set(x) & set(y) for x in states for y in states):
                 add("self_contradiction", "warning",
                     f"“{rule['name']}” leaves {name_of(entity_id)} in two different states one right after the "

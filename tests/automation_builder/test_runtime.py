@@ -199,7 +199,7 @@ async def test_delay_rule_runs_separately_and_blocks_nothing(house, hass):
     assert house.taken() == [OFF]
 
 
-async def test_parallel_delay_rule_stays_in_the_shared_automation(house):
+async def test_parallel_delay_rule_gets_its_own_parallel_automation(house):
     device = B.device(1, "Lamp", [LAMP], [
         B.rule(1, "Pulse", [B.state(MOTION, to="on")], [B.call("light.turn_on"), B.delay(30), B.call("light.turn_off")],
                retrigger="parallel"),
@@ -208,7 +208,7 @@ async def test_parallel_delay_rule_stays_in_the_shared_automation(house):
     for entity, value in ((LAMP, "off"), (MOTION, "off"), (MOOD, "Dagur")):
         house.set(entity, value)
     automations = await house.load(device)
-    assert [(a["role"], a["mode"]) for a in automations] == [("shared", "parallel")]
+    assert [(a["role"], a["mode"]) for a in automations] == [("shared", "queued"), ("separate", "parallel")]
     house.set(MOTION, "on")
     await house.settle()
     house.set(MOOD, "Hygge")

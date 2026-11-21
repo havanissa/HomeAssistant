@@ -10,7 +10,7 @@ a container on the test network and provides:
 * ``/api/hassio_ingress/<token>/...`` - Ingress with Core's and the Supervisor's header handling
   (X-Ingress-Path, X-Forwarded-*, X-Remote-User-*), requests reaching the App from this container's address.
 * ``/hassio/ingress/ab`` - a page embedding the App in a full-size iframe, like the sidebar panel.
-* ``/_test/commands``, ``/_test/drop_core`` and ``/_test/fail_api`` - test hooks.
+* ``/_test/commands``, ``/_test/drop_core`` and ``/_test/fail_api`` (``mode=down|refuse|slow``) - test hooks.
 
 Environment: SUPERVISOR_TOKEN, HA_URL, HA_TOKEN, APP_URL, INGRESS_TOKEN.
 """
@@ -65,8 +65,8 @@ async def core_websocket(request: web.Request) -> web.WebSocketResponse:
                     break
                 data = msg.json()
                 for item in data if isinstance(data, list) else [data]:
-                    recorded.append({k: item.get(k) for k in ("type", "event_type", "domain", "service", "integration")
-                                     if k in item})
+                    recorded.append({k: item.get(k) for k in ("type", "event_type", "domain", "service", "integration",
+                                                              "path", "item_id") if k in item})
                 await core.send_str(msg.data)
             await core.close()
 
@@ -98,8 +98,11 @@ async def core_api(request: web.Request) -> web.Response:
     async with request.app["api_session"].request(
             request.method, f"{HA_URL}/api/{path}", data=body or None,
             headers={"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"}) as resp:
-        return web.Response(status=resp.status, body=await resp.read(),
-                            content_type=resp.content_type or "application/json")
+        answer = web.Response(status=resp.status, body=await resp.read(),
+                              content_type=resp.content_type or "application/json")
+    if fail_api["mode"] == "slow" and request.method == "POST":
+        await asyncio.sleep(8)  # Home Assistant has the change; the App does not know yet (an interrupted deployment)
+    return answer
 
 
 async def ingress(request: web.Request) -> web.StreamResponse:

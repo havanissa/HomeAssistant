@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -23,9 +24,17 @@ from typing import Any
 import urllib.error
 import urllib.request
 
-HA = "http://127.0.0.1:18123"
+# Two targets. "stack" (default): the local stack of stack.sh (a stand-in Supervisor with test hooks).
+# "haos": a genuine Home Assistant OS, driven by haos.py, which sets these variables:
+#   AB_E2E_TARGET=haos AB_E2E_HA=http://127.0.0.1:28080 AB_E2E_INGRESS=<http://host/api/hassio_ingress/token>
+#   AB_E2E_COOKIE=<ingress_session=...>
+# Checks that need the stand-in Supervisor's hooks are reported as SKIP on "haos", never as passed.
+TARGET = os.environ.get("AB_E2E_TARGET", "stack")
+HA = os.environ.get("AB_E2E_HA", "http://127.0.0.1:18123")
 STACK = "http://127.0.0.1:18400"
-INGRESS = f"{STACK}/api/hassio_ingress/abIngressToken_XyZ789"
+INGRESS = os.environ.get("AB_E2E_INGRESS", f"{STACK}/api/hassio_ingress/abIngressToken_XyZ789")
+COOKIE = os.environ.get("AB_E2E_COOKIE", "")
+HA_VERSION = os.environ.get("AB_E2E_HA_VERSION", "2026.11.1")
 UNMANAGED = "1700000000001"
 
 BED = "light.bed_light"
@@ -46,15 +55,46 @@ def check(name: str, ok: Any, detail: Any = "") -> bool:
     return bool(ok)
 
 
+def skip(name: str, why: str) -> None:
+    results.append({"check": name, "ok": None, "detail": why})
+    print(f"SKIP {name}  [{why}]", flush=True)
+
+
+def summary(out: str = "") -> int:
+    failed = [r for r in results if r["ok"] is False]
+    skipped = [r for r in results if r["ok"] is None]
+    passed = len(results) - len(failed) - len(skipped)
+    print(f"\n{passed} of {len(results) - len(skipped)} checks passed" + (f", {len(skipped)} skipped (not run)" if skipped else ""))
+    if out:
+        Path(out).write_text(json.dumps({"target": TARGET, "passed": passed, "failed": len(failed), "skipped": len(skipped),
+                                         "total": len(results), "results": results}, indent=1))
+    return 1 if failed else 0
+
+
+_cookie = {"value": COOKIE, "at": time.monotonic()}
+
+
+def _ingress_cookie(renew: bool = False) -> str:
+    """The Ingress session of a Home Assistant OS run; a session ends after some minutes, so it is renewed."""
+    if TARGET == "haos" and (renew or time.monotonic() - _cookie["at"] > 300):
+        import haos  # noqa: PLC0415 - only on that target
+        _cookie.update(value=haos.ingress()[1], at=time.monotonic())
+    return _cookie["value"]
+
+
 def request(url: str, method: str = "GET", body: Any = None, headers: dict[str, str] | None = None) -> tuple[int, Any]:
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json", **(headers or {})})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            raw = response.read()
-            status = response.status
-    except urllib.error.HTTPError as err:
-        raw, status = err.read(), err.code
+    for attempt in (0, 1):
+        extra = {"Cookie": _ingress_cookie(renew=bool(attempt))} if COOKIE and url.startswith(INGRESS) else {}
+        req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json", **extra, **(headers or {})})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                raw = response.read()
+                status = response.status
+        except urllib.error.HTTPError as err:
+            raw, status = err.read(), err.code
+        if not (status == 401 and extra and attempt == 0):
+            break
     try:
         return status, json.loads(raw) if raw else None
     except ValueError:
@@ -184,6 +224,12 @@ class App:
         return self.device(device_id)["live"]["status"]
 
 
+#: Every websocket command the App may send in the Phase 0.1 scenario: reads, subscriptions and validation.
+READ_COMMANDS = {"auth", "ping", "get_config", "get_states", "get_services", "subscribe_events", "unsubscribe_events",
+                 "config/area_registry/list", "config/device_registry/list", "config/entity_registry/list",
+                 "config/auth/list", "validate_config", "automation/config", "search/related", "trace/list", "trace/get"}
+
+
 def t_state(entity_id: str, to: Any = None, frm: Any = None, for_seconds: int = 0) -> dict[str, Any]:
     return {"type": "state", "entity_id": entity_id, "to": to, "from": frm, "for_seconds": for_seconds}
 
@@ -211,7 +257,7 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
     status, overview = app.get("api/overview")
     ha = overview["connection"]["home_assistant"]
     check("1 fresh installation: no devices, no leftovers", status == 200 and overview["devices"] == [] and overview["orphans"] == [])
-    check("1 connected to Home Assistant 2026.11.1 through the Supervisor proxy", ha["connected"] and ha["ha_version"] == "2026.11.1", ha)
+    check(f"1 connected to Home Assistant {HA_VERSION} through the Supervisor proxy", ha["connected"] and ha["ha_version"] == HA_VERSION, ha)
     check("1 the Ingress user is recognised as an administrator", overview["user"]["is_admin"])
     check("1 nothing of this App is in Home Assistant yet", home.managed() == [])
     status, page = request(f"{INGRESS}/")
@@ -439,17 +485,21 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
     app.change("api/rules/delete", {"device_id": bed, "rule_id": bad})
     extra = app.add_rule(bed, "Extra", [t_state(MOOD, to="Nátt")], [call("light.turn_off")])
     plan = app.plan(bed)
-    request(f"{STACK}/_test/fail_api?mode=refuse", "POST")
-    status, failed = app.change("api/devices/deploy", {"device_id": bed, "plan_hash": plan["plan_hash"]})
-    request(f"{STACK}/_test/fail_api", "POST")
-    check("13 a refused deployment is reported with Home Assistant's message", status == 502 and failed["error"] == "deploy_failed" and "refused by the test" in failed["message"], failed)
-    check("13 ...and Home Assistant keeps the previous automation", home.automation(bed_auto)[1] == good)
-    view = app.device(bed)
-    check("13 ...and the device shows the failure and its pending changes", view["last_result"]["ok"] is False and view["live"]["status"] == "changes_pending")
-    request(f"{STACK}/_test/fail_api?mode=down", "POST")
-    status, down = app.post("api/devices/plan", {"device_id": bed})
-    request(f"{STACK}/_test/fail_api", "POST")
-    check("13 an unreachable API is a clear error", status == 502 and "could not read" in down["message"], down)
+    if TARGET == "stack":
+        request(f"{STACK}/_test/fail_api?mode=refuse", "POST")
+        status, failed = app.change("api/devices/deploy", {"device_id": bed, "plan_hash": plan["plan_hash"]})
+        request(f"{STACK}/_test/fail_api", "POST")
+        check("13 a refused deployment is reported with Home Assistant's message", status == 502 and failed["error"] == "deploy_failed" and "refused by the test" in failed["message"], failed)
+        check("13 ...and Home Assistant keeps the previous automation", home.automation(bed_auto)[1] == good)
+        view = app.device(bed)
+        check("13 ...and the device shows the failure and its pending changes", view["last_result"]["ok"] is False and view["live"]["status"] == "changes_pending")
+        request(f"{STACK}/_test/fail_api?mode=down", "POST")
+        status, down = app.post("api/devices/plan", {"device_id": bed})
+        request(f"{STACK}/_test/fail_api", "POST")
+        check("13 an unreachable API is a clear error", status == 502 and "could not read" in down["message"], down)
+    else:
+        for name in ("13 a refused deployment is reported with Home Assistant's message", "13 an unreachable API is a clear error"):
+            skip(name, "needs the stand-in Supervisor's failure hook; on Home Assistant OS see haos_checks.py (Core stopped)")
     status, _ = app.deploy(bed)
     check("13 recovery: the same rules deploy afterwards", status == 200 and app.status(bed) == "in_sync" and len(home.automation(bed_auto)[1]["actions"]) == 4)
     app.change("api/devices/restore", {"device_id": bed, "version": "previous"})
@@ -485,19 +535,24 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
     check("14 an App restart keeps rules, records and status", ready and set(statuses.values()) == {"in_sync"} and len(statuses) == 4, statuses)
 
     # ------------------------------------------------- access and what the App sent
-    status, _ = app.post("api/devices/plan", {"device_id": bed}, user="somebody-else")
-    check("15 a user who is not an administrator is refused", status == 403)
     status, _ = app.post("api/devices/plan", {"device_id": bed}, csrf=False)
     check("15 a request without the App's header is refused", status == 403)
-    _, sent = request(f"{STACK}/_test/commands")
-    kinds = {c["type"] for c in sent["commands"]}
-    check("15 the App never called a service or fired an event",
-          not kinds & {"call_service", "fire_event", "execute_script"} and kinds <= {
-              "auth", "ping", "get_config", "get_states", "subscribe_events", "config/area_registry/list",
-              "config/device_registry/list", "config/entity_registry/list", "config/auth/list", "validate_config",
-              "automation/config", "search/related", "trace/list", "unsubscribe_events"}, kinds)
-    paths = {h["path"] for h in sent["http"]}
-    check("15 over HTTP it only touched its own automations", paths and all(p.startswith("config/automation/config/automation_builder_") for p in paths), paths)
+    if TARGET == "stack":
+        status, _ = app.post("api/devices/plan", {"device_id": bed}, user="somebody-else")
+        check("15 a user who is not an administrator is refused", status == 403)
+        _, sent = request(f"{STACK}/_test/commands")
+        kinds = {c["type"] for c in sent["commands"]}
+        check("15 the App never called a service or fired an event",
+              not kinds & {"call_service", "fire_event", "execute_script"} and kinds <= READ_COMMANDS, kinds)
+        paths = {h["path"] for h in sent["http"]}
+        check("15 over HTTP it only touched its own automations", paths and all(p.startswith("config/automation/config/automation_builder_") for p in paths), paths)
+    else:
+        skip("15 a user who is not an administrator is refused", "the real Supervisor sets the user itself (panel_admin); covered on the stack")
+        skip("15 the App never called a service or fired an event", "needs the stand-in Supervisor's recording; covered on the stack")
+    _, mechanism = app.get("api/settings")
+    check("15 the App's own count of what it sent: reads, validation and its own automations only",
+          set(mechanism["mechanism"]["commands"]) <= READ_COMMANDS and set(mechanism["mechanism"]["requests"]) <= {"GET", "POST", "DELETE"},
+          mechanism["mechanism"]["commands"])
     check("16 the unmanaged automation is byte-for-byte unchanged", home.automation(UNMANAGED)[1] == unmanaged_before)
 
     # ------------------------------------------------- Home Assistant restart
@@ -527,11 +582,7 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
         home.set("occ_kamar", True)
         check("17 ...occupied turns the lamp on again", home.wait(FLAKY, "on", 5))
 
-    failed = [r for r in results if not r["ok"]]
-    print(f"\n{len(results) - len(failed)} of {len(results)} checks passed")
-    if args.out:
-        Path(args.out).write_text(json.dumps({"passed": len(results) - len(failed), "total": len(results), "results": results}, indent=1))
-    return 1 if failed else 0
+    return summary(args.out)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,21 @@
+# Disposable Home Assistant for the Automation Builder end-to-end checks (never a production instance).
+# No Smart Comfort, no Smart Occupancy Detection. The test entities are in ab_test_package.yaml.
+default_config:
+homeassistant:
+  name: Heima
+  latitude: 40.4
+  longitude: -3.7
+  elevation: 600
+  unit_system: metric
+  time_zone: Europe/Madrid
+  country: ES
+  packages:
+    ab_test: !include ab_test_package.yaml
+http:
+  server_host:
+    - 127.0.0.1
+    - 172.30.32.1
+  server_port: 18123
+logger:
+  default: warning
+automation: !include automations.yaml
