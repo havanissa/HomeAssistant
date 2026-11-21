@@ -109,13 +109,22 @@ Not tested on HAOS (and why):
 * **HACS itself**: HACS needs a GitHub device-flow login in a browser. The HACS *package* was tested (the published
   tag's content installed in HACS's layout, and HACS's directory selection verified in its source); the HACS user
   interface and its update notification are in the manual checklist below.
-* **App update through the Supervisor (0.1.0 → 0.2.0)**: the Supervisor identifies an App by repository URL and
-  branch, so it can only be tested once 0.2.0 is on `main`. Planned right after the merge (the VM keeps a 0.1.0
-  installation from `main` for it); tested before with the real 0.1.0 and 0.2.0 images on a simulated Supervisor.
+* (Done after the merge, see 4.4.) App update through the Supervisor.
 * **Physical hardware** (Raspberry Pi, Yellow, NUC): not available; the image is the same architecture family only
   for amd64. aarch64 builds were not exercised.
 * **Smart Comfort's own pilot comparison on HAOS**: Smart Comfort was installed but not set up with rooms on the VM;
   the pilot comparison against a live Smart Comfort was tested on the simulated stack.
+
+### 4.4 After the merge (genuine HAOS, same VM)
+
+* Companion **v0.2.0 published** from `main` (4c73259); `check` of the published tag against `main`: *in sync*;
+  installed on the VM from the GitHub tag in HACS's layout, Core restarted.
+* **App update through the Supervisor**: the 0.1.0 installation from `main` showed *update available*; the
+  Supervisor updated it to 0.2.0 and started it; its configuration revision (`1ec3516b8a41cc9b`) and room were
+  unchanged; it reported App 0.2.0, integration 0.2.0, engine 1.0.0.
+* **Pairing replaced** by the updated installation (*Pair this App*): it publishes, the data is fresh; the replaced
+  installation shows *paired with another App* and no longer holds a token; the room's five entities kept their
+  entity ids and area-id unique ids.
 
 ### 4.2 Simulated Supervisor (real images, real Core 2026.11.1)
 
