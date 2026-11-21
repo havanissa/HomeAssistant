@@ -23,7 +23,7 @@ device: the App has no way to call a Home Assistant service.
 Updates: the App updates from the App store, the integration from HACS (then restart Home Assistant). Either can be
 updated first: the App checks the integration's version and protocol and says exactly what to update when they do
 not match. Rooms, pairing and entity ids are kept. If the integration is removed and added again, the App pairs again
-by itself (not after you pressed *Unpair*).
+by itself. It never does after an *Unpair*, and an App that was replaced by another pairing forgets its own.
 
 Smart Comfort is not affected: both Apps and both integrations can be installed at the same time. They use different
 slugs, domains, entity ids, unique ids, storage and HACS repositories, and neither reads the other's data.
@@ -170,6 +170,7 @@ file. Nothing is adjusted: the comparison only observes. Clear the field to stop
 | Update recommended | It works; update the integration in HACS when convenient. |
 | Not paired | Press *Pair with Home Assistant* (administrator). |
 | Paired with another App installation | This App was reinstalled or another one was paired: *Pair this App* replaces it. |
+| Not paired, but it was paired before | *Pair with Home Assistant* again, or *Forget pairing* to make this App forget its old pairing. |
 | Waiting / Not fresh | The App is reconnecting; the entities keep their last state (`fresh: false`). If it stays, look at *Recent connection errors* and download the diagnostics. |
 | Home Assistant not connected | Decisions are frozen until it is back; changes cannot be saved meanwhile. |
 

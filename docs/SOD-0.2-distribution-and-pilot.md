@@ -51,8 +51,10 @@ App store → App; HACS custom repository → companion; Add integration; Pair i
   unique id (tested: App 0.1.0 → 0.2.0 image with the same `/data`, companion v0.1.0 tag → 0.2.0 package, and a
   0.1.0 companion store read by 0.2.0).
 * Reloads, restarts and re-adding the integration need no new pairing: after a reload the App opens a new session;
-  when the integration lost its pairing (removed and added again) the App pairs again by itself — never after an
-  explicit *Unpair* (the App deletes its token then).
+  when the integration was removed and added again (a *fresh store*, which the companion reports in its `hello`)
+  the App pairs again by itself, recorded as automatic. Never after an explicit *Unpair* (the companion's store
+  remembers it), never after another App replaced the pairing (the replaced App forgets its token), and never with a
+  0.1.0 companion (it cannot tell). *Forget pairing* drops a token the App can no longer use.
 * No migration from Smart Comfort's entities.
 
 ## 3. Diagnostics (0.2.3)
@@ -196,11 +198,40 @@ removes what the pilot added:
 - (Already in the 0.1.0 code reviewed in Phase 0.1: freshness only after a publish in the current lease, explicit
   deletions only, recovery after reloads.)
 
-## 7. Test results
+## 7. Security review
 
-See the pull request for the exact numbers of this phase's final run.
+One independent review of the phase (security, data handling, permission boundaries). Nothing blocking; no new
+Home Assistant command, subscription, service call or App permission; no secret in the published package. Fixed:
 
-## 8. Limitations and next steps
+* important: automatic re-pairing could revive an App that had been replaced or unpaired elsewhere (now only into a
+  fresh companion store; replaced Apps forget their token; pairing operations are serialised; *Forget pairing*);
+* important: the publish scan missed 32-hex ids, `token = "…"`, single-backslash and macOS/root paths, loopback/CGNAT/
+  IPv6 addresses, `.local`/`nabu.casa` hosts, e-mail addresses and PNG text chunks (all added; PNG tEXt/iTXt/zTXt are
+  scanned);
+* minor: the allowlist is an exact pattern (no wildcard crosses `/`); `publish` fetches before resolving its ref and
+  never publishes uncommitted templates; pilot CSV cells cannot start a formula; malformed pilot files are dropped
+  record by record and can no longer stop the App; pilot saves are serialised, snapshot on the event loop, fsynced;
+  redaction is salted per download, matches names case-insensitively and in entity-id form, catches IPv6 and local
+  host names and drops instance ids; pilot downloads are redacted too; save-on-change keeps the page's revision so a
+  concurrent edit is refused (409) instead of overwritten.
+
+## 8. Test results
+
+Final run on the reviewed code:
+
+| Suite | Result |
+|---|---|
+| App unit tests (`cd smart_occupancy_detection && pytest`; parity, runtime, config, publisher, web, package, distribution, Phase 0.2) | 678 passed |
+| Companion in a real Home Assistant 2026.11.1 (`scripts/run_tests.py tests/sod_companion`) | 38 passed |
+| Companion package: `hassfest` (official validator, Docker) | 1 integration, 0 invalid |
+| Simulated Supervisor, upgrade cycle (v0.1.0 tag + 0.1.0 image → 0.2.0), Smart Comfort running beside it | 32/32, then 40/40 |
+| Browser (Playwright; desktop, tablet, phone; light, dark; add room with save on change) | 49/49 |
+| **Genuine HAOS 18.4 VM**, Core 2026.11.1: fresh install | 29/29 |
+| Genuine HAOS: companion upgrade, reload, network (Supervisor restart, link down), App stop/start, Core restart, transfer, recreate, diagnostics, no service calls | 30/32 → after fixes 32/32 on the two items (cookie in the test's direct downloads; a hold already over); re-run on the reviewed build 31/32: the one failure is a snapshot taken before earlier phases changed the configuration on purpose (not an upgrade effect) |
+| Genuine HAOS: Smart Comfort App 0.11.0 + companion 1.0.0 beside it | both running, no shared entity id |
+| Smart Comfort regression: App / companion / engine | 327 + 1 xfail / 43 / 1261 passed |
+
+## 9. Limitations and next steps
 
 * Release publishing is a manual command after each merge (no CI by choice). It is guarded (main only, identical or
   refused), but it is a step to remember.
