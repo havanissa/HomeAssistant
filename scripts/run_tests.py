@@ -7,13 +7,14 @@ install that Home Assistant over the harness and run the tests through this
 script. The only incompatibility is a helper that moved in 2026.11; it is
 aliased here before the harness imports it. Nothing else is patched.
 
-Two suites exist and must run in separate processes, because both import
+The suites run in separate processes, because two of them import
 ``custom_components.smart_occupancy`` (the companion integration, and the 0.9.0
 engine harness in ``tests/engine/custom_components``):
 
-    python scripts/run_tests.py tests/companion   # the minimal companion (Phase A6)
-    python scripts/run_tests.py tests/engine      # the App's engines in a real Home Assistant
-    python scripts/run_tests.py                   # both, one after the other
+    python scripts/run_tests.py tests/companion       # Smart Comfort's minimal companion (Phase A6)
+    python scripts/run_tests.py tests/engine          # Smart Comfort's engines in a real Home Assistant
+    python scripts/run_tests.py tests/sod_companion   # Smart Occupancy Detection's companion integration
+    python scripts/run_tests.py                       # all of them, one after the other
 """
 
 import subprocess
@@ -28,7 +29,7 @@ if not hasattr(logger_pkg, "_clear_logger_overwrites"):  # moved in 2026.11
 
 import pytest  # noqa: E402
 
-SUITES = ("tests/companion", "tests/engine")
+SUITES = ("tests/companion", "tests/engine", "tests/sod_companion")
 
 
 def main(argv: list[str]) -> int:

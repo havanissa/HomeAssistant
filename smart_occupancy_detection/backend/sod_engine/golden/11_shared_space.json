@@ -1,0 +1,152 @@
+{
+ "name": "shared_space",
+ "description": "One PIR assigned to two rooms of an open-plan space, each with its own sensor, adjacent to each other.",
+ "rooms": {
+  "kitchen": {
+   "sensors": [
+    {
+     "entity_id": "binary_sensor.open_pir",
+     "kind": "pir",
+     "role": "trigger"
+    },
+    {
+     "entity_id": "binary_sensor.kitchen_radar",
+     "kind": "radar",
+     "role": "maintain"
+    }
+   ],
+   "adjacent": [
+    "dining"
+   ]
+  },
+  "dining": {
+   "sensors": [
+    {
+     "entity_id": "binary_sensor.open_pir",
+     "kind": "pir",
+     "role": "trigger"
+    },
+    {
+     "entity_id": "binary_sensor.dining_door",
+     "kind": "door",
+     "role": "trigger"
+    }
+   ],
+   "adjacent": [
+    "kitchen"
+   ]
+  }
+ },
+ "initial": {
+  "binary_sensor.open_pir": "off",
+  "binary_sensor.kitchen_radar": "off",
+  "binary_sensor.dining_door": "off"
+ },
+ "events": [
+  {
+   "t": 0,
+   "entity": "binary_sensor.open_pir",
+   "state": "on"
+  },
+  {
+   "t": 4,
+   "entity": "binary_sensor.kitchen_radar",
+   "state": "on"
+  },
+  {
+   "t": 40,
+   "entity": "binary_sensor.open_pir",
+   "state": "off"
+  },
+  {
+   "t": 300,
+   "entity": "binary_sensor.dining_door",
+   "state": "on"
+  },
+  {
+   "t": 305,
+   "entity": "binary_sensor.dining_door",
+   "state": "off"
+  },
+  {
+   "t": 900,
+   "entity": "binary_sensor.kitchen_radar",
+   "state": "off"
+  }
+ ],
+ "until": 2500,
+ "expect": [
+  {
+   "t": 0.0,
+   "area": "kitchen",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacant",
+   "start": true
+  },
+  {
+   "t": 0.0,
+   "area": "dining",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacant",
+   "start": true
+  },
+  {
+   "t": 0.0,
+   "area": "kitchen",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 0.0,
+   "area": "dining",
+   "state": "possible_occupancy",
+   "occupied": true,
+   "reason_code": "possible_occupancy"
+  },
+  {
+   "t": 4.0,
+   "area": "kitchen",
+   "state": "confirmed_occupancy",
+   "occupied": true,
+   "reason_code": "occupied"
+  },
+  {
+   "t": 10.0,
+   "area": "dining",
+   "state": "confirmed_occupancy",
+   "occupied": true,
+   "reason_code": "occupied"
+  },
+  {
+   "t": 40.0,
+   "area": "dining",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 605.0,
+   "area": "dining",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  },
+  {
+   "t": 930.0,
+   "area": "kitchen",
+   "state": "possible_vacancy",
+   "occupied": true,
+   "reason_code": "confirming_vacancy"
+  },
+  {
+   "t": 1500.0,
+   "area": "kitchen",
+   "state": "vacant",
+   "occupied": false,
+   "reason_code": "vacated"
+  }
+ ]
+}
