@@ -8,7 +8,7 @@ from .protocol import DOMAIN as _DOMAIN
 
 DOMAIN: Final = _DOMAIN
 NAME: Final = "Smart Occupancy Detection"
-VERSION: Final = "0.1.0"  # must match manifest.json (checked by the tests)
+VERSION: Final = "0.2.0"  # must match manifest.json (checked by the tests)
 
 STORE_KEY: Final = f"{DOMAIN}.published"
 STORE_VERSION: Final = 1

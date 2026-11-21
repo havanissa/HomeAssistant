@@ -230,3 +230,42 @@ async def test_coexists_with_smart_comfort_without_taking_its_entities(hass, ws,
     # Smart Comfort's bridge commands stay its own; this integration answers only its domain.
     msg = await a.ws.raw("smart_occupancy/companion/status")
     assert msg["success"] and "occupancy" in str(msg["result"])
+
+
+async def test_diagnostics_are_redacted(hass, app):
+    from custom_components.smart_occupancy_detection.diagnostics import async_get_config_entry_diagnostics
+
+    await app.publish({KAMAR: view()})
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    data = await async_get_config_entry_diagnostics(hass, entry)
+    text = str(data)
+    assert app.token not in text and app.lease not in text and app.instance_id[:8] not in text
+    assert data["status"]["paired_by"] == "**REDACTED**"
+    assert data["views"][KAMAR]["state"] == "confirmed_occupancy"
+
+
+async def test_upgrade_from_a_0_1_0_store_keeps_everything(hass, ws, areas, hass_storage):
+    """The store written by companion 0.1.0 (same format) is read by 0.2.0: pairing, epoch and views survive, the
+    entities keep their ids, and the App resumes with its stored pairing token without pairing again."""
+    import secrets
+
+    from custom_components.smart_occupancy_detection import protocol as P
+    from custom_components.smart_occupancy_detection.const import STORE_KEY
+
+    token = secrets.token_hex(16)
+    hass_storage[STORE_KEY] = {"version": 1, "minor_version": 1, "key": STORE_KEY, "data": {
+        "pairing": {"hash": P.token_hash(token), "paired_at": "2026-11-21T10:00:00+00:00", "by": "u",
+                    "instance": "abcd1234"},
+        "epoch": 7, "views": {KAMAR: view()}, "disabled": {}, "orphaned": {},
+        "published_at": "2026-11-21T10:00:00+00:00", "app_version": "0.1.0", "history": []}}
+    registry = er.async_get(hass)
+    await setup_sod(hass)
+    state = hass.states.get("binary_sensor.sod_kamar_sudur_occupied")
+    assert state.state == "on" and state.attributes["fresh"] is False
+    unique_before = registry.async_get("binary_sensor.sod_kamar_sudur_occupied").unique_id
+    a = App(await ws(), token=token)
+    assert (await a.open())["trusted"]  # no new pairing needed
+    assert (await a.claim())["epoch"] == 8
+    await a.publish({KAMAR: view(state="vacant", occupied=False)})
+    assert hass.states.get("binary_sensor.sod_kamar_sudur_occupied").state == "off"
+    assert registry.async_get("binary_sensor.sod_kamar_sudur_occupied").unique_id == unique_before

@@ -122,6 +122,8 @@ class OccupancyRuntime:
         self._activity_seen: dict[str, str | None] = {}
         self._timers: dict[str, asyncio.TimerHandle] = {}
         self.deadlines: dict[str, datetime] = {}  # when each room is evaluated again by its timer
+        #: Why each room is held (no vacancy confirmed): "start", "reconnect" or "sensors_changed".
+        self.hold_reason: dict[str, str] = {}
         self._signal_status: dict[str, dict[str, str]] = {}
         self._listeners: list[Callable[[list[str]], None]] = []
         self._save_handle: asyncio.TimerHandle | None = None
@@ -288,11 +290,13 @@ class OccupancyRuntime:
             stored = {a: r for a, r in self.stored_state.items() if a in spec.area_ids}
             house.load(stored, now, self._lookup, self._name_of)
             self.house = house
+            self.hold_reason = {a: "start" for a in spec.area_ids}
             self.timeline.add("system", now, event="started", text=(
                 f"Started; {len(stored)} room(s) restored from the previous run" if stored else "Started"))
         else:
             self.house.hold_all(now)
             self.house.resync(now, self._lookup)
+            self.hold_reason = {a: "reconnect" for a in spec.area_ids}
             self.timeline.add("system", now, event="reconnected", text=(
                 "Connected to Home Assistant again: every sensor was read again and the start-up hold applies "
                 "(nothing is known about the interruption)"))
@@ -440,6 +444,9 @@ class OccupancyRuntime:
         stored_for_new = {a: self.stored_state[a] for a in spec.area_ids
                           if a not in old_house.engines and a in self.stored_state}
         house = old_house.rebuild(spec, now, self._lookup, self._name_of)
+        for area_id, engine in house.engines.items():
+            if engine is not old_house.engines.get(area_id):
+                self.hold_reason[area_id] = "sensors_changed" if area_id in old_house.engines else "start"
         for area_id, data in stored_for_new.items():
             house.engines[area_id].restore(data, now)
         self.house = house
@@ -547,8 +554,12 @@ class OccupancyRuntime:
         if result.starting_up and self.house is not None:
             until = self.house.engines[area_id]._startup_until
             left = _words(until - now) if until else "a moment"
-            out.append({"level": "info", "code": "startup_hold", "until": _iso(until), "text": (
-                f"Start-up hold: the previous state is kept and no vacancy is confirmed for {left}.")})
+            reason = self.hold_reason.get(area_id, "start")
+            why = {"start": "Start-up hold (the App started)",
+                   "reconnect": "Reconnect hold (the connection to Home Assistant was interrupted)",
+                   "sensors_changed": "Hold after a change of this room's sensors"}.get(reason, "Hold")
+            out.append({"level": "info", "code": "startup_hold", "reason": reason, "until": _iso(until), "text": (
+                f"{why}: the previous state is kept and no vacancy is confirmed for {left}.")})
         if result.vacancy_at is not None and result.state == OccupancyState.POSSIBLE_VACANCY:
             out.append({"level": "info", "code": "vacancy_pending", "until": _iso(result.vacancy_at), "text": (
                 f"Vacancy is pending: the room becomes vacant in {_words(result.vacancy_at - now)} unless there is "
@@ -580,6 +591,9 @@ class OccupancyRuntime:
             "last_activity_source": self.source_name(area_id, result.last_activity_source) if result else None,
             "vacancy_at": _iso(result.vacancy_at) if result else None,
             "starting_up": result.starting_up if result else False,
+            "hold": ({"reason": self.hold_reason.get(area_id, "start"),
+                      "until": _iso(self.house.engines[area_id]._startup_until)}
+                     if result and result.starting_up and self.house else None),
             "contributing": [v.track.label() for v in result.signals
                              if v.status in (SignalStatus.ACTIVE, SignalStatus.GRACE, SignalStatus.RECENT)]
             if result else [],
@@ -602,6 +616,8 @@ class OccupancyRuntime:
                     "value": v.track.value.value if v else None, "status": v.status.value if v else None,
                     "status_label": SIGNAL_LABELS.get(v.status.value) if v else "Not used",
                     "since": _iso(v.track.since) if v else None,
+                    # Data age: Home Assistant's last change and last update of the sensor's state.
+                    "last_changed": state.get("last_changed"), "last_updated": state.get("last_updated"),
                 })
             activity = [{"entity_id": e, "name": self._name_of(e) or e, "ha_state": (states.get(e) or {}).get("state"),
                          "exists": e in states, "last_changed": (states.get(e) or {}).get("last_changed")}

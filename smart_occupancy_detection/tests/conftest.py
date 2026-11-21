@@ -56,6 +56,8 @@ class FakeCompanion:
         self.views: dict[str, Any] = {}
         self.disabled: dict[str, str] = {}
         self.publishes = 0
+        self.version = "0.2.0"
+        self.protocol = 1
 
     def session(self, params: dict[str, Any], send: Callable[[dict], None]) -> None:
         session_id = secrets.token_hex(16)
@@ -187,7 +189,8 @@ class FakeHA:
         if command_type == f"{P.DOMAIN}/status":
             if not self.companion.loaded:
                 raise HomeAssistantError("unknown_command", "Unknown command.")
-            return {"paired": bool(self.companion.pairing_hash)}
+            return {"paired": bool(self.companion.pairing_hash), "version": self.companion.version,
+                    "protocol": self.companion.protocol, "fresh": self.companion.lease is not None}
         if command_type.startswith(P.DOMAIN + "/"):
             return self.companion.command(command_type.split("/", 1)[1], params)
         return None

@@ -101,7 +101,12 @@ function renderBanners(data) {
   const ha = data.connection && data.connection.home_assistant;
   const link = data.connection && data.connection.companion;
   if (ha && !ha.connected) out.push(`<div class="notice warning">Not connected to Home Assistant (${esc(ha.last_error || ha.state)}). Decisions are frozen; no room is made vacant until the connection is back. Changes cannot be made meanwhile.</div>`);
-  if (link && ha && ha.connected && !link.publishing && ["not_installed", "not_set_up", "not_paired", "pair_mismatch", "busy", "error", "blocked"].includes(link.state)) {
+  const compat = link && link.compatibility;
+  if (compat && compat.level === "warning" && compat.message) out.push(`<div class="notice info"><strong>Update recommended:</strong> ${esc(compat.message)}</div>`);
+  if (data.connection && data.connection.fresh === false && ha && ha.connected && link && link.has_token && link.state === "waiting") {
+    out.push(`<div class="notice warning">The occupancy entities in Home Assistant are not fresh right now (${esc(link.detail || "reconnecting")}); they keep their last state.</div>`);
+  }
+  if (link && ha && ha.connected && !link.publishing && ["not_installed", "not_set_up", "not_paired", "pair_mismatch", "busy", "error", "blocked", "incompatible"].includes(link.state)) {
     out.push(`<div class="notice info"><strong>Home Assistant entities:</strong> ${esc(link.detail || link.state)} <a href="#/settings">Settings</a></div>`);
   }
   if (data.recovery) out.push(`<div class="notice error">The configuration file was damaged. ${data.recovery.used ? `The copy ${esc(data.recovery.used)} is used.` : "No usable copy was found."} Details in Settings → Diagnostics.</div>`);
@@ -200,7 +205,7 @@ async function roomPage(areaId, token) {
     const r = data.room;
     const timing = { ...data.global_timing, ...(data.config.timing || {}) };
     const own = data.config.timing || {};
-    const signals = r.signals.map((s) => `<tr><td>${esc(s.name)}<div class="mono">${esc(s.entity_id)}</div></td><td>${esc(KIND[s.kind] || s.kind)}${s.inverted ? ` <span class="badge">inverted</span>` : ""}</td><td>${esc(ROLE[s.role] || s.role)}${s.enabled ? "" : ` <span class="badge warn">excluded</span>`}</td><td class="state">${s.exists ? esc(s.ha_state) : `<span class="badge warn">missing</span>`}</td><td>${esc(s.status_label || "")}</td></tr>`).join("");
+    const signals = r.signals.map((s) => `<tr><td>${esc(s.name)}<div class="mono">${esc(s.entity_id)}</div></td><td>${esc(KIND[s.kind] || s.kind)}${s.inverted ? ` <span class="badge">inverted</span>` : ""}</td><td>${esc(ROLE[s.role] || s.role)}${s.enabled ? "" : ` <span class="badge warn">excluded</span>`}</td><td class="state">${s.exists ? esc(s.ha_state) : `<span class="badge warn">missing</span>`}</td><td>${esc(s.status_label || "")}</td><td class="small muted">${s.last_changed ? `${esc(since(s.last_changed))} ago` : ""}</td></tr>`).join("");
     const activity = r.activity.length ? `<h3>Activity entities</h3><ul class="plain">${r.activity.map((a) => `<li>${esc(a.name)} <span class="mono">${esc(a.entity_id)}</span>${a.exists ? "" : ` <span class="badge warn">missing</span>`}</li>`).join("")}</ul>` : "";
     const pending = r.state === "possible_vacancy" && r.vacancy_at ? `<dt>Vacant in</dt><dd><strong>${esc(countdown(r.vacancy_at))}</strong> <span class="muted">(at ${esc(clock(r.vacancy_at))}, unless there is activity)</span></dd>` : "";
     const e = r.engine;
@@ -215,7 +220,8 @@ async function roomPage(areaId, token) {
         <dt>Last activity</dt><dd>${r.last_activity ? `${esc(clock(r.last_activity))} <span class="muted">(${esc(since(r.last_activity))} ago${r.last_activity_source ? `, ${esc(r.last_activity_source)}` : ""})</span>` : `<span class="muted">none yet</span>`}</dd>
         ${pending}
       </dl>${r.problems.length ? `<h3>Notes</h3>${problemsList(r.problems)}` : ""}</div>
-      <div class="card"><h2>Sensors</h2><div class="tscroll"><table class="sensors"><thead><tr><th>Sensor</th><th>Type</th><th>Role</th><th>State</th><th>Contribution</th></tr></thead><tbody>${signals || `<tr><td colspan="5" class="muted">No sensors</td></tr>`}</tbody></table></div>${activity}</div>
+      <div class="card"><h2>Sensors</h2><div class="tscroll"><table class="sensors"><thead><tr><th>Sensor</th><th>Type</th><th>Role</th><th>State</th><th>Contribution</th><th>Last change</th></tr></thead><tbody>${signals || `<tr><td colspan="6" class="muted">No sensors</td></tr>`}</tbody></table></div>${activity}</div>
+      ${data.pilot ? pilotCard(data.pilot) : ""}
       <div class="card"><h2>Recent detection</h2>${timelineList(r.timeline)}</div>
     </div><div>
       <div class="card"><h2>Timing</h2><dl class="kv">${BASIC.map((k) => `<dt>${esc(TIMING_LABEL[k])}</dt><dd>${timingValue(timing[k], own[k] === undefined)}</dd>`).join("")}</dl>
@@ -236,6 +242,15 @@ async function roomPage(areaId, token) {
   if (!user.is_admin) { try { user = (await api("api/overview")).user; } catch { /* keep */ } }
   await load();
   setPoll(load, 2000);
+}
+
+function pilotCard(p) {
+  const recent = p.recent.slice(0, 6).map((d) => `<li><time>${esc(clock(d.started_at))}</time><div><strong>${d.ours.occupied ? "Occupied" : "Vacant"}</strong> here, <strong>${d.reference.occupied ? "occupied" : "vacant"}</strong> in the reference ${d.seconds != null ? `for ${esc(duration(d.seconds))}` : "(still)"}<div class="small muted">${esc(d.explanation)}</div></div></li>`).join("");
+  return `<div class="card"><h2>Pilot comparison</h2><dl class="kv">
+    <dt>Reference</dt><dd class="mono">${esc(p.reference)} (${esc(p.reference_state || "not found")})</dd>
+    <dt>Right now</dt><dd>${p.now === "agree" ? "Same result" : p.now === "differ" ? `<strong>Different</strong>${p.pending_since ? " (shorter than a minute so far)" : ""}` : "Not comparable (one side unknown)"}</dd>
+    <dt>Agreement</dt><dd>${p.agreement == null ? "–" : `${p.agreement}% of ${esc(duration(p.compared_seconds))}`} · ${p.differences} difference(s) since ${esc(clock(p.since))}</dd>
+  </dl>${recent ? `<h3>Recent differences</h3><ul class="plain timeline">${recent}</ul>` : ""}</div>`;
 }
 
 // ------------------------------------------------------------------ editor
@@ -320,11 +335,53 @@ function errorText(err) {
 }
 function showError(err) { toast(errorText(err)); }
 
+// Changes are applied as they are made: validated and saved one after the other, the result shown in a status line.
+function impactText(review) {
+  const items = Object.values(review.impact || {}).map((i) => {
+    if (!i.before) return `${i.name} starts as ${i.after.label}`;
+    if (i.changes_now) return `${i.name} changes now: ${i.before.label} → ${i.after.label}`;
+    return `${i.name} stays ${i.after.label}${i.restarts ? " (sensors changed: start-up hold)" : ""}`;
+  });
+  return items.join("; ");
+}
+
+function autosaver(statusId, { review, save, saved }) {
+  let chain = Promise.resolve();
+  let pending = 0;
+  const status = (html, cls = "") => {
+    const el = document.getElementById(statusId);
+    if (el) { el.className = `save-status ${cls}`; el.innerHTML = html; }
+  };
+  return () => {
+    pending += 1;
+    const mine = pending;
+    status("Saving…");
+    chain = chain.then(async () => {
+      if (mine !== pending) return;  // a newer change follows: save that one
+      try {
+        const r = await review();
+        if (!r.valid) {
+          status(`<strong>Not saved:</strong> ${(r.problems || []).map((p) => esc(where(p.path) + p.message)).join("; ")}`, "bad");
+          return;
+        }
+        if (!(r.changes || []).length) { status("All changes saved.", "ok"); return; }
+        const result = await save(r.revision);
+        const effect = impactText(r);
+        const warnings = (r.warnings || []).map((w) => esc(w.message)).join(" ");
+        status(`<strong>Saved.</strong> ${esc(effect)}${warnings ? `<div class="small">${warnings}</div>` : ""}`, "ok");
+        if (saved) saved(result, r);
+      } catch (err) {
+        status(err.status === 409 ? "Changed in another window meanwhile: reload the page." : `<strong>Not saved:</strong> ${esc(errorText(err))}`, "bad");
+      }
+    });
+  };
+}
+
 async function editorPage(areaId, token) {
   const meta = await api("api/areas");
   if (token !== navToken) return;
   const defaults = meta.defaults;
-  const isNew = !areaId;
+  let isNew = !areaId;
   let revision = meta.revision;
   let room = { enabled: true, sensors: [], activity: [], timing: {}, adjacent: [] };
   let name = "";
@@ -391,15 +448,22 @@ async function editorPage(areaId, token) {
       </div>
       ${isNew ? "" : `<div class="card"><h2>Detection</h2><label><input type="checkbox" id="room-enabled" ${room.enabled ? "checked" : ""}> Detect occupancy in this room</label><p class="muted small">When off, the room's entities stay in Home Assistant but are unavailable.</p></div>`}
       <div id="review-slot"></div>
-      <div class="actions sticky-actions"><button class="primary" id="review">Review changes</button><a class="button" href="${isNew ? "#/rooms" : `#/rooms/${enc(areaId)}`}">Cancel</a>${isNew ? "" : `<span class="spacer"></span><button class="danger" id="delete">Delete room</button>`}</div>`;
+      <div class="actions sticky-actions"><div id="save-status" class="save-status" role="status">${isNew ? "Changes are saved as you make them. Add a sensor that can detect presence to create the room." : "Changes are saved as you make them."}</div><span class="spacer"></span><a class="button primary" href="#/rooms/${enc(areaId)}">Done</a>${isNew ? "" : `<button class="danger" id="delete">Delete room</button>`}</div>`;
     view.innerHTML = `<h1>${isNew ? "Add a room" : `Edit ${esc(name)}`}</h1>${areaSelect}${body}`;
     bind();
   }
 
-  function invalidate() {
-    const slot = document.getElementById("review-slot");
-    if (slot) slot.innerHTML = "";
-  }
+  const autosave = autosaver("save-status", {
+    review: () => api("api/rooms/review", { area_id: areaId, room }),
+    save: (revision) => api("api/rooms/save", { area_id: areaId, room, expected_revision: revision }),
+    saved: () => {
+      if (isNew) {  // from now on this is the room's editor
+        isNew = false;
+        history.replaceState(null, "", `#/rooms/${enc(areaId)}/edit`);
+        meta.rooms[areaId] = name;
+      }
+    },
+  });
 
   function collect() {
     const basic = document.getElementById("timing-basic");
@@ -439,6 +503,7 @@ async function editorPage(areaId, token) {
       const open = document.getElementById("timing-advanced-details")?.open;
       draw();
       if (open) document.getElementById("timing-advanced-details").open = true;
+      autosave();
     }));
   }
 
@@ -455,30 +520,17 @@ async function editorPage(areaId, token) {
         else if (f === "kind") { s.kind = el.value; s.role = kindDefaults[el.value].default_role; }
         else s[f] = el.value;
         draw();
+        autosave();
       }));
     });
-    view.querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () => { collect(); addSensor(b.dataset.add, candidates.find((c) => c.entity_id === b.dataset.add)); draw(); }));
-    document.getElementById("add-suggested")?.addEventListener("click", () => { collect(); candidates.filter((c) => c.suggested_kind).forEach((c) => addSensor(c.entity_id, c)); draw(); });
-    view.querySelectorAll("[data-remove-activity]").forEach((b) => b.addEventListener("click", () => { collect(); room.activity.splice(Number(b.dataset.removeActivity), 1); draw(); document.getElementById("timing-advanced-details").open = true; }));
+    view.querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () => { collect(); addSensor(b.dataset.add, candidates.find((c) => c.entity_id === b.dataset.add)); draw(); autosave(); }));
+    document.getElementById("add-suggested")?.addEventListener("click", () => { collect(); candidates.filter((c) => c.suggested_kind).forEach((c) => addSensor(c.entity_id, c)); draw(); autosave(); });
+    view.querySelectorAll("[data-remove-activity]").forEach((b) => b.addEventListener("click", () => { collect(); room.activity.splice(Number(b.dataset.removeActivity), 1); draw(); document.getElementById("timing-advanced-details").open = true; autosave(); }));
     for (const kind of ["sensor", "activity"]) {
       const input = document.getElementById(`search-${kind}`);
       if (input) { let t; input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(() => search(kind, input.value.trim()).catch(showError), 250); }); }
     }
-    view.querySelectorAll("input[data-timing], select[data-unit], [data-adjacent], #room-enabled").forEach((el) => el.addEventListener("change", invalidate));
-    document.getElementById("review")?.addEventListener("click", async () => {
-      collect();
-      try {
-        const review = await api("api/rooms/review", { area_id: areaId, room });
-        const slot = document.getElementById("review-slot");
-        slot.innerHTML = "";
-        slot.appendChild(reviewCard(review, { saveLabel: isNew ? "Save room" : "Save changes", onSave: async () => {
-          await api("api/rooms/save", { area_id: areaId, room, expected_revision: review.revision });
-          toast(isNew ? "Room added" : "Room saved");
-          location.hash = `#/rooms/${enc(areaId)}`;
-        } }));
-        slot.scrollIntoView({ behavior: "smooth", block: "start" });
-      } catch (err) { showError(err); }
-    });
+    view.querySelectorAll("input[data-timing], select[data-unit], [data-adjacent], #room-enabled").forEach((el) => el.addEventListener("change", () => { collect(); autosave(); }));
     document.getElementById("delete")?.addEventListener("click", async () => {
       try {
         const review = await api("api/rooms/delete/review", { area_id: areaId });
@@ -503,20 +555,47 @@ async function editorPage(areaId, token) {
 function connectionCard(c) {
   const ha = c.home_assistant || {};
   const link = c.companion || {};
-  const state = { publishing: "Publishing", not_installed: "Integration not installed", not_set_up: "Integration not set up", not_paired: "Not paired", pair_mismatch: "Paired with another App installation", busy: "Another App session publishes", blocked: "Blocked", waiting: "Waiting", error: "Error" }[link.state] || link.state;
+  const versions = c.versions || {};
+  const view = link.companion_view || {};
+  const state = { publishing: "Publishing", not_installed: "Integration not installed", not_set_up: "Integration not set up", not_paired: "Not paired", pair_mismatch: "Paired with another App installation", busy: "Another App session publishes", blocked: "Blocked", waiting: "Waiting", error: "Error", incompatible: "Incompatible versions" }[link.state] || link.state;
   let actions = "";
   if (user.is_admin) {
     if (["not_paired"].includes(link.state)) actions = `<button class="primary" id="pair">Pair with Home Assistant</button>`;
     else if (link.state === "pair_mismatch") actions = `<button class="primary" id="pair-replace">Pair this App (replaces the other)</button>`;
     else if (link.has_token) actions = `<button id="unpair">Unpair</button>`;
   }
+  const compat = link.compatibility || {};
+  const errors = (link.errors || []).slice(0, 8).concat((ha.history || []).filter((h) => h.error).slice(0, 4).map((h) => ({ at: h.at, code: "home_assistant", message: h.error })));
   return `<div class="card"><h2>Connection</h2><dl class="kv">
+    <dt>Versions</dt><dd>App ${esc(versions.app)} · integration ${esc(versions.companion || "not found")} · engine ${esc(versions.engine)}</dd>
+    ${compat.message ? `<dt>Compatibility</dt><dd><span class="badge ${compat.level === "ok" ? "" : "warn"}">${esc(compat.level)}</span> ${esc(compat.message)}</dd>` : ""}
     <dt>Home Assistant</dt><dd>${ha.connected ? `Connected (${esc(ha.ha_version)})` : `<strong>Not connected</strong> ${esc(ha.last_error || "")}`}</dd>
     <dt>Occupancy entities</dt><dd><strong>${esc(state)}</strong>${link.detail ? `<div class="small muted">${esc(link.detail)}</div>` : ""}</dd>
-    ${link.last_publish_at ? `<dt>Last published</dt><dd>${esc(clock(link.last_publish_at))}</dd>` : ""}
-    ${link.companion && link.companion.companion_version ? `<dt>Integration</dt><dd>${esc(link.companion.companion_version)}</dd>` : ""}
-  </dl>${["not_installed", "not_set_up"].includes(link.state) ? `<p class="small">Install the <strong>Smart Occupancy Detection</strong> integration: copy <span class="mono">custom_components/smart_occupancy_detection</span> from the repository into your Home Assistant configuration folder, restart Home Assistant, then add the integration (Settings → Devices &amp; services → Add integration). See the App's documentation.</p>` : ""}
+    <dt>Data in Home Assistant</dt><dd>${c.fresh ? `<span class="status occupied">Fresh</span>` : `<span class="status uncertain">Not fresh</span> <span class="small muted">the entities keep their last state</span>`}${view.fresh !== undefined && view.fresh !== null ? ` <span class="small muted">(the integration reports ${view.fresh ? "fresh" : "stale"})</span>` : ""}</dd>
+    <dt>Last successful communication</dt><dd>${link.last_ok_at ? `${esc(clock(link.last_ok_at))} <span class="muted small">(${esc(since(link.last_ok_at))} ago)</span>` : "–"}</dd>
+    ${link.last_publish_at ? `<dt>Last published change</dt><dd>${esc(clock(link.last_publish_at))}</dd>` : ""}
+  </dl>${["not_installed", "not_set_up"].includes(link.state) ? `<p class="small">Install the <strong>Smart Occupancy Detection</strong> integration with HACS: HACS → ⋮ → Custom repositories → <span class="mono">https://github.com/havanissa/smart-occupancy-detection</span> (type Integration) → download, restart Home Assistant, then Settings → Devices &amp; services → Add integration → Smart Occupancy Detection. See the documentation.</p>` : ""}
+  ${errors.length ? `<details data-keep="errors"><summary>Recent connection errors (${errors.length})</summary><ul class="plain small">${errors.map((e) => `<li><time>${esc(clock(e.at))}</time> ${esc(e.code)}: ${esc(e.message)}</li>`).join("")}</ul></details>` : ""}
   <div class="actions">${actions}</div></div>`;
+}
+
+async function loadPilot(admin, token) {
+  const data = await api("api/pilot");
+  const box = document.getElementById("pilot-rooms");
+  if (!box || token !== navToken) return;
+  const rows = Object.entries(data.rooms);
+  if (!rows.length) { box.innerHTML = `<p class="muted small">No rooms yet.</p>`; return; }
+  box.innerHTML = rows.map(([a, r]) => `<div class="field"><label for="pilot-${esc(a)}">${esc(r.name)}</label>
+    <span class="row"><input type="text" id="pilot-${esc(a)}" data-pilot="${esc(a)}" value="${esc(r.reference || "")}" placeholder="${esc(r.suggestion || "binary_sensor.…")}" ${admin ? "" : "disabled"} aria-label="Reference for ${esc(r.name)}">
+    ${admin && r.suggestion && r.suggestion !== r.reference ? `<button class="link" data-pilot-use="${esc(a)}" data-entity="${esc(r.suggestion)}">Use Smart Comfort's</button>` : ""}
+    ${r.summary ? `<span class="small muted">${r.summary.agreement == null ? "comparing…" : `${r.summary.agreement}% same`} · ${r.summary.differences} difference(s)</span>` : ""}</span></div>`).join("") + `<div id="pilot-status" class="save-status" role="status"></div>`;
+  const set = async (area, entity) => {
+    const status = document.getElementById("pilot-status");
+    try { await api("api/pilot/reference", { area_id: area, entity_id: entity || null }); status.className = "save-status ok"; status.textContent = "Saved."; loadPilot(admin, token); }
+    catch (err) { status.className = "save-status bad"; status.textContent = `Not saved: ${errorText(err)}`; }
+  };
+  box.querySelectorAll("[data-pilot]").forEach((input) => input.addEventListener("change", () => set(input.dataset.pilot, input.value.trim())));
+  box.querySelectorAll("[data-pilot-use]").forEach((b) => b.addEventListener("click", () => set(b.dataset.pilotUse, b.dataset.entity)));
 }
 
 function readFile(input) {
@@ -544,7 +623,7 @@ async function settingsPage(token) {
     <div class="card"><h2>Detection timing</h2><p class="muted small">Defaults for every room; a room can override them in its own settings. Empty fields use the built-in default.</p>
       <div id="g-basic">${timingFields(timing, defaults, base, BASIC)}</div>
       <details><summary>Advanced</summary><div id="g-advanced">${timingFields(timing, defaults, base, Object.keys(defaults).filter((k) => !BASIC.includes(k)))}</div></details>
-      ${admin ? `<div class="actions"><button class="primary" id="timing-review">Review changes</button></div>` : ""}<div id="timing-review-slot"></div></div>
+      ${admin ? `<div id="timing-status" class="save-status" role="status">Changes are saved as you make them.</div>` : ""}</div>
   </div><div>
     <div class="card"><h2>Backups and transfer</h2>
       <div class="actions"><a class="button" href="api/export" download>Export configuration</a></div>
@@ -560,8 +639,11 @@ async function settingsPage(token) {
       <dt>Events / evaluations</dt><dd>${rt.counters ? `${rt.counters.events} / ${rt.counters.evaluations}` : ""}</dd>
       <dt>Configuration</dt><dd class="mono">${esc(data.revision)}${data.saved_at ? ` · saved ${esc(clock(data.saved_at))}` : ""}</dd>
       ${data.recovery ? `<dt>Recovery</dt><dd>${esc(data.recovery.used ? `used ${data.recovery.used}` : "no usable file")}: ${esc((data.recovery.errors || []).join("; "))}</dd>` : ""}
-    </dl><div class="actions"><a class="button" href="api/diagnostics" download>Download diagnostics</a></div></div>
+    </dl><div class="actions"><a class="button" href="api/diagnostics" download>Download diagnostics</a></div><p class="small muted">Secrets, user ids, addresses and people are removed from the file.</p></div>
+    <div class="card" id="pilot-card"><h2>Pilot comparison</h2><p class="muted small">Compare a room with another occupancy output (Smart Comfort's, normally) and log every difference longer than a minute, with the sensor evidence. Nothing is adjusted.</p><div id="pilot-rooms"><p class="muted">Loading…</p></div>
+      <div class="actions"><a class="button" href="api/pilot/report.csv" download>Download differences (CSV)</a><a class="button" href="api/pilot/report.json" download>JSON</a></div></div>
   </div></div>`;
+  loadPilot(admin, token);
 
   const bindConnection = () => {
     const pair = async (replace) => {
@@ -592,21 +674,16 @@ async function settingsPage(token) {
     bindConnection();
   }, 5000);
 
-  document.getElementById("timing-review")?.addEventListener("click", async () => {
+  const readGlobal = () => {
     timing = readTiming(document.getElementById("g-basic"), timing);
     timing = readTiming(document.getElementById("g-advanced"), timing);
-    const full = { ...base, ...timing };
-    try {
-      const review = await api("api/timing/review", { timing: full });
-      const slot = document.getElementById("timing-review-slot");
-      slot.innerHTML = "";
-      slot.appendChild(reviewCard(review, { saveLabel: "Save timing", onSave: async () => {
-        await api("api/timing/save", { timing: full, expected_revision: review.revision });
-        toast("Timing saved");
-        if (token === navToken) settingsPage(token);
-      } }));
-    } catch (err) { showError(err); }
+    return { ...base, ...timing };
+  };
+  const saveTiming = autosaver("timing-status", {
+    review: () => api("api/timing/review", { timing: readGlobal() }),
+    save: (revision) => api("api/timing/save", { timing: readGlobal(), expected_revision: revision }),
   });
+  if (admin) view.querySelectorAll("#g-basic input, #g-basic select, #g-advanced input, #g-advanced select").forEach((el) => el.addEventListener("change", saveTiming));
 
   document.getElementById("import-review")?.addEventListener("click", async () => {
     try {

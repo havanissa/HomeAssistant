@@ -8,11 +8,11 @@
   "dependencies": [
     "websocket_api"
   ],
-  "documentation": "https://github.com/havanissa/HomeAssistant/tree/main/smart_occupancy_detection",
+  "documentation": "https://github.com/havanissa/smart-occupancy-detection",
   "integration_type": "service",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/havanissa/HomeAssistant/issues",
+  "issue_tracker": "https://github.com/havanissa/smart-occupancy-detection/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

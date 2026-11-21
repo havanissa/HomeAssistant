@@ -172,6 +172,7 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         if area_id not in rooms or core.runtime is None:
             raise ConfigError("unknown_room", "This room is not configured", 404)
         return _json({"room": core.runtime.room_view(area_id, detail=True), "config": rooms[area_id],
+                      "pilot": core.pilot.room(area_id) if core.pilot else None,
                       "connection": core.connection(), "recovery": core.store.recovery,
                       "runtime": core.runtime.status(),
                       "global_timing": core.store.config["timing"], "revision": core.store.revision,
@@ -261,6 +262,22 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         return _json(core.apply_smart_comfort(data.get("document"), data.get("rooms"),
                                               bool(data.get("include_timing")), data.get("expected_revision"), user))
 
+    async def pilot_view(_request: web.Request) -> web.Response:
+        return _json(core.pilot.overview() if core.pilot else {"rooms": {}})
+
+    async def pilot_reference(request: web.Request) -> web.Response:
+        data, _ = await body(request)
+        return _json(core.set_pilot_reference(data.get("area_id"), data.get("entity_id")))
+
+    async def pilot_report(request: web.Request) -> web.Response:
+        if core.pilot is None:
+            raise ConfigError("not_ready", "Not started yet", 503)
+        if request.match_info["fmt"] == "csv":
+            return web.Response(text=core.pilot.report_csv(), content_type="text/csv", headers={
+                "Content-Disposition": 'attachment; filename="smart-occupancy-pilot.csv"'})
+        return _json({"differences": core.pilot.report(), "overview": core.pilot.overview()}, headers={
+            "Content-Disposition": 'attachment; filename="smart-occupancy-pilot.json"'})
+
     async def pair(request: web.Request) -> web.Response:
         data, user = await body(request)
         if core.link is None:
@@ -300,6 +317,9 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
     r.add_post("/api/smart-comfort/review", sc_review)
     r.add_post("/api/smart-comfort/preview", sc_preview)
     r.add_post("/api/smart-comfort/apply", sc_apply)
+    r.add_get("/api/pilot", pilot_view)
+    r.add_post("/api/pilot/reference", pilot_reference)
+    r.add_get(r"/api/pilot/report.{fmt:(json|csv)}", pilot_report)
     r.add_post("/api/companion/pair", pair)
     r.add_post("/api/companion/unpair", unpair)
     return app

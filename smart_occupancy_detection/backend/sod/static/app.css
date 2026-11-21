@@ -106,3 +106,6 @@ details > summary { cursor: pointer; color: var(--accent); font-weight: 500; pad
 .sticky-actions { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0; border-top: 1px solid var(--line); margin-top: 16px; }
 @media (max-width: 560px) { .sensors th:nth-child(2), .sensors td:nth-child(2), .sensors th:nth-child(3), .sensors td:nth-child(3) { display: none; } }
 .editor-sensor > input[type=checkbox] { width: 22px; height: 22px; }
+.save-status { color: var(--muted); font-size: 14px; min-height: 22px; flex: 1 1 260px; }
+.save-status.ok { color: var(--occupied); }
+.save-status.bad { color: var(--error); }
