@@ -29,7 +29,8 @@ def test_only_one_app_config_in_repository() -> None:
         for p in REPO.rglob("config.y*ml")
         if not any(part.startswith(".") or part in {"node_modules", "rootfs"} for part in p.relative_to(REPO).parts)
     ]
-    assert found == ["smart_lighting/config.yaml"]
+    # Smart Occupancy Detection (Phase 0.1) is a second, independent App in the same repository.
+    assert sorted(found) == ["smart_lighting/config.yaml", "smart_occupancy_detection/config.yaml"]
 
 
 def test_required_identity() -> None:

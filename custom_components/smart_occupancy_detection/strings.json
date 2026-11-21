@@ -1,0 +1,35 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Smart Occupancy Detection",
+        "description": "Native occupancy entities for the Smart Occupancy Detection App. There is nothing to configure here: rooms and sensors are set up in the App, and the App is paired from its Settings page."
+      }
+    },
+    "abort": {
+      "already_configured": "Smart Occupancy Detection is already set up.",
+      "single_instance_allowed": "Smart Occupancy Detection is already set up."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "room_occupied": {"name": "Occupancy"},
+      "app_connected": {"name": "App connected"}
+    },
+    "sensor": {
+      "room_state": {
+        "name": "Occupancy state",
+        "state": {
+          "vacant": "Vacant",
+          "possible_occupancy": "Possible occupancy",
+          "confirmed_occupancy": "Occupied",
+          "possible_vacancy": "Vacancy pending",
+          "uncertain": "Uncertain"
+        }
+      },
+      "room_confidence": {"name": "Occupancy confidence"},
+      "room_reason": {"name": "Occupancy reason"},
+      "room_last_activity": {"name": "Last activity"}
+    }
+  }
+}
