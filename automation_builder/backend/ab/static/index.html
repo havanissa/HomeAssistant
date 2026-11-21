@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Automation Builder</title>
+  <link rel="icon" href="assets/icon.svg">
+  <link rel="stylesheet" href="assets/app.css?v=__VERSION__">
+  <script type="module" src="assets/app.js?v=__VERSION__"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="assets/icon.svg" alt=""><span>Automation Builder</span></div>
+    <nav>
+      <a href="#/" data-nav="overview">Overview</a>
+      <a href="#/devices" data-nav="devices">Devices</a>
+      <a href="#/rules" data-nav="rules">Rule Editor</a>
+      <a href="#/settings" data-nav="settings">Settings</a>
+    </nav>
+  </header>
+  <div id="banners"></div>
+  <main id="view"><p class="muted">Loading…</p></main>
+  <dialog id="dialog"></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
