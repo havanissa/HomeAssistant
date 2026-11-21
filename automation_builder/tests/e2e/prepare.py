@@ -54,6 +54,32 @@ async def onboard(session) -> dict:
     return {"llat": result[0]["result"]}
 
 
+#: Rooms of the test home: area name -> device names (demo devices) and entities without a device.
+ROOMS = {
+    "Kitchen": (["Kitchen Lights", "Kitchen Window"], ["sensor.test_lux", "binary_sensor.test_motion"]),
+    "Bedroom": (["Bed Light"], []),
+    "Living Room": (["Ceiling Lights", "Living Room RGBWW Lights"], ["fan.living_room_fan"]),  # + the demo's Sonos device
+    "Office": (["Office RGBW Lights"], []),
+    "Hall": (["Entrance Color + White Lights"], ["binary_sensor.test_door"]),
+}
+
+
+async def rooms(session, token) -> None:
+    """Areas for the room-first checks (idempotent). The rest of the test entities stay without a room."""
+    areas, devices = (r["result"] for r in await ws_call(session, token, [
+        {"type": "config/area_registry/list"}, {"type": "config/device_registry/list"}]))
+    by_name = {a["name"]: a["area_id"] for a in areas}
+    for name, (device_names, entity_ids) in ROOMS.items():
+        if name not in by_name:
+            by_name[name] = (await ws_call(session, token, [{"type": "config/area_registry/create", "name": name}]))[0]["result"]["area_id"]
+        commands = [{"type": "config/device_registry/update", "device_id": d["id"], "area_id": by_name[name]}
+                    for d in devices if (d.get("name_by_user") or d.get("name")) in device_names and d.get("area_id") != by_name[name]]
+        commands += [{"type": "config/entity_registry/update", "entity_id": e, "area_id": by_name[name]} for e in entity_ids]
+        if commands:
+            await ws_call(session, token, commands)
+    print("rooms:", sorted(by_name))
+
+
 async def main(tokens_path: Path) -> None:
     async with aiohttp.ClientSession() as s:
         tokens = json.loads(tokens_path.read_text()) if tokens_path.exists() else await onboard(s)
@@ -79,6 +105,7 @@ async def main(tokens_path: Path) -> None:
             tokens.update(ab_llat=llat, ab_user=user["id"])
             tokens_path.write_text(json.dumps(tokens))
             print("created the AB App user", user["id"])
+        await rooms(s, admin)
         states = (await ws_call(s, admin, [{"type": "get_states"}]))[0]["result"]
         wanted = ("light.flaky_lamp", "binary_sensor.sod_kamar_occupied", "light.bed_light", "sensor.test_lux")
         present = {e["entity_id"] for e in states}

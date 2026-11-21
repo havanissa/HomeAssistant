@@ -124,20 +124,20 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                 if label == "desktop" and scheme == "light":
                     # ---------------------------------------- create a device and a rule, deploy: all in the interface
                     go("#/devices/new", "Add a device")
-                    frame.locator("#q").fill("ceiling")
+                    frame.locator('button.choice[data-room="living_room"]').click()
+                    frame.locator('button.choice[data-act="device"]', has_text="Ceiling Lights").click()
                     box = frame.locator(f'input[data-id="{CEILING}"]')
                     box.wait_for()
-                    check("flow: nothing is selected for the user", frame.locator("#found input:checked").count() == 0
+                    check("flow: nothing is selected for the user", frame.locator("#entities-list input:checked").count() == 0
                           and frame.locator("#create").is_disabled())
                     box.check()
                     check("flow: the name is suggested from the selection", frame.locator("#name").input_value() != "")
                     shot("new-device")
                     frame.locator("#create").click()
-                    frame.locator("h2", has_text="Rules").wait_for()
-                    check("flow: the new device has no rules and nothing deployed",
-                          frame.locator('h1 .status[data-status="nothing"]').count() == 1)
-                    frame.locator("a", has_text="Add rule").click()
                     frame.locator("h1", has_text="New rule").wait_for()
+                    made = next(d for d in overview()["devices"] if d["targets"][0]["entity_id"] == CEILING)
+                    check("flow: the new device opens an empty rule; it has no rules yet and nothing is deployed",
+                          made["rules"] == 0 and made["status"] == "nothing", str((made["rules"], made["status"])))
                     frame.locator("#rule-name").fill("GUI rule")
                     frame.locator('button[data-act="add-trigger"]').click()
                     try:
@@ -149,6 +149,9 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                     check("flow: an incomplete rule is not saved", "Not saved yet" in status_text and created["rules"] == 0,
                           f"{status_text!r}, rules: {created['rules']}")
                     frame.locator("button.entity.unset").first.click()
+                    check("flow: the picker starts with “only this room” for a device of one room", frame.locator("#pick-room").is_checked()
+                          and "Living Room" in (frame.locator(".pick-room").text_content() or ""))
+                    frame.locator("#pick-room").uncheck()   # the motion sensor is in the kitchen: rules may cross rooms
                     frame.locator("#pick-q").fill("Test motion")
                     frame.locator("button.result", has_text="binary_sensor.test_motion").click()
                     frame.locator('input[data-path="triggers.0.to"]').fill("on")
@@ -187,6 +190,7 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                         frame.locator('button[data-act="add-trigger"]').click()
                         frame.locator('select[data-f="trigger-type"]').select_option("occupancy")
                         frame.locator("button.entity.unset").first.click()
+                        frame.locator("#pick-room").uncheck()
                         wanted = frame.locator("button.result", has_text="binary_sensor.sod_kamar_occupied")
                         wanted.wait_for()
                         offered = frame.locator("button.result .mono").all_text_contents()

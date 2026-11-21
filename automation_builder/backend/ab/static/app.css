@@ -201,3 +201,25 @@ optgroup { font-style: normal; color: var(--muted); }
   .kv { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .kv dd { margin-bottom: 6px; }
 }
+/* ------------------------------------------------------------ room-first selection, default rule */
+.ico { display: inline-block; width: 1.5em; text-align: center; flex: none; }
+.crumbs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: -6px 0 12px; color: var(--muted); }
+.crumbs button.link:disabled { opacity: 1; color: var(--text); font-weight: 600; cursor: default; }
+.choices { display: grid; gap: 8px; margin-top: 10px; }
+button.choice { width: 100%; text-align: left; min-height: 56px; gap: 10px; }
+button.choice:hover, button.choice:focus-visible { border-color: var(--accent); background: var(--info-bg); }
+details.room { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 16px 16px; margin: 0 0 16px; box-shadow: var(--shadow); }
+details.room > summary { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; color: var(--text); min-height: 52px; list-style: none; }
+details.room > summary::-webkit-details-marker { display: none; }
+details.room > summary::before { content: "▸"; color: var(--muted); width: 1em; }
+details.room[open] > summary::before { content: "▾"; }
+details.room:not([open]) { padding-bottom: 4px; }
+.room-name { font-size: 17px; font-weight: 600; }
+details.room .grid { margin-top: 4px; }
+details.room .card.device { background: var(--bg); box-shadow: none; }
+.rule.default { border-top: 2px dashed var(--line); margin-top: 8px; }
+.pick-room { display: flex; gap: 8px; min-height: 44px; margin-bottom: 4px; }
+button.result .ico { margin-right: 4px; }
+.pick .ico { margin-right: -4px; }
+.problem > span:last-child { overflow-wrap: anywhere; min-width: 0; }
+.notice, .sub, .save-status { overflow-wrap: anywhere; }

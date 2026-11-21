@@ -21,20 +21,45 @@ Home Assistant must load `automations.yaml`, which it does by default (`automati
 
 ## The pages
 
-- **Overview**: every managed device with its rules, its automation's status and warnings.
+- **Overview**: the managed devices grouped by room, each with its rules, its automation's status and warnings.
 - **Devices**: add and manage devices; each device page has its rules with their execution diagnostics, the
-  review and deployment, and **Export as blueprint**.
+  optional default, the review and deployment, and **Export as blueprint**.
 - **Rule Editor**: every rule, per device; create and edit rules.
 - **Import**: the automations that already exist in Home Assistant, to analyse and copy.
 - **Settings**: occupancy recheck defaults, backup and restore, how deployment works, diagnostics.
 
+## Rooms
+
+Rooms are the **areas of Home Assistant**. Automation Builder uses them to keep lists short and to organise the
+Overview; they are a convenience, not separate engines. A device has one automation (plus one per waiting rule)
+whatever room it is listed in, and a rule may use sensors and helpers of any room.
+
+- A managed device is listed under the room of its controlled entities (an entity's own area, or the area of
+  its Home Assistant device).
+- Entities without an area are under **Unassigned**.
+- A device whose entities are in more than one room is listed once, under **Multiple rooms**, with the rooms
+  named. It is not duplicated and keeps its one automation.
+- Each room group can be collapsed and has **+ Add device**, which starts in that room.
+
 ## Devices
 
 A *device* in Automation Builder is **what one automation controls**: one entity, or several entities you chose to
-control together. **Add a device** lists Home Assistant's physical devices with their controllable entities, and
-the entities that have no device. A physical device can have several outputs (a dual relay, a light with a fan):
-tick exactly the ones you mean. Nothing is selected for you, and an area or a whole device is never controlled
-implicitly.
+control together. **Add a device** asks three short questions instead of showing everything at once:
+
+1. **Which room?** The areas of Home Assistant with how much there is to control in each, and *Unassigned*.
+   Rooms can be searched. (Skipped when you start from a room's **+ Add device**.)
+2. **Which device?** Only the devices of that room, with manufacturer and model and the kinds of entities they
+   have. Entities that belong to no physical device (helpers, groups, scripts ...) are one entry, *Entities
+   without a device*.
+3. **What should be controlled?** The controllable entities of that device, by name, with the entity id as
+   secondary text. A physical device can have several outputs (a dual relay, a speaker with switches): tick
+   exactly the ones you mean. Nothing is ticked for you, and an area or a whole device is never controlled
+   implicitly.
+
+The path (room › device › entities) is shown at the top and each part can be clicked to go back. Going back
+keeps what you ticked, so entities of two devices - or two rooms - can be combined on purpose. After **Add
+device** an empty rule opens straight away; it is saved once it is complete, and nothing reaches Home Assistant
+before you deploy.
 
 Any controllable domain works: lights, switches and relays, fans, covers, climate, humidifiers, locks, valves,
 sirens, media players, vacuums, water heaters, numbers, selects, buttons, scenes, scripts and their helper
@@ -96,6 +121,13 @@ next action*, or *skip the actions after this wait*. (Home Assistant's own "stop
 whole automation, including the device's other rules; Automation Builder generates the same result for the rule
 alone.)
 
+**Choosing entities.** Every entity picker in the rule editor has **Only show entities from this room** when
+the device belongs to exactly one room, and it is ticked to begin with: the list then holds the entities of
+that area and those that inherit it from their device. Untick it to see everything - it stays unticked while
+you edit that rule. Helpers and other entities without an area are not assumed to belong to a room, so they
+appear only without the filter. The entity that is chosen at present is always listed (marked "chosen now"),
+also when it is in another room, so an existing rule can always be edited.
+
 A rule is saved as soon as it is complete; the right-hand column shows its summary, what Automation Builder noticed
 about it, which automation it becomes part of, and the generated YAML. Each rule can be disabled without deleting
 it. Saving never changes Home Assistant: see *Deploying*. Nothing the editor offers needs hand-written YAML.
@@ -152,6 +184,33 @@ device page points that out: the later action still follows and has the last wor
 Prefer a trigger with "stays so for ..." where you can ("motion is off for 5 minutes → turn off"): it blocks
 nothing and is not lost when the trigger repeats. A restart of Home Assistant cancels a running wait: the
 actions after it do not run. That is Home Assistant's behaviour for every automation.
+
+### The default (optional)
+
+Below a device's rules you can add one **Default**: actions for the case that *one of the device's rules was
+triggered and none of the rules matched*.
+
+> IF motion changes AND motion is on AND lux is below 100 → lamp on at 80 %
+> IF motion changes AND motion is on AND it is late → lamp on at 10 %
+> DEFAULT → lamp off
+
+- It has no trigger and no conditions of its own. "Triggered" means: a trigger of any enabled rule of the
+  device fired. It never runs by itself, never periodically, and no state is enforced: when conditions change
+  without a trigger, nothing happens.
+- It never runs in addition to a rule. Whether any rule matches is decided once, before any action runs (an
+  action can change the very states the conditions look at). When several rules match, they all run in their
+  listed order, as always, and the default stays out.
+- A waiting rule (which has its own automation) counts too: when it matches, the default stays out.
+- Occupancy rechecks and the periodic occupancy check never call for the default.
+- **Manual override signal** (optional): while the chosen entity is on, the default does nothing - for a helper
+  you switch on when you have set the device by hand.
+- The default's actions use the same editor as a rule's, with one limit: they must finish at once (no delay,
+  wait or open-ended repeat), because the default lives in the device's shared automation.
+- It can be switched off (kept, but not part of the automation) or removed. A device without an enabled
+  default generates exactly the automation it would without the feature.
+
+In Home Assistant it is plain native logic inside the device's automation: *if any rule matches → the rule
+blocks as before; else → if the run was started by a rule's trigger → the default actions*.
 
 ## Occupancy (optional)
 

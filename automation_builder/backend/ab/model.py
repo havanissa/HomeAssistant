@@ -811,6 +811,30 @@ def validate_rule(raw: Any, path: str, p: Problems, targets: list[str]) -> dict[
     return rule
 
 
+def _default_rule(raw: Any, path: str, p: Problems, targets: list[str]) -> dict[str, Any] | None:
+    """The optional fallback of a device: actions that run when one of the device's triggers fired and no rule matched.
+
+    It has no trigger and no conditions of its own. Its actions must finish at once: it lives in the device's
+    shared automation, which handles one trigger after the other.
+    """
+    if not isinstance(raw, dict):
+        return None
+    raw_actions = raw.get("actions") if isinstance(raw.get("actions"), list) else []
+    override = raw.get("override_entity") or None
+    if not raw_actions and not override and raw.get("enabled") is not True:
+        return None  # nothing configured
+    actions = _sequence(raw_actions, f"{path}.actions", p, _Ctx(targets, 0), required=raw.get("enabled") is not False)
+    if sequence_waits(actions):
+        p.add(f"{path}.actions", "The default cannot wait (no delay, wait or open-ended repeat): it runs inside the "
+                                 "device's shared automation. Use an ordinary rule for a sequence that waits.")
+    for action in walk_actions(actions):
+        for group in action_groups(action):
+            if any(leaf["type"] == "trigger" for leaf in condition_leaves(group)):
+                p.add(f"{path}.actions", "The default has no triggers of its own to ask about")
+    return {"enabled": raw.get("enabled") is not False, "actions": actions,
+            "override_entity": _entity(override, f"{path}.override_entity", p) if override else None}
+
+
 INPUT_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 MAX_BLUEPRINT_INPUTS = 80
 
@@ -866,6 +890,9 @@ def validate_device(device_id: str, raw: Any, path: str, p: Problems) -> dict[st
     acknowledged = raw.get("acknowledged") if isinstance(raw.get("acknowledged"), list) else []
     blueprint = _blueprint_settings(raw.get("blueprint"), f"{path}.blueprint", p)
     extra = {"blueprint": blueprint} if blueprint else {}
+    default = _default_rule(raw.get("default_rule"), f"{path}.default_rule", p, targets)
+    if default:  # only present when the user configured one: every other device keeps its document
+        extra["default_rule"] = default
     return {
         "id": device_id,
         "name": _text(raw.get("name"), f"{path}.name", p, what="a name"),
@@ -1013,7 +1040,19 @@ def referenced_entities(device: dict[str, Any]) -> dict[str, set[str]]:
             continue
         for entity_id, uses in rule_entities(rule).items():
             out.setdefault(entity_id, set()).update(uses)
+    default = active_default(device)
+    if default:
+        for entity_id, uses in rule_entities({"triggers": [], "conditions": {"type": "and", "items": []},
+                                              "actions": default["actions"],
+                                              "recheck": {"override_entity": default["override_entity"]}}).items():
+            out.setdefault(entity_id, set()).update({"default" if u != "manual override signal" else u for u in uses})
     return out
+
+
+def active_default(device: dict[str, Any]) -> dict[str, Any] | None:
+    """The device's default rule when it is enabled and has actions."""
+    default = device.get("default_rule")
+    return default if default and default["enabled"] and default["actions"] and device["enabled"] else None
 
 
 def rule_entities(rule: dict[str, Any]) -> dict[str, set[str]]:

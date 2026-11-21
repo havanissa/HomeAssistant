@@ -363,6 +363,8 @@ class AppCore:
                         + (1 if live["turned_off"] else 0))
             devices.append({
                 "id": device["id"], "name": device["name"], "enabled": device["enabled"],
+                "room": index.room_of(device["targets"]),
+                "default": bool(model.active_default(device)),
                 "targets": self._targets_view(device, index),
                 "rules": len(device["rules"]), "rules_enabled": sum(1 for r in device["rules"] if r["enabled"]),
                 "automations": len(analysis["automations"]), "status": live["status"],
@@ -371,10 +373,29 @@ class AppCore:
                 "summaries": [{"id": r["id"], "name": r["name"], "enabled": r["enabled"],
                                "text": analysis["summaries"][r["id"]]["text"]} for r in device["rules"]],
             })
-        return {"devices": devices, "orphans": self.orphans(),
+        return {"devices": devices, "orphans": self.orphans(), "rooms": self._room_groups(devices),
                 "totals": {"devices": len(devices), "rules": sum(d["rules"] for d in devices),
                            "automations": sum(d["automations"] for d in devices),
                            "warnings": sum(d["warnings"] for d in devices)}}
+
+    @staticmethod
+    def _room_groups(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The Overview's groups: one per room that has managed devices, then "Multiple rooms", then "Unassigned".
+
+        Every device is in exactly one group. The groups are for finding things; each device still has its own
+        automation(s), whatever room it is listed in.
+        """
+        groups: dict[str, dict[str, Any]] = {}
+        for device in devices:
+            room = device["room"]
+            key = room["area_id"] if room["kind"] == "room" else room["kind"]
+            group = groups.setdefault(key, {"key": key, "kind": room["kind"], "area_id": room["area_id"],
+                                            "name": room["name"], "device_ids": [], "rules": 0, "warnings": 0})
+            group["device_ids"].append(device["id"])
+            group["rules"] += device["rules"]
+            group["warnings"] += device["warnings"]
+        order = {"room": 0, "multiple": 1, "unassigned": 2}
+        return sorted(groups.values(), key=lambda g: (order[g["kind"]], str(g["name"]).casefold()))
 
     async def device_view(self, device_id: Any) -> dict[str, Any]:
         device = self._device(device_id)
@@ -387,6 +408,9 @@ class AppCore:
                 await self.observer.refresh(item["id"])
         return {
             "rule_diagnostics": self._rule_views(device, analysis, live, index),
+            "room": index.room_of(device["targets"]),
+            "default_summary": (describe.default_rule(device["default_rule"], index.name, device["targets"])
+                                if device.get("default_rule") else None),
             "originals": self._originals(device, index),
             "device": device, "targets": self._targets_view(device, index),
             "ha_device": index.device_name(device["ha_device_id"]),
@@ -477,7 +501,7 @@ class AppCore:
                 raise ConfigError("invalid", f"{', '.join(used)} is still used by a rule's action; change that rule first.",
                                   problems=[{"path": "targets", "message": "Still used by a rule's action."}])
             target["targets"] = patch["targets"]
-        for key in ("name", "enabled", "blueprint"):
+        for key in ("name", "enabled", "blueprint", "default_rule"):
             if key in patch:
                 target[key] = patch[key]
         acknowledged = set(target.get("acknowledged") or [])
@@ -535,6 +559,31 @@ class AppCore:
             "recheck": {**model.rule_recheck(clean_rule, self.store.config["settings"]),
                         "active": expected["repeatable"] and clean_rule["recheck"]["enabled"],
                         "why_not": compiler.RECHECK_OFF.get(expected["why"]) if not expected["repeatable"] else None},
+        }
+
+    def preview_default(self, device_id: Any, default: Any) -> dict[str, Any]:
+        """What a default rule being edited would give (like ``preview_rule``; nothing is saved)."""
+        device = self._device(device_id)
+        problems = model.Problems()
+        clean = model.validate_device(device["id"], {**device, "default_rule": default}, "device", problems)
+        if problems.items:
+            names = self.index().name
+            return {"valid": False, "problems": [{**p, "path": p["path"].removeprefix("device.default_rule.")} for p in problems.items],
+                    "rules": [{"name": r["name"], "enabled": r["enabled"], "text": describe.rule(r, names, device["targets"])["text"]}
+                              for r in device["rules"]]}
+        index = self.index()
+        analysis = self.analysis(clean, index)
+        configured = clean.get("default_rule")
+        shared = next((a for a in analysis["automations"] if a["role"] == "shared"), None)
+        return {
+            "valid": True, "problems": [], "default_rule": configured,
+            "summary": describe.default_rule(configured, index.name, clean["targets"]) if configured else None,
+            "active": bool(shared and shared.get("default")),
+            "notes": [n for n in analysis["notes"] if n["code"] == "default_without_rules"],
+            "automation": ({"id": shared["id"], "alias": shared["alias"], "mode": shared["mode"], "reason": shared["reason"],
+                            "rules": len(shared["rule_ids"])} if shared else None),
+            "yaml": compiler.to_yaml(compiler.with_id(shared)) if shared else "",
+            "rules": [{"name": r["name"], "enabled": r["enabled"], "text": analysis["summaries"][r["id"]]["text"]} for r in clean["rules"]],
         }
 
     def save_rule(self, device_id: Any, rule: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:

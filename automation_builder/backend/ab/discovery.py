@@ -62,13 +62,98 @@ class Index:
         entry = self.registry.get(entity_id) or {}
         return bool(entry.get("disabled_by") or entry.get("hidden_by"))
 
+    def area_of(self, entity_id: str) -> str | None:
+        """The Home Assistant area of an entity: its own, or the one it inherits from its device."""
+        entry = self.registry.get(entity_id) or {}
+        area_id = entry.get("area_id") or (self.devices.get(entry.get("device_id")) or {}).get("area_id")
+        return area_id if area_id in self.areas else None
+
+    def room_of(self, entity_ids: list[str]) -> dict[str, Any]:
+        """Where a managed device is listed: its room, "multiple" when its entities are in several, or "unassigned".
+
+        A device is listed once. Rooms only organise the interface; they change nothing about its automation.
+        """
+        areas = []
+        for entity_id in entity_ids:
+            area_id = self.area_of(entity_id)
+            if area_id not in areas:
+                areas.append(area_id)
+        named = [{"area_id": a, "name": self.areas[a]} for a in areas if a]
+        if len(areas) == 1 and areas[0]:
+            return {"kind": "room", "area_id": areas[0], "name": self.areas[areas[0]], "areas": named}
+        if not named:
+            return {"kind": "unassigned", "area_id": None, "name": "Unassigned", "areas": []}
+        return {"kind": "multiple", "area_id": None, "name": "Multiple rooms", "areas": named,
+                "partly_unassigned": None in areas}
+
+    def _controllable_by_area(self) -> dict[str | None, dict[str | None, list[str]]]:
+        """``{area: {Home Assistant device id (None: no device): [controllable entities]}}``."""
+        out: dict[str | None, dict[str | None, list[str]]] = {}
+        for entity_id in set(self.states) | {e for e in self.registry if e}:
+            if not self._wanted(entity_id, "target"):
+                continue
+            device_id = (self.registry.get(entity_id) or {}).get("device_id")
+            out.setdefault(self.area_of(entity_id), {}).setdefault(device_id if device_id in self.devices else None, []).append(entity_id)
+        return out
+
+    def rooms(self, query: str = "") -> list[dict[str, Any]]:
+        """Every area as a room, with how much there is to control in it; "Unassigned" last."""
+        tokens = [t for t in query.casefold().split() if t]
+        found = self._controllable_by_area()
+        out = []
+        for area_id, name in sorted(self.areas.items(), key=lambda a: str(a[1]).casefold()):
+            devices = found.get(area_id, {})
+            if all(t in str(name).casefold() for t in tokens):
+                out.append({"area_id": area_id, "name": name, "devices": sum(1 for d in devices if d),
+                            "entities": sum(len(e) for e in devices.values())})
+        loose = found.get(None, {})
+        if all(t in "unassigned" for t in tokens):
+            out.append({"area_id": None, "name": "Unassigned", "devices": sum(1 for d in loose if d),
+                        "entities": sum(len(e) for e in loose.values()), "unassigned": True})
+        return out
+
+    def room_devices(self, area_id: str | None, query: str = "") -> list[dict[str, Any]]:
+        """The devices of one room that have something to control, each with those entities.
+
+        A physical device is listed with *all* its controllable entities, also those assigned to another room
+        (they carry their room's name). Entities without a device come as one entry at the end.
+        """
+        tokens = [t for t in query.casefold().split() if t]
+        found = self._controllable_by_area().get(area_id, {})
+        out = []
+        for device_id in found:
+            if device_id is None:
+                continue
+            device = self.devices[device_id]
+            entity_ids = [e for e, entry in self.registry.items()
+                          if e and entry.get("device_id") == device_id and self._wanted(e, "target")]
+            entities = sorted((self.entity_choice(e) for e in entity_ids), key=lambda v: str(v["name"]).casefold())
+            name = self.device_name(device_id) or device_id
+            model = " ".join(str(v) for v in (device.get("manufacturer"), device.get("model")) if v)
+            haystack = " ".join([name, model, *(f"{v['entity_id']} {v['name']}" for v in entities)]).casefold()
+            if all(t in haystack for t in tokens):
+                out.append({"device_id": device_id, "name": name, "model": model, "entities": entities,
+                            "domains": sorted({v["domain"] for v in entities})})
+        out.sort(key=lambda d: str(d["name"]).casefold())
+        loose = sorted((self.entity_choice(e) for e in found.get(None, [])), key=lambda v: str(v["name"]).casefold())
+        loose = [v for v in loose if all(t in f"{v['entity_id']} {v['name']}".casefold() for t in tokens)]
+        if loose:
+            out.append({"device_id": None, "name": "Entities without a device", "model": "helpers, groups, scripts, scenes …",
+                        "entities": loose, "domains": sorted({v["domain"] for v in loose})})
+        return out
+
+    def entity_choice(self, entity_id: str) -> dict[str, Any]:
+        view = self.view(entity_id)
+        area_id = self.area_of(entity_id)
+        return {**view, "area_id": area_id, "area": self.areas.get(area_id)}
+
     def view(self, entity_id: str, detail: bool = False) -> dict[str, Any]:
         state = self.states.get(entity_id) or {}
         attributes = state.get("attributes") or {}
         entry = self.registry.get(entity_id) or {}
         device_id = entry.get("device_id")
         device = self.devices.get(device_id) or {}
-        area_id = entry.get("area_id") or device.get("area_id")
+        area_id = self.area_of(entity_id)
         domain = entity_id.split(".", 1)[0]
         out = {
             "entity_id": entity_id, "name": self.name(entity_id), "domain": domain,
@@ -123,11 +208,16 @@ class Index:
             return domain in ("input_boolean", "switch", "binary_sensor") and not attributes.get("device_class") == "occupancy"
         return True
 
-    def search(self, query: str, purpose: str = "any", limit: int = 60) -> list[dict[str, Any]]:
+    def search(self, query: str, purpose: str = "any", limit: int = 60, area: str | None = None,
+               keep: str | None = None) -> list[dict[str, Any]]:
+        """Entities for a picker. ``area`` limits it to one room (the entity's own area or its device's);
+        ``keep`` is the entity chosen at present: it is always listed first, also when it is outside the room."""
         tokens = [t for t in query.casefold().split() if t]
         scored = []
         for entity_id in set(self.states) | {e for e in self.registry if e}:
-            if not self._wanted(entity_id, purpose):
+            if entity_id == keep or not self._wanted(entity_id, purpose):
+                continue
+            if area is not None and self.area_of(entity_id) != area:
                 continue
             view = self.view(entity_id)
             haystack = " ".join(str(v) for v in (entity_id, view["name"], view["area"], view["device_name"],
@@ -140,7 +230,8 @@ class Index:
                 rank = 0 if likely else 1
             scored.append((rank, str(view["name"]).casefold(), entity_id, view))
         scored.sort(key=lambda item: item[:3])
-        return [view for *_, view in scored[:limit]]
+        current = [{**self.view(keep), "current": True}] if keep and self.exists(keep) else []
+        return [*current, *(view for *_, view in scored[:limit])]
 
     def all_devices(self, query: str, limit: int = 60) -> list[dict[str, Any]]:
         """Every Home Assistant device (for device triggers: a remote has no controllable entity)."""

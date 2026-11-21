@@ -127,12 +127,20 @@ export async function editorPage(deviceId, ruleId, current) {
   session.catalog = catalog;
   session.notify = notify;
   const device = dev.device;
-  const stored = ruleId ? device.rules.find((r) => r.id === ruleId) : null;
-  if (ruleId && !stored) throw new Error("This rule does not exist (anymore).");
-  const rule = stored ? clone(stored) : {
+  // The device's optional Default Rule is edited here too: the same action editor, no triggers and no conditions.
+  const isDefault = ruleId === "default";
+  const stored = isDefault ? device.default_rule || null : ruleId ? device.rules.find((r) => r.id === ruleId) : null;
+  if (ruleId && !isDefault && !stored) throw new Error("This rule does not exist (anymore).");
+  const blank = {
     name: "", enabled: true, triggers: [], conditions: { type: "and", items: [] }, actions: [], retrigger: "restart",
     recheck: { enabled: true, first_seconds: null, second_seconds: null, periodic_minutes: null, override_entity: null },
   };
+  const rule = isDefault ? { ...blank, name: "Default", enabled: stored ? stored.enabled : true, actions: stored ? clone(stored.actions) : [],
+    recheck: { ...blank.recheck, override_entity: stored ? stored.override_entity : null } } : stored ? clone(stored) : blank;
+  const asDefault = () => ({ enabled: rule.enabled, actions: rule.actions, override_entity: rule.recheck.override_entity });
+  // "Only show entities from this room": offered when the device belongs to exactly one room, and on by default.
+  const room = dev.room && dev.room.kind === "room" ? { area_id: dev.room.area_id, name: dev.room.name } : null;
+  let roomOnly = Boolean(room);
   const refs = [...device.targets, rule.recheck.override_entity];
   collectEntities(rule, refs);
   await loadEntities(refs);
@@ -369,21 +377,29 @@ export async function editorPage(deviceId, ruleId, current) {
     const scroll = window.scrollY;
     drawn = true;
     const top = rule.conditions;
-    view.innerHTML = `<h1><a class="back" href="#/devices/${enc(deviceId)}" aria-label="Back to the device">←</a>${ruleId || rule.id ? "Edit rule" : "New rule"} <span class="muted small">for ${esc(device.name)}</span></h1>
-      <div class="two"><div id="form">
-        <div class="card"><div class="field"><label for="rule-name">Name</label><input type="text" id="rule-name" data-f="text" data-path="name" maxlength="80" value="${esc(rule.name)}" placeholder="For example: Motion at night"></div>
+    const head = isDefault ? `<div class="card" id="default-head"><div class="field"><label for="rule-enabled">Enabled</label><input type="checkbox" id="rule-enabled" data-f="check" data-path="enabled" ${rule.enabled ? "checked" : ""}></div>
+          <p class="muted small">The default has no trigger and no conditions of its own. It runs when one of this device's rules was triggered and <strong>none of the rules matched</strong> - never by itself, never periodically, and never in addition to a rule that matched. It is optional.</p></div>
+        <div class="card block if" id="default-when"><h2><span class="kw">DEFAULT</span> when no rule matched</h2>
+          ${last && last.rules && last.rules.length ? `<ul class="plain small">${last.rules.map((r) => `<li class="${r.enabled ? "" : "muted"}">${esc(r.text)}${r.enabled ? "" : " (disabled)"}</li>`).join("")}</ul>` : `<p class="muted">This device has no rules yet. The default only runs when a rule's trigger fired, so add a rule first.</p>`}</div>`
+      : `<div class="card"><div class="field"><label for="rule-name">Name</label><input type="text" id="rule-name" data-f="text" data-path="name" maxlength="80" value="${esc(rule.name)}" placeholder="For example: Motion at night"></div>
           <div class="field"><label for="rule-enabled">Enabled</label><input type="checkbox" id="rule-enabled" data-f="check" data-path="enabled" ${rule.enabled ? "checked" : ""}></div></div>
         <div class="card block if"><h2><span class="kw">IF</span> one of these happens</h2>
           ${rule.triggers.map((t, i) => triggerHtml(t, i)).join("") || `<p class="muted">Add what starts the rule.</p>`}
           <div class="actions"><button type="button" data-act="add-trigger" data-path="triggers">Add trigger</button></div></div>
         <div class="card block and"><h2><span class="kw">AND</span> <select data-f="text" data-path="conditions.type" aria-label="How the conditions combine">${options([["and", "all of these hold"], ["or", "any of these holds"], ["not", "none of these holds"]], top.type)}</select></h2>
           ${top.items.map((c, i) => conditionHtml(c, `conditions.items.${i}`, "conditions.items", i, JOIN[top.type])).join("") || `<p class="muted">Optional: without conditions the rule always runs.</p>`}
-          <div class="actions"><button type="button" data-act="add-condition" data-path="conditions.items">Add condition</button><button type="button" data-act="add-group" data-path="conditions">Add group</button></div></div>
+          <div class="actions"><button type="button" data-act="add-condition" data-path="conditions.items">Add condition</button><button type="button" data-act="add-group" data-path="conditions">Add group</button></div></div>`;
+    const tail = isDefault ? `<div class="card" id="default-override"><div class="field"><label>Manual override signal</label><span>${entityButton("recheck.override_entity", rule.recheck.override_entity, "override")}${rule.recheck.override_entity ? ` <button type="button" class="link" data-act="clear" data-path="recheck.override_entity">Clear</button>` : ""}</span>
+          <div class="help">Optional. While this entity is on, the default does nothing - for example a helper you switch on when you set the device by hand.</div></div></div>`
+      : `<div class="card"><details data-keep="advanced"><summary>Advanced</summary>${advancedHtml()}</details></div>`;
+    view.innerHTML = `<h1><a class="back" href="#/devices/${enc(deviceId)}" aria-label="Back to the device">←</a>${isDefault ? "Default rule" : ruleId || rule.id ? "Edit rule" : "New rule"} <span class="muted small">for ${esc(device.name)}${dev.room ? ` · ${esc(dev.room.name)}` : ""}</span></h1>
+      <div class="two"><div id="form">
+        ${head}
         <div class="card block then"><h2><span class="kw">THEN</span> do this</h2>
-          ${rule.actions.map((a, i) => actionHtml(a, "actions", i)).join("") || `<p class="muted">Add what the rule does with ${esc(device.targets.map(entityName).join(", "))}.</p>`}
+          ${rule.actions.map((a, i) => actionHtml(a, "actions", i)).join("") || `<p class="muted">Add what ${isDefault ? "the default" : "the rule"} does with ${esc(device.targets.map(entityName).join(", "))}.</p>`}
           <div class="actions"><button type="button" data-act="add-action" data-path="actions">Add action</button></div></div>
-        <div class="card"><details data-keep="advanced"><summary>Advanced</summary>${advancedHtml()}</details></div>
-        <div class="actions"><a class="button" href="#/devices/${enc(deviceId)}">Back to ${esc(device.name)}</a><span class="spacer"></span>${rule.id ? `<button type="button" class="danger" data-act="delete">Delete rule</button>` : ""}</div>
+        ${tail}
+        <div class="actions"><a class="button" href="#/devices/${enc(deviceId)}">Back to ${esc(device.name)}</a><span class="spacer"></span>${isDefault ? (stored || rule.saved ? `<button type="button" class="danger" data-act="delete">Remove the default</button>` : "") : rule.id ? `<button type="button" class="danger" data-act="delete">Delete rule</button>` : ""}</div>
       </div><div><div class="card sticky" id="side">${sideHtml || `<p class="muted">Checking…</p>`}</div></div></div>`;
     view.querySelectorAll("details[data-keep]").forEach((d) => { if (open.has(d.dataset.keep)) d.open = true; });
     window.scrollTo(0, scroll);
@@ -402,12 +418,14 @@ export async function editorPage(deviceId, ruleId, current) {
     const s = p.summary;
     const auto = p.automation;
     side.innerHTML = `<div class="save-status ${cls}" id="save-status">${status}</div>
-      ${p.valid ? `<div class="ifthen big" id="summary"><span class="kw">IF</span><span>${esc(s.if)}</span>${s.and ? `<span class="kw">AND</span><span>${esc(s.and)}</span>` : ""}<span class="kw">THEN</span><span>${esc(s.then)}</span></div>` : `<div id="problems">${notes(p.problems.map((x) => ({ level: "error", message: x.message })))}</div>`}
-      ${p.valid ? notes(p.conflicts) + notes(p.notes) : ""}
+      ${p.valid && isDefault ? (s ? `<div class="ifthen big" id="summary"><span class="kw">DEFAULT</span><span>one of the device's triggers fired and no rule matched</span><span class="kw">THEN</span><span>${esc(s.then)}</span></div>` : `<p class="muted" id="summary">No default is configured.</p>`)
+    : p.valid ? `<div class="ifthen big" id="summary"><span class="kw">IF</span><span>${esc(s.if)}</span>${s.and ? `<span class="kw">AND</span><span>${esc(s.and)}</span>` : ""}<span class="kw">THEN</span><span>${esc(s.then)}</span></div>` : `<div id="problems">${notes(p.problems.map((x) => ({ level: "error", message: x.message })))}</div>`}
+      ${p.valid ? notes(p.conflicts || []) + notes(p.notes) : ""}
       ${p.valid && auto ? `<p class="small" id="auto-info">Goes into the automation <strong>${esc(auto.alias)}</strong>${auto.rules > 1 ? `, together with ${auto.rules - 1} other rule${auto.rules > 2 ? "s" : ""} of this device` : ""} (mode ${esc(auto.mode)}).${auto.role === "separate" ? ` ${esc(auto.reason)}` : ""}</p>` : ""}
-      ${p.valid && !auto ? `<p class="small muted">Not part of an automation while it is disabled.</p>` : ""}
+      ${p.valid && isDefault && auto && !p.active ? `<p class="small muted">The default is not part of the automation while it is disabled or empty.</p>` : ""}
+      ${p.valid && !auto ? `<p class="small muted">${isDefault ? "There is no automation yet: the device has no enabled rule." : "Not part of an automation while it is disabled."}</p>` : ""}
       ${p.valid && p.yaml ? `<details ${yamlOpen ? "open" : ""}><summary>Generated YAML</summary><pre class="code" id="yaml">${esc(p.yaml)}</pre></details>` : ""}
-      ${p.valid && rule.id ? `<div class="actions"><a class="button primary" href="#/devices/${enc(deviceId)}">Review and deploy</a></div>` : ""}`;
+      ${p.valid && (rule.id || isDefault) ? `<div class="actions"><a class="button primary" href="#/devices/${enc(deviceId)}">Review and deploy</a></div>` : ""}`;
     const info = view.querySelector("#recheck-info");
     if (info && p.valid) {
       const r = p.recheck;
@@ -429,6 +447,20 @@ export async function editorPage(deviceId, ruleId, current) {
     chain = chain.then(async () => {
       if (mine !== seq || !current()) return;
       try {
+        if (isDefault) {
+          const p = await api("api/default/preview", { device_id: deviceId, default_rule: asDefault() });
+          if (mine !== seq || !current()) return;
+          const first = !last || !last.rules;
+          if (!p.valid) {
+            showPreview(p, rule.actions.length ? `<strong>Not saved yet:</strong> the default is not complete.` : "No default yet: add what the device should do when no rule matches.", rule.actions.length ? "bad" : "");
+            if (first) draw();
+            return;
+          }
+          if (save) { await change("api/devices/update", { device_id: deviceId, patch: { default_rule: asDefault() } }); rule.saved = Boolean(p.default_rule); }
+          showPreview(p, save ? `<strong>Saved.</strong> Home Assistant gets it when you deploy.` : "Saved.", "ok");
+          if (first) draw();  // the list of the device's rules above the default
+          return;
+        }
         const p = await api("api/rules/preview", { device_id: deviceId, rule });
         if (mine !== seq || !current()) return;
         if (!p.valid) { showPreview(p, `<strong>Not saved yet:</strong> the rule is not complete.`, "bad"); return; }
@@ -584,7 +616,7 @@ export async function editorPage(deviceId, ruleId, current) {
   window.addEventListener("hashchange", () => { view.removeEventListener("input", onInput); view.removeEventListener("change", onChange); clearTimeout(timer); }, { once: true });
 
   draw();
-  if (stored) sync(false); else showPreview({ valid: false, problems: [{ message: "Add a trigger (IF) and an action (THEN)." }] }, "A new rule: it is saved as soon as it is complete.", "");
+  if (stored || isDefault) sync(false); else showPreview({ valid: false, problems: [{ message: "Add a trigger (IF) and an action (THEN)." }] }, "A new rule: it is saved as soon as it is complete.", "");
 
   const page = {
     chg: {},
@@ -619,7 +651,7 @@ export async function editorPage(deviceId, ruleId, current) {
         const path = el.dataset.path;
         const holder = get(rule, path.split(".").slice(0, -1).join("."));
         const purpose = el.dataset.purpose !== "any" ? el.dataset.purpose : PURPOSE[holder && holder.type] || "any";
-        const chosen = await pickEntity(purpose);
+        const chosen = await pickEntity(purpose, { room, only: roomOnly, keep: get(rule, path) || null, onToggle: (value) => { roomOnly = value; } });
         if (!chosen || !current()) return;
         delete entities[chosen.entity_id];  // read it again with its details (options, event types)
         await loadEntities([chosen.entity_id]);
@@ -638,6 +670,17 @@ export async function editorPage(deviceId, ruleId, current) {
         if (current()) changed(true);
       },
       delete: async () => {
+        if (isDefault) {
+          if (!await ask({ title: "Remove the default?", body: "<p>The device then does nothing when no rule matches. Home Assistant keeps running the default until you deploy.</p>", ok: "Remove", danger: true })) return;
+          try {
+            seq += 1;
+            await chain;
+            await change("api/devices/update", { device_id: deviceId, patch: { default_rule: null } });
+            toast("Default removed.");
+            location.hash = `#/devices/${enc(deviceId)}`;
+          } catch (err) { toast(errorText(err)); }
+          return;
+        }
         if (!await ask({ title: `Delete the rule “${rule.name || "this rule"}”?`, body: "<p>The rule is removed here. Home Assistant keeps running it until you deploy.</p>", ok: "Delete", danger: true })) return;
         try {
           seq += 1;

@@ -2,7 +2,7 @@
 # Independent of Smart Comfort (slug smart_lighting) and of Smart Occupancy Detection: its own slug, container,
 # /data folder, backups and versions. It needs neither of them.
 name: Automation Builder
-version: "0.2.0"
+version: "0.2.1"
 slug: automation_builder
 description: >-
   A visual IF / AND-OR / THEN rule editor. Choose a device to control, give it
