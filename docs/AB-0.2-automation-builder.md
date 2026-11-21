@@ -196,4 +196,153 @@ Reproducible on any Home Assistant OS **test** installation (here: the VirtualBo
 7. With Smart Occupancy Detection installed and paired on the same system: `export AB_HAOS_SOD_SLUG=<slug>`,
    `sod_checks.py` (about 35 minutes; it waits out the start-up grace once).
 
-RESULTS_PLACEHOLDER
+`e2e_checks.py` expects a fresh installation of the App. Before a repetition: uninstall and install the App
+(its data folder goes with it), delete the `automation_builder_*` automations and
+`/config/blueprints/automation/automation_builder/` in the test Home Assistant.
+
+## 4. Results (2026-11-21, Home Assistant Core 2026.11.1)
+
+Simulated and genuine environments are listed separately. "Stack" is the real App image behind a stand-in
+Supervisor against a real, disposable Home Assistant Core; "HAOS" is the VirtualBox VM with Home Assistant OS
+18.4 and Supervisor 2026.11.0.
+
+| Suite | Environment | Result |
+|---|---|---|
+| `automation_builder`: `pytest` | unit, fake Home Assistant | 152 passed |
+| `scripts/run_tests.py tests/automation_builder` | Home Assistant's own parser and engine (test harness) | 40 passed |
+| `e2e_checks.py` (the 0.1 scenario) | Stack, fresh installation | 87 of 87 |
+| `browser_checks.py` | Stack | 102 of 102 |
+| `e2e_02_checks.py` | Stack | 87 of 87 |
+| `browser_02_checks.py` | Stack | 121 of 121 |
+| `haos_checks.py --phase before-update` / `after-update` | **HAOS**, Supervisor update 0.1.0 → 0.2.0 | 5 of 5 / 15 of 15 |
+| `e2e_checks.py` | **HAOS**, real Ingress and Supervisor proxy, fresh installation of 0.2.0 | 80 of 80, 4 skipped |
+| `e2e_02_checks.py` | **HAOS** | 81 of 81, 2 skipped |
+| `haos_checks.py --phase main` | **HAOS** | 48 of 48 |
+| `sod_checks.py` | **HAOS**, real Smart Occupancy Detection 0.2.0 (App + companion) | 38 of 38 |
+| Smart Occupancy Detection: App `pytest` / companion suite | regression | 678 passed / 38 passed |
+| Smart Comfort: App `pytest` / companion / engine suites | regression | 327 passed, 1 xfailed (as before) / 43 passed / 1261 passed |
+
+Skipped on HAOS (not run there, covered on the stack): a deployment refused by the endpoint and an unreachable
+API (they need the stand-in Supervisor's failure hook; on Home Assistant OS Ingress itself runs through Core,
+so a failing Core cannot be observed through the App's interface), a non-administrator (the real Supervisor
+sets the user), the deterministic interrupted deployment (the stand-in's slow answer) and the Supervisor-side
+recording of everything the App sent.
+
+### Home Assistant OS
+
+* **Installation and start**: built on the device by the Supervisor from the repository, starts under S6,
+  Ingress only (no host port), sidebar panel for administrators. Supervisor's view of the App:
+  `homeassistant_api` only; no `hassio_api`, `auth_api`, host network, privileges, Docker API or full access;
+  protected; security rating 7.
+* **The automation configuration endpoint through the real Supervisor proxy**: `GET`, `POST` and `DELETE` on
+  `http://supervisor/core/api/config/automation/config/automation_builder_*` work with the App's
+  `SUPERVISOR_TOKEN` and need no further permission. `validate_config`, `automation/config`, `trace/list`,
+  `trace/get`, `search/related`, `device_automation/trigger/list`, `blueprint/list` and `blueprint/save` work
+  through the websocket proxy. On Home Assistant OS the App acts as the system user "Supervisor".
+* **Create, update, remove, verify**: all confirmed against Home Assistant with the test's own token; the four
+  hand-made automations in the same `automations.yaml` were identical afterwards.
+* **Home Assistant rejects an update**: a broken template is refused by Home Assistant's validation, reported,
+  and nothing is written (the refusal of the write itself is covered on the stack).
+* **Reload, restarts**: "reload automations", an App restart, a Core restart and a Supervisor restart each left
+  the automations loaded and the devices in sync; after the Supervisor restart a deployment through its proxy
+  worked.
+* **Backup and restore**: a Supervisor partial backup of the running App, changes afterwards, restore: rules,
+  names and deployment records of the backup were back, and the automation in Home Assistant was untouched.
+* **Update**: the Supervisor updated 0.1.0 to 0.2.0. Devices, rules, records and automatic backups were kept;
+  a device with instant rules was in sync without redeploying (the same automation byte for byte); the device
+  with a "run both" waiting rule showed "changes not deployed yet" with the reason, kept running its 0.1
+  automation, and got the new layout when deployed. A device made in 0.1.0 exported as a blueprint.
+* **Interrupted deployment**: the App was stopped through the Supervisor during deployments. Attempt 1: the
+  deployment had finished (answered 200), in sync after the restart. Attempt 2: the request ended with 502 and
+  Home Assistant had not received the automation; after the restart the device showed "changes not deployed
+  yet" and deployed normally. The case "written, not yet recorded" was produced deterministically on the stack
+  (the App killed while Home Assistant's answer was delayed): the next start recorded it as deployed, with a
+  message, and wrote nothing.
+* **Blueprint**: installed through `blueprint/save` into `blueprints/automation/automation_builder/`; an
+  automation created from it with Home Assistant's own endpoint, with another light, another trigger entity
+  and other values, ran correctly while Automation Builder was stopped.
+
+### Real Smart Occupancy Detection
+
+Both Apps on the HAOS VM; `binary_sensor.sod_kamar_nordur_occupied` comes from Smart Occupancy Detection's
+companion. Only its timing settings were shortened for the test (global and the room's own override) and put
+back afterwards. Observed:
+
+* vacant → occupied and occupied → vacant decided by Smart Occupancy Detection, each followed by the rule;
+* a rule whose condition did not hold (bright) did nothing when the room became occupied;
+* a lost first command corrected by the 2-second recheck (lamp on 2.0 s after the occupancy change), by the
+  15-second recheck when the command path was down for 6 s, and by the periodic check when it was down
+  through both; afterwards no further commands;
+* a lamp switched off by hand in the occupied room stayed off through all rechecks, and the App reported the
+  difference instead of forcing it; the next stay turned the lamp on again;
+* an unavailable occupancy entity of Smart Occupancy Detection (a room that is not configured) reported as
+  unavailable;
+* Smart Occupancy Detection stopped: its entity reported `fresh: false`; a lost command was **not** corrected
+  during that time (two periodic checks passed); after its restart the entity was fresh again and the lamp
+  was reconciled;
+* Automation Builder stopped: occupancy and vacancy kept switching the lamp (native automation); after its
+  start the device was in sync and the rule diagnostics had caught up from Home Assistant's traces;
+* Home Assistant restarted with the room occupied and the lamp switched off by hand: the lamp stayed off
+  (start-up grace); afterwards the rules worked as before.
+
+Automation Builder has no occupancy logic: the generated automation reads the entity's state and its `fresh`
+attribute, nothing else. Smart Occupancy Detection's code and detection rules were not changed.
+
+### What the App sent (stack, one complete run of all four suites)
+
+Websocket: `subscribe_events`, `get_config`, `get_states`, `get_services`, the three registry lists,
+`config/auth/list`, `ping`, `validate_config` (86), `automation/config` (1099), `search/related` (32),
+`trace/list` (255), `trace/get` (93), `device_automation/trigger/list` (4), `blueprint/list` (4),
+`blueprint/save` (3, all `automation_builder/<device>.yaml`). HTTP: only
+`config/automation/config/automation_builder_*` (104 GET, 28 POST, 2 DELETE). No service call, no event, no
+registry change; traces only of its own automations.
+
+### Defects found by the tests and fixed in this phase
+
+* Two kinds of press of one button are one native trigger; a "which trigger" condition could not tell them
+  apart (now the condition includes what distinguishes them).
+* The very first event of a button (state `unknown` before it) was ignored.
+* The importer named only the first unsupported action of an automation.
+* A scheduled entity search could run after its page was left (a console error; present in 0.1).
+* A trace refresh that was rescheduled left a never-awaited coroutine (a warning in the log).
+
+## 5. Known limitations
+
+* Both write paths (the automation configuration endpoint, `blueprint/save`) are internal interfaces of Home
+  Assistant, isolated and verified as described; a Home Assistant release may change them.
+* Blueprint identifiers of *values* depend on the position inside the rule: removing or reordering triggers,
+  conditions or actions within a rule renames the inputs after that position. Templates written by the user are
+  not parameterised. A device with waiting rules exports one blueprint per automation. An installed blueprint
+  is removed in Home Assistant, not in the App.
+* An occupancy rule with advanced actions (branches, waits, variables ...) gets no rechecks.
+* Device triggers, conditions and actions are labelled from Home Assistant's identifiers, not with the
+  integration's translated texts. ZHA and Zigbee2MQTT hardware was not available: device triggers were
+  exercised with Home Assistant's own device automations (demo devices, the test harness), event entities with
+  the demo button and simulated state changes, `zha_event`-style triggers with real events fired on the bus.
+  MQTT triggers are generated and unit-tested but were not run against a broker.
+* The importer converts one automation into one rule and requires at least one controlled entity; it refuses
+  rather than approximates (for example a state trigger without `to`/`from`, which also fires on attribute
+  changes). Automations defined in packages or made from blueprints are not imported.
+* Rule diagnostics depend on Home Assistant's stored traces (the last 5 runs per automation, 20 with periodic
+  checks; none across a Home Assistant restart). Runs that fall out while the App is stopped are not seen.
+  Verification is a comparison with the *reported* state within three minutes of a run; it is not a
+  supervisor and corrects nothing.
+* On Home Assistant OS a failing Core cannot be told from a failing Ingress from outside; those error paths are
+  tested on the stack only. A real SIGKILL of the App was not possible on Home Assistant OS (no Docker access);
+  a Supervisor stop during deployments was used instead.
+* Conflict detection is still per device; overlaps with unmanaged automations are listed by entity (and, for
+  imports, by trigger and entity), not analysed further.
+
+## 6. Recommended Phase 0.3
+
+1. The visual blueprint designer: edit an exported blueprint's inputs, groups and order; stable identifiers
+   that survive reordering inside a rule (ids per trigger, condition and action); update of an installed
+   blueprint with a comparison; blueprint import into rules.
+2. Buttons on real hardware: ZHA and Zigbee2MQTT remotes, translated labels for device automations, a "press
+   the button now" capture that finds the event or entity.
+3. Rechecks for rules with simple branches (if/else on a state) and for rules that follow a button.
+4. Supervision built on the diagnostics: a per-device history, notification on repeated mismatches, and
+   explicitly configured retries with the safeguards of the occupancy rechecks.
+5. Import: several rules from one automation (per trigger id), `for_each` and `stop`, "replace the original"
+   as an explicit, reversible step.
+6. Cross-device and unmanaged-automation overlap analysis.

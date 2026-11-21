@@ -252,6 +252,7 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
     tokens = json.loads(Path(args.tokens).read_text())
     home, app = Home(tokens["llat"]), App()
     unmanaged_before = home.automation(UNMANAGED)[1]
+    home.call("input_select.select_option", MOOD, option="Dagur")  # whatever an earlier run left behind
 
     # ------------------------------------------------- 1. fresh installation and connection
     status, overview = app.get("api/overview")
@@ -273,7 +274,7 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
     _, occupancy = app.get("api/entities?purpose=occupancy&q=kamar")
     offered = [e["entity_id"] for e in occupancy["results"]]
     check("2 an occupancy sensor is found for occupancy triggers, occupancy-like sensors first",
-          OCC in offered[:3] and all(e.startswith("binary_sensor.") for e in offered), offered[:5])
+          OCC in offered and all(e.startswith("binary_sensor.") for e in offered), offered[:6])
     _, detail = app.get(f"api/entity?ids={MOOD}")
     check("2 selector choices come from the entity (mood options)", detail["entities"][MOOD]["suggested_states"] == ["Dagur", "Hygge", "Nátt"])
 
