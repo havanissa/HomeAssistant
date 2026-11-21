@@ -3,6 +3,7 @@
 
 import { api, ask, change, chip, clock, enc, errorText, esc, notes, pickEntity, renderBanners, session, toast, view } from "./ui.js";
 import { editorPage } from "./editor.js";
+import { blueprintPage, importListPage, importPage, moodPage } from "./pages.js";
 
 let navToken = 0;
 let page = { act: {}, chg: {} };  // the current page's handlers for [data-act] clicks and [data-chg] changes
@@ -83,7 +84,7 @@ async function devicesPage(token) {
     <td>${d.targets.map((t) => `${esc(t.name)} <span class="mono">${esc(t.entity_id)}</span>`).join("<br>")}</td>
     <td>${d.rules_enabled} / ${d.rules}</td><td>${chip(d.status, d.status_text)}</td>
     <td>${d.warnings ? `<span class="badge warn">${plural(d.warnings, "warning")}</span>` : ""}</td></tr>`).join("");
-  view.innerHTML = `<h1>Devices <span class="spacer"></span><a class="button primary" href="#/devices/new">Add a device</a></h1>
+  view.innerHTML = `<h1>Devices <span class="spacer"></span><a class="button" href="#/import">Import an automation</a><a class="button primary" href="#/devices/new">Add a device</a></h1>
     <div class="card">${data.devices.length ? `<div class="tscroll"><table><thead><tr><th>Device</th><th>Controls</th><th>Rules on</th><th>Automation</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` : `<p class="muted">No devices are managed yet.</p>`}</div>
     <p class="muted small">A device here is what one automation controls: one entity, or several entities you chose to control together. A physical Home Assistant device can have several outputs; you choose exactly which ones.</p>`;
 }
@@ -123,7 +124,9 @@ async function newDevicePage(token) {
   let last = { devices: [], results: [] };
   async function search() {
     const mine = ++seq;
-    const q = enc(view.querySelector("#q").value);
+    const input = view.querySelector("#q");
+    if (!input || token !== navToken) return;  // the page was left while a search was still scheduled
+    const q = enc(input.value);
     try {
       const [devices, single] = await Promise.all([api(`api/ha-devices?q=${q}`), api(`api/entities?purpose=target&q=${q}`)]);
       if (mine !== seq || token !== navToken) return;
@@ -192,11 +195,12 @@ function planHtml(plan) {
       ${i.yaml ? `<details data-keep="yaml-${esc(i.id)}"><summary>Complete automation (YAML)</summary><pre class="code">${esc(i.yaml)}</pre></details>` : ""}
     </div>`).join("");
   const blocked = plan.reasons.length ? `<div class="notice error" id="plan-blocked">${plan.reasons.map(esc).join(" ")}</div>` : "";
+  const duplicates = (plan.duplicates || []).map((o) => `<div class="row" data-duplicate="${esc(o.rule_id)}"><span>Original: <strong>${esc(o.alias)}</strong> <span class="mono">${esc(o.entity_id || "")}</span></span><a href="/config/automation/edit/${enc(o.automation_id)}" target="_top">Open in Home Assistant</a><button data-act="allow-both" data-id="${esc(o.rule_id)}">Allow both to run</button></div>`).join("");
   const nothing = !plan.changes ? `<div class="notice info" id="plan-nothing">Home Assistant already has exactly this. Nothing to deploy.</div>` : "";
   const overwrite = plan.needs_overwrite ? `<label class="confirm-line"><input type="checkbox" id="overwrite"> Replace the automation that was changed outside Automation Builder</label>` : "";
   return `<div class="card review" id="plan"><h2>Review before deploying</h2>
     ${items || `<p class="muted">This device has no enabled rules and nothing deployed.</p>`}
-    ${notes(plan.conflicts.filter((c) => c.level === "blocking" && !c.acknowledged))}${blocked}${nothing}${overwrite}
+    ${notes(plan.conflicts.filter((c) => c.level === "blocking" && !c.acknowledged))}${blocked}${duplicates}${nothing}${overwrite}
     <div class="actions"><button class="primary" id="deploy" data-act="deploy" ${plan.can_deploy ? "" : "disabled"}>Deploy to Home Assistant</button><button data-act="plan-close">Close</button></div>
     <p class="muted small">Home Assistant validated this automation. Deploying writes it to automations.yaml, reloads it and confirms that Home Assistant runs it. If that fails, the previous automation is put back.</p></div>`;
 }
@@ -215,6 +219,41 @@ function automationCard(a, haBase) {
       <dt>Last triggered</dt><dd>${a.last_triggered ? esc(clock(a.last_triggered)) : "not yet"}</dd>
     </dl>${a.reason ? `<div class="sub">${esc(a.reason)}</div>` : ""}${links}${traces}</div>`;
 }
+
+const OUTCOME = { finished: "ran", running: "still running", failed: "failed", blocked: "blocked", aborted: "stopped early", cancelled: "cancelled", error: "failed" };
+const VERDICT = {
+  confirmed: ["ok", "Reported state matches"], mismatch: ["bad", "Reported state differs"], changed_since: ["off", "Changed by something else since"],
+  unavailable: ["off", "Entity not available"], not_verifiable: ["off", "Cannot be verified"], pending: ["pending", "Checking the reported state…"],
+  waiting: ["pending", "Still running"], too_late: ["off", "Seen too late to verify"], nothing: ["off", "No action to verify"],
+};
+
+function ruleDiagnostics(r, d) {
+  if (!d) return "";
+  const trace = (ref, text) => (ref && d.automation_id ? `<a href="/config/automation/trace/${enc(ref.automation_id || d.automation_id)}?run_id=${enc(ref.run_id)}" target="_top">${esc(text)}</a>` : esc(text));
+  const v = d.verification;
+  const verdict = v && d.last_executed && v.run_id === d.last_executed.run_id ? VERDICT[v.state] : null;
+  const line = [];
+  line.push(chip(d.sync.status, d.sync.text));
+  if (d.turned_off) line.push(`<span class="badge warn">automation turned off in Home Assistant</span>`);
+  if (d.entity_problems) line.push(`<span class="badge warn">${plural(d.entity_problems, "entity")} missing or unavailable</span>`);
+  if (d.last_outcome && d.last_outcome.outcome === "failed") line.push(`<span class="status bad">Last run failed</span>`);
+  if (verdict && ["mismatch"].includes(v.state)) line.push(`<span class="status bad">${esc(verdict[1])}</span>`);
+  const checks = v && v.checks && v.checks.length ? `<ul class="plain small" data-checks>${v.checks.map((c) => `<li data-verdict="${esc(c.verdict)}"><span class="status ${VERDICT[c.verdict][0]}">${esc(VERDICT[c.verdict][1])}</span> ${esc(entityLabel(d, c.entity_id))}: ${c.expected ? `expected ${esc(c.expected)}, reports ${esc(c.reported)}` : ""}${c.detail ? ` <span class="muted">(${esc(c.detail)})</span>` : ""}</li>`).join("")}</ul>` : "";
+  const blockedLater = d.last_blocked && (!d.last_executed || d.last_blocked.at > d.last_executed.at);
+  return `<div class="diag" data-diag="${esc(r.id)}"><div class="row small">${line.join("")}</div>
+    <details data-keep="diag-${esc(r.id)}"><summary>Execution: ${d.last_triggered ? `triggered ${esc(clock(d.last_triggered.at))}` : "not triggered yet"}${d.last_executed ? ` · executed ${esc(clock(d.last_executed.at))}` : ""}${blockedLater ? " · blocked by a condition" : ""}</summary>
+      <dl class="kv small">
+        <dt>Last triggered</dt><dd>${d.last_triggered ? trace(d.last_triggered, clock(d.last_triggered.at)) : "not seen yet"}${d.runs ? ` <span class="muted">(${d.runs} seen)</span>` : ""}</dd>
+        <dt>Last executed</dt><dd>${d.last_executed ? `${trace(d.last_executed, clock(d.last_executed.at))}${d.last_executed.recheck ? " (occupancy recheck)" : ""}` : "not seen yet"}${d.executions ? ` <span class="muted">(${d.executions} seen)</span>` : ""}</dd>
+        <dt>Last blocked by conditions</dt><dd>${d.last_blocked ? `${trace(d.last_blocked, clock(d.last_blocked.at))}: ${esc(d.last_blocked.by)}` : "not seen yet"}</dd>
+        <dt>Last outcome</dt><dd data-outcome="${esc((d.last_outcome || {}).outcome || "")}">${d.last_outcome ? `${esc(OUTCOME[d.last_outcome.outcome] || d.last_outcome.outcome)}${d.last_outcome.error ? `: ${esc(d.last_outcome.error)}` : ""}` : "–"}</dd>
+        ${d.last_recheck ? `<dt>Last occupancy recheck</dt><dd>${esc(clock(d.last_recheck.at))}: ${d.last_recheck.executed ? "repeated the actions" : `nothing to do (${esc(d.last_recheck.skipped_because || "everything as expected")})`}</dd>` : ""}
+        <dt>Action verification</dt><dd data-verification="${esc(verdict ? v.state : "")}">${verdict ? `<span class="status ${verdict[0]}">${esc(verdict[1])}</span>` : "–"}</dd>
+        <dt>Entities</dt><dd>${d.entities.map((e) => `<span class="ent ${e.status}">${esc(e.name)}${e.status === "ok" ? "" : ` (${esc(e.status)})`}</span>`).join(", ")}</dd>
+      </dl>${checks}
+      <p class="muted small">Read from Home Assistant's traces. “Executed” means Home Assistant accepted the actions; the verification compares what the entity <em>reports</em> a few seconds later, which is not proof of what a physical device did.</p></details></div>`;
+}
+const entityLabel = (d, id) => ((d.entities.find((e) => e.entity_id === id) || {}).name || id);
 
 async function devicePage(deviceId, token) {
   let data = null;
@@ -242,24 +281,27 @@ async function devicePage(deviceId, token) {
       return `<div class="rule ${r.enabled ? "" : "disabled"}" data-rule="${esc(r.id)}">
         <div class="row"><label class="switch"><input type="checkbox" data-chg="rule-enabled" data-id="${esc(r.id)}" ${r.enabled ? "checked" : ""} aria-label="Rule enabled"></label>
           <a class="name" href="#/rules/${enc(d.id)}/${enc(r.id)}">${esc(r.name)}</a>${own ? `<span class="badge">own automation</span>` : ""}${r.triggers.some((t) => t.type === "occupancy") ? `<span class="badge">occupancy</span>` : ""}
+${(data.rule_diagnostics[r.id] || {}).advanced ? `<span class="badge">advanced</span>` : ""}${r.imported_from ? `<span class="badge">imported</span>` : ""}
           <span class="spacer"></span>
           <button class="link" data-act="move" data-id="${esc(r.id)}" data-dir="up" ${i === 0 ? "disabled" : ""} aria-label="Move up">↑</button>
           <button class="link" data-act="move" data-id="${esc(r.id)}" data-dir="down" ${i === d.rules.length - 1 ? "disabled" : ""} aria-label="Move down">↓</button>
           <a class="button" href="#/rules/${enc(d.id)}/${enc(r.id)}">Edit</a>
           <button class="link danger-text" data-act="rule-delete" data-id="${esc(r.id)}">Delete</button></div>
-        <div class="ifthen"><span class="kw">IF</span><span>${esc(s.if)}</span>${s.and ? `<span class="kw">AND</span><span>${esc(s.and)}</span>` : ""}<span class="kw">THEN</span><span>${esc(s.then)}</span></div></div>`;
+        <div class="ifthen"><span class="kw">IF</span><span>${esc(s.if)}</span>${s.and ? `<span class="kw">AND</span><span>${esc(s.and)}</span>` : ""}<span class="kw">THEN</span><span>${esc(s.then)}</span></div>
+        ${ruleDiagnostics(r, data.rule_diagnostics[r.id])}</div>`;
     }).join("");
+    const originals = data.originals.filter((o) => o.entity_id).map((o) => `<div class="problem" data-original="${esc(o.rule_id)}"><span class="dot ${o.running && !o.allow_both ? "warning" : "info"}"></span><span>“${esc(o.rule_name)}” is a copy of the automation “${esc(o.alias)}”, which ${o.running ? `is still turned on in Home Assistant${o.allow_both ? " (you allowed both to run)" : ": turn it off there before deploying, or both would act"}` : "is turned off in Home Assistant"}. <a href="/config/automation/edit/${enc(o.automation_id)}" target="_top">Open the original</a>${o.allow_both ? ` <button class="link" data-act="disallow-both" data-id="${esc(o.rule_id)}">Do not allow both</button>` : ""}</span></div>`).join("");
     const conflicts = data.conflicts.map((c) => `<div class="problem" data-conflict="${esc(c.code)}"><span class="dot ${c.level === "blocking" && !c.acknowledged ? "error" : "warning"}"></span><span>${esc(c.message)}
         ${c.level === "blocking" ? (c.acknowledged ? ` <span class="badge">order confirmed</span> <button class="link" data-act="unack" data-key="${esc(c.key)}">Withdraw</button>` : ` <button class="link" data-act="ack" data-key="${esc(c.key)}">Confirm this order</button>`) : ""}</span></div>`).join("");
     const related = data.related.map((r) => `<div class="problem"><span class="dot info"></span><span>${esc(r.message)}${r.automation_id ? ` <a href="/config/automation/edit/${enc(r.automation_id)}" target="_top">Open</a>` : ""}</span></div>`).join("");
     const mismatch = data.mismatches.map((m) => `<div class="problem"><span class="dot warning"></span><span>${esc(m.message)}</span></div>`).join("");
     const result = data.last_result ? `<div class="notice ${data.last_result.ok ? "info" : "error"}" id="last-result">${esc(data.last_result.message)} <span class="muted small">${esc(clock(data.last_result.at))}</span></div>` : "";
     const external = ["modified", "missing", "foreign"].includes(live.status) ? `<div class="notice error" id="external">${esc(live.status_text)}. Automation Builder did not touch it. “Review and deploy” shows the difference; deploying replaces the outside change only if you confirm it.</div>` : "";
-    const anything = notes(data.notes) + notes(data.entity_problems) + conflicts + mismatch + related;
+    const anything = notes(data.notes) + notes(data.entity_problems) + conflicts + originals + mismatch + related;
     view.innerHTML = `<h1><a class="back" href="#/devices" aria-label="Back to devices">←</a><span id="title">${esc(d.name)}</span> ${chip(d.enabled ? live.status : "nothing", d.enabled ? live.status_text : "Disabled")}</h1>
       ${result}${external}
       <div class="two"><div>
-        <div class="card"><div class="row"><h2>Rules</h2><span class="spacer"></span><a class="button primary" href="#/rules/${enc(d.id)}/new">Add rule</a></div>
+        <div class="card"><div class="row"><h2>Rules</h2><span class="spacer"></span><a class="button" href="#/mood/${enc(d.id)}" title="One rule per value of a dropdown helper">From a dropdown helper…</a><a class="button primary" href="#/rules/${enc(d.id)}/new">Add rule</a></div>
           ${rules || `<p class="muted">No rules yet. A rule is: IF a trigger happens AND conditions hold THEN actions run.</p>`}
           ${d.rules.length > 1 ? `<p class="muted small">Rules that match the same trigger run in this order.</p>` : ""}</div>
         <div class="card" id="checks"><h2>Conflicts and notes</h2>${anything || `<p class="muted">Nothing to report.</p>`}</div>
@@ -268,6 +310,7 @@ async function devicePage(deviceId, token) {
         <div class="card" id="deployment"><div class="row"><h2>Home Assistant automation</h2><span class="spacer"></span><button class="primary" data-act="plan">Review and deploy</button></div>
           ${live.automations.map((a) => automationCard(a)).join("") || `<p class="muted">Nothing to deploy: this device has no enabled rules.</p>`}
           ${data.yaml ? `<details data-keep="yaml"><summary>Generated YAML</summary><pre class="code" id="yaml">${esc(data.yaml)}</pre></details>` : ""}
+          <div class="actions"><a class="button" id="export-blueprint" href="#/blueprint/${enc(d.id)}">Export as blueprint</a></div>
           <details data-keep="versions"><summary>Earlier versions</summary>
             <p class="muted small">These change the rules here only. Deploying stays a separate step.</p>
             <div class="actions"><button data-act="restore" data-version="deployed" ${live.deployed ? "" : "disabled"}>Discard changes since the last deployment</button>
@@ -321,6 +364,16 @@ async function devicePage(deviceId, token) {
         try { plan = await api("api/devices/plan", { device_id: deviceId }); draw.scroll = true; draw(); } catch (err) { toast(errorText(err)); }
       },
       "plan-close": () => { plan = null; draw(); },
+      "allow-both": async (el) => {
+        const rule = data.device.rules.find((r) => r.id === el.dataset.id);
+        if (!await ask({ title: "Let the original and the copy both run?", body: "<p>Both automations will react to the same triggers and act on the same entities. Choose this only if that is what you want; otherwise turn the original off in Home Assistant.</p>", ok: "Allow both" })) return;
+        await act(() => change("api/rules/save", { device_id: deviceId, rule: { ...rule, imported_from: { ...rule.imported_from, allow_both: true } } }), "Saved.");
+        page.act.plan();
+      },
+      "disallow-both": (el) => {
+        const rule = data.device.rules.find((r) => r.id === el.dataset.id);
+        act(() => change("api/rules/save", { device_id: deviceId, rule: { ...rule, imported_from: { ...rule.imported_from, allow_both: false } } }), "Saved.");
+      },
       deploy: async (el) => {
         const box = view.querySelector("#overwrite");
         if (box && !box.checked) { toast("Tick the box to replace the automation that was changed outside Automation Builder."); return; }
@@ -396,7 +449,7 @@ async function settingsPage(token) {
           <dt>Automation Builder</dt><dd>${esc(data.connection.versions.app)}</dd>
           <dt>Configuration saved</dt><dd>${data.saved_at ? esc(clock(data.saved_at)) : "never"}</dd></dl>
         <details data-keep="mech"><summary>How deployment works</summary>
-          <p class="small">Automation Builder writes each device's automation through the endpoint Home Assistant's own automation editor uses (<span class="mono">${esc(m.endpoint)}</span>), which stores it in automations.yaml and reloads that one automation. It only ever writes ids that start with <span class="mono">automation_builder_</span>, calls no service and never touches other automations.</p>
+          <p class="small">Automation Builder writes each device's automation through the endpoint Home Assistant's own automation editor uses (<span class="mono">${esc(m.endpoint)}</span>), which stores it in automations.yaml and reloads that one automation. It only ever writes ids that start with <span class="mono">automation_builder_</span>, calls no service and never touches other automations. A blueprint is installed only when you press “Install”, through Home Assistant's blueprint command, into <span class="mono">blueprints/automation/automation_builder/</span>. Execution diagnostics are read from Home Assistant's traces of these automations.</p>
           <dl class="kv small"><dt>Websocket</dt><dd class="mono">${esc(m.websocket)}</dd><dt>API</dt><dd class="mono">${esc(m.api)}</dd>
             <dt>Commands used</dt><dd class="mono">${esc(m.commands.join(", ") || "none yet")}</dd>
             <dt>Requests</dt><dd class="mono">${esc(Object.entries(m.requests).map(([k, v]) => `${k} ${v}`).join(", ") || "none yet")}</dd></dl></details>
@@ -457,7 +510,8 @@ async function route() {
   const token = ++navToken;
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   const section = parts[0] || "overview";
-  document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === section));
+  const NAV = { blueprint: "devices", mood: "devices" };
+  document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === (NAV[section] || section)));
   page = { act: {}, chg: {} };
   const current = () => token === navToken;
   try {
@@ -467,6 +521,10 @@ async function route() {
     else if (section === "devices") await devicesPage(token);
     else if (section === "rules" && parts[1] && parts[2]) { await loadShell(); if (current()) page = await editorPage(parts[1], parts[2] === "new" ? null : parts[2], current) || page; }
     else if (section === "rules") await rulesPage(token);
+    else if (section === "blueprint" && parts[1]) { await loadShell(); if (current()) page = await blueprintPage(parts[1], current) || page; }
+    else if (section === "import" && parts[1]) { await loadShell(); if (current()) page = await importPage(parts[1], current) || page; }
+    else if (section === "import") page = await importListPage(current) || page;
+    else if (section === "mood" && parts[1]) { await loadShell(); if (current()) page = await moodPage(parts[1], current) || page; }
     else if (section === "settings") await settingsPage(token);
     else location.hash = "#/";
   } catch (err) {

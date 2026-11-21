@@ -212,6 +212,8 @@ class DeployStore:
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir / "deploy" / "state.json"
         self.records: dict[str, dict[str, Any]] = {}
+        self.blueprints: dict[str, dict[str, Any]] = {}  # installed blueprint files, by path
+        self.pending: dict[str, Any] | None = None       # a deployment that was started and not finished
         self.problem: str | None = None
 
     def load(self) -> None:
@@ -221,6 +223,9 @@ class DeployStore:
             if not isinstance(records, dict):
                 raise ValueError("records is not an object")
             self.records = {k: v for k, v in records.items() if isinstance(v, dict) and "hash" in v}
+            blueprints = document.get("blueprints")
+            self.blueprints = {k: v for k, v in blueprints.items() if isinstance(v, dict)} if isinstance(blueprints, dict) else {}
+            self.pending = document["pending"] if isinstance(document.get("pending"), dict) else None
         except FileNotFoundError:
             self.records = {}
         except (OSError, ValueError, KeyError, TypeError) as err:
@@ -235,21 +240,43 @@ class DeployStore:
             self.records = {}
 
     def _write(self) -> None:
-        _atomic_write(self.path, {"schema": SCHEMA, "saved_at": iso(utcnow()), "records": self.records})
+        document: dict[str, Any] = {"schema": SCHEMA, "saved_at": iso(utcnow()), "records": self.records}
+        if self.blueprints:
+            document["blueprints"] = self.blueprints
+        if self.pending:
+            document["pending"] = self.pending
+        _atomic_write(self.path, document)
+
+    def begin(self, device: dict[str, Any], items: dict[str, dict[str, Any] | None], by: str | None) -> None:
+        """Note what a deployment is about to write, *before* the first request: if the App stops in between,
+        the next start can tell which of it reached Home Assistant (``AppCore.recover``)."""
+        self.pending = {"device_id": device["id"], "at": iso(utcnow()), "by": by, "device": copy.deepcopy(device),
+                        "items": items}
+        self._write()
+
+    def finish(self) -> None:
+        if self.pending is not None:
+            self.pending = None
+            self._write()
+
+    def blueprint_installed(self, path: str, *, digest: str, device_id: str, name: str, by: str | None) -> None:
+        self.blueprints[path] = {"hash": digest, "device_id": device_id, "name": name, "installed_at": iso(utcnow()),
+                                 "by": by}
+        self._write()
 
     def of_device(self, device_id: str) -> dict[str, dict[str, Any]]:
         return {k: v for k, v in self.records.items() if v.get("device_id") == device_id}
 
     def record(self, automation_id: str, *, device_id: str, config_hash: str, config: dict[str, Any],
-               device: dict[str, Any], by: str | None) -> None:
+               device: dict[str, Any], by: str | None, blocks: list[dict[str, Any]] | None = None) -> None:
         previous = self.records.get(automation_id)
         history = []
         if previous:
-            history = [{k: previous.get(k) for k in ("hash", "config", "deployed_at", "device", "by")},
+            history = [{k: previous.get(k) for k in ("hash", "config", "deployed_at", "device", "by", "blocks")},
                        *previous.get("history", [])][:HISTORY]
         self.records[automation_id] = {"device_id": device_id, "hash": config_hash, "config": config,
                                        "deployed_at": iso(utcnow()), "device": copy.deepcopy(device), "by": by,
-                                       "history": history}
+                                       "blocks": blocks, "history": history}
         self._write()
 
     def forget(self, automation_id: str) -> None:

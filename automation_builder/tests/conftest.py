@@ -11,7 +11,7 @@ import pytest
 
 from ab import compiler
 from ab.core import AppCore
-from ab.ha import ALLOWED_COMMANDS, DeployError, HomeAssistantError, NotAllowed
+from ab.ha import ALLOWED_COMMANDS, DeployError, HomeAssistantError, NotAllowed, check_params
 from ab.settings import load_settings
 
 ADMIN = "user-admin"
@@ -44,6 +44,11 @@ class FakeHome:
         self.unreachable = False
         self.invalid: dict[str, str] = {}   # validate_config errors by key
         self.related: dict[str, list[str]] = {}
+        self.services = {"notify": {"phone": {}, "send_message": {}}, "light": {"turn_on": {}}}
+        self.traces: dict[str, list[dict[str, Any]]] | None = None  # automation id -> full traces (None: one stub)
+        self.device_automations: dict[str, list[dict[str, Any]]] = {}  # "<kind>:<device id>" -> what HA lists
+        self.blueprints: dict[str, str] = {}     # blueprints/automation/<path> -> YAML
+        self.configs: dict[str, dict[str, Any]] = {}  # automation entity id -> its configuration (unmanaged ones)
         for entity_id, value, device, attributes in (
             ("light.bed_lamp", "off", "dev-lamp", {"friendly_name": "Bed lamp", "supported_color_modes": ["color_temp"]}),
             ("switch.relay_1", "off", "dev-relay", {"friendly_name": "Relay 1"}),
@@ -74,6 +79,7 @@ class FakeHome:
     async def command(self, kind: str, **params: Any) -> Any:
         if kind not in ALLOWED_COMMANDS:
             raise NotAllowed(kind)
+        check_params(kind, params)
         if not self.connected:
             raise ConnectionError("not connected")
         self.commands_sent[kind] += 1
@@ -83,6 +89,27 @@ class FakeHome:
         if kind == "validate_config":
             return {key: {"valid": key not in self.invalid, "error": self.invalid.get(key)}
                     for key in ("triggers", "conditions", "actions") if key in params}
+        if kind == "automation/config" and params["entity_id"] in self.configs:
+            return {"config": self.configs[params["entity_id"]]}
+        if kind == "trace/get":
+            for trace in (self.traces or {}).get(params["item_id"], []):
+                if trace["run_id"] == params["run_id"]:
+                    return trace
+            raise HomeAssistantError("not_found", "The trace could not be found")
+        if kind == "trace/list" and self.traces is not None:
+            return [{k: t.get(k) for k in ("run_id", "timestamp", "state", "script_execution", "trigger", "error")}
+                    for t in self.traces.get(params["item_id"], [])]
+        if kind.startswith("device_automation/"):
+            return self.device_automations.get(f"{kind.split('/')[1]}:{params['device_id']}", [])
+        if kind == "blueprint/list":
+            return {path: {"metadata": {"name": path}} for path in self.blueprints}
+        if kind == "blueprint/save":
+            if params["path"] in self.blueprints and not params.get("allow_override"):
+                raise HomeAssistantError("already_exists", "File already exists")
+            if "blueprint:" not in params["yaml"]:
+                raise HomeAssistantError("invalid_format", "Invalid blueprint")
+            self.blueprints[params["path"]] = params["yaml"]
+            return {"overrides_existing": False}
         if kind == "automation/config":
             for automation_id, config in self.loaded.items():
                 if self.entity_of(automation_id) == params["entity_id"]:
@@ -139,6 +166,12 @@ class FakeHome:
         self._check(automation_id, "DELETE")
         self.file.pop(automation_id, None)
         self._load(automation_id, None)
+
+    def add_automation(self, entity_id: str, config: dict[str, Any], value: str = "on") -> None:
+        """An automation the user made in Home Assistant (not managed by the App)."""
+        self.configs[entity_id] = config
+        self.states[entity_id] = state(entity_id, value, id=config.get("id"), friendly_name=config.get("alias", entity_id),
+                                       last_triggered=None, mode=config.get("mode", "single"))
 
     def edit_outside(self, automation_id: str, **changes: Any) -> None:
         """Somebody edits the automation in Home Assistant's own editor."""

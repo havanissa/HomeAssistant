@@ -8,7 +8,7 @@ from .catalog import CONTROLLABLE_DOMAINS, DOMAINS
 from .compiler import is_managed_id
 
 OCCUPANCY_CLASSES = ("occupancy", "presence", "motion")
-OPTION_ATTRIBUTES = ("options", "hvac_modes", "preset_modes", "fan_modes", "effect_list", "min_color_temp_kelvin",
+OPTION_ATTRIBUTES = ("event_types", "options", "hvac_modes", "preset_modes", "fan_modes", "effect_list", "min_color_temp_kelvin",
                      "max_color_temp_kelvin", "supported_color_modes", "min", "max", "step", "min_temp", "max_temp")
 DOMAIN_STATES = {
     "binary_sensor": ["on", "off"], "light": ["on", "off"], "switch": ["on", "off"], "input_boolean": ["on", "off"],
@@ -18,6 +18,16 @@ DOMAIN_STATES = {
     "sun": ["above_horizon", "below_horizon"], "media_player": ["off", "idle", "playing", "paused"],
     "vacuum": ["docked", "cleaning", "returning", "idle"], "alarm_control_panel": ["disarmed", "armed_home", "armed_away"],
 }
+
+
+#: Entity pickers that are limited to some domains.
+PURPOSE_DOMAINS = {
+    "button": ("event",), "script": ("script",), "scene": ("scene",), "notify": ("notify",),
+    "select": ("input_select", "select"),
+    "helper": ("input_boolean", "input_button", "input_number", "input_select", "input_text", "input_datetime",
+               "counter", "timer", "schedule"),
+}
+SEARCH_PURPOSES = ("any", "target", "occupancy", "numeric", "override", "time", *PURPOSE_DOMAINS)
 
 
 class Index:
@@ -105,6 +115,10 @@ class Index:
             except (TypeError, ValueError):
                 return False
             return True
+        if purpose in PURPOSE_DOMAINS:
+            return domain in PURPOSE_DOMAINS[purpose]
+        if purpose == "time":
+            return domain == "input_datetime" or (domain == "sensor" and attributes.get("device_class") == "timestamp")
         if purpose == "override":
             return domain in ("input_boolean", "switch", "binary_sensor") and not attributes.get("device_class") == "occupancy"
         return True
@@ -127,6 +141,29 @@ class Index:
             scored.append((rank, str(view["name"]).casefold(), entity_id, view))
         scored.sort(key=lambda item: item[:3])
         return [view for *_, view in scored[:limit]]
+
+    def all_devices(self, query: str, limit: int = 60) -> list[dict[str, Any]]:
+        """Every Home Assistant device (for device triggers: a remote has no controllable entity)."""
+        tokens = [t for t in query.casefold().split() if t]
+        out = []
+        for device_id, device in self.devices.items():
+            if not device_id or device.get("disabled_by") or device.get("entry_type") == "service":
+                continue
+            name = self.device_name(device_id) or device_id
+            area = self.areas.get(device.get("area_id"))
+            model = " ".join(str(v) for v in (device.get("manufacturer"), device.get("model")) if v)
+            if all(t in f"{name} {area or ''} {model}".casefold() for t in tokens):
+                out.append({"device_id": device_id, "name": name, "area": area, "model": model})
+        out.sort(key=lambda d: str(d["name"]).casefold())
+        return out[:limit]
+
+    def entity_by_registry_id(self, registry_id: Any) -> str | None:
+        if not isinstance(registry_id, str) or not registry_id:
+            return None
+        for entity_id, entry in self.registry.items():
+            if entry.get("id") == registry_id:
+                return entity_id
+        return None
 
     def physical_devices(self, query: str, limit: int = 40) -> list[dict[str, Any]]:
         """Home Assistant devices that have at least one controllable entity, each with those entities."""

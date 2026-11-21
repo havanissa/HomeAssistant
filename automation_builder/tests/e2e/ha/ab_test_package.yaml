@@ -1,0 +1,113 @@
+# Test entities for the Automation Builder end-to-end checks, as a Home Assistant package. Used by the disposable
+# Home Assistant of the local stack (configuration.yaml next to this file) and by the Home Assistant OS test VM
+# (copied to /config/packages/ab_test.yaml). Never install this in a production Home Assistant.
+#
+# Nothing here is occupancy detection: binary_sensor.sod_kamar_occupied is a plain template sensor that is named
+# and behaves like one of Smart Occupancy Detection's entities (attribute "fresh"). The checks against the real
+# Smart Occupancy Detection use its own entities instead (sod_checks.py).
+demo:
+input_boolean:
+  test_motion:
+    name: Motion (test driver)
+  occ_kamar:
+    name: Kamar occupied (test driver)
+  occ_available:
+    name: Occupancy available (test driver)
+    initial: true
+  occ_fresh:
+    name: Occupancy fresh (test driver)
+    initial: true
+  flaky_state:
+    name: Flaky lamp state
+  drop_commands:
+    name: Drop the flaky lamp's commands
+  manual_override:
+    name: Manual override
+  guest_mode:
+    name: Guest mode
+  ab_door:
+    name: Door (test driver)
+  slow_done:
+    name: Slow script finished
+input_number:
+  test_lux:
+    name: Lux (test driver)
+    min: 0
+    max: 2000
+    initial: 400
+  script_level:
+    name: Level set by the test script
+    min: 0
+    max: 100
+    initial: 0
+input_button:
+  wall_switch:
+    name: Wall switch
+input_select:
+  mood:
+    name: Mood
+    options: [Dagur, Hygge, Nátt]
+    initial: Dagur
+input_datetime:
+  ab_wake:
+    name: Wake time
+    has_time: true
+    has_date: false
+script:
+  ab_test_script:
+    alias: AB test script
+    fields:
+      level:
+        description: A number
+    sequence:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.script_level
+        data:
+          value: "{{ level | default(1) }}"
+  ab_slow_script:
+    alias: AB slow script
+    sequence:
+      - delay: 3
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.slow_done
+template:
+  - binary_sensor:
+      - name: sod_kamar_occupied
+        unique_id: ab_e2e_sod_kamar_occupied
+        device_class: occupancy
+        state: "{{ is_state('input_boolean.occ_kamar', 'on') }}"
+        availability: "{{ is_state('input_boolean.occ_available', 'on') }}"
+        attributes:
+          fresh: "{{ is_state('input_boolean.occ_fresh', 'on') }}"
+      - name: Test motion
+        unique_id: ab_e2e_test_motion
+        device_class: motion
+        state: "{{ is_state('input_boolean.test_motion', 'on') }}"
+      - name: Test door
+        unique_id: ab_e2e_test_door
+        device_class: door
+        state: "{{ is_state('input_boolean.ab_door', 'on') }}"
+    sensor:
+      - name: Test lux
+        unique_id: ab_e2e_test_lux
+        unit_of_measurement: lx
+        device_class: illuminance
+        state: "{{ states('input_number.test_lux') }}"
+    light:
+      - name: Flaky lamp
+        unique_id: ab_e2e_flaky_lamp
+        state: "{{ is_state('input_boolean.flaky_state', 'on') }}"
+        turn_on:
+          - if: "{{ is_state('input_boolean.drop_commands', 'off') }}"
+            then:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.flaky_state
+        turn_off:
+          - if: "{{ is_state('input_boolean.drop_commands', 'off') }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.flaky_state

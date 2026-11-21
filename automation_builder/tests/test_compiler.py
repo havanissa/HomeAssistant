@@ -100,8 +100,10 @@ def test_delay_rules_and_execution_modes():
         assert "its own automation because" in own["reason"]
         assert own["config"]["actions"][0]["then"][1] == {"delay": {"hours": 0, "minutes": 1, "seconds": 30}}
         assert {n["code"] for n in result["notes"]} == {"delay_restart", "separate_automation"}
+    # a waiting rule that may overlap with itself is separated too: the shared automation always stays queued
     result = compiler.compile_device(build("parallel"), S)
-    assert [(a["role"], a["mode"]) for a in result["automations"]] == [("shared", "parallel")]
+    assert [(a["role"], a["mode"]) for a in result["automations"]] == [("shared", "queued"), ("separate", "parallel")]
+    assert result["automations"][1]["config"]["max"] == 20
 
 
 def test_occupancy_rechecks_are_generated_only_for_occupancy_rules():
@@ -246,5 +248,5 @@ def test_blueprint_inputs_cover_the_reusable_values():
                                                                               B.delay(60), B.call("light.turn_off")],
                B.all_of(B.c_state("input_select.mood", "Hygge")))])
     kinds = {(i["kind"], i["value"]) for i in blueprint.inputs_of(device)}
-    assert kinds == {("entity", LAMP), ("entity", "sensor.lux"), ("number", 100), ("duration", 30), ("action_data", 70),
-                     ("duration", 60), ("entity", "input_select.mood"), ("state", "Hygge")}
+    assert kinds == {("entity", LAMP), ("entity", "sensor.lux"), ("number", 100), ("duration", 30), ("data", 70),
+                     ("duration", 60), ("entity", "input_select.mood"), ("text", "Hygge")}

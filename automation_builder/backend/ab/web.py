@@ -25,6 +25,7 @@ from aiohttp import web
 
 from .const import APP_NAME, APP_VERSION
 from .core import AppCore
+from .discovery import SEARCH_PURPOSES
 from .model import ConfigError
 from .settings import Settings
 
@@ -41,7 +42,6 @@ CSP = "; ".join((
     "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:",
     "connect-src 'self'", "frame-ancestors 'self'", "base-uri 'self'", "form-action 'none'", "object-src 'none'",
 ))
-SEARCH_PURPOSES = ("any", "target", "occupancy", "numeric", "override")
 
 
 def base_href(request: web.Request) -> str:
@@ -197,6 +197,35 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         core._require_ha()  # noqa: SLF001
         return _json({"devices": core.index().physical_devices(request.query.get("q", "")[:100])})
 
+    async def all_devices(request: web.Request) -> web.Response:
+        await require_admin(request)
+        core._require_ha()  # noqa: SLF001
+        return _json({"devices": core.index().all_devices(request.query.get("q", "")[:100])})
+
+    async def device_automations(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(await core.device_automations(request.query.get("device_id"), request.query.get("kind")))
+
+    async def notify_targets(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(core.notify_targets())
+
+    async def blueprint_view(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(await core.blueprint_view(request.match_info["device_id"]))
+
+    async def blueprint_download(request: web.Request) -> web.Response:
+        await require_admin(request)
+        view = await core.blueprint_view(request.match_info["device_id"])
+        if not view["yaml"]:
+            raise ConfigError("blocked", "There is no blueprint to download; see the validation results.", 409)
+        return web.Response(text=view["yaml"], content_type="application/yaml", headers={
+            "Content-Disposition": f'attachment; filename="{view["filename"]}"'})
+
+    async def import_list(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json({**core.import_list(), "revision": core.store.revision})
+
     async def settings_view(request: web.Request) -> web.Response:
         await require_admin(request)
         return _json(core.settings_view())
@@ -240,6 +269,10 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         "/api/backups/review": lambda d, u: core.review_backup(d.get("name")),
         "/api/backups/restore": lambda d, u: core.restore_backup(d.get("name"), d.get(rev), u),
         "/api/orphans/remove": lambda d, u: core.remove_orphan(d.get("automation_id"), d.get("overwrite") is True),
+        "/api/blueprint/preview": lambda d, u: core.blueprint_view(d.get("device_id"), d.get("settings") or {}),
+        "/api/blueprint/install": lambda d, u: core.blueprint_install(d.get("device_id"), d.get("overwrite") is True, u),
+        "/api/import/analyse": lambda d, u: core.import_analyse(d.get("entity_id")),
+        "/api/import/convert": lambda d, u: core.import_convert(d.get("entity_id"), d.get("destination"), d.get(rev), u),
     }
     large = {
         "/api/import/review": lambda d, u: core.review_import(d.get("document")),
@@ -257,6 +290,12 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
     r.add_get("/api/entities", entities)
     r.add_get("/api/entity", entity)
     r.add_get("/api/ha-devices", ha_devices)
+    r.add_get("/api/all-devices", all_devices)
+    r.add_get("/api/device-automations", device_automations)
+    r.add_get("/api/notify-targets", notify_targets)
+    r.add_get("/api/blueprint/{device_id}", blueprint_view)
+    r.add_get("/api/blueprint/{device_id}/download", blueprint_download)
+    r.add_get("/api/automations", import_list)
     r.add_get("/api/settings", settings_view)
     r.add_get("/api/export", export)
     r.add_get("/api/diagnostics", diagnostics)

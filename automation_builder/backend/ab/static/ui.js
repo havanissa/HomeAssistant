@@ -57,7 +57,7 @@ export function clock(iso) {
   return `${d.getDate()}.${d.getMonth() + 1}.${d.getFullYear()} ${time}`;
 }
 
-const CHIP = { in_sync: "ok", changes_pending: "pending", not_deployed: "pending", modified: "bad", missing: "bad", foreign: "bad", unknown: "off", nothing: "off" };
+const CHIP = { in_sync: "ok", changes_pending: "pending", not_deployed: "pending", pending: "pending", modified: "bad", missing: "bad", foreign: "bad", unknown: "off", nothing: "off", off: "off" };
 export const chip = (status, text) => `<span class="status ${CHIP[status] || "off"}" data-status="${esc(status)}">${esc(text)}</span>`;
 
 export function notes(items) {
@@ -93,7 +93,12 @@ export function ask({ title, body = "", ok = "OK", danger = false }) {
   });
 }
 
-const PURPOSE_TITLE = { target: "Choose an entity to control", occupancy: "Choose an occupancy sensor", numeric: "Choose a sensor with a number", override: "Choose the manual override signal", any: "Choose an entity" };
+const PURPOSE_TITLE = {
+  target: "Choose an entity to control", occupancy: "Choose an occupancy sensor", numeric: "Choose a sensor with a number",
+  override: "Choose the manual override signal", any: "Choose an entity", button: "Choose a button or remote (event entity)",
+  helper: "Choose a helper", script: "Choose a script", scene: "Choose a scene", notify: "Choose where the notification goes",
+  time: "Choose a date/time helper", select: "Choose a dropdown helper",
+};
 
 // The entity picker: search by name, area, device or entity id. Resolves the chosen entity (or null).
 export function pickEntity(purpose = "any") {
@@ -116,6 +121,43 @@ export function pickEntity(purpose = "any") {
         box.innerHTML = found.length ? found.map((e, i) => `<button class="result" data-i="${i}">
             <span><strong>${esc(e.name)}</strong> <span class="muted small">${esc([e.area, e.device_name].filter(Boolean).join(" · "))}</span><br><span class="mono">${esc(e.entity_id)}</span></span>
             <span class="spacer"></span><span class="badge">${esc(e.state ?? "?")}${e.unit ? " " + esc(e.unit) : ""}</span></button>`).join("")
+          : `<div class="muted">Nothing found.</div>`;
+      } catch (err) {
+        if (mine === seq) box.innerHTML = `<div class="notice error">${esc(err.message)}</div>`;
+      }
+    };
+    let timer = null;
+    input.oninput = () => { clearTimeout(timer); timer = setTimeout(search, 200); };
+    dialog.onclick = (e) => {
+      const result = e.target.closest("[data-i]");
+      if (result) return done(found[Number(result.dataset.i)]);
+      if (e.target.closest("[data-d]")) done(null);
+    };
+    dialog.oncancel = (e) => { e.preventDefault(); done(null); };
+    search();
+    input.focus();
+  });
+}
+
+// The device picker (for device triggers and conditions): every Home Assistant device. Resolves the device or null.
+export function pickDevice() {
+  return new Promise((resolve) => {
+    openDialog(`<h2>Choose a device</h2>
+      <input type="search" id="pick-q" placeholder="Search by name, area, manufacturer or model" autocomplete="off">
+      <div class="results" id="pick-results"><div class="muted">Searching…</div></div>
+      <div class="actions"><button data-d="cancel">Cancel</button></div>`, true);
+    const input = dialog.querySelector("#pick-q");
+    const box = dialog.querySelector("#pick-results");
+    let found = [];
+    let seq = 0;
+    const done = (value) => { dialog.onclick = null; dialog.oncancel = null; input.oninput = null; dialog.close(); resolve(value); };
+    const search = async () => {
+      const mine = ++seq;
+      try {
+        const data = await api(`api/all-devices?q=${enc(input.value)}`);
+        if (mine !== seq) return;
+        found = data.devices;
+        box.innerHTML = found.length ? found.map((d, i) => `<button class="result" data-i="${i}"><span><strong>${esc(d.name)}</strong><br><span class="muted small">${esc([d.area, d.model].filter(Boolean).join(" · "))}</span></span></button>`).join("")
           : `<div class="muted">Nothing found.</div>`;
       } catch (err) {
         if (mine === seq) box.innerHTML = `<div class="notice error">${esc(err.message)}</div>`;

@@ -26,10 +26,11 @@ from typing import Any
 
 import aiohttp
 
-from . import blueprint, catalog, compiler, conflicts as conflict_check, describe, model
+from . import blueprint, catalog, compiler, conflicts as conflict_check, describe, importer, model
 from .const import APP_NAME, APP_VERSION
+from .diagnostics import Observer
 from .discovery import Index
-from .ha import AutomationConfigApi, DeployError, HomeAssistantClient, HomeAssistantError, utcnow_iso
+from .ha import AutomationConfigApi, DeployError, HomeAssistantClient, HomeAssistantError, NotAllowed, utcnow_iso
 from .logbuffer import BufferHandler
 from .model import ConfigError
 from .settings import Settings
@@ -70,15 +71,28 @@ class AppCore:
         self._related: dict[str, tuple[float, list[str]]] = {}
         self._deploy_lock = asyncio.Lock()
         self.last_results: dict[str, dict[str, Any]] = {}  # device id -> the last deployment attempt
+        self.observer = Observer(self)
+        self._recovering: asyncio.Task[Any] | None = None
 
     async def start(self) -> None:
         self.session = aiohttp.ClientSession()
         self.ha = HomeAssistantClient(self.session, self.settings.ha_ws_url, self.settings.token)
         self.api = AutomationConfigApi(self.session, self.settings.ha_api_url, self.settings.token)
+        self.ha.add_listener(self._on_ha)
         await self.ha.start()
         _LOGGER.info("%s %s started (%d devices)", APP_NAME, APP_VERSION, len(self.store.config["devices"]))
 
+    def _on_ha(self, kind: str, payload: Any) -> None:
+        if kind == "state":
+            self.observer.on_state(*payload)
+        elif kind == "status" and isinstance(payload, dict) and payload.get("connected") and self.deploys.pending \
+                and (self._recovering is None or self._recovering.done()):
+            self._recovering = asyncio.get_running_loop().create_task(self.recover())
+
     async def stop(self) -> None:
+        self.observer.stop()
+        if self._recovering is not None:
+            self._recovering.cancel()
         if self.ha:
             await self.ha.stop()
         if self.session:
@@ -170,6 +184,56 @@ class AppCore:
             "entity_problems": self._entity_problems(device, index),
             "summaries": {r["id"]: describe.rule(r, index.name, device["targets"]) for r in device["rules"]},
         }
+
+    # ------------------------------------------------------------ rule level
+    def _rule_sync(self, device: dict[str, Any], rule: dict[str, Any], analysis: dict[str, Any]) -> dict[str, str]:
+        """Is this rule, as it is now, what Home Assistant runs? (Compared with the device as it was deployed.)"""
+        records = self.deploys.of_device(device["id"])
+        deployed = None
+        for record in records.values():
+            for old in (record.get("device") or {}).get("rules", []):
+                if old["id"] == rule["id"] and (record.get("blocks") is None or any(
+                        b["rule_id"] == rule["id"] for b in record["blocks"])):
+                    deployed = old
+        wanted = device["enabled"] and rule["enabled"]
+        if deployed is None:
+            return ({"status": "not_deployed", "text": "Not deployed yet"} if wanted
+                    else {"status": "off", "text": "Disabled, not in Home Assistant"})
+        if not wanted:
+            return {"status": "pending", "text": "Disabled here, still running in Home Assistant until you deploy"}
+        strip = lambda r: {k: v for k, v in r.items() if k != "imported_from"}  # noqa: E731
+        if strip(deployed) != strip(rule):
+            return {"status": "pending", "text": "Changed since the last deployment"}
+        home = next((a for a in analysis["automations"] if rule["id"] in a["rule_ids"]), None)
+        if home is None or home["id"] not in records:
+            return {"status": "pending", "text": "Moves to another automation at the next deployment"}
+        return {"status": "in_sync", "text": "Deployed"}
+
+    def _rule_views(self, device: dict[str, Any], analysis: dict[str, Any], live: dict[str, Any],
+                    index: Index) -> dict[str, dict[str, Any]]:
+        connected = bool(self.ha and self.ha.connected)
+        states = {a["id"]: a for a in live["automations"]}
+        out = {}
+        for rule in device["rules"]:
+            entities = []
+            for entity_id, uses in sorted({**{t: {"controlled"} for t in device["targets"]},
+                                           **model.rule_entities(rule)}.items()):
+                state = (index.states.get(entity_id) or {}).get("state")
+                entities.append({"entity_id": entity_id, "name": index.name(entity_id), "uses": sorted(uses),
+                                 "state": state, "status": ("unknown" if not connected else "missing" if not index.exists(entity_id)
+                                                            else "unavailable" if state == "unavailable" else "ok")})
+            home = next((a for a in analysis["automations"] if rule["id"] in a["rule_ids"]), None)
+            sync = self._rule_sync(device, rule, analysis)
+            live_home = states.get(home["id"]) if home else None
+            if sync["status"] == "in_sync" and live_home and live_home["status"] in ("modified", "missing", "foreign"):
+                sync = {"status": live_home["status"], "text": live_home["status_text"]}
+            out[rule["id"]] = {
+                **self.observer.view(rule["id"]), "sync": sync, "entities": entities,
+                "entity_problems": sum(1 for e in entities if e["status"] in ("missing", "unavailable")),
+                "automation_id": home["id"] if home else None, "advanced": model.is_advanced(rule),
+                "waits": model.waits(rule), "turned_off": bool(live_home and live_home["turned_off"]),
+            }
+        return out
 
     async def _live(self, device: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
         """The deployment status of a device: its automations in Home Assistant against the records and the rules."""
@@ -319,7 +383,11 @@ class AppCore:
         live = await self._live(device, analysis)
         for item in live["automations"]:
             item["traces"] = await self._traces(item["id"]) if item["entity_id"] else []
+            if item["entity_id"]:
+                await self.observer.refresh(item["id"])
         return {
+            "rule_diagnostics": self._rule_views(device, analysis, live, index),
+            "originals": self._originals(device, index),
             "device": device, "targets": self._targets_view(device, index),
             "ha_device": index.device_name(device["ha_device_id"]),
             "summaries": analysis["summaries"], "notes": analysis["notes"], "conflicts": analysis["conflicts"],
@@ -330,6 +398,21 @@ class AppCore:
             "last_result": self.last_results.get(device["id"]),
             "blueprint_inputs": len(blueprint.inputs_of(device)),
         }
+
+    def _originals(self, device: dict[str, Any], index: Index) -> list[dict[str, Any]]:
+        """For imported rules: the automation each was copied from, when it still exists in Home Assistant."""
+        out = []
+        for rule in device["rules"]:
+            origin = rule.get("imported_from")
+            if not origin:
+                continue
+            entity_id = next((e for e, s in index.states.items() if e.startswith("automation.")
+                              and str((s.get("attributes") or {}).get("id")) == origin["automation_id"]), None)
+            state = (index.states.get(entity_id) or {}).get("state") if entity_id else None
+            out.append({"rule_id": rule["id"], "rule_name": rule["name"], "automation_id": origin["automation_id"],
+                        "alias": origin["alias"], "entity_id": entity_id, "state": state,
+                        "running": state == "on", "allow_both": origin["allow_both"], "enabled": rule["enabled"]})
+        return out
 
     def orphans(self) -> list[dict[str, Any]]:
         """Automations this App deployed for devices that are no longer in the configuration (import, restore)."""
@@ -346,7 +429,11 @@ class AppCore:
         for device in clean["devices"].values():  # a confirmation belongs to a conflict that still exists
             keys = {c["key"] for c in conflict_check.analyse(device)}
             device["acknowledged"] = [k for k in device["acknowledged"] if k in keys]
-        return self.store.save(clean, expected_revision=expected_revision, reason=reason, by=by)
+        saved = self.store.save(clean, expected_revision=expected_revision, reason=reason, by=by)
+        keep = {r["id"] for d in clean["devices"].values() for r in d["rules"]} | {
+            r["id"] for record in self.deploys.records.values() for r in (record.get("device") or {}).get("rules", [])}
+        self.observer.stats.forget(keep)  # observations of rules that exist nowhere anymore
+        return saved
 
     def _check_targets(self, targets: Any, index: Index, own_device: str | None = None) -> None:
         if not isinstance(targets, list):
@@ -390,7 +477,7 @@ class AppCore:
                 raise ConfigError("invalid", f"{', '.join(used)} is still used by a rule's action; change that rule first.",
                                   problems=[{"path": "targets", "message": "Still used by a rule's action."}])
             target["targets"] = patch["targets"]
-        for key in ("name", "enabled"):
+        for key in ("name", "enabled", "blueprint"):
             if key in patch:
                 target[key] = patch[key]
         acknowledged = set(target.get("acknowledged") or [])
@@ -444,7 +531,7 @@ class AppCore:
                             "rules": len(mine[0]["rule_ids"])} if mine else None),
             "yaml": "".join(compiler.to_yaml(compiler.with_id(a)) for a in mine),
             "has_occupancy": any(t["type"] == "occupancy" for t in clean_rule["triggers"]),
-            "has_delay": model.has_delay(clean_rule),
+            "has_delay": model.waits(clean_rule), "advanced": model.is_advanced(clean_rule),
             "recheck": {**model.rule_recheck(clean_rule, self.store.config["settings"]),
                         "active": expected["repeatable"] and clean_rule["recheck"]["enabled"],
                         "why_not": compiler.RECHECK_OFF.get(expected["why"]) if not expected["repeatable"] else None},
@@ -571,6 +658,13 @@ class AppCore:
         blocking = conflict_check.blocking(analysis["conflicts"])
         invalid = [e for i in items for e in i["errors"]]
         reasons = []
+        duplicates = [o for o in self._originals(device, index) if o["running"] and not o["allow_both"] and o["enabled"]
+                      and device["enabled"]]
+        for original in duplicates:
+            reasons.append(f"“{original['rule_name']}” is a copy of the automation “{original['alias']}”, which is "
+                           "still turned on in Home Assistant: both would run. Turn the original off in Home "
+                           "Assistant (Automation Builder never changes it), or allow both in the review below.")
+        fingerprint.append([[o["rule_id"], o["running"], o["allow_both"]] for o in self._originals(device, index)])
         if blocking:
             reasons.append(f"{len(blocking)} conflict{'s' if len(blocking) != 1 else ''} between rules must be "
                            "resolved or confirmed first.")
@@ -582,7 +676,7 @@ class AppCore:
             "conflicts": analysis["conflicts"], "notes": analysis["notes"],
             "entity_problems": analysis["entity_problems"], "changes": changes,
             "needs_overwrite": any(i["external"] in ("modified", "foreign") for i in items),
-            "can_deploy": not reasons and changes, "reasons": reasons,
+            "can_deploy": not reasons and changes, "reasons": reasons, "duplicates": duplicates,
             "plan_hash": compiler.config_hash(fingerprint),
         }
 
@@ -652,6 +746,10 @@ class AppCore:
             desired = {a["id"]: a for a in self.analysis(device)["automations"]}
             applied: list[tuple[str, dict[str, Any] | None]] = []
             done = []
+            self.deploys.begin(device, {
+                i["id"]: ({"hash": desired[i["id"]]["hash"], "config": desired[i["id"]]["config"],
+                           "blocks": desired[i["id"]]["blocks"]} if i["operation"] in ("create", "update") else None)
+                for i in plan["items"] if i["operation"] in ("create", "update", "delete")}, by)
             try:
                 for item in sorted(plan["items"], key=lambda i: i["operation"] in ("delete", "forget")):
                     automation_id, operation = item["id"], item["operation"]
@@ -675,6 +773,8 @@ class AppCore:
                 message = f"Deployment failed: {err} {restored}"
                 _LOGGER.error("Deployment of %s failed: %s %s", device["id"], err, restored)
                 self.last_results[device["id"]] = {"ok": False, "at": utcnow_iso(), "message": message}
+                if not not_restored:
+                    self.deploys.finish()  # otherwise the note stays: the next start looks at Home Assistant again
                 raise ConfigError("deploy_failed", message, 502) from err
             for item in plan["items"]:
                 automation_id = item["id"]
@@ -683,9 +783,11 @@ class AppCore:
                     if record is None or record["hash"] != desired[automation_id]["hash"] or item["operation"] != "none":
                         self.deploys.record(automation_id, device_id=device["id"],
                                             config_hash=desired[automation_id]["hash"],
-                                            config=desired[automation_id]["config"], device=device, by=by)
+                                            config=desired[automation_id]["config"], device=device, by=by,
+                                            blocks=desired[automation_id]["blocks"])
                 else:
                     self.deploys.forget(automation_id)
+            self.deploys.finish()
             self._related.clear()
             message = ", ".join(f"{d['operation']}d {d['entity_id'] or d['id']}".replace("deleted", "removed")
                                 for d in done) or "nothing to change"
@@ -756,6 +858,230 @@ class AppCore:
             await self._remove_automation(automation_id, overwrite)
             return {"removed": automation_id}
 
+    async def recover(self) -> dict[str, Any] | None:
+        """Finish the bookkeeping of a deployment that was interrupted (the App or Home Assistant stopped midway).
+
+        Nothing is written to Home Assistant here. For each automation the interrupted deployment was about to
+        write, what Home Assistant has now is compared with what was intended:
+
+        * exactly the intended automation: the write went through; it is recorded as deployed;
+        * gone, and the deployment was removing it: the record is dropped;
+        * anything else: left as it is. The device then shows "changes pending" (the write never happened) or
+          "changed outside this App" (a half state), and the next deployment is reviewed as always.
+        """
+        pending = self.deploys.pending
+        if not pending or self.api is None or self.ha is None or not self.ha.connected:
+            return None
+        async with self._deploy_lock:
+            adopted, dropped, left = [], [], []
+            try:
+                for automation_id, intended in (pending.get("items") or {}).items():
+                    actual = await self.api.get(automation_id)
+                    actual_hash = compiler.config_hash(compiler.strip_id(actual)) if actual is not None else None
+                    if intended is None:
+                        if actual is None:
+                            self.deploys.forget(automation_id)
+                            dropped.append(automation_id)
+                        else:
+                            left.append(automation_id)
+                    elif actual_hash == intended.get("hash"):
+                        self.deploys.record(automation_id, device_id=pending["device_id"], config_hash=intended["hash"],
+                                            config=intended["config"], device=pending["device"], by=pending.get("by"),
+                                            blocks=intended.get("blocks"))
+                        adopted.append(automation_id)
+                    else:
+                        left.append(automation_id)
+            except (DeployError, NotAllowed, ConnectionError, TimeoutError) as err:
+                _LOGGER.warning("Could not look into the interrupted deployment yet: %s", err)
+                return None
+            self.deploys.finish()
+            parts = ([f"{len(adopted)} automation{'s' if len(adopted) != 1 else ''} had reached Home Assistant and "
+                      f"{'are' if len(adopted) != 1 else 'is'} recorded as deployed"] if adopted else []) \
+                + ([f"{len(dropped)} had been removed"] if dropped else []) \
+                + ([f"{len(left)} had not been written (or only partly): review and deploy again"] if left else [])
+            message = ("A deployment was interrupted (" + str(pending.get("at")) + "). " + "; ".join(parts) + "."
+                       if parts else "A deployment was interrupted before anything was written.")
+            _LOGGER.warning("%s (device %s)", message, pending.get("device_id"))
+            result = {"ok": not left, "at": utcnow_iso(), "message": message, "recovered": True}
+            if pending.get("device_id") in self.store.config["devices"]:
+                self.last_results[pending["device_id"]] = result
+            return {**result, "adopted": adopted, "dropped": dropped, "left": left}
+
+    # --------------------------------------------------------------- blueprint
+    async def blueprint_view(self, device_id: Any, draft: Any = None) -> dict[str, Any]:
+        """The blueprint of a device with the stored choices (or with ``draft``, the choices being edited)."""
+        device = self._device(device_id)
+        index = self.index()
+        if draft is not None:
+            problems = model.Problems()
+            device = model.validate_device(device["id"], {**device, "blueprint": draft}, "device", problems)
+            if problems.items:
+                raise ConfigError("invalid", problems.items[0]["message"], problems=problems.items)
+        built = blueprint.build(device, self.store.config["settings"], names=index.name)
+        validation: list[dict[str, str]] = [{"level": "error", "message": p} for p in built["problems"]]
+        if built["config"] is not None and not built["problems"]:
+            if self.ha is not None and self.ha.connected:
+                errors = await self._validate(built["config"])
+                validation += [{"level": "error", "message": f"Home Assistant does not accept it: {e}"} for e in errors]
+                if not errors:
+                    validation.append({"level": "ok", "message": "Home Assistant accepts the triggers, conditions and "
+                                                                 "actions (checked with every input at its default)."})
+            else:
+                validation.append({"level": "warning", "message": "Home Assistant is not connected: the blueprint "
+                                                                  "could not be checked there."})
+            validation.append({"level": "ok", "message": "With every input at its default, the blueprint is exactly "
+                                                         "the automation this device deploys."})
+        validation += [{"level": "warning", "message": w} for w in built["warnings"]]
+        installed = self.deploys.blueprints.get(built["path"]) if built["path"] else None
+        digest = compiler.config_hash(built["yaml"]) if built["yaml"] else None
+        return {
+            "device_id": device["id"], "device_name": device["name"], "revision": self.store.revision,
+            "settings": device.get("blueprint") or {"name": "", "description": "", "automation": None, "inputs": {}},
+            "name": built.get("name"), "description": built.get("description"), "inputs": built["inputs"],
+            "groups": [g for g in blueprint.GROUP_ORDER if any(i["group"] == g for i in built["inputs"])],
+            "automation": built["automation"], "automations": built["automations"], "yaml": built["yaml"],
+            "path": built["path"], "validation": validation,
+            "valid": bool(built["yaml"]) and not any(v["level"] == "error" for v in validation),
+            "installed": ({**installed, "current": installed["hash"] == digest} if installed else None),
+            "filename": f"{blueprint._slug(built.get('name') or device['name']) or 'blueprint'}.yaml",  # noqa: SLF001
+        }
+
+    async def blueprint_install(self, device_id: Any, overwrite: bool, by: str | None) -> dict[str, Any]:
+        """Save the device's blueprint in Home Assistant's blueprint folder (``blueprint/save``, own folder only)."""
+        view = await self.blueprint_view(device_id)
+        if not view["valid"]:
+            raise ConfigError("blocked", "The blueprint has errors; see the validation results.", 409)
+        ha = self._require_ha()
+        path, digest = view["path"], compiler.config_hash(view["yaml"])
+        try:
+            existing = await ha.command("blueprint/list", domain="automation") or {}
+        except HomeAssistantError as err:
+            raise ConfigError("ha_error", f"Home Assistant could not list its blueprints: {err.message}", 502) from err
+        exists = path in existing
+        ours = path in self.deploys.blueprints
+        if exists and not overwrite:
+            raise ConfigError("exists", ("This blueprint is installed already. Installing again replaces the file; "
+                                         "automations made from it are reloaded with the new version." if ours else
+                                         "A blueprint file with this name exists in Home Assistant that Automation "
+                                         "Builder did not install."), 409, installed_by_app=ours)
+        try:
+            await ha.command("blueprint/save", domain="automation", path=path, yaml=view["yaml"], allow_override=exists)
+        except HomeAssistantError as err:
+            raise ConfigError("ha_error", f"Home Assistant did not accept the blueprint: {err.message}", 502) from err
+        self.deploys.blueprint_installed(path, digest=digest, device_id=view["device_id"], name=view["name"], by=by)
+        _LOGGER.info("Blueprint installed: blueprints/automation/%s", path)
+        return {"installed": True, "path": f"blueprints/automation/{path}", "replaced": exists,
+                "message": f"Installed as blueprints/automation/{path}. Create automations from it under Settings → "
+                           "Automations & scenes → Blueprints."}
+
+    # ------------------------------------------------------------------ import
+    def import_list(self) -> dict[str, Any]:
+        """The automations in Home Assistant that this App does not manage."""
+        self._require_ha()
+        index = self.index()
+        imported = {r["imported_from"]["automation_id"]: (d["id"], d["name"], r["name"])
+                    for d in self.store.config["devices"].values() for r in d["rules"] if r.get("imported_from")}
+        out = []
+        for entity_id, state in index.states.items():
+            if not entity_id.startswith("automation.") or index.is_own_automation(entity_id):
+                continue
+            attributes = state.get("attributes") or {}
+            automation_id = str(attributes.get("id")) if attributes.get("id") is not None else None
+            copy_of = imported.get(automation_id) if automation_id else None
+            out.append({"entity_id": entity_id, "name": index.name(entity_id), "id": automation_id,
+                        "state": state.get("state"), "last_triggered": attributes.get("last_triggered"),
+                        "mode": attributes.get("mode"),
+                        "imported": ({"device_id": copy_of[0], "device": copy_of[1], "rule": copy_of[2]} if copy_of else None)})
+        out.sort(key=lambda a: str(a["name"]).casefold())
+        return {"automations": out}
+
+    async def import_analyse(self, entity_id: Any) -> dict[str, Any]:
+        ha = self._require_ha()
+        index = self.index()
+        if not isinstance(entity_id, str) or not entity_id.startswith("automation.") or entity_id not in index.states:
+            raise ConfigError("unknown_automation", "This automation does not exist in Home Assistant.", 404)
+        if index.is_own_automation(entity_id):
+            raise ConfigError("invalid", "This automation is managed by Automation Builder already.")
+        try:
+            config = ((await ha.command("automation/config", entity_id=entity_id)) or {}).get("config")
+        except HomeAssistantError as err:
+            raise ConfigError("ha_error", f"Home Assistant could not return the automation: {err.message}", 502) from err
+        result = importer.analyse(config, entity_id=entity_id, state=index.states.get(entity_id),
+                                  devices=self.store.config["devices"], settings=self.store.config["settings"],
+                                  names=index.name)
+        result["original_yaml"] = compiler.to_yaml(config) if isinstance(config, dict) else ""
+        result["revision"] = self.store.revision
+        return result
+
+    async def import_convert(self, entity_id: Any, destination: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        """Copy an analysed automation into the rule model: a new device, or (explicitly chosen) an existing one.
+
+        Nothing is deployed and the original is not touched. While the original is still turned on, deploying
+        the copy is refused unless the user allows both to run (``plan``).
+        """
+        result = await self.import_analyse(entity_id)
+        if not result["can_convert"]:
+            raise ConfigError("blocked", "This automation cannot be converted faithfully: "
+                              + "; ".join(f"{u['what']}: {u['why']}" for u in result["unsupported"][:3]), 409)
+        if any(o.get("rule_id") and "imported before" in o["message"] for o in result["overlaps"]):
+            raise ConfigError("blocked", "This automation has been imported already.", 409)
+        rule = {**result["rule"], "id": model.new_rule_id()}
+        targets = [c["entity_id"] for c in result["controlled"]]
+        new = copy.deepcopy(self.store.config)
+        if destination in (None, "", "new"):
+            self._check_targets(targets, self.index())
+            device_id = model.new_device_id()
+            new["devices"][device_id] = {"name": rule["name"], "targets": targets, "enabled": True,
+                                         "ha_device_id": None, "rules": [rule]}
+        else:
+            device = self._device(destination)
+            if not set(targets) <= set(device["targets"]):
+                raise ConfigError("invalid", "That device does not control all entities of this automation.")
+            device_id = device["id"]
+            for action in importer.model_walk(rule["actions"]):  # "all" meant: all entities of the import
+                if action.get("type") == "service" and action.get("target") == "all":
+                    action["target"] = list(targets)
+            new["devices"][device_id]["rules"].append(rule)
+        saved = self._save(new, expected_revision, f"automation imported: {rule['id']}", by)
+        return {**saved, "device_id": device_id, "rule_id": rule["id"]}
+
+    # ------------------------------------------------------ device automations
+    async def device_automations(self, ha_device_id: Any, kind: Any) -> dict[str, Any]:
+        """The triggers, conditions or actions Home Assistant itself offers for a device (nothing is made up)."""
+        ha = self._require_ha()
+        if kind not in ("trigger", "condition", "action") or not isinstance(ha_device_id, str) or not ha_device_id:
+            raise ConfigError("invalid", "Unknown device or kind")
+        index = self.index()
+        try:
+            found = await ha.command(f"device_automation/{kind}/list", device_id=ha_device_id) or []
+        except HomeAssistantError as err:
+            raise ConfigError("ha_error", f"Home Assistant could not list the device's {kind}s: {err.message}", 502) from err
+        items = []
+        for raw in found:
+            if not isinstance(raw, dict):
+                continue
+            config = {k: v for k, v in raw.items() if k not in ("platform", "trigger", "condition", "metadata")}
+            words = [str(config.get("type", "")).replace("_", " ")]
+            if config.get("subtype"):
+                words.append(str(config["subtype"]).replace("_", " "))
+            entity_id = index.entity_by_registry_id(config.get("entity_id")) or (
+                config.get("entity_id") if isinstance(config.get("entity_id"), str) and "." in config["entity_id"] else None)
+            label = " ".join(w for w in words if w)
+            if entity_id:
+                label = f"{index.name(entity_id)}: {label}"
+            items.append({"config": config, "label": label[:model.MAX_STATE], "domain": config.get("domain"),
+                          "secondary": bool((raw.get("metadata") or {}).get("secondary"))})
+        items.sort(key=lambda i: (i["secondary"], i["label"].casefold()))
+        return {"device_id": ha_device_id, "name": index.device_name(ha_device_id), "kind": kind, "items": items}
+
+    def notify_targets(self) -> dict[str, Any]:
+        """Where a notification can go: Home Assistant's notify actions and notify entities."""
+        ha = self._require_ha()
+        index = self.index()
+        services = sorted(f"notify.{name}" for name in (ha.services.get("notify") or {}) if name != "send_message")
+        entities = [index.view(e) for e in sorted(index.states) if e.startswith("notify.")]
+        return {"actions": [*services, "persistent_notification.create"], "entities": entities}
+
     # ------------------------------------------------------------ diagnostics
     def settings_view(self) -> dict[str, Any]:
         return {"settings": self.store.config["settings"], "revision": self.store.revision,
@@ -780,6 +1106,8 @@ class AppCore:
                             "automations": live["automations"], "conflicts": analysis["conflicts"],
                             "notes": analysis["notes"], "entity_problems": analysis["entity_problems"],
                             "mismatches": self._mismatches(device, index),
+                            "rule_diagnostics": {rid: {k: v for k, v in view.items() if k != "entities"}
+                                                 for rid, view in self._rule_views(device, analysis, live, index).items()},
                             "last_result": self.last_results.get(device["id"])})
         return {
             "app": {"name": APP_NAME, "version": APP_VERSION, "generated_at": utcnow_iso()},
@@ -788,7 +1116,8 @@ class AppCore:
                               "recovery": self.store.recovery, "devices": len(self.store.config["devices"]),
                               "backups": len(self.store.backups()), "settings": self.store.config["settings"]},
             "deployment_records": {"count": len(self.deploys.records), "problem": self.deploys.problem,
-                                   "orphans": self.orphans()},
+                                   "orphans": self.orphans(), "interrupted": bool(self.deploys.pending),
+                                   "blueprints": self.deploys.blueprints},
             "devices": devices,
             "commands_sent": dict(self.ha.commands_sent) if self.ha else {},
             "api_requests": dict(self.api.requests) if self.api else {},
@@ -804,4 +1133,5 @@ class AppCore:
                     {"value": "single", "label": "Ignore the new trigger"},
                     {"value": "queued", "label": "Run again afterwards"},
                     {"value": "parallel", "label": "Run both at the same time"}],
-                "limits": {"targets": model.MAX_TARGETS, "rules": model.MAX_RULES}}
+                "limits": {"targets": model.MAX_TARGETS, "rules": model.MAX_RULES,
+                           "action_depth": model.MAX_ACTION_DEPTH}}

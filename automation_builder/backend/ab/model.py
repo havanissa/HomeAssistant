@@ -50,6 +50,19 @@ MAX_ACTIONS = 20
 MAX_DEPTH = 3
 MAX_SECONDS = 86400
 MAX_DATA_BYTES = 4000
+MAX_TEMPLATE = 2000
+MAX_ACTION_DEPTH = 4      # nesting of branches, repeats and waits inside a rule's actions
+MAX_ACTIONS_TOTAL = 60    # actions of one rule, nested ones included
+MAX_BRANCHES = 10
+MAX_REPEAT = 1000
+EVENT_TYPE = re.compile(r"^[A-Za-z0-9_.\-]{1,120}$")
+VARIABLE_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,40}$")
+PATTERN_FIELD = re.compile(r"^(\*|/[1-9]\d?|\d{1,2})$")
+#: Names Home Assistant sets itself inside a running automation: a rule's own variable must not replace them.
+RESERVED_VARIABLES = frozenset({"trigger", "this", "wait", "repeat", "context"})
+ON_TIMEOUT = ("continue", "stop")
+REPEAT_MODES = ("count", "while", "until")
+TIME_ENTITY_DOMAINS = ("input_datetime", "sensor")
 LIGHT_COLOUR_KEYS = ("color_temp_kelvin", "rgb_color", "hs_color", "xy_color", "rgbw_color", "rgbww_color", "color_name")
 
 #: Defaults of the automatic occupancy rechecks (Settings; a rule can override them).
@@ -183,24 +196,71 @@ def _threshold(raw: dict[str, Any], path: str, p: Problems) -> tuple[Any, Any]:
     return above, below
 
 
+def _template(raw: Any, path: str, p: Problems) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        p.add(path, "Enter a template")
+        return ""
+    if len(raw) > MAX_TEMPLATE:
+        p.add(path, f"At most {MAX_TEMPLATE} characters")
+        return ""
+    if "{{" not in raw and "{%" not in raw:
+        p.add(path, "A template contains {{ … }} (for example {{ states('sensor.x') | float(0) > 5 }})")
+    return raw.strip()
+
+
+def _attribute(raw: Any, path: str, p: Problems) -> str | None:
+    if raw is None or raw == "":
+        return None
+    if not isinstance(raw, str) or len(raw) > 80 or not re.fullmatch(r"[A-Za-z0-9_ .\-]+", raw):
+        p.add(path, "Must be the name of an attribute")
+        return None
+    return raw
+
+
+def _small_json(raw: Any, path: str, p: Problems, what: str) -> dict[str, Any]:
+    data = raw or {}
+    if not isinstance(data, dict) or not _json_size(data) or len(json.dumps(data)) > MAX_DATA_BYTES:
+        p.add(path, f"{what} must be a small JSON object")
+        return {}
+    return {k: data[k] for k in sorted(data)}
+
+
+def _device_automation(raw: dict[str, Any], path: str, p: Problems, kind: str) -> dict[str, Any]:
+    """A device trigger, condition or action exactly as Home Assistant lists it for a device (never invented here)."""
+    config = raw.get("config")
+    if (not isinstance(config, dict) or not _json_size(config) or len(json.dumps(config)) > MAX_DATA_BYTES
+            or not all(isinstance(config.get(k), str) and config.get(k) for k in ("device_id", "domain", "type"))):
+        p.add(path, f"Choose one of the {kind}s Home Assistant offers for the device")
+        config = {}
+    clean = {k: config[k] for k in sorted(config) if k not in ("platform", "trigger", "condition", "id", "metadata", "alias")}
+    label = raw.get("label")
+    return {"type": "device", "config": clean, "label": label.strip()[:MAX_STATE] if isinstance(label, str) else ""}
+
+
 # ------------------------------------------------------------------ triggers
 def _trigger_state(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
     to, from_ = _state(raw.get("to"), f"{path}.to", p, required=False), _state(raw.get("from"), f"{path}.from", p, required=False)
     if to is not None and to == from_:
         p.add(path, "“From” and “to” are the same state: this never happens")
     return {"type": "state", "entity_id": _entity(raw.get("entity_id"), f"{path}.entity_id", p), "to": to, "from": from_,
-            "for_seconds": _seconds(raw.get("for_seconds"), f"{path}.for_seconds", p)}
+            "for_seconds": _seconds(raw.get("for_seconds"), f"{path}.for_seconds", p),
+            "attribute": _attribute(raw.get("attribute"), f"{path}.attribute", p)}
 
 
 def _trigger_numeric(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
     above, below = _threshold(raw, path, p)
     return {"type": "numeric", "entity_id": _entity(raw.get("entity_id"), f"{path}.entity_id", p), "above": above,
-            "below": below, "for_seconds": _seconds(raw.get("for_seconds"), f"{path}.for_seconds", p)}
+            "below": below, "for_seconds": _seconds(raw.get("for_seconds"), f"{path}.for_seconds", p),
+            "attribute": _attribute(raw.get("attribute"), f"{path}.attribute", p)}
 
 
 def _trigger_time(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
-    return {"type": "time", "at": _time(raw.get("at"), f"{path}.at", p, required=True),
-            "weekdays": _weekdays(raw.get("weekdays"), f"{path}.weekdays", p)}
+    at = raw.get("at")
+    if isinstance(at, str) and ENTITY_ID.match(at) and at.split(".", 1)[0] in TIME_ENTITY_DOMAINS:
+        pass  # the time held by a date/time helper or a timestamp sensor
+    else:
+        at = _time(at, f"{path}.at", p, required=True)
+    return {"type": "time", "at": at, "weekdays": _weekdays(raw.get("weekdays"), f"{path}.weekdays", p)}
 
 
 def _trigger_sun(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
@@ -226,21 +286,116 @@ def _trigger_occupancy(raw: dict[str, Any], path: str, p: Problems) -> dict[str,
     return {"type": "occupancy", "entity_id": entity_id, "to": to}
 
 
+def _trigger_button(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
+    """A button or remote that Home Assistant shows as an event entity (Zigbee2MQTT, Matter, Hue, ZHA quirks v2 …)."""
+    entity_id = _entity(raw.get("entity_id"), f"{path}.entity_id", p)
+    if entity_id and not entity_id.startswith("event."):
+        p.add(f"{path}.entity_id", "Choose an event entity (a button or remote)")
+    kinds = raw.get("event_types") or []
+    if not isinstance(kinds, list) or len(kinds) > 30 or any(not isinstance(k, str) or not 0 < len(k) <= MAX_STATE for k in kinds):
+        p.add(f"{path}.event_types", "Must be a list of the button's event types")
+        kinds = []
+    return {"type": "button", "entity_id": entity_id, "event_types": sorted(set(kinds))}
+
+
+def _trigger_device(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
+    return _device_automation(raw, path, p, "trigger")
+
+
+def _trigger_event(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
+    event_type = raw.get("event_type")
+    if not isinstance(event_type, str) or not EVENT_TYPE.match(event_type):
+        p.add(f"{path}.event_type", "Enter the event type (for example zha_event)")
+        event_type = ""
+    return {"type": "event", "event_type": event_type,
+            "event_data": _small_json(raw.get("event_data"), f"{path}.event_data", p, "The event data")}
+
+
+def _trigger_mqtt(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
+    topic = raw.get("topic")
+    if not isinstance(topic, str) or not topic.strip() or len(topic) > 250 or any(c in topic for c in "\n\r\0"):
+        p.add(f"{path}.topic", "Enter the MQTT topic (for example zigbee2mqtt/My remote/action)")
+        topic = ""
+    payload = raw.get("payload")
+    if payload in (None, ""):
+        payload = None
+    elif not isinstance(payload, str) or len(payload) > MAX_STATE:
+        p.add(f"{path}.payload", f"The payload must be a text of at most {MAX_STATE} characters")
+        payload = None
+    return {"type": "mqtt", "topic": topic.strip(), "payload": payload}
+
+
+def _trigger_template(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
+    return {"type": "template", "value_template": _template(raw.get("value_template"), f"{path}.value_template", p),
+            "for_seconds": _seconds(raw.get("for_seconds"), f"{path}.for_seconds", p)}
+
+
+def _trigger_pattern(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
+    out: dict[str, Any] = {"type": "pattern"}
+    for key in ("hours", "minutes", "seconds"):
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            value = str(value)
+        if value in (None, ""):
+            value = None
+        elif not isinstance(value, str) or not PATTERN_FIELD.match(value):
+            p.add(f"{path}.{key}", "Use a number, /N (every N) or *")
+            value = None
+        out[key] = value
+    if out["hours"] is None and out["minutes"] is None and out["seconds"] is None:
+        p.add(path, "Give at least one of hours, minutes or seconds (for example minutes /15)")
+    return out
+
+
+def _trigger_homeassistant(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
+    event = raw.get("event")
+    if event not in ("start", "shutdown"):
+        p.add(f"{path}.event", "Choose “starts” or “shuts down”")
+        event = "start"
+    return {"type": "homeassistant", "event": event}
+
+
 TRIGGER_TYPES = {"state": _trigger_state, "numeric": _trigger_numeric, "time": _trigger_time, "sun": _trigger_sun,
-                 "occupancy": _trigger_occupancy}
+                 "occupancy": _trigger_occupancy, "button": _trigger_button, "device": _trigger_device,
+                 "event": _trigger_event, "mqtt": _trigger_mqtt, "template": _trigger_template,
+                 "pattern": _trigger_pattern, "homeassistant": _trigger_homeassistant}
+#: Trigger types that can end a "wait for trigger" action (an occupancy trigger brings its rechecks: not there).
+WAIT_TRIGGER_TYPES = tuple(t for t in TRIGGER_TYPES if t != "occupancy")
+
+
+def _triggers(raw: Any, path: str, p: Problems, *, allowed: Any = None, what: str = "Add at least one trigger (IF)"
+              ) -> list[dict[str, Any]]:
+    triggers: list[dict[str, Any]] = []
+    raw_triggers = raw if isinstance(raw, list) else []
+    if not raw_triggers:
+        p.add(path, what)
+    if len(raw_triggers) > MAX_TRIGGERS:
+        p.add(path, f"At most {MAX_TRIGGERS} triggers")
+    for i, trigger in enumerate(raw_triggers[:MAX_TRIGGERS]):
+        kind = trigger.get("type") if isinstance(trigger, dict) else None
+        if kind not in TRIGGER_TYPES or (allowed is not None and kind not in allowed):
+            p.add(f"{path}[{i}]", f"Unsupported trigger type {kind!r}")
+            continue
+        clean = TRIGGER_TYPES[kind](trigger, f"{path}[{i}]", p)
+        if clean in triggers:
+            p.add(f"{path}[{i}]", "This trigger is listed twice")
+        else:
+            triggers.append(clean)
+    return triggers
 
 
 # ---------------------------------------------------------------- conditions
 def _condition_state(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
     return {"type": "state", "entity_id": _entity(raw.get("entity_id"), f"{path}.entity_id", p),
             "state": _state(raw.get("state"), f"{path}.state", p, required=True), "negate": raw.get("negate") is True,
-            "for_seconds": _seconds(raw.get("for_seconds"), f"{path}.for_seconds", p)}
+            "for_seconds": _seconds(raw.get("for_seconds"), f"{path}.for_seconds", p),
+            "attribute": _attribute(raw.get("attribute"), f"{path}.attribute", p)}
 
 
 def _condition_numeric(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
     above, below = _threshold(raw, path, p)
     return {"type": "numeric", "entity_id": _entity(raw.get("entity_id"), f"{path}.entity_id", p), "above": above,
-            "below": below}
+            "below": below, "attribute": _attribute(raw.get("attribute"), f"{path}.attribute", p)}
 
 
 def _condition_time(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
@@ -251,14 +406,57 @@ def _condition_time(raw: dict[str, Any], path: str, p: Problems) -> dict[str, An
     return {"type": "time", "after": after, "before": before, "weekdays": weekdays}
 
 
-CONDITION_TYPES = {"state": _condition_state, "numeric": _condition_numeric, "time": _condition_time}
+def _condition_template(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
+    return {"type": "template", "value_template": _template(raw.get("value_template"), f"{path}.value_template", p)}
 
 
-def _group(raw: Any, path: str, p: Problems, depth: int, budget: list[int]) -> dict[str, Any]:
+def _condition_trigger(raw: dict[str, Any], path: str, p: Problems, count: int = 0) -> dict[str, Any]:
+    """"The rule was started by trigger number …" (positions in the rule's own trigger list)."""
+    chosen = raw.get("triggers")
+    if (not isinstance(chosen, list) or not chosen
+            or any(isinstance(i, bool) or not isinstance(i, int) or not 0 <= i < count for i in chosen)):
+        p.add(f"{path}.triggers", "Choose which of the rule's triggers this is about")
+        chosen = []
+    return {"type": "trigger", "triggers": sorted(set(chosen))}
+
+
+def _condition_device(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
+    return _device_automation(raw, path, p, "condition")
+
+
+def _sun_offset(raw: Any, path: str, p: Problems) -> int:
+    raw = raw or 0
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw != int(raw) or abs(raw) > 720:
+        p.add(path, "The offset must be a whole number of minutes between -720 and 720")
+        return 0
+    return int(raw)
+
+
+def _condition_sun(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
+    out: dict[str, Any] = {"type": "sun"}
+    for key in ("after", "before"):
+        value = raw.get(key) or None
+        if value not in (None, "sunrise", "sunset"):
+            p.add(f"{path}.{key}", "Choose sunrise or sunset")
+            value = None
+        out[key] = value
+        out[f"{key}_offset_minutes"] = _sun_offset(raw.get(f"{key}_offset_minutes"), f"{path}.{key}_offset_minutes", p) if value else 0
+    if out["after"] is None and out["before"] is None:
+        p.add(path, "Choose “after”, “before” or both")
+    return out
+
+
+CONDITION_TYPES = {"state": _condition_state, "numeric": _condition_numeric, "time": _condition_time,
+                   "template": _condition_template, "trigger": _condition_trigger, "device": _condition_device,
+                   "sun": _condition_sun}
+GROUP_TYPES = ("and", "or", "not")
+
+
+def _group(raw: Any, path: str, p: Problems, depth: int, budget: list[int], triggers: int = 0) -> dict[str, Any]:
     if raw is None:
         return {"type": "and", "items": []}
-    if not isinstance(raw, dict) or raw.get("type") not in ("and", "or") or not isinstance(raw.get("items"), list):
-        p.add(path, "Must be a group of conditions (all of / any of)")
+    if not isinstance(raw, dict) or raw.get("type") not in GROUP_TYPES or not isinstance(raw.get("items"), list):
+        p.add(path, "Must be a group of conditions (all of / any of / none of)")
         return {"type": "and", "items": []}
     items = []
     for i, item in enumerate(raw["items"]):
@@ -269,14 +467,16 @@ def _group(raw: Any, path: str, p: Problems, depth: int, budget: list[int]) -> d
             break
         if not isinstance(item, dict):
             p.add(item_path, "Must be a condition")
-        elif item.get("type") in ("and", "or"):
+        elif item.get("type") in GROUP_TYPES:
             if depth >= MAX_DEPTH:
                 p.add(item_path, "Groups are nested too deeply")
                 continue
-            group = _group(item, item_path, p, depth + 1, budget)
+            group = _group(item, item_path, p, depth + 1, budget, triggers)
             if not group["items"]:
                 p.add(item_path, "A group needs at least one condition")
             items.append(group)
+        elif item.get("type") == "trigger":
+            items.append(_condition_trigger(item, item_path, p, triggers))
         elif item.get("type") in CONDITION_TYPES:
             items.append(CONDITION_TYPES[item["type"]](item, item_path, p))
         else:
@@ -300,7 +500,8 @@ def _json_size(value: Any, depth: int = 0) -> bool:
     return False
 
 
-def _action_service(raw: dict[str, Any], path: str, p: Problems, targets: list[str]) -> dict[str, Any]:
+def _action_service(raw: dict[str, Any], path: str, p: Problems, ctx: "_Ctx") -> dict[str, Any]:
+    targets = ctx.targets
     action = raw.get("action")
     if not isinstance(action, str) or not ACTION_NAME.match(action) or len(action) > 120:
         p.add(f"{path}.action", "Choose an action (for example light.turn_on)")
@@ -339,11 +540,215 @@ def _action_service(raw: dict[str, Any], path: str, p: Problems, targets: list[s
     return {"type": "service", "action": action, "target": target, "data": {k: data[k] for k in sorted(data)}}
 
 
-def _action_delay(raw: dict[str, Any], path: str, p: Problems, _targets: list[str]) -> dict[str, Any]:
+def _action_delay(raw: dict[str, Any], path: str, p: Problems, _ctx: "_Ctx") -> dict[str, Any]:
     return {"type": "delay", "seconds": _seconds(raw.get("seconds"), f"{path}.seconds", p, minimum=1)}
 
 
-ACTION_TYPES = {"service": _action_service, "delay": _action_delay}
+class _Ctx:
+    """What the validation of a rule's actions needs to know about the rule."""
+
+    def __init__(self, targets: list[str], triggers: int) -> None:
+        self.targets = targets
+        self.triggers = triggers
+        self.depth = 0
+        self.budget = [MAX_ACTIONS_TOTAL]
+        self.conditions = [MAX_CONDITIONS * 2]
+
+
+def _other_entity(raw: Any, path: str, p: Problems, domain: str, what: str) -> str:
+    entity_id = _entity(raw, path, p)
+    if entity_id and entity_id.split(".", 1)[0] != domain:
+        p.add(path, f"Choose {what}")
+    return entity_id
+
+
+def _action_notify(raw: dict[str, Any], path: str, p: Problems, _ctx: _Ctx) -> dict[str, Any]:
+    action = raw.get("action")
+    if (not isinstance(action, str) or not ACTION_NAME.match(action) or len(action) > 120
+            or action.split(".", 1)[0] not in ("notify", "persistent_notification")):
+        p.add(f"{path}.action", "Choose where the notification goes (a notify action)")
+        action = ""
+    entity_id = raw.get("entity_id") or None
+    if action == "notify.send_message":
+        entity_id = _other_entity(entity_id, f"{path}.entity_id", p, "notify", "a notify entity")
+    elif entity_id is not None:
+        p.add(f"{path}.entity_id", "Only notify.send_message takes a notify entity")
+        entity_id = None
+    message = raw.get("message")
+    if not isinstance(message, str) or not message.strip() or len(message) > MAX_TEMPLATE:
+        p.add(f"{path}.message", f"Enter the message (at most {MAX_TEMPLATE} characters)")
+        message = ""
+    title = raw.get("title")
+    if title in (None, ""):
+        title = None
+    elif not isinstance(title, str) or len(title) > 200:
+        p.add(f"{path}.title", "The title must be a text of at most 200 characters")
+        title = None
+    return {"type": "notify", "action": action, "entity_id": entity_id, "title": title, "message": message.strip()}
+
+
+def _variables(raw: Any, path: str, p: Problems) -> dict[str, Any]:
+    data = _small_json(raw, path, p, "The variables")
+    for name in data:
+        if not VARIABLE_NAME.match(name):
+            p.add(path, f"“{name}” is not a variable name (lower-case letters, digits and _)")
+        elif name in RESERVED_VARIABLES:
+            p.add(path, f"“{name}” is set by Home Assistant itself: choose another name")
+    return data
+
+
+def _action_script(raw: dict[str, Any], path: str, p: Problems, _ctx: _Ctx) -> dict[str, Any]:
+    return {"type": "script", "entity_id": _other_entity(raw.get("entity_id"), f"{path}.entity_id", p, "script", "a script"),
+            "wait": raw.get("wait") is True, "variables": _variables(raw.get("variables"), f"{path}.variables", p)}
+
+
+def _action_scene(raw: dict[str, Any], path: str, p: Problems, _ctx: _Ctx) -> dict[str, Any]:
+    return {"type": "scene", "entity_id": _other_entity(raw.get("entity_id"), f"{path}.entity_id", p, "scene", "a scene")}
+
+
+def _action_device(raw: dict[str, Any], path: str, p: Problems, _ctx: _Ctx) -> dict[str, Any]:
+    return _device_automation(raw, path, p, "action")
+
+
+def _action_variables(raw: dict[str, Any], path: str, p: Problems, _ctx: _Ctx) -> dict[str, Any]:
+    variables = _variables(raw.get("variables"), f"{path}.variables", p)
+    if not variables:
+        p.add(f"{path}.variables", "Give at least one variable, for example {\"level\": 40}")
+    return {"type": "variables", "variables": variables}
+
+
+def _conditions_of(raw: Any, path: str, p: Problems, ctx: _Ctx, *, required: bool) -> dict[str, Any]:
+    group = _group(raw, path, p, 1, ctx.conditions, ctx.triggers)
+    if required and not group["items"]:
+        p.add(path, "Add at least one condition")
+    return group
+
+
+def _action_if(raw: dict[str, Any], path: str, p: Problems, ctx: _Ctx) -> dict[str, Any]:
+    then = _sequence(raw.get("then"), f"{path}.then", p, ctx, required=True)
+    return {"type": "if", "conditions": _conditions_of(raw.get("conditions"), f"{path}.conditions", p, ctx, required=True),
+            "then": then, "else": _sequence(raw.get("else"), f"{path}.else", p, ctx, required=False)}
+
+
+def _action_choose(raw: dict[str, Any], path: str, p: Problems, ctx: _Ctx) -> dict[str, Any]:
+    raw_branches = raw.get("branches") if isinstance(raw.get("branches"), list) else []
+    if not raw_branches:
+        p.add(f"{path}.branches", "Add at least one branch")
+    if len(raw_branches) > MAX_BRANCHES:
+        p.add(f"{path}.branches", f"At most {MAX_BRANCHES} branches")
+    branches = []
+    for i, branch in enumerate(raw_branches[:MAX_BRANCHES]):
+        branch = branch if isinstance(branch, dict) else {}
+        branches.append({
+            "conditions": _conditions_of(branch.get("conditions"), f"{path}.branches[{i}].conditions", p, ctx, required=True),
+            "actions": _sequence(branch.get("actions"), f"{path}.branches[{i}].actions", p, ctx, required=True)})
+    return {"type": "choose", "branches": branches,
+            "default": _sequence(raw.get("default"), f"{path}.default", p, ctx, required=False)}
+
+
+def _timeout(raw: dict[str, Any], path: str, p: Problems) -> dict[str, Any]:
+    seconds = raw.get("timeout_seconds")
+    seconds = None if seconds in (None, "", 0) else _seconds(seconds, f"{path}.timeout_seconds", p, minimum=1)
+    on_timeout = raw.get("on_timeout", "continue")
+    if on_timeout not in ON_TIMEOUT:
+        p.add(f"{path}.on_timeout", "Choose what happens when the time is up")
+        on_timeout = "continue"
+    return {"timeout_seconds": seconds, "on_timeout": on_timeout if seconds else "continue"}
+
+
+def _action_wait_trigger(raw: dict[str, Any], path: str, p: Problems, _ctx: _Ctx) -> dict[str, Any]:
+    triggers = _triggers(raw.get("triggers"), f"{path}.triggers", p, allowed=WAIT_TRIGGER_TYPES,
+                         what="Add what the rule waits for")
+    for i, trigger in enumerate(triggers):
+        if trigger["type"] == "time" and trigger["weekdays"]:
+            p.add(f"{path}.triggers[{i}].weekdays", "A wait cannot be limited to weekdays")
+        if trigger["type"] == "button" and trigger["event_types"]:
+            p.add(f"{path}.triggers[{i}].event_types", "A wait reacts to any event of the button; to wait for one "
+                                                       "kind of press, use the device's own trigger or an event trigger")
+    return {"type": "wait_trigger", "triggers": triggers, **_timeout(raw, path, p)}
+
+
+WAITABLE_CONDITIONS = ("state", "numeric", "template")
+_SIMPLE_TEMPLATE = re.compile(r"^\s*\{\{(?P<body>(?:(?!\{\{|\}\}|\{%|%\}).)*)\}\}\s*$", re.S)
+
+
+def simple_template(template: str) -> str | None:
+    """The expression of a template that is exactly one ``{{ … }}``."""
+    match = _SIMPLE_TEMPLATE.match(template)
+    return match.group("body").strip() if match else None
+
+
+def _action_wait_condition(raw: dict[str, Any], path: str, p: Problems, ctx: _Ctx) -> dict[str, Any]:
+    group = _conditions_of(raw.get("conditions"), f"{path}.conditions", p, ctx, required=True)
+    leaves = list(condition_leaves(group))
+    for leaf in leaves:
+        if leaf["type"] not in WAITABLE_CONDITIONS:
+            p.add(f"{path}.conditions", "A wait can watch entity states, numbers and templates; for anything else "
+                                        "use “wait for a trigger”")
+        elif leaf["type"] == "state" and leaf["for_seconds"]:
+            p.add(f"{path}.conditions", "A wait cannot ask how long a state has lasted; use “wait for a trigger” "
+                                        "with “and stays so for”")
+        elif leaf["type"] == "template" and len(leaves) > 1 and simple_template(leaf["value_template"]) is None:
+            p.add(f"{path}.conditions", "A template that is combined with other conditions must be one {{ … }} "
+                                        "expression")
+    return {"type": "wait_condition", "conditions": group, **_timeout(raw, path, p)}
+
+
+def _action_repeat(raw: dict[str, Any], path: str, p: Problems, ctx: _Ctx) -> dict[str, Any]:
+    mode = raw.get("mode")
+    if mode not in REPEAT_MODES:
+        p.add(f"{path}.mode", "Choose how often the actions repeat")
+        mode = "count"
+    count = None
+    if mode == "count":
+        count = raw.get("count")
+        if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_REPEAT:
+            p.add(f"{path}.count", f"Must be a whole number between 1 and {MAX_REPEAT}")
+            count = 2
+    conditions = (_conditions_of(raw.get("conditions"), f"{path}.conditions", p, ctx, required=True)
+                  if mode != "count" else {"type": "and", "items": []})
+    actions = _sequence(raw.get("actions"), f"{path}.actions", p, ctx, required=True)
+    if mode != "count" and actions and not sequence_waits(actions):
+        p.add(f"{path}.actions", "A repeat “while” or “until” needs a wait in its actions (for example a delay), "
+                                 "otherwise it spins without pause")
+    return {"type": "repeat", "mode": mode, "count": count, "conditions": conditions, "actions": actions}
+
+
+ACTION_TYPES = {"service": _action_service, "delay": _action_delay, "notify": _action_notify, "script": _action_script,
+                "scene": _action_scene, "device": _action_device, "variables": _action_variables, "if": _action_if,
+                "choose": _action_choose, "wait_trigger": _action_wait_trigger,
+                "wait_condition": _action_wait_condition, "repeat": _action_repeat}
+#: The basic actions of Phase 0.1; everything else is offered under "more" in the editor.
+BASIC_ACTIONS = ("service", "delay")
+#: Sub-sequences of an action, by key.
+SEQUENCE_KEYS = {"if": ("then", "else"), "choose": ("default",), "repeat": ("actions",)}
+
+
+def _sequence(raw: Any, path: str, p: Problems, ctx: _Ctx, *, required: bool) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    raw_actions = raw if isinstance(raw, list) else []
+    if required and not raw_actions:
+        p.add(path, "Add at least one action" + (" (THEN)" if ctx.depth == 0 else ""))
+    if len(raw_actions) > MAX_ACTIONS:
+        p.add(path, f"At most {MAX_ACTIONS} actions in one list")
+    if ctx.depth >= MAX_ACTION_DEPTH and raw_actions:
+        p.add(path, "Actions are nested too deeply")
+        return []
+    ctx.depth += 1
+    for i, action in enumerate(raw_actions[:MAX_ACTIONS]):
+        kind = action.get("type") if isinstance(action, dict) else None
+        ctx.budget[0] -= 1
+        if ctx.budget[0] < 0:
+            p.add(path, f"At most {MAX_ACTIONS_TOTAL} actions per rule")
+            break
+        if kind not in ACTION_TYPES:
+            p.add(f"{path}[{i}]", f"Unsupported action type {kind!r}")
+            continue
+        actions.append(ACTION_TYPES[kind](action, f"{path}[{i}]", p, ctx))
+    ctx.depth -= 1
+    if actions and actions[-1]["type"] == "delay":
+        p.add(f"{path}[{len(actions) - 1}]", "A delay at the end does nothing: add the action that follows it")
+    return actions
 
 
 # --------------------------------------------------------------------- rules
@@ -366,6 +771,15 @@ def _recheck(raw: Any, path: str, p: Problems) -> dict[str, Any]:
     return out
 
 
+def _imported_from(raw: Any) -> dict[str, Any] | None:
+    """Where an imported rule came from (the original automation is never changed by this App)."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("automation_id"), str) or not raw["automation_id"]:
+        return None
+    return {"automation_id": raw["automation_id"][:120],
+            "alias": raw["alias"].strip()[:MAX_STATE] if isinstance(raw.get("alias"), str) else "",
+            "allow_both": raw.get("allow_both") is True}
+
+
 def validate_rule(raw: Any, path: str, p: Problems, targets: list[str]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         p.add(path, "Must be a rule")
@@ -374,50 +788,54 @@ def validate_rule(raw: Any, path: str, p: Problems, targets: list[str]) -> dict[
     if not isinstance(rule_id, str) or not RULE_ID.match(rule_id):
         p.add(f"{path}.id", "Invalid rule id")
         rule_id = ""
-    triggers = []
-    raw_triggers = raw.get("triggers") if isinstance(raw.get("triggers"), list) else []
-    if not raw_triggers:
-        p.add(f"{path}.triggers", "Add at least one trigger (IF)")
-    if len(raw_triggers) > MAX_TRIGGERS:
-        p.add(f"{path}.triggers", f"At most {MAX_TRIGGERS} triggers per rule")
-    for i, trigger in enumerate(raw_triggers[:MAX_TRIGGERS]):
-        kind = trigger.get("type") if isinstance(trigger, dict) else None
-        if kind not in TRIGGER_TYPES:
-            p.add(f"{path}.triggers[{i}]", f"Unsupported trigger type {kind!r}")
-            continue
-        clean = TRIGGER_TYPES[kind](trigger, f"{path}.triggers[{i}]", p)
-        if clean in triggers:
-            p.add(f"{path}.triggers[{i}]", "This trigger is listed twice")
-        else:
-            triggers.append(clean)
-    actions = []
-    raw_actions = raw.get("actions") if isinstance(raw.get("actions"), list) else []
-    if not raw_actions:
-        p.add(f"{path}.actions", "Add at least one action (THEN)")
-    if len(raw_actions) > MAX_ACTIONS:
-        p.add(f"{path}.actions", f"At most {MAX_ACTIONS} actions per rule")
-    for i, action in enumerate(raw_actions[:MAX_ACTIONS]):
-        kind = action.get("type") if isinstance(action, dict) else None
-        if kind not in ACTION_TYPES:
-            p.add(f"{path}.actions[{i}]", f"Unsupported action type {kind!r}")
-            continue
-        actions.append(ACTION_TYPES[kind](action, f"{path}.actions[{i}]", p, targets))
-    if actions and actions[-1]["type"] == "delay":
-        p.add(f"{path}.actions[{len(actions) - 1}]", "A delay at the end does nothing: add the action that follows it")
+    triggers = _triggers(raw.get("triggers"), f"{path}.triggers", p)
+    ctx = _Ctx(targets, len(triggers))
+    actions = _sequence(raw.get("actions"), f"{path}.actions", p, ctx, required=True)
     retrigger = raw.get("retrigger", "restart")
     if retrigger not in RETRIGGER_MODES:
         p.add(f"{path}.retrigger", "Unknown retrigger behaviour")
         retrigger = "restart"
-    return {
+    rule = {
         "id": rule_id,
         "name": _text(raw.get("name"), f"{path}.name", p, what="a name"),
         "enabled": raw.get("enabled") is not False,
         "triggers": triggers,
-        "conditions": _group(raw.get("conditions"), f"{path}.conditions", p, 1, [MAX_CONDITIONS]),
+        "conditions": _group(raw.get("conditions"), f"{path}.conditions", p, 1, [MAX_CONDITIONS], len(triggers)),
         "actions": actions,
         "retrigger": retrigger,
         "recheck": _recheck(raw.get("recheck"), f"{path}.recheck", p),
     }
+    imported = _imported_from(raw.get("imported_from"))
+    if imported:  # only present on imported rules: every other rule keeps the document of Phase 0.1
+        rule["imported_from"] = imported
+    return rule
+
+
+INPUT_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+MAX_BLUEPRINT_INPUTS = 80
+
+
+def _blueprint_settings(raw: Any, path: str, p: Problems) -> dict[str, Any] | None:
+    """What the user chose on the blueprint export screen (kept, so the next export has the same inputs)."""
+    if not isinstance(raw, dict):
+        return None
+    inputs: dict[str, dict[str, str]] = {}
+    raw_inputs = raw.get("inputs") if isinstance(raw.get("inputs"), dict) else {}
+    if len(raw_inputs) > MAX_BLUEPRINT_INPUTS:
+        p.add(f"{path}.inputs", f"At most {MAX_BLUEPRINT_INPUTS} inputs")
+    for key in sorted(raw_inputs)[:MAX_BLUEPRINT_INPUTS]:
+        value = raw_inputs[key] if isinstance(raw_inputs[key], dict) else {}
+        if not isinstance(key, str) or not INPUT_KEY.match(key):
+            p.add(f"{path}.inputs", f"“{key}” is not an input identifier")
+            continue
+        inputs[key] = {"name": _text(value.get("name"), f"{path}.inputs.{key}.name", p, required=False),
+                       "description": _text(value.get("description"), f"{path}.inputs.{key}.description", p,
+                                            limit=300, required=False)}
+    automation = raw.get("automation")
+    return {"name": _text(raw.get("name"), f"{path}.name", p, required=False),
+            "description": _text(raw.get("description"), f"{path}.description", p, limit=1000, required=False),
+            "automation": automation if isinstance(automation, str) and len(automation) <= 120 else None,
+            "inputs": inputs}
 
 
 def validate_device(device_id: str, raw: Any, path: str, p: Problems) -> dict[str, Any]:
@@ -446,6 +864,8 @@ def validate_device(device_id: str, raw: Any, path: str, p: Problems) -> dict[st
         rules.append(clean)
     ha_device = raw.get("ha_device_id")
     acknowledged = raw.get("acknowledged") if isinstance(raw.get("acknowledged"), list) else []
+    blueprint = _blueprint_settings(raw.get("blueprint"), f"{path}.blueprint", p)
+    extra = {"blueprint": blueprint} if blueprint else {}
     return {
         "id": device_id,
         "name": _text(raw.get("name"), f"{path}.name", p, what="a name"),
@@ -454,6 +874,7 @@ def validate_device(device_id: str, raw: Any, path: str, p: Problems) -> dict[st
         "ha_device_id": ha_device if isinstance(ha_device, str) and 0 < len(ha_device) <= 64 else None,
         "rules": rules,
         "acknowledged": sorted({a for a in acknowledged if isinstance(a, str) and len(a) <= 120})[:100],
+        **extra,
     }
 
 
@@ -517,35 +938,106 @@ def rule_recheck(rule: dict[str, Any], settings: dict[str, Any]) -> dict[str, An
 
 def condition_leaves(group: dict[str, Any]):
     for item in group["items"]:
-        if item["type"] in ("and", "or"):
+        if item["type"] in GROUP_TYPES:
             yield from condition_leaves(item)
         else:
             yield item
 
 
-def referenced_entities(device: dict[str, Any]) -> dict[str, set[str]]:
-    """Every entity a device's rules read or control, with how it is used (for the missing-entity check)."""
-    out: dict[str, set[str]] = {}
+def sub_sequences(action: dict[str, Any]):
+    """``(key, actions)`` for every list of actions inside an action (branches included)."""
+    for key in SEQUENCE_KEYS.get(action["type"], ()):
+        yield key, action[key]
+    if action["type"] == "choose":
+        for i, branch in enumerate(action["branches"]):
+            yield f"branches[{i}].actions", branch["actions"]
 
-    def add(entity_id: str | None, use: str) -> None:
-        if entity_id:
-            out.setdefault(entity_id, set()).add(use)
 
-    for target in device["targets"]:
-        add(target, "controlled")
-    for rule in device["rules"]:
-        if not rule["enabled"]:
-            continue
-        for trigger in rule["triggers"]:
-            add(trigger.get("entity_id"), "trigger")
-        for leaf in condition_leaves(rule["conditions"]):
-            add(leaf.get("entity_id"), "condition")
-        add(rule["recheck"]["override_entity"], "manual override signal")
-    return out
+def action_groups(action: dict[str, Any]):
+    """The condition groups an action holds itself (not those of nested actions)."""
+    if action["type"] in ("if", "wait_condition") or (action["type"] == "repeat" and action["mode"] != "count"):
+        yield action["conditions"]
+    if action["type"] == "choose":
+        for branch in action["branches"]:
+            yield branch["conditions"]
+
+
+def walk_actions(actions: list[dict[str, Any]]):
+    """Every action of a sequence, nested ones included, in order."""
+    for action in actions:
+        yield action
+        for _key, inner in sub_sequences(action):
+            yield from walk_actions(inner)
+
+
+def sequence_waits(actions: list[dict[str, Any]]) -> bool:
+    """Does this sequence keep a run alive: a delay, a wait, an open-ended repeat or a script it waits for?"""
+    for action in walk_actions(actions):
+        if action["type"] in ("delay", "wait_trigger", "wait_condition"):
+            return True
+        if action["type"] == "repeat" and action["mode"] != "count":
+            return True
+        if action["type"] == "script" and action["wait"]:
+            return True
+    return False
+
+
+def waits(rule: dict[str, Any]) -> bool:
+    return sequence_waits(rule["actions"])
 
 
 def has_delay(rule: dict[str, Any]) -> bool:
-    return any(a["type"] == "delay" for a in rule["actions"])
+    return any(a["type"] == "delay" for a in walk_actions(rule["actions"]))
+
+
+def is_advanced(rule: dict[str, Any]) -> bool:
+    """Does the rule use more than plain actions and delays (branches, waits, repeats, variables …)?"""
+    return any(a["type"] not in BASIC_ACTIONS for a in walk_actions(rule["actions"]))
+
+
+def all_conditions(rule: dict[str, Any]):
+    """Every condition leaf of a rule: its own and those inside its actions."""
+    yield from condition_leaves(rule["conditions"])
+    for action in walk_actions(rule["actions"]):
+        for group in action_groups(action):
+            yield from condition_leaves(group)
+
+
+def referenced_entities(device: dict[str, Any]) -> dict[str, set[str]]:
+    """Every entity a device's rules read or control, with how it is used (for the missing-entity check)."""
+    out: dict[str, set[str]] = {}
+    for target in device["targets"]:
+        out.setdefault(target, set()).add("controlled")
+    for rule in device["rules"]:
+        if not rule["enabled"]:
+            continue
+        for entity_id, uses in rule_entities(rule).items():
+            out.setdefault(entity_id, set()).update(uses)
+    return out
+
+
+def rule_entities(rule: dict[str, Any]) -> dict[str, set[str]]:
+    """The entities one rule reads or uses besides the device's controlled entities."""
+    out: dict[str, set[str]] = {}
+
+    def add(entity_id: Any, use: str) -> None:
+        if isinstance(entity_id, str) and ENTITY_ID.match(entity_id):
+            out.setdefault(entity_id, set()).add(use)
+
+    for trigger in rule["triggers"]:
+        add(trigger.get("entity_id"), "trigger")
+        if trigger["type"] == "time":
+            add(trigger["at"], "trigger")
+    for leaf in all_conditions(rule):
+        add(leaf.get("entity_id"), "condition")
+    for action in walk_actions(rule["actions"]):
+        if action["type"] == "wait_trigger":
+            for trigger in action["triggers"]:
+                add(trigger.get("entity_id"), "wait")
+        elif action["type"] in ("script", "scene", "notify"):
+            add(action.get("entity_id"), action["type"])
+    add(rule["recheck"]["override_entity"], "manual override signal")
+    return out
 
 
 def action_entities(action: dict[str, Any], targets: list[str]) -> list[str]:

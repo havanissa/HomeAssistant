@@ -2,7 +2,7 @@
 # Independent of Smart Comfort (slug smart_lighting) and of Smart Occupancy Detection: its own slug, container,
 # /data folder, backups and versions. It needs neither of them.
 name: Automation Builder
-version: "0.1.0"
+version: "0.2.0"
 slug: automation_builder
 description: >-
   A visual IF / AND-OR / THEN rule editor. Choose a device to control, give it
@@ -27,8 +27,9 @@ panel_title: Automation Builder
 panel_admin: true
 
 # Home Assistant Core API through the Supervisor proxy (SUPERVISOR_TOKEN). The backend sends only allowlisted
-# websocket commands (reads, event subscriptions, validate_config) and uses one HTTP endpoint: Home Assistant's
-# automation configuration endpoint, for ids that start with "automation_builder_" (backend/ab/ha.py).
+# websocket commands (reads, event subscriptions, validate_config, and blueprint/save for its own folder when the
+# user installs a blueprint) and uses one HTTP endpoint: Home Assistant's automation configuration endpoint, for
+# ids that start with "automation_builder_" (backend/ab/ha.py).
 # There is no service call, and no access to Home Assistant's configuration folder (no "map").
 homeassistant_api: true
 hassio_api: false

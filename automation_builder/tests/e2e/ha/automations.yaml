@@ -1,0 +1,74 @@
+# Hand-made automations of the test Home Assistant. Automation Builder must never change them.
+- id: '1700000000001'
+  alias: Hand-made automation (not managed)
+  description: Written by the user. Automation Builder must never change it.
+  triggers:
+    - trigger: state
+      entity_id: input_button.wall_switch
+  conditions: []
+  actions:
+    - action: light.toggle
+      target:
+        entity_id: light.bed_light
+  mode: single
+- id: '1700000000002'
+  alias: Kitchen window at night
+  description: A simple automation that can be imported.
+  triggers:
+    - trigger: state
+      entity_id: input_select.mood
+      to: Nátt
+      id: night
+    - trigger: state
+      entity_id: binary_sensor.test_door
+      to: 'on'
+      for: '00:00:02'
+      id: door
+  conditions:
+    - condition: numeric_state
+      entity_id: sensor.test_lux
+      below: 1500
+  actions:
+    - choose:
+        - conditions:
+            - condition: trigger
+              id: night
+          sequence:
+            - action: cover.close_cover
+              target:
+                entity_id: cover.kitchen_window
+      default:
+        - action: cover.open_cover
+          target:
+            entity_id: cover.kitchen_window
+  mode: single
+- id: '1700000000003'
+  alias: Everything off in the kitchen
+  description: Targets an area and stops early, neither of which Automation Builder can represent.
+  triggers:
+    - trigger: state
+      entity_id: input_select.mood
+      to: Nátt
+  conditions: []
+  actions:
+    - action: light.turn_off
+      target:
+        area_id: kitchen
+    - stop: Done
+  mode: single
+- id: '1700000000004'
+  alias: Decor at the door
+  description: Another simple automation; the browser checks import it through the interface.
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.test_door
+      to: 'on'
+  conditions:
+    - condition: state
+      entity_id: input_boolean.guest_mode
+      state: 'off'
+  actions:
+    - action: switch.turn_on
+      target:
+        entity_id: switch.decorative_lights
+  mode: single

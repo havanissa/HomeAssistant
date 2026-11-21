@@ -77,3 +77,83 @@ def settings(**occupancy_overrides: Any) -> dict[str, Any]:
     clean = model.validate_settings({"occupancy": occupancy_overrides}, problems)
     assert not problems.items, problems.items
     return clean
+
+
+# ------------------------------------------------------------------ Phase 0.2
+def button(entity_id: str, *event_types: str) -> dict[str, Any]:
+    return {"type": "button", "entity_id": entity_id, "event_types": list(event_types)}
+
+
+def event(event_type: str, **event_data: Any) -> dict[str, Any]:
+    return {"type": "event", "event_type": event_type, "event_data": event_data}
+
+
+def device_trigger(label: str = "", **config: Any) -> dict[str, Any]:
+    return {"type": "device", "config": config, "label": label}
+
+
+def mqtt(topic: str, payload: str | None = None) -> dict[str, Any]:
+    return {"type": "mqtt", "topic": topic, "payload": payload}
+
+
+def template(value_template: str, for_seconds: int = 0) -> dict[str, Any]:
+    return {"type": "template", "value_template": value_template, "for_seconds": for_seconds}
+
+
+def pattern(**fields: Any) -> dict[str, Any]:
+    return {"type": "pattern", **fields}
+
+
+def c_template(value_template: str) -> dict[str, Any]:
+    return {"type": "template", "value_template": value_template}
+
+
+def c_trigger(*indexes: int) -> dict[str, Any]:
+    return {"type": "trigger", "triggers": list(indexes)}
+
+
+def c_sun(after: str | None = None, before: str | None = None, after_offset: int = 0, before_offset: int = 0) -> dict[str, Any]:
+    return {"type": "sun", "after": after, "before": before, "after_offset_minutes": after_offset,
+            "before_offset_minutes": before_offset}
+
+
+def none_of(*items: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "not", "items": list(items)}
+
+
+def if_(conditions: dict[str, Any], then: list[dict[str, Any]], else_: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    return {"type": "if", "conditions": conditions, "then": then, "else": else_ or []}
+
+
+def choose(*branches: tuple[dict[str, Any], list[dict[str, Any]]], default: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    return {"type": "choose", "branches": [{"conditions": c, "actions": a} for c, a in branches], "default": default or []}
+
+
+def wait_trigger(*triggers: dict[str, Any], timeout: int | None = None, on_timeout: str = "continue") -> dict[str, Any]:
+    return {"type": "wait_trigger", "triggers": list(triggers), "timeout_seconds": timeout, "on_timeout": on_timeout}
+
+
+def wait_condition(conditions: dict[str, Any], timeout: int | None = None, on_timeout: str = "continue") -> dict[str, Any]:
+    return {"type": "wait_condition", "conditions": conditions, "timeout_seconds": timeout, "on_timeout": on_timeout}
+
+
+def repeat(actions: list[dict[str, Any]], count: int | None = None, while_: dict[str, Any] | None = None,
+           until: dict[str, Any] | None = None) -> dict[str, Any]:
+    mode = "count" if count is not None else "while" if while_ is not None else "until"
+    return {"type": "repeat", "mode": mode, "count": count, "conditions": while_ or until, "actions": actions}
+
+
+def variables(**values: Any) -> dict[str, Any]:
+    return {"type": "variables", "variables": values}
+
+
+def notify(action: str, message: str, title: str | None = None, entity_id: str | None = None) -> dict[str, Any]:
+    return {"type": "notify", "action": action, "entity_id": entity_id, "title": title, "message": message}
+
+
+def script(entity_id: str, wait: bool = False, **values: Any) -> dict[str, Any]:
+    return {"type": "script", "entity_id": entity_id, "wait": wait, "variables": values}
+
+
+def scene(entity_id: str) -> dict[str, Any]:
+    return {"type": "scene", "entity_id": entity_id}
