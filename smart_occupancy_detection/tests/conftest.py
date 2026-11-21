@@ -57,6 +57,7 @@ class FakeCompanion:
         self.disabled: dict[str, str] = {}
         self.publishes = 0
         self.version = "0.2.0"
+        self.ever_paired = False
         self.protocol = 1
 
     def session(self, params: dict[str, Any], send: Callable[[dict], None]) -> None:
@@ -67,7 +68,8 @@ class FakeCompanion:
         self._trusted = getattr(self, "_trusted", {})
         self._trusted[session_id] = trusted
         send({"type": "hello", "session_id": session_id, "paired": bool(self.pairing_hash), "trusted": trusted,
-              "companion_version": "0.1.0", "protocol": 1, "epoch": self.epoch})
+              "companion_version": self.version, "protocol": 1, "epoch": self.epoch,
+              "fresh_store": not self.ever_paired})
 
     def command(self, kind: str, params: dict[str, Any]) -> Any:
         session_id = params.get("session_id")
@@ -78,6 +80,8 @@ class FakeCompanion:
                 raise HomeAssistantError(P.REJECT_ALREADY_PAIRED, "already paired")
             token = secrets.token_hex(16)
             self.pairing_hash = P.token_hash(token)
+            self.ever_paired = True
+            self.automatic = bool(params.get("automatic"))
             for s in self._trusted:
                 self._trusted[s] = s == session_id
             return {"pairing_token": token}

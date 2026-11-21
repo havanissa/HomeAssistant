@@ -66,11 +66,20 @@ def test_check_detects_drift(tmp_path, tree):
     (lambda t: t.__setitem__(f"{INTEGRATION}/api.py", t[f"{INTEGRATION}/api.py"] + b"\n# ghp_" + b"a" * 30),
      "a GitHub token"),
     (lambda t: t.__setitem__("README.md", t["README.md"] + b"\nsee /home/ragnar/notes"), "a local path"),
-    (lambda t: t.__setitem__("README.md", t["README.md"] + b"\nHA at 192.168.1.50"), "a private IP address"),
+    (lambda t: t.__setitem__("README.md", t["README.md"] + b"\nHA at 192.168.1.50"), "a private address"),
     (lambda t: t.__setitem__("custom_components/other/manifest.json", b"{}"), "exactly one integration"),
     (lambda t: t.__setitem__(f"{INTEGRATION}/__pycache__/x.pyc", b""), "must not be published"),
     (lambda t: t.__setitem__(f"{INTEGRATION}/const.py", b'VERSION: Final = "9.9.9"'), "const.VERSION differs"),
     (lambda t: t.pop("LICENSE"), "LICENSE is missing"),
+    (lambda t: t.__setitem__("README.md", t["README.md"] + b"\npairing " + b"a1" * 16), "32\\+ hex id"),
+    (lambda t: t.__setitem__("README.md", t["README.md"] + b'\ntoken = "abcdef123"'), "a credential"),
+    (lambda t: t.__setitem__("README.md", t["README.md"] + b"\nC:\\Users\\x"), "a local path"),
+    (lambda t: t.__setitem__("README.md", t["README.md"] + b"\n/Users/ragnar/x"), "a local path"),
+    (lambda t: t.__setitem__("README.md", t["README.md"] + b"\n/home/Ragnar/x"), "a local path"),
+    (lambda t: t.__setitem__("README.md", t["README.md"] + b"\nat 127.0.0.1"), "a private address"),
+    (lambda t: t.__setitem__("README.md", t["README.md"] + b"\nat fe80::1"), "a private address"),
+    (lambda t: t.__setitem__("README.md", t["README.md"] + b"\nopen myha.local"), "a local host name"),
+    (lambda t: t.__setitem__("README.md", t["README.md"] + b"\nmail me@example.com"), "an e-mail address"),
     (lambda t: t.__setitem__("CHANGELOG.md", b"# Changelog\n"), "no section"),
 ])
 def test_validation_refuses_unsafe_or_broken_packages(tree, change, error):
@@ -93,3 +102,28 @@ def test_smart_comfort_stays_the_hacs_integration_of_the_main_repository():
     directories = [line.split("\t")[1] for line in listing if "\ttree\t" in line or " tree " in line]
     assert directories[0] == "custom_components/smart_occupancy"
     assert json.loads((REPO / "hacs.json").read_text())["name"] == "Smart Occupancy & Lighting"
+
+
+def test_png_text_chunks_are_scanned(tree):
+    import struct
+    import zlib
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", b"\0" * 13)
+           + chunk(b"tEXt", b"Comment\0/home/ragnar/icons/x.svg") + chunk(b"IEND", b""))
+    broken = {**tree, f"{INTEGRATION}/brand/icon.png": png}
+    with pytest.raises(dist.DistError, match="a local path"):
+        dist.validate(broken, (REPO / dist.APP_PROTOCOL).read_bytes())
+
+
+@pytest.mark.parametrize("path", ["translations/x.py", "brand/a.py", "translations/brand/x.json", "sub/x.py",
+                                  "brand/icon.svg", "secrets.yaml"])
+def test_allowlist_is_exact(path):
+    assert not dist.ALLOWED.match(path)
+
+
+def test_publish_refuses_uncommitted_templates():
+    with pytest.raises(dist.DistError, match="committed"):
+        dist.publish("0.2.0", "HEAD", dry_run=True, allow_unmerged=True, templates_ref=None)

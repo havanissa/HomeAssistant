@@ -85,6 +85,7 @@ class CompanionLink:
         self.compatibility: dict[str, Any] = {"level": "unknown", "message": None}
         self._status_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self._pair_lock = asyncio.Lock()  # pair, automatic pair and unpair never overlap
         self._publish_handle: asyncio.TimerHandle | None = None
         self._heartbeat: asyncio.Task[None] | None = None
         self._retry: asyncio.TimerHandle | None = None
@@ -266,14 +267,20 @@ class CompanionLink:
             self.session_id = event.get("session_id") if isinstance(event.get("session_id"), str) else None
             self.paired = bool(event.get("paired"))
             self.trusted = bool(event.get("trusted"))
-            self.companion = {k: event.get(k) for k in ("companion_version", "protocol", "epoch", "paired_at")}
+            self.companion = {k: event.get(k) for k in ("companion_version", "protocol", "epoch", "paired_at",
+                                                        "fresh_store")}
             if self.trusted:
                 self._spawn(self.claim())
-            elif not self.paired and self.token:
-                # This App was paired before, and the integration lost its pairing (it was removed and added again):
-                # pair again by itself. An administrator approved this App once; after an explicit unpair the App
-                # forgets its token, so this never happens then.
+            elif not self.paired and self.token and event.get("fresh_store") is True:
+                # This App was paired before and the integration was removed and added again (its store has never
+                # been paired): pair again by itself. Never after an explicit unpair or a replacement (the store
+                # remembers those), and never with an integration that cannot tell (0.1.0).
                 self._spawn(self._auto_pair())
+            elif self.paired and self.token:
+                # Another App installation was paired since: this one was replaced and forgets its token.
+                self._spawn(asyncio.to_thread(self._store_token, None))
+                self._set("pair_mismatch", "The companion is paired with another App installation (this one was "
+                                           "replaced). Pair again in Settings to publish from this App.")
             elif self.paired:
                 self._set("pair_mismatch", "The companion is paired with another App installation (or this App "
                                            "was reinstalled). Pair again in Settings to publish from this App.")
@@ -287,6 +294,8 @@ class CompanionLink:
             # Another session was paired or claimed: this one may no longer publish.
             self.lease_token = self.epoch = None
             self.trusted = bool(event.get("trusted", False))
+            if not self.trusted and self.token:
+                self._spawn(asyncio.to_thread(self._store_token, None))  # replaced by another App: forget the token
             self._set("pair_mismatch" if not self.trusted else "waiting", event.get("detail") or "Publishing was "
                                                                                                   "stopped by the companion.")
             if self.trusted:
@@ -300,14 +309,20 @@ class CompanionLink:
         return {"session_id": self.session_id, "epoch": self.epoch, "lease_token": self.lease_token, "seq": self.seq}
 
     # ------------------------------------------------------------- pairing
-    async def pair(self, *, replace: bool, user_id: str | None) -> dict[str, Any]:
+    async def pair(self, *, replace: bool, user_id: str | None, automatic: bool = False) -> dict[str, Any]:
+        async with self._pair_lock:
+            return await self._pair(replace=replace, user_id=user_id, automatic=automatic)
+
+    async def _pair(self, *, replace: bool, user_id: str | None, automatic: bool) -> dict[str, Any]:
         if self.session_id is None:
             await self._open()
         if self.session_id is None:
             raise LinkError(self.state, self.detail or "The companion integration is not reachable")
         try:
-            result = await self._send("pair", session_id=self.session_id, replace=bool(replace),
-                                      requested_by=user_id)
+            params: dict[str, Any] = {"session_id": self.session_id, "replace": bool(replace), "requested_by": user_id}
+            if automatic:
+                params["automatic"] = True
+            result = await self._send("pair", **params)
         except HomeAssistantError as err:
             raise LinkError(err.code, err.message) from err
         token = (result or {}).get("pairing_token")
@@ -321,7 +336,7 @@ class CompanionLink:
 
     async def _auto_pair(self) -> None:
         try:
-            await self.pair(replace=False, user_id=None)
+            await self.pair(replace=False, user_id=None, automatic=True)
         except LinkError as err:
             self._set("not_paired", f"Pairing again automatically failed ({err}); pair in Settings.")
             return
@@ -329,19 +344,27 @@ class CompanionLink:
         _LOGGER.warning("The integration had lost its pairing (removed and added again?): paired again automatically")
 
     async def unpair(self, *, user_id: str | None) -> dict[str, Any]:
-        if self.session_id is not None:
-            try:
-                await self._send("unpair", session_id=self.session_id, requested_by=user_id)
-            except HomeAssistantError as err:
-                raise LinkError(err.code, err.message) from err
-        await asyncio.to_thread(self._store_token, None)
-        self.paired = self.trusted = False
+        """Unpair (when this App is the paired one) and always forget the token here ("Forget pairing")."""
+        async with self._pair_lock:
+            was_trusted, companion_paired = self.trusted, self.paired
+            if self.session_id is not None and self.trusted:
+                try:
+                    await self._send("unpair", session_id=self.session_id, requested_by=user_id)
+                except HomeAssistantError as err:
+                    raise LinkError(err.code, err.message) from err
+            await asyncio.to_thread(self._store_token, None)
+        self.trusted = False
+        self.paired = companion_paired and not was_trusted  # still paired, with another App
         self.lease_token = self.epoch = None
         if self._heartbeat:
             self._heartbeat.cancel()
             self._heartbeat = None
-        self._set("not_paired", "Unpaired: the occupancy entities keep their last state and show that they are not "
-                                "fresh.")
+        if self.paired:
+            self._set("pair_mismatch", "This App forgot its pairing; the companion stays paired with another App "
+                                       "installation.")
+        else:
+            self._set("not_paired", "Unpaired: the occupancy entities keep their last state and show that they are "
+                                    "not fresh.")
         return {"paired": False}
 
     # -------------------------------------------------------------- lease

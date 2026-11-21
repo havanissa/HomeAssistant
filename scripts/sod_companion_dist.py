@@ -19,7 +19,6 @@ an annotated tag ``v<version>`` and creates the GitHub release, then re-checks t
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import hashlib
 import json
 import os
@@ -37,7 +36,8 @@ REPO_URL = f"https://github.com/{REPO}"
 INTEGRATION = f"custom_components/{DOMAIN}"
 TEMPLATES = "smart_occupancy_detection/companion_dist"
 APP_PROTOCOL = "smart_occupancy_detection/backend/sod/protocol.py"
-ALLOWED = ("*.py", "manifest.json", "strings.json", "translations/*.json", "brand/*.png")
+#: Exact path shapes inside the integration directory (no wildcard crosses a "/").
+ALLOWED = re.compile(r"^(?:[a-z_]+\.py|manifest\.json|strings\.json|translations/[a-z_-]+\.json|brand/[a-z@0-9_-]+\.png)$")
 TEMPLATE_FILES = {"README.md": "README.md", "hacs.json": "hacs.json", "CHANGELOG.md": "CHANGELOG.md",
                   "gitignore": ".gitignore"}
 MANIFEST_KEYS = ("domain", "name", "version", "documentation", "issue_tracker", "codeowners", "config_flow",
@@ -46,10 +46,17 @@ SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 FORBIDDEN = [
     (re.compile(rb"eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}"), "a JSON web token"),
     (re.compile(rb"\bgh[opsu]_[A-Za-z0-9]{20,}"), "a GitHub token"),
-    (re.compile(rb"(?i)(password|passwd|secret|api_key)\s*[=:]\s*['\"][^'\"]{4,}"), "a credential"),
-    (re.compile(rb"/home/[a-z_][a-z0-9_-]*/|/tmp/claude|[A-Za-z]:\\\\Users\\\\"), "a local path"),
-    (re.compile(rb"\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b"), "a private IP address"),
+    (re.compile(rb"(?<![0-9a-fA-F])[0-9a-f]{32,}(?![0-9a-fA-F])"), "a 32+ hex id (token, pairing token or user id)"),
+    (re.compile(rb"(?i)\b(password|passwd|secret|api_key|token|access_token|llat)\s*[=:]\s*['\"][^'\"]{4,}"),
+     "a credential"),
+    (re.compile(rb"(?i)/home/[^/\s]+/|/Users/[^/\s]+/|/root/|/tmp/claude|[A-Za-z]:\\\\?Users\\\\?"), "a local path"),
+    (re.compile(rb"\b(?:10|127|192\.168|172\.(?:1[6-9]|2\d|3[01])|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7]))"
+                rb"\.\d{1,3}\.\d{1,3}\b|\b(?:fe80|fd[0-9a-f]{2}|fc[0-9a-f]{2})::?[0-9a-f:]*\b"), "a private address"),
+    (re.compile(rb"(?i)\b[\w-]+\.(?:local|lan|home\.arpa)\b|\bui\.nabu\.casa\b|[\w-]+\.nabu\.casa"), "a local host name"),
+    (re.compile(rb"[\w.+-]+@[\w-]+\.[\w.-]+"), "an e-mail address"),
 ]
+#: Known safe text the scan would otherwise flag (codeowners and GitHub's noreply address).
+ALLOW_TEXT = (b"@havanissa",)
 
 
 class DistError(Exception):
@@ -76,7 +83,7 @@ def build_tree(ref: str | None = None, *, templates_ref: str | None = "same") ->
     tref = ref if templates_ref == "same" else templates_ref
     tree: dict[str, bytes] = {}
     for rel, content in sorted(_files_at(ref, INTEGRATION).items()):
-        if any(fnmatch.fnmatch(rel, pattern) for pattern in ALLOWED) and "/" not in rel.replace("translations/", "").replace("brand/", ""):
+        if ALLOWED.match(rel):
             tree[f"{INTEGRATION}/{rel}"] = content
     templates = _files_at(tref, TEMPLATES)
     for source, target in TEMPLATE_FILES.items():
@@ -115,14 +122,35 @@ def validate(tree: dict[str, bytes], app_protocol: bytes | None = None) -> dict:
     for path, content in tree.items():
         if "__pycache__" in path or path.endswith((".pyc", ".env")) or "/." in "/" + path.replace(".gitignore", ""):
             raise DistError(f"{path} must not be published")
-        if path.endswith(".png"):
-            continue
+        text = png_text(content) if path.endswith(".png") else content
+        for allowed in ALLOW_TEXT:
+            text = text.replace(allowed, b"")
         for pattern, what in FORBIDDEN:
-            if pattern.search(content):
+            if pattern.search(text):
                 raise DistError(f"{path} contains {what}")
     if f"## {manifest['version']}" not in tree["CHANGELOG.md"].decode():
         raise DistError(f"CHANGELOG.md has no section for {manifest['version']}")
     return manifest
+
+
+def png_text(content: bytes) -> bytes:
+    """The text chunks of a PNG (tEXt, iTXt, zTXt; zTXt decompressed): metadata could carry names or paths."""
+    import struct
+    import zlib
+
+    if not content.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise DistError("not a PNG file")
+    out, pos = [], 8
+    while pos + 8 <= len(content):
+        length, kind = struct.unpack(">I4s", content[pos:pos + 8])
+        data = content[pos + 8:pos + 8 + length]
+        if kind in (b"tEXt", b"iTXt"):
+            out.append(data)
+        elif kind == b"zTXt":
+            key, _, rest = data.partition(b"\0")
+            out.append(key + b" " + zlib.decompress(rest[1:]))
+        pos += 12 + length
+    return b"\n".join(out)
 
 
 def write_tree(tree: dict[str, bytes], out: Path) -> None:
@@ -158,9 +186,13 @@ def release_notes(tree: dict[str, bytes], version: str, source: str) -> str:
 
 
 def publish(version: str, ref: str, *, dry_run: bool, allow_unmerged: bool, templates_ref: str | None) -> int:
+    if templates_ref is None:
+        raise DistError("publish only from committed files: --templates-ref worktree is for build and check")
+    git("fetch", "-q", "origin", "main")  # before resolving the ref, so origin/main is current
     source = git("rev-parse", ref).strip()
+    if templates_ref != "same":
+        templates_ref = git("rev-parse", templates_ref).strip()
     if not allow_unmerged:
-        git("fetch", "-q", "origin", "main")
         if subprocess.run(["git", "merge-base", "--is-ancestor", source, "origin/main"], cwd=ROOT).returncode != 0:
             raise DistError(f"{ref} is not on origin/main: publish from the authoritative branch")
     tree = build_tree(source, templates_ref=templates_ref)

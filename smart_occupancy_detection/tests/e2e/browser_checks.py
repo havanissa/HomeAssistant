@@ -71,6 +71,9 @@ def main(out: Path, add_room: str | None) -> int:
                     inner.wait_for_timeout(2600)  # longer than the refresh interval
                     still = inner.evaluate("document.querySelector('details[data-keep=diagnostics]').open")
                     check(f"{tag}: an opened section stays open while the page refreshes", still)
+                    pilot = frame.locator("h2", has_text="Pilot comparison")
+                    if pilot.count():
+                        frame.locator("body").screenshot(path=str(out / f"{tag}-room-pilot.png"))
                     edit = frame.locator("a", has_text="Edit room")
                     if edit.count():
                         edit.click()
@@ -95,12 +98,12 @@ def main(out: Path, add_room: str | None) -> int:
             frame.locator("#add-suggested").click()
             rows = frame.locator(".editor-sensor").count()
             check("Add room: suggested sensors are added only on request", rows >= 1, str(rows))
-            frame.locator("#review").click()
-            frame.locator(".review h2", has_text="Review").wait_for()
-            frame.locator("body").screenshot(path=str(out / "add-2-review.png"))
-            review = frame.locator(".review").inner_text()
-            check("Add room: the review says what the room will show", "starts as" in review, review[:200])
-            frame.locator(".review button", has_text="Save room").click()
+            status = frame.locator("#save-status")
+            status.filter(has_text="Saved").wait_for(timeout=10000)
+            frame.locator("body").screenshot(path=str(out / "add-2-saved.png"))
+            text = status.inner_text()
+            check("Add room: saved on change, and the line says what the room shows", "starts as" in text, text[:200])
+            frame.locator("a", has_text="Done").click()
             frame.locator("h2", has_text="Recent detection").wait_for()
             frame.locator("body").screenshot(path=str(out / "add-3-room.png"))
             check("Add room: saved and opened", True)

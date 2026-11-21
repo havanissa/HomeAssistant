@@ -100,12 +100,13 @@ async def test_the_app_pairs_again_when_the_integration_lost_its_pairing(tmp_pat
     await wait_for(lambda: link.state == "not_paired")
     await link.pair(replace=False, user_id="admin")
     await wait_for(lambda: link.state == "publishing")
-    # The integration is removed and added again: its pairing is gone, the App still holds its token.
+    # The integration is removed and added again: a fresh store, the App still holds its token.
     ha.companion.pairing_hash = None
+    ha.companion.ever_paired = False
     ha.disconnect()
     ha.connect()
     await wait_for(lambda: link.state == "publishing")
-    assert link.counters["auto_pairs"] == 1
+    assert link.counters["auto_pairs"] == 1 and ha.companion.automatic
     # After an explicit unpair the App never pairs by itself.
     await link.unpair(user_id="admin")
     ha.disconnect()
@@ -216,3 +217,79 @@ def test_diagnostics_redaction():
         assert secret not in text, secret
     assert data["by"].startswith("user-") and data["token"] == "**REDACTED**"
     assert "binary_sensor.pir active in Kamar Suður" in text  # what a diagnosis needs stays
+
+
+async def test_no_automatic_pairing_after_an_unpair_elsewhere_or_a_replacement(tmp_path, ha, clock):
+    runtime, link = await setup(tmp_path, ha, clock)
+    ha.connect()
+    await wait_for(lambda: link.state == "not_paired")
+    await link.pair(replace=False, user_id="admin")
+    await wait_for(lambda: link.state == "publishing")
+    # Another App installation replaces this one: this App forgets its token.
+    ha.companion.pairing_hash = "0" * 64
+    ha.disconnect()
+    ha.connect()
+    await wait_for(lambda: link.state == "pair_mismatch")
+    await wait_for(lambda: link.token is None)
+    assert not (tmp_path / "companion.json").exists()
+    # The other one is unpaired later (the store remembers it was paired): nobody pairs by itself.
+    ha.companion.pairing_hash = None
+    ha.disconnect()
+    ha.connect()
+    await wait_for(lambda: link.state == "not_paired")
+    await asyncio.sleep(0.1)
+    assert link.counters["auto_pairs"] == 0
+
+
+async def test_forget_pairing_without_the_companion(tmp_path, ha, clock):
+    runtime, link = await setup(tmp_path, ha, clock)
+    ha.connect()
+    await wait_for(lambda: link.state == "not_paired")
+    await link.pair(replace=False, user_id="admin")
+    await wait_for(lambda: link.state == "publishing")
+    ha.companion.pairing_hash = None  # the integration lost the pairing, but it is not a fresh store
+    ha.disconnect()
+    ha.connect()
+    await wait_for(lambda: link.state == "not_paired")
+    assert link.token is not None and link.counters["auto_pairs"] == 0
+    await link.unpair(user_id="admin")  # "Forget pairing": works although this App is not trusted
+    assert link.token is None and link.state == "not_paired"
+    await link.stop()
+    await runtime.stop()
+
+
+def test_pilot_csv_never_contains_formulas(tmp_path):
+    from sod.pilot import _cell, valid_difference
+
+    assert _cell("=HYPERLINK(\"http://x\")") == "'=HYPERLINK(\"http://x\")"
+    assert _cell("+1") == "'+1" and _cell("-1") == "'-1" and _cell("@SUM") == "'@SUM" and _cell("Kamar") == "Kamar"
+    assert not valid_difference({"seq": "1"}) and not valid_difference({"seq": 1, "area_id": "a"})
+
+
+async def test_malformed_pilot_files_never_stop_the_app(tmp_path, ha, clock):
+    (tmp_path / "pilot").mkdir()
+    (tmp_path / "pilot" / "differences.json").write_text('{"differences": 5, "stats": [1]}')
+    (tmp_path / "pilot" / "settings.json").write_text('{"references": {"kamar_sudur": 7}}')
+    runtime, link = await setup(tmp_path, ha, clock)
+    pilot = Pilot(ha, runtime, tmp_path)
+    await pilot.start()
+    assert pilot.references == {} and list(pilot.differences) == []
+    (tmp_path / "pilot" / "differences.json").write_text(json.dumps({"differences": [
+        {"seq": 1, "area_id": KAMAR}, {"seq": "x"}, 7]}))
+    pilot2 = Pilot(ha, runtime, tmp_path)
+    await pilot2.start()
+    assert list(pilot2.differences) == [] and pilot2.report_csv().startswith("room,")
+    await pilot.stop()
+    await pilot2.stop()
+    await link.stop()
+    await runtime.stop()
+
+
+def test_redaction_catches_names_in_ids_addresses_and_hosts():
+    a = Redactor({"Ragnar Hansen"})
+    b = Redactor({"Ragnar Hansen"})
+    text = json.dumps(a({"log": "binary_sensor.ragnar_hansen_phone_charging seen from fe80::1 and fd12:3456::7 on "
+                                "homeassistant.local; RAGNAR HANSEN", "instance": "abcd1234"}))
+    for leak in ("ragnar_hansen", "fe80::1", "fd12:3456::7", "homeassistant.local", "RAGNAR", "abcd1234"):
+        assert leak not in text, leak
+    assert a._pseudo("user", "x") != b._pseudo("user", "x")  # salted per download

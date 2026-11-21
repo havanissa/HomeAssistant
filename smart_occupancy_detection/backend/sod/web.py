@@ -272,10 +272,11 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
     async def pilot_report(request: web.Request) -> web.Response:
         if core.pilot is None:
             raise ConfigError("not_ready", "Not started yet", 503)
+        redactor = core.redactor()  # no personal names or addresses in the downloads either
         if request.match_info["fmt"] == "csv":
-            return web.Response(text=core.pilot.report_csv(), content_type="text/csv", headers={
+            return web.Response(text=redactor.text(core.pilot.report_csv()), content_type="text/csv", headers={
                 "Content-Disposition": 'attachment; filename="smart-occupancy-pilot.csv"'})
-        return _json({"differences": core.pilot.report(), "overview": core.pilot.overview()}, headers={
+        return _json(redactor({"differences": core.pilot.report(), "overview": core.pilot.overview()}), headers={
             "Content-Disposition": 'attachment; filename="smart-occupancy-pilot.json"'})
 
     async def pair(request: web.Request) -> web.Response:

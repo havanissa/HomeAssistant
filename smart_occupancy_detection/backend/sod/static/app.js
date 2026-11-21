@@ -345,7 +345,10 @@ function impactText(review) {
   return items.join("; ");
 }
 
-function autosaver(statusId, { review, save, saved }) {
+// ``base`` is the revision the page was loaded with: a save is checked against it, so a change made meanwhile in
+// another window (or by another administrator) is refused (409) instead of overwritten.
+function autosaver(statusId, { review, save, saved, base }) {
+  let revision = base;
   let chain = Promise.resolve();
   let pending = 0;
   const status = (html, cls = "") => {
@@ -365,7 +368,8 @@ function autosaver(statusId, { review, save, saved }) {
           return;
         }
         if (!(r.changes || []).length) { status("All changes saved.", "ok"); return; }
-        const result = await save(r.revision);
+        const result = await save(revision === undefined ? r.revision : revision);
+        if (result && result.revision) revision = result.revision;
         const effect = impactText(r);
         const warnings = (r.warnings || []).map((w) => esc(w.message)).join(" ");
         status(`<strong>Saved.</strong> ${esc(effect)}${warnings ? `<div class="small">${warnings}</div>` : ""}`, "ok");
@@ -454,6 +458,7 @@ async function editorPage(areaId, token) {
   }
 
   const autosave = autosaver("save-status", {
+    base: revision,
     review: () => api("api/rooms/review", { area_id: areaId, room }),
     save: (revision) => api("api/rooms/save", { area_id: areaId, room, expected_revision: revision }),
     saved: () => {
@@ -563,6 +568,7 @@ function connectionCard(c) {
     if (["not_paired"].includes(link.state)) actions = `<button class="primary" id="pair">Pair with Home Assistant</button>`;
     else if (link.state === "pair_mismatch") actions = `<button class="primary" id="pair-replace">Pair this App (replaces the other)</button>`;
     else if (link.has_token) actions = `<button id="unpair">Unpair</button>`;
+    if (link.has_token && !link.trusted && link.state !== "publishing") actions += ` <button id="forget">Forget pairing</button>`;
   }
   const compat = link.compatibility || {};
   const errors = (link.errors || []).slice(0, 8).concat((ha.history || []).filter((h) => h.error).slice(0, 4).map((h) => ({ at: h.at, code: "home_assistant", message: h.error })));
@@ -659,6 +665,11 @@ async function settingsPage(token) {
     };
     document.getElementById("pair")?.addEventListener("click", () => pair(false));
     document.getElementById("pair-replace")?.addEventListener("click", () => { if (confirm("Pair this App? The other App installation stops publishing.")) pair(true); });
+    document.getElementById("forget")?.addEventListener("click", async () => {
+      if (!confirm("Forget this App's pairing? It will not pair again by itself; press Pair to pair it again.")) return;
+      try { await api("api/companion/unpair", {}); toast("Pairing forgotten"); } catch (err) { showError(err); }
+      if (token === navToken) settingsPage(token);
+    });
     document.getElementById("unpair")?.addEventListener("click", async () => {
       if (!confirm("Unpair? The occupancy entities keep their last state and show that they are not fresh until the App is paired again.")) return;
       try { await api("api/companion/unpair", {}); toast("Unpaired"); } catch (err) { showError(err); }
@@ -680,6 +691,7 @@ async function settingsPage(token) {
     return { ...base, ...timing };
   };
   const saveTiming = autosaver("timing-status", {
+    base: data.revision,
     review: () => api("api/timing/review", { timing: readGlobal() }),
     save: (revision) => api("api/timing/save", { timing: readGlobal(), expected_revision: revision }),
   });

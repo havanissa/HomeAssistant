@@ -321,9 +321,12 @@ class AppCore:
     def diagnostics(self) -> dict[str, Any]:
         """The downloadable package, redacted (``redact.py``: no secrets, user ids, addresses or personal entities)."""
         raw = self._diagnostics_raw()
-        redactor = Redactor(personal_names(self.ha.states if self.ha else {}))
+        redactor = self.redactor()
         return {"redaction": "Secrets, user ids, IP addresses, URLs and personal entities (person, device_tracker, "
                              "notify) with their names are removed or replaced by pseudonyms.", **redactor(raw)}
+
+    def redactor(self) -> Redactor:
+        return Redactor(personal_names(self.ha.states if self.ha else {}))
 
     def _diagnostics_raw(self) -> dict[str, Any]:
         runtime = self.runtime

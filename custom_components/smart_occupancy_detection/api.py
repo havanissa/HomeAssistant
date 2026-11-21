@@ -75,6 +75,7 @@ def ws_session(hass: HomeAssistant, connection: Any, msg: dict[str, Any]) -> Non
     vol.Required("type"): f"{DOMAIN}/pair",
     vol.Required("session_id"): _SESSION,
     vol.Optional("replace", default=False): bool,
+    vol.Optional("automatic", default=False): bool,
     vol.Optional("requested_by"): vol.Any(None, vol.All(str, vol.Length(max=64))),
 })
 @callback

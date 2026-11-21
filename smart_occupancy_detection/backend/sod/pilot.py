@@ -44,11 +44,29 @@ def _iso(value: datetime | None) -> str | None:
     return value.astimezone(UTC).isoformat(timespec="seconds") if value else None
 
 
-def _write(path: Path, data: Any) -> None:
+def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(tmp, path)
+
+
+def _cell(value: Any) -> str:
+    """A CSV cell that a spreadsheet never evaluates as a formula (names and reasons come from Home Assistant)."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def valid_difference(item: Any) -> bool:
+    if not isinstance(item, dict) or not isinstance(item.get("seq"), int) or not isinstance(item.get("area_id"), str):
+        return False
+    for side in ("ours", "reference"):
+        if not isinstance(item.get(side), dict) or not isinstance(item[side].get("occupied"), bool):
+            return False
+    return isinstance(item.get("started_at"), str) and isinstance(item["ours"].get("signals", []), list)
 
 
 def explain(ours: dict[str, Any], reference: dict[str, Any]) -> str:
@@ -88,6 +106,7 @@ class Pilot:
         self._last: dict[str, tuple[datetime, bool | None]] = {}  # area -> (time, agreed) of the last check
         self._timers: dict[str, asyncio.TimerHandle] = {}
         self._save_handle: asyncio.TimerHandle | None = None
+        self._save_lock = asyncio.Lock()
         self._seq = 0
 
     # ------------------------------------------------------------ lifecycle
@@ -101,7 +120,7 @@ class Pilot:
             handle.cancel()
         if self._save_handle:
             self._save_handle.cancel()
-        await asyncio.to_thread(self._save)
+        await self._save_now()
 
     def _load(self) -> None:
         if self.dir is None:
@@ -116,28 +135,43 @@ class Pilot:
             _LOGGER.warning("The pilot settings are not readable (%s); no comparison until set again", err)
         try:
             data = json.loads((self.dir / "differences.json").read_text(encoding="utf-8"))
-            for item in data.get("differences") or []:
-                if isinstance(item, dict):
+            items = data.get("differences") if isinstance(data, dict) else None
+            for item in items if isinstance(items, list) else []:
+                if valid_difference(item):  # anything malformed is dropped, never half-used
                     self.differences.append(item)
-            self.stats = {a: s for a, s in (data.get("stats") or {}).items() if isinstance(s, dict)}
-            self._seq = max((d.get("seq", 0) for d in self.differences), default=0)
+            stats = data.get("stats") if isinstance(data, dict) else None
+            self.stats = {a: s for a, s in (stats.items() if isinstance(stats, dict) else [])
+                          if isinstance(a, str) and isinstance(s, dict)}
+            self._seq = max((d["seq"] for d in self.differences), default=0)
         except FileNotFoundError:
             pass
-        except (OSError, ValueError, AttributeError) as err:
+        except (OSError, ValueError, AttributeError, TypeError) as err:
             _LOGGER.warning("The pilot differences are not readable (%s); starting a new log", err)
 
-    def _save(self) -> None:
+    def _snapshot(self) -> tuple[str, str]:
+        """Both documents, serialised on the event loop (the worker thread never sees live structures)."""
+        return (json.dumps({"schema": 1, "references": self.references}, ensure_ascii=False),
+                json.dumps({"schema": 1, "differences": list(self.differences), "stats": self.stats},
+                           ensure_ascii=False, separators=(",", ":")))
+
+    def _write_files(self, documents: tuple[str, str]) -> None:
+        _write(self.dir / "settings.json", documents[0])
+        _write(self.dir / "differences.json", documents[1])
+
+    async def _save_now(self) -> None:
         if self.dir is None:
             return
-        _write(self.dir / "settings.json", {"schema": 1, "references": self.references})
-        _write(self.dir / "differences.json", {"schema": 1, "differences": list(self.differences),
-                                                "stats": self.stats})
+        async with self._save_lock:
+            try:
+                await asyncio.to_thread(self._write_files, self._snapshot())
+            except OSError as err:
+                _LOGGER.warning("Could not store the pilot comparison: %s", err)
 
     def _save_soon(self) -> None:
         if self._save_handle is None and self.dir is not None:
             def run() -> None:
                 self._save_handle = None
-                asyncio.get_running_loop().create_task(asyncio.to_thread(self._save))
+                asyncio.get_running_loop().create_task(self._save_now())
             self._save_handle = asyncio.get_running_loop().call_later(10, run)
 
     # ------------------------------------------------------------ settings
@@ -284,7 +318,14 @@ class Pilot:
 
     def report_csv(self) -> str:
         out = io.StringIO()
-        writer = csv.writer(out)
+        raw = csv.writer(out)
+
+        class _Safe:
+            @staticmethod
+            def writerow(row: list[Any]) -> None:
+                raw.writerow([_cell(v) for v in row])
+
+        writer = _Safe()
         writer.writerow(["room", "started_at", "ended_at", "seconds", "this_app", "this_app_state", "this_app_reason",
                          "reference", "reference_state", "reference_reason", "active_sensors", "unavailable_sensors",
                          "explanation"])
