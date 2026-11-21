@@ -11,5 +11,5 @@ It only detects. It never switches a light, moves a cover or calls any service.
 - An outage or an unavailable sensor never makes a room vacant.
 - Three pages: Overview, Rooms, Settings.
 
-Needs the small companion integration `smart_occupancy_detection` (in this repository, `custom_components/`)
-for the native entities. See the Documentation tab for installation and use.
+Needs the small companion integration `smart_occupancy_detection`, installed with HACS from
+https://github.com/havanissa/smart-occupancy-detection. See the Documentation tab for installation and use.

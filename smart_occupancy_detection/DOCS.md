@@ -8,19 +8,27 @@ device: the App has no way to call a Home Assistant service.
 
 ## Installation
 
-1. **The App.** Add this repository to the App store (Settings → Apps → App store → ⋮ → Repositories) if it is not
-   there yet, install **Smart Occupancy Detection** and start it. It opens from the sidebar (**Occupancy**).
-2. **The companion integration** (for the native entities). Copy the folder
-   `custom_components/smart_occupancy_detection` from this repository into the `custom_components` folder of your
-   Home Assistant configuration (for example with the File editor or Samba App), restart Home Assistant, then add
-   it: Settings → Devices & services → Add integration → **Smart Occupancy Detection**. There is nothing to fill in.
-   (HACS installs only one integration per repository, and this repository's HACS entry is Smart Comfort's
-   integration, so this one is copied by hand.)
-3. **Pair.** In the App, open Settings and press **Pair with Home Assistant**. Only an administrator can do this.
-   From then on the App publishes the occupancy of every room, also after restarts.
+1. **The App.** Settings → Apps → App store → ⋮ → Repositories → add `https://github.com/havanissa/HomeAssistant`
+   (if it is not there yet), install **Smart Occupancy Detection** and start it. It opens from the sidebar
+   (**Occupancy**).
+2. **The companion integration** (for the native entities), with HACS: HACS → ⋮ → **Custom repositories** → add
+   `https://github.com/havanissa/smart-occupancy-detection` with the type **Integration** → open *Smart Occupancy
+   Detection* → **Download** → restart Home Assistant.
+3. Settings → Devices & services → **Add integration** → **Smart Occupancy Detection** (nothing to fill in).
+4. **Pair.** In the App, Settings → **Pair with Home Assistant** (administrators only). From then on the App publishes
+   the occupancy of every room, also after restarts, reloads and updates.
+5. **Check.** Settings → Connection shows both versions, "Publishing" and "Fresh"; in Home Assistant
+   `binary_sensor.sod_app_connected` is on.
 
-Smart Comfort is not affected: both Apps and both integrations can be installed at the same time. They use
-different slugs, domains, entity ids, unique ids and storage, and neither reads the other's data.
+Updates: the App updates from the App store, the integration from HACS (then restart Home Assistant). Either can be
+updated first: the App checks the integration's version and protocol and says exactly what to update when they do
+not match. Rooms, pairing and entity ids are kept. If the integration is removed and added again, the App pairs again
+by itself (not after you pressed *Unpair*).
+
+Smart Comfort is not affected: both Apps and both integrations can be installed at the same time. They use different
+slugs, domains, entity ids, unique ids, storage and HACS repositories, and neither reads the other's data.
+(Before 0.2 the integration was copied by hand from `custom_components/smart_occupancy_detection` of the Smart
+Comfort repository; adding the HACS repository above replaces that copy.)
 
 ## Adding a room
 
@@ -30,11 +38,12 @@ A room is a Home Assistant **area** (create areas in Home Assistant first). Room
 2. the App lists the binary sensors found in that area, with a suggested type. Nothing is selected for you: add the
    sensors that should take part (or **Add all suggested**). **Add another sensor** finds any entity, in any area,
    for example a PC activity helper, a bed sensor or a motion sensor shared with the next room;
-3. check each sensor's type and role, then **Review changes** and **Save room**.
+3. check each sensor's type and role. **Changes are saved as you make them**: the line at the bottom says
+   "Saved" and what the room shows afterwards (for example "Kamar stays Occupied", or "Kamar changes now:
+   Vacant → Occupied"). Something that cannot be saved yet (a room without a sensor that can detect presence) is
+   not stored, and the line says why.
 
-The review lists what changes and whether the room's decision would change **immediately** (for example "stays
-Occupied: no immediate change", or "changes immediately: Vacant → Occupied"). An invalid configuration cannot be
-saved; the review says why.
+Deleting a room, importing a configuration and restoring a backup still show what will change and ask first.
 
 ### Sensor types and roles
 
@@ -136,7 +145,37 @@ actions:
 - **Detection timing**: the global defaults.
 - **Backups and transfer**: export the configuration, import an export (reviewed), restore one of the automatic
   backups (one is made before every change; the last 30 are kept), and **Import from Smart Comfort**.
-- **Diagnostics**: the engine's self-test, counters, and a downloadable diagnostics file.
+- **Diagnostics**: the engine's self-test, counters, and a downloadable diagnostics file. The file is redacted:
+  secrets, Home Assistant user ids, IP addresses, URLs and personal entities (person, device tracker, notify) with
+  their names are removed or replaced by pseudonyms; room names and sensor entities stay (they are needed to find a
+  problem).
+- **Pilot comparison**: see below.
+
+## Pilot comparison with Smart Comfort
+
+Settings → Pilot comparison: for a room, choose the occupancy output to compare with - **Use Smart Comfort's**
+picks Smart Comfort's occupancy entity of the same area. From then on every difference that lasts longer than a
+minute is logged: when it started and ended, both decisions with their reasons, this room's sensors at that moment
+and an explanation (for example "This App is still waiting for its vacancy timeout; the reference already decided
+vacant"). The room page shows the agreement and the recent differences; **Download differences** gives a CSV or JSON
+file. Nothing is adjusted: the comparison only observes. Clear the field to stop comparing.
+
+## Troubleshooting
+
+| Settings → Connection says | What to do |
+|---|---|
+| Integration not installed | Install it with HACS (see Installation), restart Home Assistant. |
+| Integration not set up | Settings → Devices & services → Add integration → Smart Occupancy Detection. |
+| Incompatible versions | Update what the message names (the integration in HACS, or the App), then restart Home Assistant. |
+| Update recommended | It works; update the integration in HACS when convenient. |
+| Not paired | Press *Pair with Home Assistant* (administrator). |
+| Paired with another App installation | This App was reinstalled or another one was paired: *Pair this App* replaces it. |
+| Waiting / Not fresh | The App is reconnecting; the entities keep their last state (`fresh: false`). If it stays, look at *Recent connection errors* and download the diagnostics. |
+| Home Assistant not connected | Decisions are frozen until it is back; changes cannot be saved meanwhile. |
+
+A room page explains every hold: *Start-up hold* (the App started), *Reconnect hold* (the connection to Home
+Assistant was interrupted), *Hold after a change of this room's sensors*. Each sensor shows how long ago its state
+last changed.
 
 ### Import from Smart Comfort
 
