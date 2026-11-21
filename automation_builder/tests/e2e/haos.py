@@ -114,7 +114,7 @@ def ingress(slug: str = "") -> tuple[str, str]:
     return f"{URL}{info['ingress_url'].rstrip('/')}", f"ingress_session={session}"
 
 
-def app_ready(slug: str = "", timeout: float = 240) -> bool:
+def app_ready(slug: str = "", *, timeout: float = 240) -> bool:
     """Until the App answers through Ingress and is connected to Home Assistant."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

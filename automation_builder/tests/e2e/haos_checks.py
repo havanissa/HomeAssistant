@@ -309,7 +309,7 @@ def main_phase(app: App) -> None:  # noqa: PLR0915 - one linear scenario
     check("H7 the App noticed the interruption (it reconnected)", reconnects >= 1, reconnects)
     haos.supervisor("restart")
     core_ok = haos.wait_core(600)
-    app_ok = haos.app_ready(600)
+    app_ok = haos.app_ready(timeout=600)
     check("H8 Supervisor restart: Core and the App keep running or come back", core_ok and app_ok, f"core running: {core_ok}, App answering and connected: {app_ok}")
     app = App()
     check("H8 ...still in sync, and a deployment works afterwards", app.wait_sync(device_id) == "in_sync")
@@ -337,38 +337,50 @@ def main_phase(app: App) -> None:  # noqa: PLR0915 - one linear scenario
     check("H9 ...and Home Assistant's automation was not touched by the restore", automation(automation_id)["alias"] == "HAOS lamp (Automation Builder)" and runs(OFFICE))
     haos.sup(f"/backups/{slug}", "delete")
 
-    # a deployment interrupted by stopping the App
-    rule = next(r for r in view["device"]["rules"])
-    rule["actions"][0]["data"]["brightness_pct"] = 33
-    app.change("api/rules/save", {"device_id": device_id, "rule": rule})
-    _, plan = app.call("api/devices/plan", {"device_id": device_id})
-    outcome: dict[str, Any] = {}
+    # a deployment interrupted by stopping the App. The stop is given different head starts; whatever the
+    # interruption hits, the App's view afterwards must match what Home Assistant has.
+    hit = []
+    final = 70
+    for attempt, head_start in enumerate((0.0, 0.25, 0.5, 0.8, 1.1)):
+        rule = app.device(device_id)["device"]["rules"][0]
+        final = 30 + attempt
+        rule["actions"][0]["data"]["brightness_pct"] = final
+        app.change("api/rules/save", {"device_id": device_id, "rule": rule})
+        _, plan = app.call("api/devices/plan", {"device_id": device_id})
+        outcome: dict[str, Any] = {}
 
-    def deploy() -> None:
-        try:
-            outcome["answer"] = app.change("api/devices/deploy", {"device_id": device_id, "plan_hash": plan["plan_hash"]})
-        except Exception as err:  # noqa: BLE001 - the App went away under the request
-            outcome["answer"] = (0, type(err).__name__)
+        def deploy(plan: dict[str, Any] = plan, outcome: dict[str, Any] = outcome) -> None:
+            try:
+                outcome["answer"] = app.change("api/devices/deploy", {"device_id": device_id, "plan_hash": plan["plan_hash"]})
+            except Exception as err:  # noqa: BLE001 - the App went away under the request
+                outcome["answer"] = (0, type(err).__name__)
 
-    thread = threading.Thread(target=deploy, daemon=True)
-    thread.start()
-    time.sleep(0.15)
-    haos.app("stop")
-    thread.join(60)
-    written = automation(automation_id)["actions"][0]["then"][0]["data"]["brightness_pct"] == 33
-    haos.app("start")
-    check("H10 the App was stopped during a deployment and starts again", haos.app_ready())
-    app = App()
-    status_now = app.wait_sync(device_id, ("in_sync", "changes_pending"), 60)
-    view = app.device(device_id)
-    note("H10 what the interruption hit", f"request answered: {outcome.get('answer', ('none',))[0]}; automation written in Home Assistant: {written}; "
-         f"status after restart: {status_now}; message: {(view.get('last_result') or {}).get('message')}")
-    check("H10 afterwards the App's view matches Home Assistant: in sync if the write went through, pending if not - never “changed outside”",
-          status_now == ("in_sync" if written else "changes_pending"), (status_now, written))
-    if status_now != "in_sync":
-        status, _ = app.deploy(device_id)
-        check("H10 ...and the pending change deploys normally", status == 200 and app.wait_sync(device_id, timeout=20) == "in_sync")
-    check("H10 the automation runs with the new value", automation(automation_id)["actions"][0]["then"][0]["data"]["brightness_pct"] == 33)
+        stopper = threading.Thread(target=haos.app, args=("stop",), daemon=True)
+        deployer = threading.Thread(target=deploy, daemon=True)
+        stopper.start()
+        time.sleep(head_start)
+        deployer.start()
+        deployer.join(90)
+        stopper.join(200)
+        written = automation(automation_id)["actions"][0]["then"][0]["data"]["brightness_pct"] == final
+        haos.app("start")
+        ready = haos.app_ready()
+        app = App()
+        status_now = app.wait_sync(device_id, ("in_sync", "changes_pending"), 60)
+        message = (app.device(device_id).get("last_result") or {}).get("message")
+        answered = outcome.get("answer", ("none",))[0]
+        hit.append(f"stop {head_start} s ahead: request answered {answered}, written in Home Assistant: {written}, after restart: {status_now}"
+                   + (f" ({message})" if message and "interrupted" in message else ""))
+        check(f"H10 stop during a deployment (attempt {attempt + 1}): the App starts again and its view matches Home Assistant - "
+              "in sync if the write went through, pending if not, never “changed outside”",
+              ready and status_now == ("in_sync" if written else "changes_pending"), hit[-1])
+        if status_now != "in_sync":
+            status, _ = app.deploy(device_id)
+            check(f"H10 (attempt {attempt + 1}) ...and the pending change deploys normally", status == 200 and app.wait_sync(device_id, timeout=20) == "in_sync")
+        if answered != 200:
+            break
+    note("H10 what the interruptions hit", "; ".join(hit))
+    check("H10 the automation runs with the last value", automation(automation_id)["actions"][0]["then"][0]["data"]["brightness_pct"] == final)
 
     # remove
     status, removed = app.change("api/devices/delete", {"device_id": device_id, "overwrite": False})
