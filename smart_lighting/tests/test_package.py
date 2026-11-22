@@ -31,7 +31,7 @@ def test_only_one_app_config_in_repository() -> None:
     ]
     # Smart Occupancy Detection (Phase 0.1) is a second, independent App in the same repository.
     assert sorted(found) == ["automation_builder/config.yaml", "smart_lighting/config.yaml",
-                             "smart_occupancy_detection/config.yaml"]
+                             "smart_occupancy_detection/config.yaml", "smart_predictive_climate/config.yaml"]
 
 
 def test_required_identity() -> None:

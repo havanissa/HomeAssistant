@@ -1,0 +1,19 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Smart Adaptive & Predictive Climate",
+        "description": "Native entities for the Smart Adaptive & Predictive Climate App. There is nothing to configure here: rooms are set up in the App, and the App is paired from its Settings page."
+      }
+    },
+    "abort": {
+      "already_configured": "Smart Adaptive & Predictive Climate is already set up.",
+      "single_instance_allowed": "Smart Adaptive & Predictive Climate is already set up."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "app_connected": {"name": "App connected"}
+    }
+  }
+}

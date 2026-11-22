@@ -1,0 +1,60 @@
+# Disposable Home Assistant for the Smart Adaptive & Predictive Climate end-to-end checks (never production).
+# demo: climate entities (observed only) and weather entities with hourly forecasts. Test drivers move the
+# room and outdoor temperatures. Smart Comfort's and Smart Occupancy Detection's companions are installed beside
+# this App's companion (custom_components) to show they do not interfere.
+default_config:
+demo:
+homeassistant:
+  name: Heima
+  latitude: 62.01
+  longitude: -6.77
+  elevation: 20
+  unit_system: metric
+  time_zone: Atlantic/Faroe
+  country: FO
+http:
+  server_host:
+    - 127.0.0.1
+    - 172.30.32.1
+  server_port: 18123
+logger:
+  default: warning
+input_number:
+  kamar_temp:
+    name: Kamar temperature (test driver)
+    min: 0
+    max: 40
+    step: 0.1
+    initial: 19.5
+  outdoor_temp:
+    name: Outdoor temperature (test driver)
+    min: -30
+    max: 40
+    step: 0.1
+    initial: 4.0
+input_boolean:
+  kamar_sensor_ok:
+    name: Kamar sensor available (test driver)
+    initial: true
+  kamar_window:
+    name: Kamar window open (test driver)
+template:
+  - sensor:
+      - name: Kamar temperature
+        unique_id: spc_e2e_kamar_temperature
+        device_class: temperature
+        unit_of_measurement: "°C"
+        state_class: measurement
+        state: "{{ states('input_number.kamar_temp') }}"
+        availability: "{{ is_state('input_boolean.kamar_sensor_ok', 'on') }}"
+      - name: Outdoor temperature
+        unique_id: spc_e2e_outdoor_temperature
+        device_class: temperature
+        unit_of_measurement: "°C"
+        state_class: measurement
+        state: "{{ states('input_number.outdoor_temp') }}"
+    binary_sensor:
+      - name: Kamar window
+        unique_id: spc_e2e_kamar_window
+        device_class: window
+        state: "{{ is_state('input_boolean.kamar_window', 'on') }}"

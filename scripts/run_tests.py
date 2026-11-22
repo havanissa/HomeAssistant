@@ -14,6 +14,7 @@ engine harness in ``tests/engine/custom_components``):
     python scripts/run_tests.py tests/companion       # Smart Comfort's minimal companion (Phase A6)
     python scripts/run_tests.py tests/engine          # Smart Comfort's engines in a real Home Assistant
     python scripts/run_tests.py tests/sod_companion   # Smart Occupancy Detection's companion integration
+    python scripts/run_tests.py tests/spc_companion   # Smart Adaptive & Predictive Climate's companion integration
     python scripts/run_tests.py tests/automation_builder   # Automation Builder's generated automations, run by HA
     python scripts/run_tests.py                       # all of them, one after the other
 """
@@ -30,7 +31,8 @@ if not hasattr(logger_pkg, "_clear_logger_overwrites"):  # moved in 2026.11
 
 import pytest  # noqa: E402
 
-SUITES = ("tests/companion", "tests/engine", "tests/sod_companion", "tests/automation_builder")
+SUITES = ("tests/companion", "tests/engine", "tests/sod_companion", "tests/spc_companion",
+          "tests/automation_builder")
 
 
 def main(argv: list[str]) -> int:
