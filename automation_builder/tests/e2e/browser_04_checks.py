@@ -38,6 +38,15 @@ def designer(device_id: str) -> dict:
     return items[0]["config"] if items else {}
 
 
+def add_v1(device_id: str, designer: dict) -> str:
+    """A Lighting Designer of version 1 (Phase 0.3), as an earlier App saved it (since 0.4 new designers are version 2;
+    version 1 keeps its editor). Added through export and import."""
+    exported = api("export")
+    exported["config"]["devices"][device_id].setdefault("designers", []).append(designer)
+    change("import/apply", {"document": exported})
+    return designer["id"]
+
+
 def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
     out.mkdir(parents=True, exist_ok=True)
     results: list[tuple[str, bool, str]] = []
@@ -90,10 +99,12 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                 go(f"#/gallery/{lights}", "New automation")
                 cards = frame.locator(".card.tpl[data-template]")
                 check(f"{tag}: the gallery shows the lighting templates for a light", cards.count() == 5
-                      and frame.locator("[data-template=mood_lighting]").count() == 1 and frame.locator("text=Planned").count() == 1, str(cards.count()))
+                      and frame.locator("[data-template=l2_mood]").count() == 1 and frame.locator("text=Planned").count() == 1, str(cards.count()))
                 check(f"{tag}: the gallery does not overflow", not overflow())
                 shot("gallery")
-                frame.locator("[data-template=mood_lighting] button[data-act=use]").click()
+                gid = add_v1(lights, {"id": "g_000004b1", "kind": "lighting", "version": 1, "name": "Lighting", "lights": [],
+                                      "primary": "mood", "mood": {"enabled": True}})   # the 0.3 mood template, as 0.3 saved it
+                go(f"#/design/{lights}/{gid}", "Lighting")
                 frame.locator("nav.tabs").wait_for()
                 check(f"{tag}: a template opens the designer with its controls on and nothing bound",
                       designer(lights).get("primary") == "mood" and designer(lights)["lights"] == [] and designer(lights)["mood"]["entity_id"] is None)

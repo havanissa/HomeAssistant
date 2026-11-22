@@ -25,6 +25,20 @@ WINDOW, AWNING = "cover.living_room_window", "cover.test_awning"
 HERE = Path(__file__).parent
 
 
+def add_v1(app: App, device_id: str, designer: dict) -> str:
+    """A Lighting Designer of version 1 (Phase 0.3), as an earlier App saved it: since 0.4 the App creates version 2,
+    and version 1 designers are kept and compiled exactly as before. Added through export and import."""
+    _, exported = app.get("api/export")
+    exported["config"]["devices"][device_id].setdefault("designers", []).append(designer)
+    status, data = app.change("api/import/apply", {"document": exported})
+    assert status == 200, data
+    return designer["id"]
+
+
+V1_COMBINED = {"id": "g_000004a1", "kind": "lighting", "version": 1, "name": "Lighting", "lights": [], "primary": "presence",
+               "mood": {"enabled": True}, "presence": {"enabled": True}, "lux": {"enabled": True}}
+
+
 def main() -> int:  # noqa: PLR0915 - one linear scenario
     parser = argparse.ArgumentParser()
     parser.add_argument("tokens")
@@ -84,9 +98,8 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
     device = app.add_device("Living lights", [CEILING, KITCHEN, RGBWW])
     _, gallery = app.get(f"api/gallery/{device}")
     check("51 the gallery offers the lighting templates (and only those) for lights", {t["designer"] for t in gallery["templates"]} == {"lighting"}
-          and "combined_lighting" in [t["id"] for t in gallery["templates"]] and gallery["planned"], [t["id"] for t in gallery["templates"]])
-    status, made = app.change("api/gallery/apply", {"device_id": device, "template": "combined_lighting"})
-    designer_id = made["designer_id"]
+          and "l2_presence" in [t["id"] for t in gallery["templates"]] and gallery["planned"], [t["id"] for t in gallery["templates"]])
+    designer_id = add_v1(app, device, V1_COMBINED)   # the combined template of 0.3, as a 0.3 App saved it
     _, page = app.get(f"api/designers/{device}/{designer_id}")
     config = page["designer"]["config"]
     check("51 a template turns controls on and binds nothing", config["primary"] == "presence" and config["mood"]["enabled"] and config["lux"]["enabled"]
@@ -188,7 +201,7 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
 
     # ------------------------------------------------- 55. a position zone
     desk_device = app.add_device("Desk lamp", [OFFICE])
-    _, made = app.change("api/designers/create", {"device_id": desk_device, "kind": "lighting"})
+    made = {"designer_id": add_v1(app, desk_device, {"id": "g_000004a2", "kind": "lighting", "version": 1, "name": "Lighting", "lights": []})}
     _, page = app.get(f"api/designers/{desk_device}/{made['designer_id']}")
     d = page["designer"]["config"]
     d.update(lights=[OFFICE], primary="presence")

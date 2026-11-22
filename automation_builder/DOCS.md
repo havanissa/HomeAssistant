@@ -215,7 +215,8 @@ blocks as before; else → if the run was started by a rule's trigger → the de
 
 ## Specialised designers (lights and covers)
 
-For lights and covers there are graphical designers next to the rule editor. They are another way to write the
+For lights and covers there are graphical designers next to the rule editor (the Lighting Designer also maps
+switches, buttons and remotes). They are another way to write the
 rules of a device - not a separate engine: what a designer configures becomes ordinary rules of that device,
 compiled with its other rules into its **one** native automation. Nothing of a designer runs inside the App.
 
@@ -250,37 +251,94 @@ without one, no tilt for a blind without one.
 
 ### Lighting Designer
 
-Tabs: **Combination**, **Mood**, **Presence / Zones**, **Light Level**, **Schedule**, **Overrides**,
-**Simulate**, **YAML**, and *Advanced Rules* (the device's ordinary rules).
+Tabs: **Lights**, **Truth Matrix**, **Brightness Matrix**, **Colour & Mood**, **Switches & Remotes**,
+**Advanced Rules**, **Priority & Resolution**, **Simulate**, **YAML**.
 
-- **Combination.** Tick the lights that take part (rows) and turn on the controls you want; nothing is on by
-  itself. When several matrices are on, choose which one **decides** what the lights do. The others are:
-  - the **mood**: the palette for cells that say *Use mood* (optionally re-applied when the mood changes);
-  - **light level** and **presence**: *permissions* - “allow ON only in these bands”, “allow OFF only in these
-    bands”, “allow ON only while one of these situations holds”. A permission never sends a command by itself,
-    unless you tick *also act when it changes*.
-- **Mood.** The mood source is any entity whose state is the mood - typically an `input_select`. You choose it
-  (for example `input_select.main_mood`). A value like `Auto` that hands the choice to something else can be set
-  up as the *automatic mode*: then the effective mood is read from another entity, and `Auto` is no column.
-- **Presence / Zones.** The columns are situations: *Sofa occupied*, *Kitchen occupied*, *Room vacant*,
-  *Room possibly occupied*, *Anna at home* … from the presence sources. When two situations can hold at the same
-  time and both have a cell for a light, choose a policy:
-  - **Priority** (the column order): while a column holds whose cell for a light is set (also through a default)
-    or *NO ACTION*, the columns to its right do not act on that light. An *UNSET* cell does not hold them back.
-  - **Nothing while ambiguous**: a column acts only while no other column with a cell for the light holds.
-  - **Both, when compatible**: both act; if they want different things, that is a conflict that blocks deployment
-    until you change the cells, choose another policy, or confirm that the latest situation may win.
-  Note that a matrix default fills *every* unset cell, also in the zone columns; use a row default or explicit
-  cells when a default is meant for one column only (the cells always show what applies).
-  *Occupancy rechecks* (on request) correct lost commands for binary sensors without delays, with the safety
-  rules of the ordinary occupancy rechecks.
-- **Light Level.** Choose the sensor, then name the bands and give their upper limits (for example *Dark* below
-  50, *Dim* below 200 …); nothing is assumed. A brighter band starts only *hysteresis* above its limit; a *delay*
-  makes a new level hold before the lights react.
-- **Schedule.** Time windows in which the deciding matrix acts, and timed entries (what happens at a time).
-- **Overrides.** A switch or helper that pauses the designer while it is on, and a pause after somebody changed a
-  light by hand (a change not made by an automation or script; after a Home Assistant restart every state counts
-  as changed by hand for this time).
+**How a light is controlled.** Each light has its own native automation. It evaluates the light from the current
+states every time one of its inputs changes (a matrix source, the mood, an Advanced Rule's condition, the manual
+override), and resolves every *property* on its own - on/off, brightness, colour, effect, transition - by asking
+the layers in the priority order (default, highest first):
+
+1. **Advanced Rules** (“while …” rules)
+2. **Switch & remote overrides** (a manual override that a switch started)
+3. **Colour & Mood**
+4. **Brightness Matrix**
+5. **Truth Matrix**
+
+The first layer that *decides* a property wins: a value, or *NO ACTION* (leave it as it is). *UNSET* means “this
+layer does not decide”, so the next one is asked. Then **truth gating** applies: a resolved OFF switches the light
+off (brightness and colour are not sent); a resolved ON switches it on with the resolved settings; otherwise an ON
+light gets the resolved brightness and colour and an OFF light stays off - brightness and colour never switch a
+light on by themselves. Nothing is sent when the light already is what the evaluation wants, and nothing at all
+while it is unavailable (a smart bulb whose power a wall switch cut gets no endless retries). Example: Truth ON,
+Brightness 40 %, mood Hygge = 2700 K → ON at 40 %, 2700 K; if Hygge also sets 25 %, the mood's 25 % wins (it ranks
+above the Brightness Matrix) - unless you move the Brightness Matrix higher.
+
+Because the evaluation always starts from the current states, **the light returns to the currently calculated
+state by itself** when an Advanced Rule's conditions stop holding or a manual override ends - no rule of its own
+is needed, and no old brightness is restored when the inputs changed meanwhile. A light is evaluated when one of
+its inputs changes, not at the moment you deploy; *Reconciliation* (Lights tab) can also evaluate it every few
+minutes (it changes nothing that is already right).
+
+- **Lights.** Tick the lights that take part. Optional: periodic reconciliation; *apply the calculated state when an
+  unavailable light is available again* (off by default: a bulb that comes back after its wall switch was turned on
+  is left as it comes back).
+- **Truth Matrix.** Lights × columns, each cell ON, OFF, NO ACTION, USE DEFAULT or UNSET (no percentages). Columns
+  can be any of: a presence situation (*Sofa occupied*, *Room vacant* …, from the presence sources), a range of a
+  number (a light level: *below 50*, *50–300*, *from 300*, with a delay against flicker), an entity's state (a
+  switch *is on*, a mood selector *is Hygge*, a media player *is playing* …), a time of day with weekdays, or
+  *Always*. When two columns can hold at the same time (two zones occupied at once) and want different things for a
+  light, the matrix needs an explicit policy: **an explicit ranking** (you rank the columns under Priority &
+  Resolution - the order of the columns in the table decides nothing), **ON wins**, **OFF wins**, or **nothing
+  while they disagree**. Several Truth Matrices are combined explicitly (an order you set, ON wins, or OFF wins).
+- **Brightness Matrix.** The same columns, each cell 0-100 %, NO ACTION, USE DEFAULT or UNSET. Brightness never
+  overrides an OFF and never switches a light on. **0 % is never silently an OFF**: as soon as a cell is 0 % you
+  choose what it means - switch the light off, the lowest brightness (1 %), or leave the brightness as it is.
+  Policies for overlapping columns: a ranking, the highest, the lowest, nothing while they disagree.
+- **Colour & Mood** (optional). A mood source you choose (an `input_select` or any entity whose state is the mood),
+  the moods (columns), and per light and mood: colour temperature or a colour, brightness, effect, transition -
+  each field empty means unchanged. A mood applies while the light is on; it never switches a light on.
+- **Switches & Remotes.** Room → device → entity or event: the device triggers Home Assistant offers for the
+  device (ZHA, Zigbee2MQTT, Hue …), the event types of an event entity, or the on/off states of a switch. A
+  **latched** switch (it stays on or off) reports state changes, and can also be a matrix source (a column *is
+  on*); a **momentary** button or remote reports presses - its state is never read as “pressed”. Anything Home
+  Assistant does not list (a `zha_event` command, an MQTT payload) can be mapped by hand (*Manual event*). For each
+  interaction you choose the action - toggle, on, off, set or change brightness, apply a mood, start a manual
+  override, resume automatic control, run a one-shot Advanced Rule, dim while held (until the release), or a light
+  action with data - and the lights it acts on. Nothing is assigned for you. Without *start a manual override* an
+  action is **one-shot**: it happens once, and the next evaluation applies the matrices again (a switch gets no
+  priority just because it is physical).
+  **Manual override**: while it lasts, the layers below it in the priority change nothing for that light. It lasts
+  *until resumed* (a resume action, or turning the helper off in Home Assistant), *a time*, *until a room or zone
+  is vacant*, or *until an event*; a resume action always ends it, and the light then returns to the calculated
+  state. Optionally a change *by hand* (the light switched on or off by something that is not an automation - the
+  app, voice, the device itself) also starts one; Home Assistant's context tells them apart (attribute reports do
+  not count, and a bulb without power reports *unavailable* instead, which is not detected).
+  The override state is kept in Home Assistant **helpers** that the App creates when you deploy and owns:
+  `input_boolean.ab_<device>_<light>_override` (on = override active) and, for a timed override,
+  `timer.ab_<device>_<light>_override` (restored across restarts). They survive restarts and do not need the App.
+  The review before deploying lists them; a helper of that name that the App did not create blocks deployment and
+  is never touched; helpers no longer needed are deleted after the automations stopped using them, and removing
+  the device removes them. A light that a wall switch powers cannot be switched on by software while the wall
+  switch is off; not every Zigbee switch has a detached (decoupled) mode.
+- **Advanced Rules.** **While …** rules set properties (ON/OFF, brightness, colour, effect, or NO ACTION to keep
+  one) while their conditions hold, and release them by themselves (“while the TV plays → OFF”: when it stops, the
+  light returns to what the matrices say now). **When …** rules act once at their moment (a time, or run from a
+  switch). Their order (1 = highest) is their priority among themselves. The device's ordinary rules (the generic
+  IF / AND-OR / THEN editor) are listed there too; they act on their own, outside this priority, and the conflict
+  check reports when both can act at the same moment.
+- **Priority & Resolution.** The order of the five layers (move them up or down), how several matrices combine,
+  the rankings of columns, and **who controls each light now**: per light the value and the layer of every
+  property, whether an override is active, and what its automation would send - calculated from Home Assistant's
+  states with the same plan the automation uses. Unresolved conflicts (overlapping columns without a policy, 0 %
+  without a meaning, an override without a policy …) are listed and block deployment until resolved.
+
+**Designers made by 0.3** (version 1) keep working and compile exactly as before. Their page offers **Convert to
+version 2**: you see what changes (for example: the lights now follow the matrices continuously; “priority by
+column order” becomes an explicit ranking in the same order; “pause after a change by hand” becomes a timed manual
+override). Parts that have no exact equivalent - permissions (gates), “both when compatible”, schedule windows,
+colours inside situation cells, hysteresis - are named and nothing is converted until you change them or rebuild
+by hand. Converting saves the configuration only; the automation deployed now keeps running until you deploy.
 
 ### Cover Designer
 
@@ -337,11 +395,11 @@ evaluates by itself), so nothing depends on the App at run time.
 
 ### Templates
 
-Lighting: *Mood Lighting*, *Presence Lighting*, *Lux-Adaptive Lighting*, *Combined Mood + Presence + Lux*,
-*Zone-Specific Lighting*. Covers: *Sun-Angle Shading*, *Privacy Presets*, *Cover Mood Matrix*, *Mood-Linked
-Covers*, *Scheduled Covers*. A template turns on the controls it is about and lists what it needs; it chooses no
-entity, value or default. Designers for climate, ventilation, buttons/remotes, fans and switches are planned; use
-the rule editor for those devices.
+Lighting: *Presence lighting* and *Light-level lighting* (a Truth Matrix), *Brightness by situation* (a Brightness
+Matrix), *Colour & mood*, *Wall switch or remote*. Covers: *Sun-Angle Shading*, *Privacy Presets*, *Cover Mood
+Matrix*, *Mood-Linked Covers*, *Scheduled Covers*. A template adds what it is about and lists what it needs; it
+chooses no entity, value or default. Designers for climate, ventilation and fans are planned; use the rule editor
+for those devices.
 
 ### Simulation
 
@@ -351,6 +409,12 @@ that the trigger starts, which of its conditions fail, the command each light or
 and inputs that are missing from the scenario. It evaluates the same rules that are deployed. Nothing is sent to
 any device; a hand-written template or a sun condition is reported as *cannot be evaluated offline*. It is a
 prediction, not a test of the deployed automation.
+
+For the Lighting Designer the simulation shows, per light: each matrix's value and which columns hold, the mood,
+the active Advanced Rules, whether an override is active and when it ends, the winning layer of every property,
+and the command (or why nothing is sent). *What just happened* can be a press of a switch or remote - an event,
+kept apart from the states: you see what the mapping does (and that a one-shot action lasts only until the next
+evaluation, or that an override starts).
 
 ## Occupancy (optional)
 
@@ -562,12 +626,19 @@ fixed allowlist enforced in the App before anything is sent (`backend/ab/ha.py`)
 | Websocket `trace/list`, `trace/get` | the runs of the App's **own** automations (ids that start with `automation_builder_`), for the rule diagnostics |
 | Websocket `device_automation/{trigger,condition,action}/list`, `get_services` | what Home Assistant offers for a device; the notify actions |
 | Websocket `blueprint/list`, `blueprint/save` | install an exported blueprint, only as `automation_builder/<name>.yaml` among the automation blueprints, only when you press Install |
+| Websocket `input_boolean/{list,create,delete}`, `timer/{list,create,delete}` | the manual-override helpers of the Lighting Designer, only named `AB <device> <light> override` (ids `ab_<device>_<light>_override`), created at deployment; only helpers the App created and recorded are ever deleted |
 | HTTP `GET/POST/DELETE /api/config/automation/config/<id>` | read, save and delete **one automation**, only for ids that start with `automation_builder_` |
 
 The App cannot call a service, set a state, fire an event, change a registry or turn an automation on or off,
 and it has no access to Home Assistant's configuration folder (no `map`). It never controls a device itself:
-the deployed automations do. The only things it writes are its own automations and, on request, its own
-blueprint files.
+the deployed automations do. The only things it writes are its own automations, the override helpers its
+Lighting Designers need (at deployment) and, on request, its own blueprint files.
+
+**Override helpers.** `input_boolean/create` and `timer/create` are the commands Home Assistant's own helper
+editor uses; helpers made this way are editable in *Settings → Helpers* and kept in Home Assistant's storage, so
+they survive restarts and work without the App. The App records each helper it created (in its deployment
+records, and in diagnostics); a helper of the same name that it did not create is reported and never changed or
+deleted.
 
 **Blueprint installation.** Home Assistant has no documented public API for storing a blueprint file either.
 `blueprint/save` is the websocket command its own "Import blueprint" dialog uses; it validates the blueprint and
@@ -601,7 +672,8 @@ deployments fail with a clear message; rules, records and the automations alread
   in that file are lost. Automations kept in other YAML files are not affected.
 - The App acts with administrator rights (as every App with `homeassistant_api`); the restriction to its own
   automations is enforced by the App.
-- Not part of the rule model: `stop`, `parallel`, `repeat for_each`, events fired by a rule, response variables,
+- Not part of the rule model: `stop`, `parallel`, `repeat for_each`, events fired by a rule (only the Lighting
+  Designer's generated rules fire their own re-evaluation event `automation_builder_lighting`), response variables,
   `continue_on_error`, and trigger types such as zone, calendar, tag, webhook and conversation. A hand-entered
   action is passed to Home Assistant exactly as written, never simplified.
 - An occupancy rule with branches, waits or other advanced actions gets no automatic rechecks (a recheck would
@@ -620,8 +692,9 @@ tests/automation_builder` from the repository root loads the compiler's output -
 imported copies next to their originals - into a real Home Assistant (its automation parser and engine) and
 drives states and time. `tests/e2e/` runs the real image against a disposable Home Assistant (`stack.sh`,
 `prepare.py`, `ha/` with the test configuration, `e2e_checks.py`, `e2e_02_checks.py`, `browser_checks.py`,
-`browser_02_checks.py`, `e2e_03_checks.py`, `browser_03_checks.py`, and for the designers `e2e_04_checks.py`,
-`browser_04_checks.py`) and against a Home Assistant OS test system (`haos.py`, `haos_checks.py`,
-`sod_checks.py` with the real Smart Occupancy Detection). Details and results: `docs/AB-0.3-automation-builder.md`
-(designers), `docs/AB-0.2-automation-builder.md` (with the Home Assistant OS procedure) and
-`docs/AB-0.1-automation-builder.md`.
+`browser_02_checks.py`, `e2e_03_checks.py`, `browser_03_checks.py`, for the designers `e2e_04_checks.py`,
+`browser_04_checks.py`, and for the Lighting Designer 2 `e2e_05_checks.py`, `browser_05_checks.py`) and against a
+Home Assistant OS test system (`haos.py`, `haos_checks.py`, `sod_checks.py` with the real Smart Occupancy
+Detection). Details and results: `docs/AB-0.4-lighting-designer.md` (Lighting Designer 2),
+`docs/AB-0.3-automation-builder.md` (designers), `docs/AB-0.2-automation-builder.md` (with the Home Assistant OS
+procedure) and `docs/AB-0.1-automation-builder.md`.

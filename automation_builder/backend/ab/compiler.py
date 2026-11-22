@@ -368,7 +368,12 @@ def _action(action: dict[str, Any], ctx: _Ctx) -> dict[str, Any]:
         if entities:
             native["target"] = {"entity_id": entities}
         if action["data"]:
-            native["data"] = dict(action["data"])
+            native["data"] = dict(action["data"]) if isinstance(action["data"], dict) else action["data"]
+        return native
+    if kind == "event":
+        native = {"event": action["event_type"]}
+        if action["event_data"]:
+            native["event_data"] = dict(action["event_data"])
         return native
     if kind == "notify":
         native = {"action": action["action"]}
@@ -470,7 +475,8 @@ def expectations(rule: dict[str, Any], targets: list[Any]) -> dict[str, Any]:
             continue
         if kind["kind"] == "state":
             expected = kind["states"]
-            given = [v for v in action["data"].values() if isinstance(v, Input) and [plain(v)] == expected]
+            given = [v for v in (action["data"].values() if isinstance(action["data"], dict) else [])
+                     if isinstance(v, Input) and [plain(v)] == expected]
             if given:  # the state follows a blueprint input (a selected option, a mode)
                 expected = [given[0]]
             for entity_id in action_entities(action, targets):
@@ -693,18 +699,35 @@ def compile_device(device: dict[str, Any], settings: dict[str, Any]) -> dict[str
                                      "cancels it: the actions after the wait then do not run. A trigger with "
                                      "“for …” survives better and blocks nothing."})
         (separate if waits(rule) else shared).append(rule)
+    # A designer can ask for an automation of their own for a group of its rules (the Lighting Designer: one per
+    # light). Such a group never waits; it runs queued like the shared automation, next to it.
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for rule in list(shared):
+        group = (rule.get("generated") or {}).get("group")
+        if group:
+            groups.setdefault(group, []).append(rule)
+            shared.remove(rule)
     automations = []
     default = active_default(device) if rules else None
     if device["enabled"] and active_default(device) and not rules:
         notes.append({"level": "info", "code": "default_without_rules", "rule_id": None,
                       "message": "The default never runs while no rule is enabled: it has no trigger of its own."})
+    grouped = [r for members in groups.values() for r in members]
     if shared or default:
         main = _automation(device, shared, settings, mode="queued", separate=None, notes=notes, default=default,
-                           others=separate)
+                           others=[*separate, *grouped])
         main["reason"] = (f"{len(shared)} rule{'s' if len(shared) != 1 else ''} in one automation"
                           + (", with the default for when none of the device's rules matches" if default else ""))
         main["default"] = bool(default)
         automations.append(main)
+    for group, members in groups.items():
+        suffix = "l_" + hashlib.sha256(group.encode()).hexdigest()[:8]
+        own = _automation(device, members, settings, mode="queued", separate={"id": suffix, "name": group}, notes=notes)
+        own["role"] = "group"
+        own["group"] = group
+        own["reason"] = (f"The rules for {group} have an automation of their own (one per light): "
+                         f"{len(members)} rule{'s' if len(members) != 1 else ''}.")
+        automations.append(own)
     for rule in separate:
         own = _automation(device, [rule], settings, mode=rule["retrigger"], separate=rule, notes=notes)
         own["reason"] = f"“{rule['name']}” has its own automation because {SEPARATE_REASONS[rule['retrigger']]}."

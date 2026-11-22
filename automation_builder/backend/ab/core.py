@@ -19,7 +19,9 @@ through the same steps:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
+from datetime import UTC, datetime
 import difflib
 import logging
 from typing import Any
@@ -27,11 +29,11 @@ from typing import Any
 import aiohttp
 
 from . import blueprint, catalog, compiler, conflicts as conflict_check, describe, designers, importer, model, simulate
-from .designers import gallery, presence as presence_sources, solar
+from .designers import gallery, lighting2, presence as presence_sources, solar, switches
 from .const import APP_NAME, APP_VERSION
 from .diagnostics import Observer
 from .discovery import Index
-from .ha import AutomationConfigApi, DeployError, HomeAssistantClient, HomeAssistantError, NotAllowed, utcnow_iso
+from .ha import HELPER_DOMAINS, AutomationConfigApi, DeployError, HomeAssistantClient, HomeAssistantError, NotAllowed, utcnow_iso
 from .logbuffer import BufferHandler
 from .model import ConfigError
 from .settings import Settings
@@ -158,13 +160,16 @@ class AppCore:
         return entity_id, config if isinstance(config, dict) else None
 
     # --------------------------------------------------------------- analysis
-    def _entity_problems(self, device: dict[str, Any], index: Index) -> list[dict[str, Any]]:
+    def _entity_problems(self, device: dict[str, Any], index: Index, created: set[str] | None = None) -> list[dict[str, Any]]:
         if self.ha is None or not self.ha.connected:
             return []
         out = []
         for entity_id, uses in sorted(model.referenced_entities(device).items()):
             use = ", ".join(sorted(uses))
-            if not index.exists(entity_id):
+            if entity_id in (created or set()) and not index.exists(entity_id):
+                out.append({"level": "info", "code": "helper_created_at_deploy", "entity_id": entity_id,
+                            "message": f"{entity_id} is a helper Automation Builder creates when you deploy."})
+            elif not index.exists(entity_id):
                 out.append({"level": "warning", "code": "missing_entity", "entity_id": entity_id,
                             "message": f"{entity_id} ({use}) does not exist in Home Assistant."})
             elif (index.states.get(entity_id) or {}).get("state") == "unavailable":
@@ -196,7 +201,7 @@ class AppCore:
             "conflicts": found,
             "blocking": len(conflict_check.blocking(found)) + len(blocking_problems),
             "designer_problems": blocking_problems,
-            "entity_problems": self._entity_problems(effective, index),
+            "entity_problems": self._entity_problems(effective, index, {h["entity_id"] for h in self._wanted_helpers(expansion)}),
             "summaries": {r["id"]: describe.rule(r, index.name, device["targets"]) for r in effective["rules"]},
             "effective": effective, "expansion": expansion,
             "generated": expansion.rules,
@@ -690,6 +695,100 @@ class AppCore:
         return [f"{key}: {value.get('error')}" for key, value in result.items()
                 if isinstance(value, dict) and not value.get("valid")]
 
+    # ------------------------------------------------------------ helpers (Lighting Designer 2)
+    @staticmethod
+    def _wanted_helpers(expansion: Any) -> list[dict[str, Any]]:
+        """The helpers the device's designers need in Home Assistant (manual override state)."""
+        out: list[dict[str, Any]] = []
+        for designer_id, view in expansion.views.items():
+            for helper in view.get("helpers") or []:
+                if all(h["entity_id"] != helper["entity_id"] for h in out):
+                    out.append({**helper, "designer_id": designer_id})
+        return out
+
+    async def _existing_helpers(self) -> dict[str, dict[str, Any]]:
+        """``{entity_id: {domain, item_id, name}}`` of the input_boolean and timer helpers made in the interface."""
+        ha = self._require_ha()
+        index = self.index()
+        out: dict[str, dict[str, Any]] = {}
+        for domain in HELPER_DOMAINS:
+            try:
+                items = await ha.command(f"{domain}/list") or []
+            except HomeAssistantError as err:
+                raise ConfigError("ha_error", f"Home Assistant could not list its {domain} helpers: {err.message}", 502) from err
+            for item in items:
+                if isinstance(item, dict) and isinstance(item.get("id"), str):
+                    entity_id = next((e for e, entry in index.registry.items() if entry.get("platform") == domain
+                                      and entry.get("unique_id") == item["id"]), f"{domain}.{item['id']}")
+                    out[entity_id] = {"domain": domain, "item_id": item["id"], "name": item.get("name")}
+        return out
+
+    async def _helper_plan(self, device: dict[str, Any], analysis: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+        wanted = self._wanted_helpers(analysis["expansion"])
+        owned = {e: r for e, r in self.deploys.helpers.items() if r.get("device_id") == device["id"]}
+        if not wanted and not owned:
+            return [], []
+        existing = await self._existing_helpers()
+        items, reasons = [], []
+        for helper in wanted:
+            entity_id = helper["entity_id"]
+            same_item = next((e for e, h in existing.items() if h["domain"] == helper["domain"]
+                              and h["item_id"] == helper["item_id"]), None)
+            if entity_id in owned and same_item == entity_id:
+                operation = "keep"
+            elif same_item is not None or entity_id in existing or self.index().exists(entity_id):
+                operation = "foreign"
+                reasons.append(f"{entity_id} already exists in Home Assistant, but Automation Builder did not create it. "
+                               "Rename or delete it there (Settings → Helpers), then review again.")
+            else:
+                operation = "create"
+            items.append({**helper, "operation": operation})
+        wanted_ids = {h["entity_id"] for h in wanted}
+        for entity_id, record in owned.items():
+            if entity_id not in wanted_ids:
+                gone = not any(h["domain"] == record["domain"] and h["item_id"] == record["item_id"] for h in existing.values())
+                items.append({"entity_id": entity_id, "domain": record["domain"], "item_id": record["item_id"],
+                              "light": record.get("light"), "purpose": "no longer needed",
+                              "operation": "forget" if gone else "delete"})
+        return items, reasons
+
+    async def _create_helper(self, helper: dict[str, Any], device_id: str, by: str | None) -> None:
+        ha = self._require_ha()
+        params: dict[str, Any] = {"name": helper["name"], "icon": "mdi:hand-back-right"}
+        if helper["domain"] == "timer":
+            params.update(duration="00:00:00", restore=True)
+        try:
+            created = await ha.command(f"{helper['domain']}/create", **params) or {}
+        except HomeAssistantError as err:
+            raise DeployError(f"Home Assistant did not create the helper {helper['entity_id']}: {err.message}") from err
+        item_id = created.get("id") if isinstance(created, dict) else None
+        if item_id != helper["item_id"]:
+            if isinstance(item_id, str):
+                with contextlib.suppress(HomeAssistantError, NotAllowed):
+                    await ha.command(f"{helper['domain']}/delete", **{f"{helper['domain']}_id": item_id})
+            raise DeployError(f"Home Assistant created the helper under another id ({item_id}) than "
+                              f"{helper['item_id']}: an entity of that name exists already.")
+        self.deploys.helper_created(helper["entity_id"], domain=helper["domain"], item_id=item_id, device_id=device_id,
+                                    light=helper.get("light") or "", by=by)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.CONFIRM_TIMEOUT
+        while helper["entity_id"] not in (self.ha.states if self.ha else {}):
+            if loop.time() >= deadline:
+                raise DeployError(f"Home Assistant created the helper {helper['entity_id']}, but its entity did not appear.")
+            await asyncio.sleep(self.CONFIRM_INTERVAL)
+
+    async def _delete_helper(self, entity_id: str) -> None:
+        record = self.deploys.helpers.get(entity_id)
+        if record is None:  # never a helper this App did not create
+            return
+        ha = self._require_ha()
+        try:
+            await ha.command(f"{record['domain']}/delete", **{f"{record['domain']}_id": record["item_id"]})
+        except HomeAssistantError as err:
+            if err.code != "not_found":
+                raise DeployError(f"Home Assistant did not delete the helper {entity_id}: {err.message}") from err
+        self.deploys.helper_removed(entity_id)
+
     async def plan(self, device_id: Any) -> dict[str, Any]:
         device = self._device(device_id)
         self._require_ha()
@@ -731,9 +830,11 @@ class AppCore:
                 "diff": diff, "errors": errors, "entity_id": self._entity_of(automation_id),
             })
             fingerprint.append([automation_id, operation, (want or {}).get("hash"), actual_hash])
+        helpers, helper_reasons = await self._helper_plan(device, analysis)
+        fingerprint.append([[h["entity_id"], h["operation"]] for h in helpers])
         blocking = conflict_check.blocking(analysis["conflicts"])
         invalid = [e for i in items for e in i["errors"]]
-        reasons = []
+        reasons = list(helper_reasons)
         duplicates = [o for o in self._originals(device, index) if o["running"] and not o["allow_both"] and o["enabled"]
                       and device["enabled"]]
         for original in duplicates:
@@ -748,9 +849,11 @@ class AppCore:
             reasons.append(problem["message"])
         if invalid:
             reasons.append("Home Assistant does not accept the generated automation: " + "; ".join(invalid))
-        changes = any(i["operation"] != "none" for i in items)
+        changes = any(i["operation"] != "none" for i in items) or any(h["operation"] in ("create", "delete", "forget")
+                                                                         for h in helpers)
         return {
             "device_id": device["id"], "name": device["name"], "revision": self.store.revision, "items": items,
+            "helpers": helpers,
             "conflicts": analysis["conflicts"], "notes": analysis["notes"],
             "entity_problems": analysis["entity_problems"], "changes": changes,
             "needs_overwrite": any(i["external"] in ("modified", "foreign") for i in items),
@@ -831,7 +934,13 @@ class AppCore:
                            "generated": [r for r in current["generated"] if r["id"] in desired[i["id"]]["rule_ids"]]}
                           if i["operation"] in ("create", "update") else None)
                 for i in plan["items"] if i["operation"] in ("create", "update", "delete")}, by)
+            created: list[str] = []
             try:
+                for helper in plan["helpers"]:
+                    if helper["operation"] == "create":
+                        await self._create_helper(helper, device["id"], by)
+                        created.append(helper["entity_id"])
+                        done.append({"id": helper["entity_id"], "operation": "create", "entity_id": helper["entity_id"]})
                 for item in sorted(plan["items"], key=lambda i: i["operation"] in ("delete", "forget")):
                     automation_id, operation = item["id"], item["operation"]
                     if operation in ("create", "update"):
@@ -848,7 +957,12 @@ class AppCore:
                         done.append({"id": automation_id, "operation": operation, "entity_id": None})
             except (DeployError, ConnectionError, TimeoutError) as err:
                 not_restored = await self._undo(applied)
-                restored = ("Nothing was changed in Home Assistant." if not applied else
+                for entity_id in reversed(created):
+                    try:
+                        await self._delete_helper(entity_id)
+                    except (DeployError, ConnectionError, TimeoutError) as undo_err:
+                        not_restored.append(f"{entity_id}: {undo_err}")
+                restored = ("Nothing was changed in Home Assistant." if not applied and not created else
                             "The previous automation was put back." if not not_restored else
                             "The previous state could NOT be restored: " + "; ".join(not_restored))
                 message = f"Deployment failed: {err} {restored}"
@@ -870,6 +984,15 @@ class AppCore:
                                                        if r["id"] in desired[automation_id]["rule_ids"]])
                 else:
                     self.deploys.forget(automation_id)
+            for helper in plan["helpers"]:  # after the automations no longer use them
+                try:
+                    if helper["operation"] == "delete":
+                        await self._delete_helper(helper["entity_id"])
+                        done.append({"id": helper["entity_id"], "operation": "delete", "entity_id": helper["entity_id"]})
+                    elif helper["operation"] == "forget":
+                        self.deploys.helper_removed(helper["entity_id"])
+                except (DeployError, ConnectionError, TimeoutError) as err:
+                    _LOGGER.warning("A helper that is no longer needed could not be removed: %s", err)
             self.deploys.finish()
             self._related.clear()
             message = ", ".join(f"{d['operation']}d {d['entity_id'] or d['id']}".replace("deleted", "removed")
@@ -927,6 +1050,11 @@ class AppCore:
                 self._require_ha()
                 for automation_id in records:
                     await self._remove_automation(automation_id, overwrite)
+            for entity_id in [e for e, r in self.deploys.helpers.items() if r.get("device_id") == device["id"]]:
+                try:
+                    await self._delete_helper(entity_id)
+                except DeployError as err:
+                    raise ConfigError("deploy_failed", f"{err} The device was kept.", 502) from err
             new = copy.deepcopy(self.store.config)
             del new["devices"][device["id"]]
             self.last_results.pop(device["id"], None)
@@ -1191,6 +1319,10 @@ class AppCore:
                             "mismatches": self._mismatches(analysis["effective"], index),
                             "rule_diagnostics": {rid: {k: v for k, v in view.items() if k != "entities"}
                                                  for rid, view in self._rule_views(device, analysis, live, index).items()},
+                            "lighting": {d["id"]: _control_summary(self._lighting_live(analysis, d, index))
+                                         for d in device.get("designers") or []
+                                         if d.get("kind") == "lighting" and d.get("version") == 2},
+                            "helpers": {e: r for e, r in self.deploys.helpers.items() if r.get("device_id") == device["id"]},
                             "last_result": self.last_results.get(device["id"])})
         return {
             "app": {"name": APP_NAME, "version": APP_VERSION, "generated_at": utcnow_iso()},
@@ -1335,12 +1467,31 @@ class AppCore:
             raise ConfigError("unknown_designer", "This designer does not exist (anymore).", 404)
         shared = next((a for a in analysis["automations"] if a["role"] == "shared"), None)
         own_conflicts = [c for c in analysis["conflicts"] if set(c["rule_ids"]) & {r["id"] for r in item["rules"]}]
+        mine = [a for a in analysis["automations"] if set(a["rule_ids"]) & {r["id"] for r in item["rules"]}]
+        extra: dict[str, Any] = {}
+        config = item["config"]
+        if config.get("kind") == "lighting" and config.get("version") == 2 and item["supported"]:
+            extra["live"] = self._lighting_live(analysis, config, index)
+            extra["helpers"] = self._helpers_view(analysis["expansion"], config["id"], index)
+            extra["automations"] = [{"id": a["id"], "alias": a["alias"], "mode": a["mode"], "role": a["role"],
+                                     "rules": len(a["rule_ids"]), "group": a.get("group")} for a in mine]
+            extra["adoptable"] = [{k: v for k, v in item.items() if k != "trigger"} | {"trigger": describe.trigger(item["trigger"], index.name)}
+                                  for item in lighting2.adoptable(device, config)]
+        elif config.get("kind") == "lighting" and config.get("version") == 1:
+            extra["conversion"] = {k: v for k, v in lighting2.convert(config, (self.presence or {}).get("sources") or {}).items()
+                                   if k != "designer"}
+        if mine and config.get("version") == 2:
+            text = "".join(compiler.to_yaml(compiler.with_id(a)) for a in mine)
+        else:
+            text = compiler.to_yaml(compiler.with_id(shared)) if shared else ""
         return {"valid": True, "problems": [], "designer": item, "capabilities": view["capabilities"],
-                "conflicts": own_conflicts, "blocking": analysis["blocking"],
+                "conflicts": own_conflicts, "blocking": analysis["blocking"], **extra,
                 "automation": ({"id": shared["id"], "alias": shared["alias"], "mode": shared["mode"],
                                 "rules": len(shared["rule_ids"])} if shared else None),
-                "yaml": compiler.to_yaml(compiler.with_id(shared)) if shared else "",
+                "yaml": text,
                 "all_rules": len(analysis["effective"]["rules"]), "own_rules": len(device["rules"]),
+                "ordinary_rules": [{"id": r["id"], "name": r["name"], "enabled": r["enabled"],
+                                    "summary": analysis["summaries"][r["id"]]["text"]} for r in device["rules"]],
                 "device": {"id": device["id"], "name": device["name"], "targets": device["targets"]},
                 "presence": self._sources_view(index), "revision": self.store.revision}
 
@@ -1357,6 +1508,13 @@ class AppCore:
         effective = analysis["effective"]
         scenario = scenario if isinstance(scenario, dict) else {}
         result = simulate.run(effective, scenario, analysis["expansion"].refs.evaluators, index.name)
+        lighting = {}
+        for designer_id, gen in analysis["expansion"].generators.items():
+            ev = simulate.Evaluator(scenario.get("states") or {}, {"time": scenario.get("time") or "12:00:00",
+                                                                  "weekday": scenario.get("weekday") or "mon"},
+                                    analysis["expansion"].refs.evaluators, index.name)
+            lighting[designer_id] = {**lighting2.simulate(gen, ev, scenario, index.name), "missing": sorted(ev.missing)}
+        result["lighting"] = lighting
         return {**result, "triggers": simulate.triggers_of(effective, index.name),
                 "problems": [p for p in analysis["notes"] if p.get("level") == "blocking"],
                 "conflicts": [c for c in analysis["conflicts"] if c["level"] == "blocking" and not c["acknowledged"]]}
@@ -1365,9 +1523,107 @@ class AppCore:
         device = self._device(device_id)
         index = self.index()
         analysis = self.analysis(device, index)
-        return {"inputs": simulate.inputs(analysis["effective"], index),
+        events = [{"id": i["id"], "switch": w["name"], "label": i["label"] or lighting2.INTERACTION_NAMES[i["kind"]],
+                   "kind": i["kind"]}
+                  for d in device.get("designers") or [] if d.get("kind") == "lighting" and d.get("version") == 2
+                  for w in d["switches"] for i in w["interactions"]]
+        helpers = {h["entity_id"] for h in self._wanted_helpers(analysis["expansion"])}
+        inputs = simulate.inputs(analysis["effective"], index)
+        for entity_id in sorted(helpers - {i["entity_id"] for i in inputs}):
+            inputs.append({"entity_id": entity_id, "name": entity_id, "uses": ["manual override"], "state": "off",
+                           "attributes": {}, "exists": False, "suggested": ["on", "off"] if entity_id.startswith("input_boolean.")
+                           else ["idle", "active"]})
+        return {"inputs": inputs, "events": events,
                 "triggers": simulate.triggers_of(analysis["effective"], index.name),
                 "weekdays": list(model.WEEKDAYS)}
+
+    # ------------------------------------------------------------ Lighting Designer 2
+    def _now(self) -> tuple[datetime, dict[str, str]]:
+        """Now, and the local time and weekday of Home Assistant (its configured time zone)."""
+        now = datetime.now(UTC)
+        zone = (getattr(self.ha, "config", None) or {}).get("time_zone")
+        local = now
+        if isinstance(zone, str):
+            with contextlib.suppress(Exception):
+                from zoneinfo import ZoneInfo
+                local = now.astimezone(ZoneInfo(zone))
+        return now, {"time": local.strftime("%H:%M:%S"), "weekday": model.WEEKDAYS[local.weekday()]}
+
+    def _lighting_live(self, analysis: dict[str, Any], config: dict[str, Any], index: Index) -> dict[str, Any]:
+        """Which layer controls each light now (the Python twin with Home Assistant's current states)."""
+        gen = analysis["expansion"].generators.get(config["id"])
+        if gen is None or not (self.ha and self.ha.connected):
+            return {"available": False, "lights": []}
+        now, local = self._now()
+        ev = simulate.Evaluator(lighting2.live_states(index, now), local, analysis["expansion"].refs.evaluators, index.name)
+        return {"available": True, "at": now.isoformat(timespec="seconds"),
+                **lighting2.simulate(gen, ev, {}, index.name)}
+
+    def _helpers_view(self, expansion: Any, designer_id: str, index: Index) -> list[dict[str, Any]]:
+        out = []
+        for helper in self._wanted_helpers(expansion):
+            if helper["designer_id"] != designer_id:
+                continue
+            state = index.states.get(helper["entity_id"]) or {}
+            out.append({**helper, "exists": index.exists(helper["entity_id"]), "state": state.get("state"),
+                        "owned": helper["entity_id"] in self.deploys.helpers})
+        return out
+
+    def convert_designer(self, device_id: Any, designer_id: Any, apply: bool, expected_revision: Any,
+                         by: str | None) -> dict[str, Any]:
+        """A version 1 Lighting Designer as version 2: the report, and with ``apply`` the saved conversion.
+
+        Nothing reaches Home Assistant: the deployed automation keeps running until the device is deployed again.
+        """
+        device = self._device(device_id)
+        designer = self._designer(device, designer_id)
+        if designer.get("kind") != "lighting" or designer.get("version") != 1:
+            raise ConfigError("invalid", "Only a Lighting Designer of version 1 can be converted.")
+        result = lighting2.convert(designer, (self.presence or {}).get("sources") or {})
+        if not apply:
+            return {k: v for k, v in result.items() if k != "designer"}
+        if result["refused"]:
+            raise ConfigError("not_convertible", "This designer cannot be converted without guessing: "
+                              + " ".join(result["refused"]), 409)
+        new = copy.deepcopy(self.store.config)
+        new["devices"][device["id"]] = self._with_designer(device, result["designer"])
+        saved = self._save(new, expected_revision, f"designer converted to version 2: {designer_id}", by)
+        return {**saved, "changes": result["changes"], "designer_id": designer_id}
+
+    def adopt_rule(self, device_id: Any, designer_id: Any, rule_id: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        """Move an ordinary button rule into the designer's Switches & Remotes (only when that is exact): the rule is
+        replaced by an interaction and its mapping in one save, so nothing runs twice."""
+        device = self._device(device_id)
+        designer = self._designer(device, designer_id)
+        if designer.get("kind") != "lighting" or designer.get("version") != 2:
+            raise ConfigError("invalid", "Only the Lighting Designer (version 2) maps switches.")
+        found = next((f for f in lighting2.adoptable(device, designer) if f["rule_id"] == rule_id), None)
+        if found is None:
+            raise ConfigError("invalid", "This rule cannot be expressed exactly as a switch action (or it is gone).")
+        draft = self._with_designer(device, lighting2.adopt(designer, found))
+        draft["rules"] = [r for r in draft["rules"] if r["id"] != rule_id]
+        new = copy.deepcopy(self.store.config)
+        new["devices"][device["id"]] = draft
+        saved = self._save(new, expected_revision, f"rule {rule_id} moved into the designer {designer_id}", by)
+        return {**saved, **self.designer_page(device["id"], designer_id)}
+
+    def switch_sources(self, area: Any, query: Any = "") -> dict[str, Any]:
+        """Room → device → entity: the switches, buttons and remotes Home Assistant knows in a room."""
+        index = self.index()
+        return {"area": area, "devices": switches.room_switches(index, area if isinstance(area, str) and area else None,
+                                                                 str(query or ""), every_room=area == "*")}
+
+    async def switch_interactions(self, ha_device_id: Any, entity_id: Any) -> dict[str, Any]:
+        """What a switch or remote can report (discovered from Home Assistant; nothing is assumed)."""
+        index = self.index()
+        found = []
+        if isinstance(ha_device_id, str) and ha_device_id:
+            listed = await self.device_automations(ha_device_id, "trigger")
+            found += switches.from_device_triggers(listed["items"])
+        if isinstance(entity_id, str) and entity_id:
+            found += switches.from_entity(index, entity_id)
+        return {"device_id": ha_device_id, "entity_id": entity_id, "interactions": found,
+                "kind": switches.kind_of(found), "notes": switches.notes(index, ha_device_id, entity_id, found)}
 
     # ------------------------------------------------------------ presence sources
     def presence_view(self) -> dict[str, Any]:
@@ -1422,6 +1678,9 @@ class AppCore:
         existing = next((d for d in device.get("designers") or [] if d.get("kind") == found["designer"]), None)
         if existing is None:
             return self.create_designer(device_id, found["designer"], template, expected_revision, by)
+        if existing.get("kind") == "lighting" and existing.get("version") == 1:
+            raise ConfigError("invalid", "This Lighting Designer is of version 1: convert it to version 2 first "
+                              "(on its page), then add templates.")
         updated = gallery.apply(template, existing)
         new = copy.deepcopy(self.store.config)
         new["devices"][device["id"]] = self._with_designer(device, updated)
@@ -1454,3 +1713,16 @@ class AppCore:
                     {"value": "parallel", "label": "Run both at the same time"}],
                 "limits": {"targets": model.MAX_TARGETS, "rules": model.MAX_RULES,
                            "action_depth": model.MAX_ACTION_DEPTH}}
+
+
+def _control_summary(live: dict[str, Any]) -> list[dict[str, Any]]:
+    """Per light: which layer controls each property now, and what its automation would send (diagnostics)."""
+    out = []
+    for light in live.get("lights") or []:
+        if not light.get("controlled"):
+            continue
+        out.append({"light": light["entity_id"], "state": light["state"], "override": light.get("override"),
+                    "controlled_by": {prop: (value[1] if value else None) for prop, value in light["resolved"].items()},
+                    "values": {prop: (value[0] if value else None) for prop, value in light["resolved"].items()},
+                    "command": light["command"], "unknown": light["unknown"]})
+    return out

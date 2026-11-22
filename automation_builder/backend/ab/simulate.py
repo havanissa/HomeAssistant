@@ -106,7 +106,10 @@ class Evaluator:
             return bool(set(item["triggers"]) & started)
         return None  # sun, device: not evaluated offline
 
-    def data(self, data: dict[str, Any]) -> dict[str, Any]:
+    def data(self, data: Any) -> dict[str, Any]:
+        if isinstance(data, str):
+            fn = self.evaluators.get(data)
+            return fn(self.states) if fn else {"(template)": "not evaluated"}
         out = {}
         for key, value in data.items():
             if isinstance(value, str) and ("{{" in value or "{%" in value):
@@ -157,7 +160,7 @@ def _actions(actions: list[dict[str, Any]], ev: Evaluator, targets: list[str], s
         elif kind == "repeat":
             inner, done = _actions(action["actions"], ev, targets, started, notes)
             calls += inner * action["count"]
-        elif kind in ("scene", "script", "notify", "device", "variables"):
+        elif kind in ("scene", "script", "notify", "device", "variables", "event"):
             calls.append({"action": kind, "entities": [action.get("entity_id")] if action.get("entity_id") else [],
                           "data": {}, "other": describe.action(action, ev.names, targets)})
     return calls, True

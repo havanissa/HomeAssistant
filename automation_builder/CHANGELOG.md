@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.4.0
+
+The Lighting Designer, redesigned (version 2): a light's normal behaviour comes from Truth and Brightness
+Matrices and optional Colour & Mood; switches and remotes are mapped graphically; Advanced Rules and manual
+overrides take precedence by an explicit, visible priority; and when an override or a rule ends, the light returns
+to the **currently** calculated state by itself. Everything stays native Home Assistant automations.
+
+- **Truth Matrices** (ON / OFF / NO ACTION / USE DEFAULT / UNSET) and **Brightness Matrices** (0-100 % / NO ACTION /
+  USE DEFAULT / UNSET), several of each, combined explicitly. Columns of any kind: presence situations (rooms,
+  zones, position zones, persons), number ranges (light level with a delay), an entity's state (switches, mood
+  selectors, media players …), times of day, *Always*. Columns that can hold together need an explicit policy
+  (a ranking you set, ON/OFF wins, highest/lowest, nothing while they disagree) - never the table order.
+- **Truth gating**: brightness and colour never switch a light on and never override an OFF; **0 % is never
+  silently an OFF** (its meaning is a required choice).
+- **Colour & Mood**: colour temperature or colour, brightness, effect and transition per light and mood; each field
+  empty = unchanged.
+- **Priority & Resolution**: per property (on/off, brightness, colour, effect, transition), layers in a
+  configurable order (default: Advanced Rules, switch overrides, mood, brightness, truth); the page shows who
+  controls each light now and what its automation would send.
+- **Switches & Remotes**: room → device → entity or event; device triggers (ZHA, Zigbee2MQTT, Hue …), event
+  entities and latched switches, discovered from Home Assistant, plus manual ZHA / MQTT / event mappings. Actions:
+  toggle, on, off, set or change brightness, apply a mood, override only, resume, run a one-shot Advanced Rule,
+  dim while held, light action with data. One-shot by default; optionally a **manual override** that lasts until
+  resumed, a time, a room/zone vacancy or an event, optionally also started by a change by hand (Home Assistant's
+  context, not every state change).
+- **Override helpers**: the override state lives in Home Assistant helpers that the App creates at deployment and
+  owns (`input_boolean.ab_<device>_<light>_override`, and `timer.…` for a timed override, restored across
+  restarts). Listed in the review, recorded, deleted when no longer needed or with the device; helpers the App did
+  not create are never touched. New allowlisted websocket commands: `input_boolean/{list,create,delete}`,
+  `timer/{list,create,delete}`, limited to these names.
+- **Advanced Rules**: “while …” rules (conditional overrides that release by themselves) and “when …” one-shot
+  rules, in an explicit order; the generic IF / AND-OR / THEN editor stays available for ordinary rules.
+- **Native form**: one automation per light (mode queued): `choose` branches in the explicit order set variables,
+  templates resolve the properties, and a single `light.turn_on` / `light.turn_off` sends exactly the resolved
+  attributes - only when the light differs, never while it is unavailable. Switch mappings live in the device's
+  shared automation; hold-to-dim gets an automation of its own (it waits).
+- **Simulation** with the compiler's own plan (the same branches and conditions): matrices, mood, rules, override
+  and its end, the winning layer of each property, the command; a press is an event, kept apart from the states.
+- **Version 1 designers** (0.3) are kept and compile byte for byte as before; their page offers an explicit,
+  lossless **conversion** (with what changes), and refuses the parts that would need a guess.
+- Gallery: new lighting templates (Presence, Light level, Brightness by situation, Colour & mood, Wall switch or
+  remote). New designers are version 2.
+
 ## 0.3.0
 
 Specialised graphical designers on the same automation model. A designer is a different way to write the rules of

@@ -147,16 +147,16 @@ async def test_phase03_routes(client):
     device_id = created["device_id"]
     status, gallery = await get(client, f"/api/gallery/{device_id}")
     assert status == 200 and gallery["kinds"] == ["lighting"] and all(t["designer"] == "lighting" for t in gallery["templates"])
-    status, made = await post(client, "/api/gallery/apply", {"device_id": device_id, "template": "mood_lighting",
+    status, made = await post(client, "/api/gallery/apply", {"device_id": device_id, "template": "l2_mood",
                                                              "expected_revision": core.store.revision})
     assert status == 200, made
     status, page = await get(client, f"/api/designers/{device_id}/{made['designer_id']}")
-    assert status == 200 and page["designer"]["config"]["primary"] == "mood"
+    assert status == 200 and page["designer"]["config"]["version"] == 2 and page["designer"]["config"]["mood"]["enabled"]
     designer = {**page["designer"]["config"], "lights": [LAMP]}
     designer["mood"] = {**designer["mood"], "entity_id": "input_select.mood", "values": ["Dagur"],
-                        "cells": {LAMP: {"Dagur": {"kind": "on", "brightness_pct": 30}}}}
+                        "cells": {LAMP: {"Dagur": {"kind": "set", "brightness_pct": 30}}}}
     status, preview = await post(client, "/api/designers/preview", {"device_id": device_id, "designer": designer})
-    assert status == 200 and preview["valid"] and len(preview["designer"]["rules"]) == 1 and "brightness_pct: 30" in preview["yaml"]
+    assert status == 200 and preview["valid"] and len(preview["designer"]["rules"]) == 1 and "bri: 30" in preview["yaml"]
     status, stale = await post(client, "/api/designers/save", {"device_id": device_id, "designer": designer, "expected_revision": "old"})
     assert status == 409 and stale["error"] == "stale"
     status, saved = await post(client, "/api/designers/save", {"device_id": device_id, "designer": designer,
@@ -165,8 +165,14 @@ async def test_phase03_routes(client):
     status, sim_inputs = await get(client, f"/api/simulation/{device_id}")
     assert status == 200 and any(i["entity_id"] == "input_select.mood" for i in sim_inputs["inputs"])
     status, result = await post(client, "/api/designers/simulate", {"device_id": device_id, "scenario": {
-        "trigger": sim_inputs["triggers"][0]["key"], "states": {"input_select.mood": {"state": "Dagur"}}}})
-    assert status == 200 and result["outcome"][0]["final"]["data"] == {"brightness_pct": 30}
+        "trigger": sim_inputs["triggers"][0]["key"], "states": {"input_select.mood": {"state": "Dagur"},
+                                                                 LAMP: {"state": "on", "attributes": {"brightness": 255}}}}})
+    lamp = result["lighting"][made["designer_id"]]["lights"][0]
+    assert status == 200 and lamp["command"] == {"service": "turn_on", "data": {"brightness_pct": 30}}
+    status, sources = await get(client, "/api/switch-sources?area=kamar")
+    assert status == 200 and any(d["device_id"] == "dev-lamp" for d in sources["devices"]) is False   # a lamp is no remote
+    status, found = await get(client, "/api/switch-interactions?entity_id=input_boolean.manual")
+    assert status == 200 and found["kind"] == "latched" and [i["kind"] for i in found["interactions"]] == ["on", "off"]
     assert core.ha.requests == {} or "POST" not in core.ha.requests          # simulation never writes anything
     status, sources = await post(client, "/api/presence/save", {"source": {"name": "Sofa", "kind": "zone", "entity_id": None},
                                                                 "expected_revision": core.store.revision})

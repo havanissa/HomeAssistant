@@ -12,10 +12,14 @@ form **IF** something happens **AND/OR** conditions hold **THEN** do this.
   Actions can branch, wait (with a time limit), repeat, set variables, notify and run scripts.
 - Organised by room (Home Assistant's areas): add a device by choosing room, device, then entities; the Overview
   is grouped by room; entity pickers can be limited to the device's room.
-- **Specialised designers** for lights (mood, presence-zone and light-level matrices that work together) and
-  covers (sun angle with 0° = South, cover modes, mapping from household moods), with presence sources (rooms,
-  named zones, position zones drawn on a sensor's coordinates, persons), templates and a simulation. They write
-  ordinary rules of the same one automation; unset stays unset, and nothing is chosen for you.
+- **Lighting Designer**: Truth Matrices (ON/OFF) and Brightness Matrices over any sources (occupancy, zones,
+  light level, switch states, moods, times …), Colour & Mood, Switches & Remotes (ZHA, Zigbee2MQTT, event
+  entities, switches; one-shot actions or a manual override held in native helpers), Advanced Rules and an
+  explicit, property-specific priority. One native automation per light that always applies the *currently*
+  calculated state - so a light returns to it by itself when an override or a rule ends.
+- **Cover Designer** (sun angle with 0° = South, cover modes, mapping from household moods), presence sources
+  (rooms, named zones, position zones drawn on a sensor's coordinates, persons), templates and a simulation. Unset
+  stays unset, and nothing is chosen for you.
 - An optional **default** per device: what it does when a rule was triggered and none matched.
 - **Export as blueprint**: turn a device's automation into a native Home Assistant blueprint and choose which
   values become inputs.

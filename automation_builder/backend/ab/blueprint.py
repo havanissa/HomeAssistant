@@ -204,7 +204,9 @@ class _Collector:
                 if isinstance(action["target"], list):
                     for j, entity_id in enumerate(action["target"]):
                         self.entity(entity_id, (*action_path, "target", j), "Controlled entities", "Controlled entity")
-                for name, value in action["data"].items():
+                if isinstance(action["data"], str):  # generated: one template of resolved values
+                    self.fixed_template(action["data"], rule_name)
+                for name, value in (action["data"].items() if isinstance(action["data"], dict) else []):
                     if isinstance(value, str) and ("{{" in value or "{%" in value):
                         self.fixed_template(value, rule_name)
                         continue

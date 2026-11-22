@@ -18,6 +18,13 @@ own blueprint import uses. It is limited to automation blueprints in the App's
 own folder (``blueprints/automation/automation_builder/<name>.yaml``, see
 :func:`check_params`) and is only sent when the user presses "Install".
 
+Helpers (Lighting Designer 2): ``input_boolean/create|delete`` and
+``timer/create|delete`` (Home Assistant's own helper editor commands) and their
+``/list``, only for helpers named ``AB <device> <light> override`` (ids
+``ab_<device>_<light>_override``, :data:`HELPER_ID`). They hold the state of a
+manual override durably in Home Assistant; the App creates them at deployment,
+records them as its own and deletes only those it created.
+
 **HTTP** (``http://supervisor/core/api``), :class:`AutomationConfigApi`: only
 ``/config/automation/config/<id>``, and only for ids that start with
 ``automation_builder_``. This is the endpoint Home Assistant's own automation
@@ -71,7 +78,17 @@ ALLOWED_COMMANDS: frozenset[str] = frozenset({
     "device_automation/action/list",
     "blueprint/list",
     "blueprint/save",
+    "input_boolean/list",
+    "input_boolean/create",
+    "input_boolean/delete",
+    "timer/list",
+    "timer/create",
+    "timer/delete",
 })
+#: The helpers this App may create or delete (manual override state of the Lighting Designer).
+HELPER_NAME = re.compile(r"AB [0-9a-f]{8} [a-z0-9_]{1,200} override")
+HELPER_ID = re.compile(r"ab_[0-9a-f]{8}_[a-z0-9_]{1,200}_override")
+HELPER_DOMAINS = ("input_boolean", "timer")
 #: Where this App may save a blueprint: its own folder below ``blueprints/automation``, nothing else.
 BLUEPRINT_PATH = re.compile(r"automation_builder/[a-z0-9_]{1,80}\.yaml")
 
@@ -85,6 +102,13 @@ def check_params(command_type: str, params: dict[str, Any]) -> None:
         raise NotAllowed("Only the traces of this App's own automations are read")
     if command_type.startswith("blueprint/") and params.get("domain") != "automation":
         raise NotAllowed("Only automation blueprints are handled")
+    domain, _, verb = command_type.partition("/")
+    if domain in HELPER_DOMAINS and verb == "create" and (
+            not isinstance(params.get("name"), str) or not HELPER_NAME.fullmatch(params["name"])):
+        raise NotAllowed(f"{params.get('name')!r} is not a helper of this App")
+    if domain in HELPER_DOMAINS and verb == "delete" and (
+            not isinstance(params.get(f"{domain}_id"), str) or not HELPER_ID.fullmatch(params[f"{domain}_id"])):
+        raise NotAllowed(f"{params.get(f'{domain}_id')!r} is not a helper of this App")
     if command_type == "blueprint/save" and (
             not isinstance(params.get("path"), str) or not BLUEPRINT_PATH.fullmatch(params["path"])
             or "source_url" in params):

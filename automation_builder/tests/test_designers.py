@@ -463,7 +463,13 @@ async def test_designer_workflow_through_the_core(core, home):
                     expected_revision=core.store.revision, reason="t")
     for entity in (LAMP, SPOTS):
         home.states[entity] = state(entity, "off", supported_color_modes=["color_temp"], min_color_temp_kelvin=2000, max_color_temp_kelvin=6500)
-    created = core.create_designer("d_00000001", "lighting", "combined_lighting", core.store.revision, ADMIN)
+    # A version 1 designer (Phase 0.3) as an earlier App saved it: kept, compiled and deployed exactly as before.
+    v1 = {"id": "g_0000000a", "kind": "lighting", "version": 1, "name": "Lighting", "lights": [], "primary": "presence",
+          "presence": {"enabled": True}, "mood": {"enabled": True}, "lux": {"enabled": True}}
+    cfg = copy.deepcopy(core.store.config)
+    cfg["devices"]["d_00000001"]["designers"] = [v1]
+    core.store.save(model.validate_config(cfg), expected_revision=core.store.revision, reason="t")
+    created = {"designer_id": v1["id"]}
     page = core.designer_page("d_00000001", created["designer_id"])
     assert page["designer"]["config"]["primary"] == "presence" and page["designer"]["config"]["lights"] == []
     assert any(p["code"] == "no_lights" for p in page["designer"]["problems"])

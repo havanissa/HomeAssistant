@@ -26,13 +26,14 @@ from typing import Any
 from .. import model
 from ..compiler import Input, plain
 from ..model import Problems
-from . import common as C, cover, lighting, presence
+from . import common as C, cover, lighting2, presence
 
-REGISTRY = {lighting.KIND: lighting, cover.KIND: cover}
+#: The Lighting Designer module handles both versions: 1 (Phase 0.3, kept and compiled exactly as before) and 2.
+REGISTRY = {lighting2.KIND: lighting2, cover.KIND: cover}
 #: Which designers suit an entity of a domain. Every other domain keeps the ordinary rule editor.
 APPLICABLE = {"light": ["lighting"], "cover": ["cover"]}
 #: Kinds that are planned but have no designer yet (the gallery says so; there is no editor for them).
-PLANNED = ("climate", "ventilation", "fan", "remote", "switch")
+PLANNED = ("climate", "ventilation", "fan")
 MAX_DESIGNERS = 4
 MAX_DOCUMENT = 120_000
 
@@ -90,7 +91,9 @@ def _plain_json(value: Any, depth: int = 0) -> bool:
 
 def supported(designer: dict[str, Any]) -> bool:
     module = REGISTRY.get(designer.get("kind"))
-    return module is not None and designer.get("version") == module.VERSION
+    version = designer.get("version")
+    return (module is not None and isinstance(version, int) and not isinstance(version, bool)
+            and 1 <= version <= module.VERSION)
 
 
 def referenced_sources(designers: list[dict[str, Any]] | None) -> set[str]:
@@ -144,6 +147,8 @@ class Expansion:
         self.blueprint = exposed is not None
         self.fixed: list[str] = []
         self._own_ids = {r["id"] for r in device["rules"]}
+        self.extra_targets: set[str] = set()   # helpers a designer's rules may act on (Lighting Designer 2)
+        self.generators: dict[str, Any] = {}    # designer id -> its expansion (for the simulation and live views)
 
     # ------------------------------------------------------------ results
     def problem(self, level: str, code: str, message: str, designer_id: str | None = None, layer: str | None = None) -> None:
@@ -169,7 +174,7 @@ class Expansion:
         if self.blueprint:
             self.rules.append(raw)
             return
-        clean = C.checked(raw, self.targets, self.problems, designer_id)
+        clean = C.checked(raw, [*self.targets, *sorted(self.extra_targets)], self.problems, designer_id)
         if clean is not None:
             self.rules.append(clean)
 
