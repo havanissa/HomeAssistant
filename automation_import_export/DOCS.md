@@ -13,8 +13,11 @@ confirmation; every archive is verified; Automation Builder's automations are ne
 
 Requirements: Home Assistant 2026.10 or newer (tested with 2026.11.1). The App reads Home Assistant's
 configuration folder **read-only** (`map: homeassistant_config`) for two things only: blueprint files (so archives
-include them) and `automations.yaml` (to detect duplicate or missing ids). Without that folder the App still
-works; it then says what it cannot know.
+include them) and `automations.yaml` (to list automations quickly and to detect duplicate or missing ids). Home
+Assistant's own automation editor endpoint re-reads the whole file for every single automation, so the pages list
+from the file, and the editor endpoint is used for every automation an operation exports, verifies, deletes or
+restores (a verified export of a few hundred automations takes about a minute). Without the folder the App still
+works, more slowly, and says what it cannot know.
 
 ## The pages
 

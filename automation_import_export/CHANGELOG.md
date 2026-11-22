@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1
+
+- **Fix: the interface did not load on installations with many automations** ("NetworkError when attempting to
+  fetch resource"). Home Assistant's automation editor endpoint re-reads the whole `automations.yaml` for every
+  single automation, one request at a time, so listing a few hundred automations took a minute or more. The
+  Overview and Export pages now read `automations.yaml` once (read-only, with the fast YAML parser): 0.2 s instead
+  of 61 s for 415 automations. The editor endpoint is still used for every automation an operation exports,
+  verifies, deletes or restores, so archives stay verified against Home Assistant itself.
+- A clearer message when the App does not answer.
+
 ## 0.1.0
 
 First version (Phase 0.1): an independent App for exporting, archiving, cleaning up and restoring Home Assistant

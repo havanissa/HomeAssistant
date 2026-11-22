@@ -72,6 +72,16 @@ class FakeHome:
         for name in ("Lighting", "Security", "Night"):
             self.add_label(name)
 
+    # ------------------------------------------------------------------ automations.yaml on disk
+    path = None  # set by the ha_folder fixture: Home Assistant rewrites the file on every save and delete
+
+    def sync(self) -> None:
+        if self.path is not None:
+            import yaml
+            text = yaml.safe_dump(self.file, allow_unicode=True, sort_keys=False)
+            if not self.path.exists() or self.path.read_text() != text:
+                self.path.write_text(text)
+
     # ------------------------------------------------------------------ helpers for tests
     def add_label(self, name: str, **extra: Any) -> str:
         label_id = slug(name)
@@ -172,6 +182,7 @@ class FakeHome:
         return HomeAssistantClient.scoped(self, **kwargs)  # type: ignore[arg-type]
 
     async def command(self, kind: str, **params: Any) -> Any:
+        self.sync()
         check_params(kind, params, self.scope)
         if not self.connected:
             raise ConnectionError("Not connected to Home Assistant")
@@ -326,6 +337,7 @@ class FakeApi:
         return AutomationConfigApi.addressable(automation_id)
 
     async def get(self, automation_id: str) -> dict[str, Any] | None:
+        self.home.sync()
         if not self.addressable(automation_id):
             raise NotAllowed("not addressable")
         if not self.home.connected:
@@ -423,8 +435,8 @@ def ha_folder(tmp_path: Path, home: FakeHome) -> Path:
     (root / "configuration.yaml").write_text("automation: !include automations.yaml\n")
     for path, text in home.blueprint_files.items():
         (root / "blueprints" / "automation" / path).write_text(text)
-    import yaml
-    (root / "automations.yaml").write_text(yaml.safe_dump(home.file))
+    home.path = root / "automations.yaml"
+    home.sync()
     return root
 
 

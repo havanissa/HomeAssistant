@@ -402,7 +402,7 @@ class RestoreRunner:
 
     def __init__(self, *, ha: HomeAssistantClient, api: AutomationConfigApi, archive: Archive,
                  plan: dict[str, Any], log: Callable[[str, str], None], item: Callable[..., None],
-                 snapshot: Callable[[], Awaitable[Snapshot]], hook: Callable[[str, int], Awaitable[None]],
+                 snapshot: Callable[..., Awaitable[Snapshot]], hook: Callable[[str, int], Awaitable[None]],
                  items_view: dict[str, Any]) -> None:
         self.ha = ha
         self.items_view = items_view  # the operation's per-automation journal entries (read)
@@ -591,7 +591,7 @@ class RestoreRunner:
         """Compare what Home Assistant has now with the plan (configuration, identity, metadata, state)."""
         mapping = mapping or getattr(self, "mapping", {"labels": {}, "categories": {}, "areas": {}})
         await asyncio.sleep(SETTLE_SECONDS)
-        snap = await self.snapshot()
+        snap = await self.snapshot(fetch=[e["target_id"] for e in self._active()])
         results: dict[str, Any] = {}
         for entry in self._active():
             key = entry["key"]

@@ -2,7 +2,7 @@
 # Independent of every other App in this repository (Smart Comfort, Smart Occupancy Detection, Automation Builder,
 # Smart Predictive Climate): its own slug, container, /data folder, backups and versions. It needs none of them.
 name: Automation Import/Export Manager
-version: "0.1.0"
+version: "0.1.1"
 slug: automation_import_export
 description: >-
   Export, archive, clean up and restore your Home Assistant automations with

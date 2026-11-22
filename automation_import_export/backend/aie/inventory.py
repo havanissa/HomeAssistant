@@ -21,6 +21,7 @@ Classification of every automation (:func:`classify`):
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 import logging
 from typing import Any
@@ -91,6 +92,7 @@ class Snapshot:
     runtime_configs: dict[str, dict[str, Any]]           # entity id -> what the entity runs (automation/config)
     file_scan: FileScan
     problems: list[dict[str, Any]] = field(default_factory=list)
+    config_origins: dict[str, str] = field(default_factory=dict)  # id -> "editor" | "file"
     items: list[Item] = field(default_factory=list)
 
     def item(self, key: str) -> Item | None:
@@ -183,8 +185,15 @@ async def _read_list(ha: HomeAssistantClient, command: str, **params: Any) -> li
 
 
 async def take_snapshot(ha: HomeAssistantClient, api: AutomationConfigApi, folder: HaConfigFolder,
-                        *, now: str) -> Snapshot:
-    """Read everything fresh. Raises ConnectionError / HomeAssistantError when Home Assistant cannot be read."""
+                        *, now: str, fetch: Iterable[str] = ()) -> Snapshot:
+    """Read everything fresh. Raises ConnectionError / HomeAssistantError when Home Assistant cannot be read.
+
+    Configurations: Home Assistant's editor endpoint re-reads all of automations.yaml for every single id (one
+    request at a time), which takes about a minute for a few hundred automations. So the listing uses the file
+    itself (parsed once, read-only), and the editor endpoint is asked only for the ids in ``fetch`` (what an
+    operation exports, verifies, deletes or restores), for entries the file parse cannot represent exactly, and
+    for everything when the file cannot be read. Exports are always verified against the editor endpoint.
+    """
     ha_config = await ha.command("get_config") or {}
     states_list = await ha.command("get_states") or []
     states = {s["entity_id"]: s for s in states_list if isinstance(s, dict) and "entity_id" in s}
@@ -232,14 +241,25 @@ async def take_snapshot(ha: HomeAssistantClient, api: AutomationConfigApi, folde
     for entity_id, st in states.items():
         if entity_id.startswith("automation.") and isinstance((st.get("attributes") or {}).get("id"), str):
             config_ids.add(st["attributes"]["id"])
-    file_scan = folder.scan_automations_file()
+    file_scan = await asyncio.to_thread(folder.scan_automations_file)
     config_ids |= {i for i in file_scan.ids if isinstance(i, str)}
 
     configs: dict[str, dict[str, Any]] = {}
     config_errors: dict[str, str] = {}
+    origins: dict[str, str] = {}
+    wanted = set(fetch)
+    if file_scan.available and file_scan.error is None:
+        for config_id, config in file_scan.configs.items():
+            if config_id not in wanted:
+                configs[config_id] = config
+                origins[config_id] = "file"
+        # ids that are not in automations.yaml cannot be in the editor endpoint either (it reads that file)
+        to_get = (wanted & config_ids) | {i for i in file_scan.ids if i not in file_scan.configs}
+    else:
+        to_get = set(config_ids)
     semaphore = asyncio.Semaphore(GET_CONCURRENCY)
 
-    async def fetch(config_id: str) -> None:
+    async def fetch_one(config_id: str) -> None:
         if not api.addressable(config_id):
             config_errors[config_id] = "This id cannot be addressed through Home Assistant's automation editor"
             return
@@ -251,8 +271,12 @@ async def take_snapshot(ha: HomeAssistantClient, api: AutomationConfigApi, folde
                 return
         if value is not None:
             configs[config_id] = value
+            origins[config_id] = "editor"
 
-    await asyncio.gather(*(fetch(i) for i in sorted(config_ids)))
+    await asyncio.gather(*(fetch_one(i) for i in sorted(to_get)))
+    for config_id in config_ids - set(config_errors):
+        if not api.addressable(config_id):
+            config_errors[config_id] = "This id cannot be addressed through Home Assistant's automation editor"
 
     runtime: dict[str, dict[str, Any]] = {}
     in_file = set(configs)
@@ -274,7 +298,8 @@ async def take_snapshot(ha: HomeAssistantClient, api: AutomationConfigApi, folde
         areas=areas, floors=floors, devices=devices,
         entity_ids=set(states) | {e.get("entity_id") for e in registry_all if e.get("entity_id")},
         blueprints={p: v for p, v in blueprints.items() if isinstance(v, dict)}, configs=configs,
-        config_errors=config_errors, runtime_configs=runtime, file_scan=file_scan, problems=problems)
+        config_errors=config_errors, runtime_configs=runtime, file_scan=file_scan, problems=problems,
+        config_origins=origins)
     if not file_scan.available:
         problems.append({"level": "info", "code": "config_folder_unavailable",
                          "message": "Home Assistant's configuration folder is not readable by the App: blueprint "
