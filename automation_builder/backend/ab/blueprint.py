@@ -39,8 +39,8 @@ from .model import GROUP_TYPES, sub_sequences
 MIN_HA_VERSION = "2024.10.0"  # "triggers" / "actions" / "action:" need this release
 FOLDER = "automation_builder"
 
-GROUP_ORDER = ("Controlled entities", "Trigger entities", "Sensor entities", "Devices", "Thresholds", "Time values",
-               "Delays and durations", "Brightness", "Colour temperature", "Action parameters", "States")
+GROUP_ORDER = ("Controlled entities", "Trigger entities", "Sensor entities", "Devices", "Thresholds", "Angles", "Time values",
+               "Delays and durations", "Brightness", "Colour temperature", "Cover positions", "Action parameters", "States")
 DATA_GROUP = {"brightness_pct": "Brightness", "brightness": "Brightness", "color_temp_kelvin": "Colour temperature"}
 DATA_SELECTOR: dict[str, dict[str, Any]] = {
     "brightness_pct": {"number": {"min": 1, "max": 100, "unit_of_measurement": "%", "mode": "slider"}},
@@ -320,21 +320,30 @@ def _by_content(config: dict[str, Any]) -> dict[str, Any]:
     return {**walk({k: v for k, v in config.items() if k != "triggers"}), "triggers": triggers}
 
 
-def _automations(device: dict[str, Any], settings: dict[str, Any]) -> list[dict[str, Any]]:
-    return compiler.compile_device(device, settings)["automations"]
+def _automations(device: dict[str, Any], settings: dict[str, Any], presence: dict[str, Any] | None = None,
+                 exposed: dict[str, Input] | None = None) -> tuple[list[dict[str, Any]], Any]:
+    """The device's automations, its designers' rules included, and the designers' expansion."""
+    from . import designers
+    expansion = designers.expand(device, presence, exposed=exposed)
+    return compiler.compile_device(designers.effective(device, expansion), settings)["automations"], expansion
 
 
 def candidates(device: dict[str, Any], settings: dict[str, Any], automation_id: str | None = None,
-               names: Any = None) -> dict[str, Any]:
+               names: Any = None, presence: dict[str, Any] | None = None) -> dict[str, Any]:
     """Everything of one generated automation that can become a blueprint input, in a stable order."""
     names = names or (lambda entity_id: entity_id)
-    automations = _automations(device, settings)
+    automations, expansion = _automations(device, settings, presence)
     chosen = next((a for a in automations if a["id"] == automation_id), automations[0] if automations else None)
     if chosen is None:
-        return {"automation": None, "automations": [], "inputs": [], "collector": None}
+        return {"automation": None, "automations": [], "inputs": [], "collector": None, "expansion": expansion}
     collector = _Collector(device, chosen["rule_ids"], names)
-    items = sorted(collector.items.values(), key=lambda i: (GROUP_ORDER.index(i["group"]), i["key"]))
-    return {"automation": chosen, "automations": automations, "inputs": items, "collector": collector}
+    items = dict(collector.items)
+    if any(r["id"] in chosen["rule_ids"] for r in expansion.rules):
+        for key, param in expansion.params.items():  # the designers' values (the shared automation holds their rules)
+            if key not in items:
+                items[key] = {**param, "name": names(param["value"]) if param["kind"] == "entity" else param["name"]}
+    found = sorted(items.values(), key=lambda i: (GROUP_ORDER.index(i["group"]), i["key"]))
+    return {"automation": chosen, "automations": automations, "inputs": found, "collector": collector, "expansion": expansion}
 
 
 def _set(holder: Any, path: tuple[Any, ...], value: Any) -> None:
@@ -360,14 +369,15 @@ def file_path(automation_id: str) -> str:
     return f"{FOLDER}/{automation_id.removeprefix(compiler.AUTOMATION_PREFIX)}.yaml"
 
 
-def build(device: dict[str, Any], settings: dict[str, Any], *, names: Any = None) -> dict[str, Any]:
+def build(device: dict[str, Any], settings: dict[str, Any], *, names: Any = None,
+          presence: dict[str, Any] | None = None) -> dict[str, Any]:
     """The blueprint of one of a device's automations, from the choices stored in ``device["blueprint"]``.
 
     ``{"yaml", "document", "config" (the automation with every input at its default), "inputs" (all candidates,
     each with "exposed"), "problems" (errors: no export), "warnings", "automation", "automations", "path"}``
     """
     choice = device.get("blueprint") or {}
-    found = candidates(device, settings, choice.get("automation"), names)
+    found = candidates(device, settings, choice.get("automation"), names, presence)
     automation, problems, warnings = found["automation"], [], []
     if automation is None:
         return {"yaml": "", "document": None, "config": None, "inputs": [], "automation": None, "automations": [],
@@ -380,6 +390,7 @@ def build(device: dict[str, Any], settings: dict[str, Any], *, names: Any = None
                         "moved) and is left out.")
     work = copy.deepcopy(device)
     exposed = []
+    refs: dict[str, Input] = {}
     for item in found["inputs"]:
         item["exposed"] = item["key"] in chosen
         custom = chosen.get(item["key"]) or {}
@@ -387,18 +398,26 @@ def build(device: dict[str, Any], settings: dict[str, Any], *, names: Any = None
         item["shown_description"] = custom.get("description") or item["description"]
         if item["exposed"]:
             ref = Input(item["key"], item["value"], item["default"])
+            refs[item["key"]] = ref
             for path in item["paths"]:
                 _set(work, path, ref)
             exposed.append(item)
-    compiled = next(a for a in _automations(work, settings) if a["id"] == automation["id"])
+    automations, expansion = _automations(work, settings, presence, exposed=refs)
+    compiled = next(a for a in automations if a["id"] == automation["id"])
     config = compiled["config"]
+    used = {name: ref for name, ref in expansion.refs.variables.items() if name in compiler.canonical(config)}
+    if used:  # inputs inside the designers' templates: carried by automation variables, like the compiler's own
+        merged = {**(config.get("variables") or {}), **used}
+        config = {**{k: v for k, v in config.items() if k in ("alias", "description")},
+                  "variables": {name: merged[name] for name in sorted(merged)},
+                  **{k: v for k, v in config.items() if k not in ("alias", "description", "variables")}}
     restored = restore({k: v for k, v in config.items() if k != "variables"}, config.get("variables") or {})
     if _by_content(restored) != _by_content(automation["config"]):
         problems.append("Internal check failed: with every input at its default the blueprint is not the "
                         "automation this device deploys. Please report this; nothing was exported.")
     body = {k: v for k, v in config.items() if k not in ("alias", "description")}
     name = choice.get("name") or device["name"]
-    rules = [r["name"] for r in device["rules"] if r["id"] in automation["rule_ids"]]
+    rules = [r["name"] for r in [*device["rules"], *found["expansion"].rules] if r["id"] in automation["rule_ids"]]
     description = choice.get("description") or (
         f"Exported from Automation Builder. Rules: {'; '.join(rules)}.")
     document = {
@@ -422,6 +441,7 @@ def build(device: dict[str, Any], settings: dict[str, Any], *, names: Any = None
     if disabled:
         warnings.append("Disabled rules are not part of the automation and not of the blueprint: " + ", ".join(disabled) + ".")
     warnings += collector.fixed
+    warnings += _designer_warnings(device, automation, found["expansion"], presence)
     entity_inputs = {i["value"]: i["key"] for i in exposed if i["kind"] == "entity"}
     for rule_name, template in collector.templates:
         mentioned = sorted(e for e in entity_inputs if e in template)
@@ -442,8 +462,36 @@ def build(device: dict[str, Any], settings: dict[str, Any], *, names: Any = None
             "problems": problems, "warnings": warnings}
 
 
-def inputs_of(device: dict[str, Any]) -> list[dict[str, Any]]:
+def _designer_warnings(device: dict[str, Any], automation: dict[str, Any], expansion: Any,
+                       presence: dict[str, Any] | None) -> list[str]:
+    """What of the designers stays fixed in a blueprint (values inside the templates they generate)."""
+    if not any(r["id"] in automation["rule_ids"] for r in expansion.rules):
+        return []
+    out = []
+    sources = (presence or {}).get("sources") or {}
+    from . import designers
+    used = designers.referenced_sources(device.get("designers"))
+    zones = sorted(sources[s]["name"] for s in used if s in sources and sources[s]["kind"] == "position")
+    if zones:
+        out.append(f"The shapes of the position zones {', '.join(zones)} are inside templates and stay as drawn; their "
+                   "coordinate entities can be inputs.")
+    for d in device.get("designers") or []:
+        if d.get("kind") == "cover" and any((w.get("position") or {}).get("kind") == "curve" or (w.get("tilt") or {}).get("kind") == "curve"
+                                            for w in (d.get("sun") or {}).get("windows", {}).values()):
+            out.append(f"“{d['name']}”: the sun curves (angles and positions) are inside templates and stay fixed.")
+        if (d.get("kind") == "lighting" and (d.get("lux") or {}).get("hysteresis")) or (
+                d.get("kind") == "cover" and (d.get("sun") or {}).get("hysteresis")):
+            out.append(f"“{d['name']}”: thresholds that include the hysteresis stay fixed (an input cannot be added to another).")
+    return out
+
+
+def inputs_of(device: dict[str, Any], presence: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Kept from Phase 0.1 (the count shown on the device page): every candidate input of the device's rules."""
     collector = _Collector(device, [r["id"] for r in device["rules"]], lambda entity_id: entity_id)
+    items = {item["key"]: item for item in collector.items.values()}
+    if device.get("designers"):
+        from . import designers
+        for key, param in designers.expand(device, presence).params.items():
+            items.setdefault(key, param)
     return [{"path": item["key"], "kind": item["kind"], "value": item["value"], "label": item["name"]}
-            for item in collector.items.values()]
+            for item in items.values()]

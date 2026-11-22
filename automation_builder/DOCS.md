@@ -25,6 +25,7 @@ Home Assistant must load `automations.yaml`, which it does by default (`automati
 - **Devices**: add and manage devices; each device page has its rules with their execution diagnostics, the
   optional default, the review and deployment, and **Export as blueprint**.
 - **Rule Editor**: every rule, per device; create and edit rules.
+- **Presence**: the presence sources the designers use (rooms, named zones, position zones, persons).
 - **Import**: the automations that already exist in Home Assistant, to analyse and copy.
 - **Settings**: occupancy recheck defaults, backup and restore, how deployment works, diagnostics.
 
@@ -211,6 +212,145 @@ triggered and none of the rules matched*.
 
 In Home Assistant it is plain native logic inside the device's automation: *if any rule matches → the rule
 blocks as before; else → if the run was started by a rule's trigger → the default actions*.
+
+## Specialised designers (lights and covers)
+
+For lights and covers there are graphical designers next to the rule editor. They are another way to write the
+rules of a device - not a separate engine: what a designer configures becomes ordinary rules of that device,
+compiled with its other rules into its **one** native automation. Nothing of a designer runs inside the App.
+
+Adding a device with lights or covers opens the **template gallery**; the device page has a card *Specialised
+designers* with **Create** and **Templates…**. The rule list of such a device is called *Advanced rules*; both
+act, and neither has priority by itself (when they can act at the same moment, the conflict check asks you).
+
+### Unset, default, no action
+
+Every matrix cell is one of:
+
+| Shown as | Meaning |
+|---|---|
+| `UNSET` | Nothing is configured. If you configured a default (for the light/cover, or for the matrix), it applies; otherwise nothing happens. |
+| `DEFAULT: 30%` | The cell is unset (or says *Use default*) and takes a default; the small text says which one. |
+| `NO ACTION` | You decided that nothing happens. No default applies. |
+| `OFF`, `CLOSE`, `40% · 2700K` … | A command. Off and Closed are commands like any other. |
+
+Order: the cell itself, then the default of its light or cover (*Row default*), then the *Matrix default*. A
+default is optional and never created for you. *Use default* without a default is an error. A source you have
+not chosen (a mood selector, a sensor, a zone's entity) is *unset*: it blocks deployment, with the reason, until
+you choose it - nothing similar-sounding is picked for you. A chosen entity that is *unavailable* simply makes
+the conditions that read it fail: nothing happens.
+
+### Matrices
+
+Tap cells to select them (tap again to deselect), tap a row or column name to select the row or column. The
+editor below the matrix changes every selected cell. **Copy** and **Paste** work on any selection (a whole mood
+column onto another, the rows of some lights onto others, one cell into many); **Set to Unset** clears. Controls
+appear only for what the lights or covers can do (Home Assistant reports it): no colour temperature for a lamp
+without one, no tilt for a blind without one.
+
+### Lighting Designer
+
+Tabs: **Combination**, **Mood**, **Presence / Zones**, **Light Level**, **Schedule**, **Overrides**,
+**Simulate**, **YAML**, and *Advanced Rules* (the device's ordinary rules).
+
+- **Combination.** Tick the lights that take part (rows) and turn on the controls you want; nothing is on by
+  itself. When several matrices are on, choose which one **decides** what the lights do. The others are:
+  - the **mood**: the palette for cells that say *Use mood* (optionally re-applied when the mood changes);
+  - **light level** and **presence**: *permissions* - “allow ON only in these bands”, “allow OFF only in these
+    bands”, “allow ON only while one of these situations holds”. A permission never sends a command by itself,
+    unless you tick *also act when it changes*.
+- **Mood.** The mood source is any entity whose state is the mood - typically an `input_select`. You choose it
+  (for example `input_select.main_mood`). A value like `Auto` that hands the choice to something else can be set
+  up as the *automatic mode*: then the effective mood is read from another entity, and `Auto` is no column.
+- **Presence / Zones.** The columns are situations: *Sofa occupied*, *Kitchen occupied*, *Room vacant*,
+  *Room possibly occupied*, *Anna at home* … from the presence sources. When two situations can hold at the same
+  time and both have a cell for a light, choose a policy:
+  - **Priority** (the column order): while a column holds whose cell for a light is set (also through a default)
+    or *NO ACTION*, the columns to its right do not act on that light. An *UNSET* cell does not hold them back.
+  - **Nothing while ambiguous**: a column acts only while no other column with a cell for the light holds.
+  - **Both, when compatible**: both act; if they want different things, that is a conflict that blocks deployment
+    until you change the cells, choose another policy, or confirm that the latest situation may win.
+  Note that a matrix default fills *every* unset cell, also in the zone columns; use a row default or explicit
+  cells when a default is meant for one column only (the cells always show what applies).
+  *Occupancy rechecks* (on request) correct lost commands for binary sensors without delays, with the safety
+  rules of the ordinary occupancy rechecks.
+- **Light Level.** Choose the sensor, then name the bands and give their upper limits (for example *Dark* below
+  50, *Dim* below 200 …); nothing is assumed. A brighter band starts only *hysteresis* above its limit; a *delay*
+  makes a new level hold before the lights react.
+- **Schedule.** Time windows in which the deciding matrix acts, and timed entries (what happens at a time).
+- **Overrides.** A switch or helper that pauses the designer while it is on, and a pause after somebody changed a
+  light by hand (a change not made by an automation or script; after a Home Assistant restart every state counts
+  as changed by hand for this time).
+
+### Cover Designer
+
+Tabs: **Covers & controls**, **Sun Position**, **Cover Moods**, **Normal Mood Mapping**, **Presence / Zones**,
+**Schedule**, **Overrides**, **Simulate**, **YAML**, *Advanced Rules*.
+
+- **Orientation: 0° = South**, +90° = West, -90° = East, ±180° = North. Home Assistant's `sun.sun` counts from
+  North (180° = South); Automation Builder converts (`HA azimuth = orientation + 180°`) and shows both. Tap the
+  compass to turn a window, or type the angle; *fine adjustment* adds an offset.
+- **Sector**: how far counter-clockwise and clockwise of the window direction sunlight comes in (walls, eaves);
+  **sun elevation** from (required, 0° = horizon) and to (optional). The compass shows today's sun path and the
+  sun now; the preview says whether and when the sun shines in today.
+- **Response**: a fixed position (or *Close* for covers that only open and close), or a position that follows
+  the sun - linear between two points of the **sun elevation** or of the **profile angle** (the elevation seen at
+  right angles to the window, which tells how deep the sun reaches in when it shines at a slant). Tilt the same
+  way, for covers that tilt. A following position needs a *minimum change* (and, for covers that do not report
+  their position, a *minimum time between movements*), so tiny angle changes never move a cover.
+- **When the sun has gone**: unset (nothing), no action, open, close or a position. *Hysteresis* (degrees)
+  decides when the sun counts as gone.
+- Optional conditions: light level above, outdoor temperature above, weather conditions (the current condition
+  of a weather entity), presence (Presence / Zones tab), time windows (Schedule).
+- **Unavailable data** moves nothing, unless you set *When sun or sensor data are unavailable*.
+- **Weather-sensitive covers** (awnings - Home Assistant's device class *awning* is recognised - and other
+  exterior covers you mark): sun shading needs a wind sensor and limit (and optionally a rain sensor), which then
+  retract the cover and keep it from extending, or your statement that it has its own independent protection.
+- **Cover Moods**: modes you name (*Daylight*, *Privacy* … are only suggestions) in a matrix of covers × modes.
+  A mode is active when a cover-mode selector shows its name, or - **Normal Mood Mapping** - when a household mood
+  you mapped to it is active (unmapped moods change nothing). Without either, modes are applied by timed entries.
+  Per mode you choose what happens when the sun shading also wants the cover: *the mode wins* (no sun shading
+  while it is active) or *sun shading wins* (the mode's position returns when the sun has gone). This choice is
+  required; nothing is decided for you.
+
+### Presence sources
+
+The **Presence** page lists the sources by room. A source reads an entity; it detects nothing itself (Smart
+Occupancy Detection, a radar, a phone … do that). Smart Occupancy Detection is not required.
+
+- **Room presence**: an occupancy/presence entity (on = occupied), optionally a second entity and state for
+  “possibly occupied” where the source supplies one.
+- **Named zone**: a zone inside a room with its own on/off entity (for example a radar's zone entity). A zone
+  becoming vacant does not make the room vacant; several zones can be occupied at once.
+- **Position zone**: a rectangle or polygon drawn on the coordinates a sensor reports (x and y per target,
+  as states or attributes, up to three targets). Document the coordinate system and units in the notes. Optional:
+  ignore readings of exactly (0, 0) (“no target”), ignore readings older than N seconds. Positions are anonymous:
+  a zone never knows who is in it. Sensors report x and y separately, so give position zones an entry and exit
+  delay of a second or two (the designer reminds you). A basic motion sensor cannot be a position zone.
+- **Person or tracker**: a person or device tracker at a geographic zone of Home Assistant (`home` or another
+  zone) - kept apart from the indoor zones; identity-based rules are entirely opt-in.
+- Entry and exit delays per source; *Nothing acts while the entity reports `fresh: false`* for sources that
+  report staleness (Smart Occupancy Detection does).
+
+Everything compiles into native triggers and conditions (position zones into a template that Home Assistant
+evaluates by itself), so nothing depends on the App at run time.
+
+### Templates
+
+Lighting: *Mood Lighting*, *Presence Lighting*, *Lux-Adaptive Lighting*, *Combined Mood + Presence + Lux*,
+*Zone-Specific Lighting*. Covers: *Sun-Angle Shading*, *Privacy Presets*, *Cover Mood Matrix*, *Mood-Linked
+Covers*, *Scheduled Covers*. A template turns on the controls it is about and lists what it needs; it chooses no
+entity, value or default. Designers for climate, ventilation, buttons/remotes, fans and switches are planned; use
+the rule editor for those devices.
+
+### Simulation
+
+*Simulate* shows what the device's automation would do: choose what just happened (one of its triggers), the
+time, and the states - Home Assistant's live values, or values you type (marked *test value*). You see each rule
+that the trigger starts, which of its conditions fail, the command each light or cover would receive, conflicts,
+and inputs that are missing from the scenario. It evaluates the same rules that are deployed. Nothing is sent to
+any device; a hand-written template or a sun condition is reported as *cannot be evaluated offline*. It is a
+prediction, not a test of the deployed automation.
 
 ## Occupancy (optional)
 
@@ -480,6 +620,8 @@ tests/automation_builder` from the repository root loads the compiler's output -
 imported copies next to their originals - into a real Home Assistant (its automation parser and engine) and
 drives states and time. `tests/e2e/` runs the real image against a disposable Home Assistant (`stack.sh`,
 `prepare.py`, `ha/` with the test configuration, `e2e_checks.py`, `e2e_02_checks.py`, `browser_checks.py`,
-`browser_02_checks.py`) and against a Home Assistant OS test system (`haos.py`, `haos_checks.py`,
-`sod_checks.py` with the real Smart Occupancy Detection). Details, the Home Assistant OS procedure and results:
-`docs/AB-0.2-automation-builder.md` (and `docs/AB-0.1-automation-builder.md` for the first version).
+`browser_02_checks.py`, `e2e_03_checks.py`, `browser_03_checks.py`, and for the designers `e2e_04_checks.py`,
+`browser_04_checks.py`) and against a Home Assistant OS test system (`haos.py`, `haos_checks.py`,
+`sod_checks.py` with the real Smart Occupancy Detection). Details and results: `docs/AB-0.3-automation-builder.md`
+(designers), `docs/AB-0.2-automation-builder.md` (with the Home Assistant OS procedure) and
+`docs/AB-0.1-automation-builder.md`.

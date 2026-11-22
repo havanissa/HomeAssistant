@@ -26,7 +26,8 @@ from typing import Any
 
 import aiohttp
 
-from . import blueprint, catalog, compiler, conflicts as conflict_check, describe, importer, model
+from . import blueprint, catalog, compiler, conflicts as conflict_check, describe, designers, importer, model, simulate
+from .designers import gallery, presence as presence_sources, solar
 from .const import APP_NAME, APP_VERSION
 from .diagnostics import Observer
 from .discovery import Index
@@ -171,18 +172,34 @@ class AppCore:
                             "message": f"{index.name(entity_id)} ({use}) is unavailable right now."})
         return out
 
+    @property
+    def presence(self) -> dict[str, Any] | None:
+        return self.store.config.get("presence")
+
     def analysis(self, device: dict[str, Any], index: Index | None = None) -> dict[str, Any]:
-        """Everything that follows from the rules alone: the compiled automations, conflicts, notes, summaries."""
+        """Everything that follows from the rules alone: the compiled automations, conflicts, notes, summaries.
+
+        The device's designers are expanded first: their rules are compiled, checked and summarised together with
+        the device's own rules (``effective``).
+        """
         index = index or self.index()
-        compiled = compiler.compile_device(device, self.store.config["settings"])
-        found = conflict_check.analyse(device, index.name)
+        connected = bool(self.ha and self.ha.connected)
+        expansion = designers.expand(device, self.presence, index=index if connected else None)
+        effective = designers.effective(device, expansion)
+        compiled = compiler.compile_device(effective, self.store.config["settings"])
+        found = conflict_check.analyse(effective, index.name) + expansion.conflicts
+        problems = [{**p, "rule_id": None} for p in expansion.problems]
+        blocking_problems = [p for p in problems if p["level"] == "blocking"]
         return {
             "automations": compiled["automations"],
-            "notes": compiled["notes"],
+            "notes": compiled["notes"] + problems,
             "conflicts": found,
-            "blocking": len(conflict_check.blocking(found)),
-            "entity_problems": self._entity_problems(device, index),
-            "summaries": {r["id"]: describe.rule(r, index.name, device["targets"]) for r in device["rules"]},
+            "blocking": len(conflict_check.blocking(found)) + len(blocking_problems),
+            "designer_problems": blocking_problems,
+            "entity_problems": self._entity_problems(effective, index),
+            "summaries": {r["id"]: describe.rule(r, index.name, device["targets"]) for r in effective["rules"]},
+            "effective": effective, "expansion": expansion,
+            "generated": expansion.rules,
         }
 
     # ------------------------------------------------------------ rule level
@@ -365,6 +382,7 @@ class AppCore:
                 "id": device["id"], "name": device["name"], "enabled": device["enabled"],
                 "room": index.room_of(device["targets"]),
                 "default": bool(model.active_default(device)),
+                "designers": [{"id": g.get("id"), "kind": g.get("kind"), "name": g.get("name")} for g in device.get("designers") or []],
                 "targets": self._targets_view(device, index),
                 "rules": len(device["rules"]), "rules_enabled": sum(1 for r in device["rules"] if r["enabled"]),
                 "automations": len(analysis["automations"]), "status": live["status"],
@@ -417,10 +435,12 @@ class AppCore:
             "summaries": analysis["summaries"], "notes": analysis["notes"], "conflicts": analysis["conflicts"],
             "blocking": analysis["blocking"], "entity_problems": analysis["entity_problems"],
             "yaml": "".join(compiler.to_yaml(compiler.with_id(a)) for a in analysis["automations"]),
-            "live": live, "mismatches": self._mismatches(device, index),
+            "live": live, "mismatches": self._mismatches(analysis["effective"], index),
             "related": await self._related_automations(device, index),
             "last_result": self.last_results.get(device["id"]),
-            "blueprint_inputs": len(blueprint.inputs_of(device)),
+            "blueprint_inputs": len(blueprint.inputs_of(device, self.presence)),
+            "designers": self._designers_view(device, analysis, index),
+            "presence": self._sources_view(index),
         }
 
     def _originals(self, device: dict[str, Any], index: Index) -> list[dict[str, Any]]:
@@ -450,12 +470,17 @@ class AppCore:
     # ---------------------------------------------------------------- changes
     def _save(self, new_config: dict[str, Any], expected_revision: Any, reason: str, by: str | None) -> dict[str, Any]:
         clean = model.validate_config(new_config)
+        generated: set[str] = set()
         for device in clean["devices"].values():  # a confirmation belongs to a conflict that still exists
-            keys = {c["key"] for c in conflict_check.analyse(device)}
+            expansion = designers.expand(device, clean.get("presence"))
+            keys = {c["key"] for c in conflict_check.analyse(designers.effective(device, expansion))}
+            keys |= {c["key"] for c in expansion.conflicts}
             device["acknowledged"] = [k for k in device["acknowledged"] if k in keys]
+            generated |= {r["id"] for r in expansion.rules}
         saved = self.store.save(clean, expected_revision=expected_revision, reason=reason, by=by)
-        keep = {r["id"] for d in clean["devices"].values() for r in d["rules"]} | {
-            r["id"] for record in self.deploys.records.values() for r in (record.get("device") or {}).get("rules", [])}
+        keep = {r["id"] for d in clean["devices"].values() for r in d["rules"]} | generated | {
+            r["id"] for record in self.deploys.records.values()
+            for r in [*(record.get("device") or {}).get("rules", []), *(record.get("generated") or [])]}
         self.observer.stats.forget(keep)  # observations of rules that exist nowhere anymore
         return saved
 
@@ -638,6 +663,8 @@ class AppCore:
                 changes.append({"type": "changed", "name": cur["name"], "rules": len(cur["rules"])})
         if before is not after and self.store.config["settings"] != new["settings"]:
             changes.append({"type": "settings", "name": "Settings", "rules": 0})
+        if self.store.config.get("presence") != new.get("presence"):
+            changes.append({"type": "settings", "name": "Presence sources", "rules": 0})
         return {"valid": True, "changes": changes, "devices": len(after), "revision": self.store.revision,
                 "note": "Nothing in Home Assistant changes: deployed automations stay as they are until you deploy "
                         "each device again. Automations of devices that disappear are listed on the Overview."}
@@ -717,6 +744,8 @@ class AppCore:
         if blocking:
             reasons.append(f"{len(blocking)} conflict{'s' if len(blocking) != 1 else ''} between rules must be "
                            "resolved or confirmed first.")
+        for problem in analysis["designer_problems"]:
+            reasons.append(problem["message"])
         if invalid:
             reasons.append("Home Assistant does not accept the generated automation: " + "; ".join(invalid))
         changes = any(i["operation"] != "none" for i in items)
@@ -792,12 +821,15 @@ class AppCore:
                 raise ConfigError("external_change", "The automation in Home Assistant was changed outside this App. "
                                                      "Confirm that it may be replaced.", 409)
             assert self.api is not None
-            desired = {a["id"]: a for a in self.analysis(device)["automations"]}
+            current = self.analysis(device)
+            desired = {a["id"]: a for a in current["automations"]}
             applied: list[tuple[str, dict[str, Any] | None]] = []
             done = []
             self.deploys.begin(device, {
                 i["id"]: ({"hash": desired[i["id"]]["hash"], "config": desired[i["id"]]["config"],
-                           "blocks": desired[i["id"]]["blocks"]} if i["operation"] in ("create", "update") else None)
+                           "blocks": desired[i["id"]]["blocks"],
+                           "generated": [r for r in current["generated"] if r["id"] in desired[i["id"]]["rule_ids"]]}
+                          if i["operation"] in ("create", "update") else None)
                 for i in plan["items"] if i["operation"] in ("create", "update", "delete")}, by)
             try:
                 for item in sorted(plan["items"], key=lambda i: i["operation"] in ("delete", "forget")):
@@ -833,7 +865,9 @@ class AppCore:
                         self.deploys.record(automation_id, device_id=device["id"],
                                             config_hash=desired[automation_id]["hash"],
                                             config=desired[automation_id]["config"], device=device, by=by,
-                                            blocks=desired[automation_id]["blocks"])
+                                            blocks=desired[automation_id]["blocks"],
+                                            generated=[r for r in current["generated"]
+                                                       if r["id"] in desired[automation_id]["rule_ids"]])
                 else:
                     self.deploys.forget(automation_id)
             self.deploys.finish()
@@ -936,7 +970,7 @@ class AppCore:
                     elif actual_hash == intended.get("hash"):
                         self.deploys.record(automation_id, device_id=pending["device_id"], config_hash=intended["hash"],
                                             config=intended["config"], device=pending["device"], by=pending.get("by"),
-                                            blocks=intended.get("blocks"))
+                                            blocks=intended.get("blocks"), generated=intended.get("generated"))
                         adopted.append(automation_id)
                     else:
                         left.append(automation_id)
@@ -966,7 +1000,7 @@ class AppCore:
             device = model.validate_device(device["id"], {**device, "blueprint": draft}, "device", problems)
             if problems.items:
                 raise ConfigError("invalid", problems.items[0]["message"], problems=problems.items)
-        built = blueprint.build(device, self.store.config["settings"], names=index.name)
+        built = blueprint.build(device, self.store.config["settings"], names=index.name, presence=self.presence)
         validation: list[dict[str, str]] = [{"level": "error", "message": p} for p in built["problems"]]
         if built["config"] is not None and not built["problems"]:
             if self.ha is not None and self.ha.connected:
@@ -1154,7 +1188,7 @@ class AppCore:
                             "status": live["status"], "last_sync": live["last_sync"],
                             "automations": live["automations"], "conflicts": analysis["conflicts"],
                             "notes": analysis["notes"], "entity_problems": analysis["entity_problems"],
-                            "mismatches": self._mismatches(device, index),
+                            "mismatches": self._mismatches(analysis["effective"], index),
                             "rule_diagnostics": {rid: {k: v for k, v in view.items() if k != "entities"}
                                                  for rid, view in self._rule_views(device, analysis, live, index).items()},
                             "last_result": self.last_results.get(device["id"])})
@@ -1172,6 +1206,242 @@ class AppCore:
             "api_requests": dict(self.api.requests) if self.api else {},
             "log": self.buffer.entries("info")[-150:] if self.buffer else [],
         }
+
+    # ------------------------------------------------------------ designers (Phase 0.3)
+    def _designer(self, device: dict[str, Any], designer_id: Any) -> dict[str, Any]:
+        found = next((d for d in device.get("designers") or [] if d.get("id") == designer_id), None)
+        if found is None:
+            raise ConfigError("unknown_designer", "This designer does not exist (anymore).", 404)
+        return found
+
+    def _designers_view(self, device: dict[str, Any], analysis: dict[str, Any], index: Index) -> dict[str, Any]:
+        """For the device page and the designer pages: what exists, what is possible, and what it generates."""
+        expansion = analysis["expansion"]
+        by_designer: dict[str, list[dict[str, Any]]] = {}
+        for rule in expansion.rules:
+            by_designer.setdefault(rule["generated"]["designer_id"], []).append({
+                "id": rule["id"], "name": rule["name"], "layer": rule["generated"]["layer"],
+                "target": rule["generated"]["target"], "column": rule["generated"]["column"], "mood": rule["generated"]["mood"],
+                "summary": analysis["summaries"][rule["id"]]["text"], **self.observer.view(rule["id"])})
+        rows = sorted({t for d in device.get("designers") or [] for t in (d.get("lights") or d.get("covers") or [])}
+                      | set(device["targets"]))
+        return {
+            "available": designers.applicable(device["targets"]),
+            "items": [{"id": d.get("id"), "kind": d.get("kind"), "name": d.get("name"), "enabled": d.get("enabled"),
+                       "supported": designers.supported(d), "config": d,
+                       "view": expansion.views.get(d.get("id"), {}),
+                       "problems": [p for p in expansion.problems if p["designer_id"] == d.get("id")],
+                       "conflicts": [c for c in expansion.conflicts if c["key"].split(":")[1:2] == [d.get("id")]],
+                       "rules": by_designer.get(d.get("id"), [])} for d in device.get("designers") or []],
+            "capabilities": designers.capabilities(index, rows),
+            "planned": list(designers.PLANNED),
+        }
+
+    def _sources_view(self, index: Index) -> list[dict[str, Any]]:
+        """The presence sources with what Home Assistant reports for them now."""
+        out = []
+        used: dict[str, list[str]] = {}
+        for device in self.store.config["devices"].values():
+            for d in device.get("designers") or []:
+                for source_id in designers.referenced_sources([d]):
+                    used.setdefault(source_id, []).append(f"{device['name']}: {d.get('name')}")
+        for source in ((self.presence or {}).get("sources") or {}).values():
+            live: dict[str, Any] = {"state": None, "detail": None}
+            if source["kind"] == "position":
+                if presence_sources.missing(source, "occupied") is None:
+                    states = {e: {**s, "age": None} for e, s in index.states.items()}
+                    occupied = presence_sources.evaluate_position(source, states, "inside")
+                    vacant = presence_sources.evaluate_position(source, states, "outside")
+                    live["state"] = "occupied" if occupied else "vacant" if vacant else "no readings"
+                    live["targets"] = [[presence_sources._reading(index.states, t["x"]), presence_sources._reading(index.states, t["y"])]  # noqa: SLF001
+                                       for t in source["position"]["targets"]]
+            elif source["entity_id"]:
+                state = (index.states.get(source["entity_id"]) or {})
+                live["state"] = state.get("state") if state else "missing"
+                live["fresh"] = (state.get("attributes") or {}).get("fresh")
+            out.append({**source, "live": live, "used_by": used.get(source["id"], []),
+                        "area": index.areas.get(source["area_id"]) if source["area_id"] else None,
+                        "entity_name": index.name(source["entity_id"]) if source["entity_id"] else None})
+        out.sort(key=lambda s: (str(s["area"] or "~").casefold(), s["name"].casefold()))
+        return out
+
+    def _with_designer(self, device: dict[str, Any], designer: Any) -> dict[str, Any]:
+        """The device with this designer put in (replacing the one with its id, or added)."""
+        if not isinstance(designer, dict) or not isinstance(designer.get("id"), str):
+            raise ConfigError("invalid", "Not a designer")
+        draft = copy.deepcopy(device)
+        items = list(draft.get("designers") or [])
+        for i, existing in enumerate(items):
+            if existing.get("id") == designer["id"]:
+                items[i] = designer
+                break
+        else:
+            raise ConfigError("unknown_designer", "This designer does not exist (anymore).", 404)
+        draft["designers"] = items
+        return draft
+
+    def create_designer(self, device_id: Any, kind: Any, template: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        device = self._device(device_id)
+        if kind not in designers.applicable(device["targets"]):
+            raise ConfigError("invalid", "This designer does not suit the entities of this device.")
+        if any(d.get("kind") == kind for d in device.get("designers") or []):
+            raise ConfigError("invalid", "This device has this designer already.")
+        designer = designers.blank(kind, designers.new_designer_id(), device["targets"])
+        if template:
+            try:
+                designer = gallery.apply(template, designer)
+            except KeyError as err:
+                raise ConfigError("invalid", "Unknown template") from err
+        new = copy.deepcopy(self.store.config)
+        new["devices"][device["id"]]["designers"] = [*(device.get("designers") or []), designer]
+        saved = self._save(new, expected_revision, f"designer added: {designer['id']}", by)
+        return {**saved, "designer_id": designer["id"]}
+
+    def save_designer(self, device_id: Any, designer: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        device = self._device(device_id)
+        new = copy.deepcopy(self.store.config)
+        new["devices"][device["id"]] = self._with_designer(device, designer)
+        saved = self._save(new, expected_revision, f"designer changed: {designer.get('id')}", by)
+        return {**saved, **self.designer_page(device["id"], designer["id"])}
+
+    def delete_designer(self, device_id: Any, designer_id: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        device = self._device(device_id)
+        self._designer(device, designer_id)
+        new = copy.deepcopy(self.store.config)
+        rest = [d for d in device.get("designers") or [] if d.get("id") != designer_id]
+        target = new["devices"][device["id"]]
+        if rest:
+            target["designers"] = rest
+        else:
+            target.pop("designers", None)
+        return self._save(new, expected_revision, f"designer removed: {designer_id}", by)
+
+    def designer_page(self, device_id: Any, designer_id: Any, draft: Any = None) -> dict[str, Any]:
+        """One designer as its page shows it; with ``draft``, that version (validated, nothing saved)."""
+        device = self._device(device_id)
+        if draft is not None:
+            problems = model.Problems()
+            clean = model.validate_device(device["id"], self._with_designer(device, draft), "device", problems)
+            if problems.items:
+                prefix = "device.designers["
+                return {"valid": False, "problems": [{**p, "path": p["path"].split("].", 1)[-1] if p["path"].startswith(prefix) else p["path"]}
+                                                     for p in problems.items]}
+            device = clean
+        index = self.index()
+        analysis = self.analysis(device, index)
+        view = self._designers_view(device, analysis, index)
+        item = next((i for i in view["items"] if i["id"] == designer_id), None)
+        if item is None:
+            raise ConfigError("unknown_designer", "This designer does not exist (anymore).", 404)
+        shared = next((a for a in analysis["automations"] if a["role"] == "shared"), None)
+        own_conflicts = [c for c in analysis["conflicts"] if set(c["rule_ids"]) & {r["id"] for r in item["rules"]}]
+        return {"valid": True, "problems": [], "designer": item, "capabilities": view["capabilities"],
+                "conflicts": own_conflicts, "blocking": analysis["blocking"],
+                "automation": ({"id": shared["id"], "alias": shared["alias"], "mode": shared["mode"],
+                                "rules": len(shared["rule_ids"])} if shared else None),
+                "yaml": compiler.to_yaml(compiler.with_id(shared)) if shared else "",
+                "all_rules": len(analysis["effective"]["rules"]), "own_rules": len(device["rules"]),
+                "device": {"id": device["id"], "name": device["name"], "targets": device["targets"]},
+                "presence": self._sources_view(index), "revision": self.store.revision}
+
+    def simulation(self, device_id: Any, scenario: Any, draft: Any = None) -> dict[str, Any]:
+        """What the device's automation would do in a scenario (see ``simulate``). Nothing is sent."""
+        device = self._device(device_id)
+        if draft is not None:
+            problems = model.Problems()
+            device = model.validate_device(device["id"], self._with_designer(device, draft), "device", problems)
+            if problems.items:
+                raise ConfigError("invalid", problems.items[0]["message"], problems=problems.items)
+        index = self.index()
+        analysis = self.analysis(device, index)
+        effective = analysis["effective"]
+        scenario = scenario if isinstance(scenario, dict) else {}
+        result = simulate.run(effective, scenario, analysis["expansion"].refs.evaluators, index.name)
+        return {**result, "triggers": simulate.triggers_of(effective, index.name),
+                "problems": [p for p in analysis["notes"] if p.get("level") == "blocking"],
+                "conflicts": [c for c in analysis["conflicts"] if c["level"] == "blocking" and not c["acknowledged"]]}
+
+    def simulation_inputs(self, device_id: Any) -> dict[str, Any]:
+        device = self._device(device_id)
+        index = self.index()
+        analysis = self.analysis(device, index)
+        return {"inputs": simulate.inputs(analysis["effective"], index),
+                "triggers": simulate.triggers_of(analysis["effective"], index.name),
+                "weekdays": list(model.WEEKDAYS)}
+
+    # ------------------------------------------------------------ presence sources
+    def presence_view(self) -> dict[str, Any]:
+        index = self.index()
+        return {"sources": self._sources_view(index), "areas": [{"area_id": a, "name": n} for a, n in sorted(
+            index.areas.items(), key=lambda a: str(a[1]).casefold())], "revision": self.store.revision}
+
+    def save_source(self, source: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        if not isinstance(source, dict):
+            raise ConfigError("invalid", "Not a presence source")
+        source = copy.deepcopy(source)
+        is_new = not source.get("id")
+        if is_new:
+            import secrets
+            source["id"] = f"z_{secrets.token_hex(4)}"
+        new = copy.deepcopy(self.store.config)
+        sources = (new.get("presence") or {}).get("sources") or {}
+        if not is_new and source["id"] not in sources:
+            raise ConfigError("unknown_source", "This presence source does not exist (anymore).", 404)
+        sources[source["id"]] = source
+        new["presence"] = {"sources": sources}
+        saved = self._save(new, expected_revision, f"presence source {'added' if is_new else 'changed'}: {source['id']}", by)
+        return {**saved, "source_id": source["id"]}
+
+    def delete_source(self, source_id: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        sources = (self.presence or {}).get("sources") or {}
+        if source_id not in sources:
+            raise ConfigError("unknown_source", "This presence source does not exist (anymore).", 404)
+        users = [f"{d['name']}: {g.get('name')}" for d in self.store.config["devices"].values()
+                 for g in d.get("designers") or [] if source_id in designers.referenced_sources([g])]
+        if users:
+            raise ConfigError("in_use", f"“{sources[source_id]['name']}” is used by {', '.join(users)}. Remove it there first.", 409)
+        new = copy.deepcopy(self.store.config)
+        del new["presence"]["sources"][source_id]
+        if not new["presence"]["sources"]:
+            del new["presence"]
+        return self._save(new, expected_revision, f"presence source removed: {source_id}", by)
+
+    # ------------------------------------------------------------ templates and the sun
+    def gallery_view(self, device_id: Any) -> dict[str, Any]:
+        device = self._device(device_id)
+        kinds = designers.applicable(device["targets"])
+        existing = {d.get("kind"): d.get("id") for d in device.get("designers") or []}
+        return {**gallery.for_kinds(kinds), "existing": existing, "kinds": kinds,
+                "device": {"id": device["id"], "name": device["name"]}}
+
+    def apply_template(self, device_id: Any, template: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        device = self._device(device_id)
+        found = next((t for t in gallery.TEMPLATES if t["id"] == template), None)
+        if found is None:
+            raise ConfigError("invalid", "Unknown template")
+        existing = next((d for d in device.get("designers") or [] if d.get("kind") == found["designer"]), None)
+        if existing is None:
+            return self.create_designer(device_id, found["designer"], template, expected_revision, by)
+        updated = gallery.apply(template, existing)
+        new = copy.deepcopy(self.store.config)
+        new["devices"][device["id"]] = self._with_designer(device, updated)
+        saved = self._save(new, expected_revision, f"template applied: {template}", by)
+        return {**saved, "designer_id": existing["id"]}
+
+    def sun_view(self) -> dict[str, Any]:
+        """The sun now (Home Assistant's sun.sun) and today's path at the home's location (for the previews)."""
+        index = self.index()
+        state = index.states.get(solar.SUN) or {}
+        attributes = state.get("attributes") or {}
+        config = getattr(self.ha, "config", None) or {}
+        lat, lon = config.get("latitude"), config.get("longitude")
+        from datetime import UTC, datetime
+        path = solar.day_path(datetime.now(UTC), float(lat), float(lon)) if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) else []
+        return {"available": bool(state) and state.get("state") != "unavailable",
+                "elevation": attributes.get("elevation"), "azimuth": attributes.get("azimuth"),
+                "azimuth_user": solar.from_ha(attributes["azimuth"]) if isinstance(attributes.get("azimuth"), (int, float)) else None,
+                "path": [{**p, "azimuth_user": solar.from_ha(p["azimuth"])} for p in path],
+                "location": bool(path), "convention": "0° = South, +90° = West, -90° = East (Home Assistant: 0° = North)"}
 
     # ---------------------------------------------------------------- catalog
     def catalog(self) -> dict[str, Any]:

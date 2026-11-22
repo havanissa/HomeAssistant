@@ -4,6 +4,8 @@
 import { api, ask, change, chip, clock, enc, errorText, esc, icon, notes, pickEntity, renderBanners, session, toast, view } from "./ui.js";
 import { editorPage } from "./editor.js";
 import { blueprintPage, importListPage, importPage, moodPage } from "./pages.js";
+import { designerPage, designersCard, galleryPage } from "./designer.js";
+import { presencePage } from "./zones.js";
 
 let navToken = 0;
 let page = { act: {}, chg: {} };  // the current page's handlers for [data-act] clicks and [data-chg] changes
@@ -40,7 +42,8 @@ function deviceCard(d) {
     <div class="row"><span class="name">${esc(d.name)}</span><span class="spacer"></span>${chip(d.enabled ? d.status : "nothing", d.enabled ? d.status_text : "Disabled")}</div>
     <div class="sub">Controls ${d.targets.map((x) => `${icon(x.domain)}${esc(x.name)}`).join(", ")}</div>
     <div class="sub">${d.rules_enabled} of ${plural(d.rules, "rule")} enabled · ${plural(d.automations, "automation")}${d.last_sync ? ` · deployed ${esc(clock(d.last_sync))}` : ""}</div>
-    ${rules || more ? `<ul class="rules-mini">${rules}${more}${d.default ? `<li>DEFAULT: when no rule matched</li>` : ""}</ul>` : `<div class="sub">No rules yet.</div>`}${warn}</a>`;
+    ${d.designers && d.designers.length ? `<div class="sub">${d.designers.map((g) => `${icon(g.kind === "lighting" ? "light" : "cover")}${esc(g.name)}`).join(", ")} <span class="muted">(designer)</span></div>` : ""}
+    ${rules || more ? `<ul class="rules-mini">${rules}${more}${d.default ? `<li>DEFAULT: when no rule matched</li>` : ""}</ul>` : d.designers && d.designers.length ? "" : `<div class="sub">No rules yet.</div>`}${warn}</a>`;
 }
 
 function orphanList(orphans) {
@@ -217,7 +220,9 @@ async function newDevicePage(token, presetArea) {
         const from = new Set(list.map((e) => e.ha_device_id || ""));
         try {
           const result = await change("api/devices/create", { name, targets: list.map((e) => e.entity_id), ha_device_id: from.size === 1 ? [...from][0] || null : null });
-          location.hash = `#/rules/${enc(result.device_id)}/new`;  // straight into an empty rule
+          // lights and covers: the gallery of designers and templates; everything else: straight into an empty rule
+          const special = list.some((e) => e.domain === "light" || e.domain === "cover");
+          location.hash = special ? `#/gallery/${enc(result.device_id)}` : `#/rules/${enc(result.device_id)}/new`;
         } catch (err) { toast(errorText(err)); }
       },
     },
@@ -377,7 +382,8 @@ ${(data.rule_diagnostics[r.id] || {}).advanced ? `<span class="badge">advanced</
     view.innerHTML = `<h1><a class="back" href="#/devices" aria-label="Back to devices">←</a><span id="title">${esc(d.name)}</span> ${chip(d.enabled ? live.status : "nothing", d.enabled ? live.status_text : "Disabled")}</h1>
       ${result}${external}
       <div class="two"><div>
-        <div class="card"><div class="row"><h2>Rules</h2><span class="spacer"></span><a class="button" href="#/mood/${enc(d.id)}" title="One rule per value of a dropdown helper">From a dropdown helper…</a><a class="button primary" href="#/rules/${enc(d.id)}/new">Add rule</a></div>
+        ${designersCard(d.id, data.designers)}
+        <div class="card"><div class="row"><h2>${data.designers && data.designers.items.length ? "Advanced rules" : "Rules"}</h2><span class="spacer"></span><a class="button" href="#/mood/${enc(d.id)}" title="One rule per value of a dropdown helper">From a dropdown helper…</a><a class="button primary" href="#/rules/${enc(d.id)}/new">Add rule</a></div>
           ${rules || `<p class="muted">No rules yet. A rule is: IF a trigger happens AND conditions hold THEN actions run.</p>`}
           ${d.rules.length > 1 ? `<p class="muted small">Rules that match the same trigger run in this order.</p>` : ""}
           ${defaultHtml(d, data.default_summary)}</div>
@@ -423,6 +429,17 @@ ${(data.rule_diagnostics[r.id] || {}).advanced ? `<span class="badge">advanced</
     },
     act: {
       move: (el) => act(() => change("api/rules/move", { device_id: deviceId, rule_id: el.dataset.id, direction: el.dataset.dir })),
+      "designer-create": async (el) => {
+        try {
+          const result = await change("api/designers/create", { device_id: deviceId, kind: el.dataset.kind });
+          location.hash = `#/design/${enc(deviceId)}/${enc(result.designer_id)}`;
+        } catch (err) { toast(errorText(err)); }
+      },
+      "designer-delete": async (el) => {
+        const item = data.designers.items.find((i) => i.id === el.dataset.id);
+        if (!await ask({ title: `Delete “${item.name}”?`, body: `<p>The designer and the ${item.rules.length} rules it generates are removed here (the configuration goes to the backups in Settings). Home Assistant keeps running them until you deploy.</p>`, ok: "Delete", danger: true })) return;
+        act(() => change("api/designers/delete", { device_id: deviceId, designer_id: item.id }), "Designer deleted.");
+      },
       ack: (el) => patch({ acknowledge: el.dataset.key }, "Order confirmed."),
       unack: (el) => patch({ unacknowledge: el.dataset.key }),
       "rule-delete": async (el) => {
@@ -590,7 +607,7 @@ async function route() {
   const token = ++navToken;
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   const section = parts[0] || "overview";
-  const NAV = { blueprint: "devices", mood: "devices", default: "rules" };
+  const NAV = { blueprint: "devices", mood: "devices", default: "rules", design: "devices", gallery: "devices" };
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === (NAV[section] || section)));
   page = { act: {}, chg: {} };
   const current = () => token === navToken;
@@ -606,6 +623,9 @@ async function route() {
     else if (section === "import" && parts[1]) { await loadShell(); if (current()) page = await importPage(parts[1], current) || page; }
     else if (section === "import") page = await importListPage(current) || page;
     else if (section === "mood" && parts[1]) { await loadShell(); if (current()) page = await moodPage(parts[1], current) || page; }
+    else if (section === "design" && parts[1] && parts[2]) { await loadShell(); if (current()) page = await designerPage(parts[1], parts[2], parts[3] || null, current) || page; }
+    else if (section === "gallery" && parts[1]) { await loadShell(); if (current()) page = await galleryPage(parts[1], current) || page; }
+    else if (section === "presence") { await loadShell(); if (current()) page = await presencePage(current) || page; }
     else if (section === "settings") await settingsPage(token);
     else location.hash = "#/";
   } catch (err) {

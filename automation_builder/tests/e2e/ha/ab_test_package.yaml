@@ -29,6 +29,12 @@ input_boolean:
     name: Door (test driver)
   slow_done:
     name: Slow script finished
+  sofa_zone_drv:
+    name: Sofa zone (test driver)
+  kitchen_zone_drv:
+    name: Kitchen zone (test driver)
+  rain_drv:
+    name: Rain (test driver)
 input_number:
   test_lux:
     name: Lux (test driver)
@@ -40,6 +46,31 @@ input_number:
     min: 0
     max: 100
     initial: 0
+  radar_x:
+    name: Radar x (test driver)
+    min: -4000
+    max: 4000
+    initial: 0
+  radar_y:
+    name: Radar y (test driver)
+    min: 0
+    max: 6000
+    initial: 0
+  wind_drv:
+    name: Wind (test driver)
+    min: 0
+    max: 40
+    initial: 2
+  outdoor_lux_drv:
+    name: Outdoor lux (test driver)
+    min: 0
+    max: 120000
+    initial: 30000
+  awning_pos:
+    name: Awning position (test driver)
+    min: 0
+    max: 100
+    initial: 0
 input_button:
   wall_switch:
     name: Wall switch
@@ -48,6 +79,14 @@ input_select:
     name: Mood
     options: [Dagur, Hygge, Nátt]
     initial: Dagur
+  main_mood:
+    name: Main mood
+    options: [Auto, Dagur, Hygge, Nátt]
+    initial: Dagur
+  cover_mode:
+    name: Cover mode
+    options: [Daylight, Privacy, Sleep]
+    initial: Daylight
 input_datetime:
   ab_wake:
     name: Wake time
@@ -89,12 +128,65 @@ template:
         unique_id: ab_e2e_test_door
         device_class: door
         state: "{{ is_state('input_boolean.ab_door', 'on') }}"
+      - name: Sofa zone
+        unique_id: ab_e2e_sofa_zone
+        device_class: occupancy
+        state: "{{ is_state('input_boolean.sofa_zone_drv', 'on') }}"
+      - name: Kitchen zone
+        unique_id: ab_e2e_kitchen_zone
+        device_class: occupancy
+        state: "{{ is_state('input_boolean.kitchen_zone_drv', 'on') }}"
+      - name: Test rain
+        unique_id: ab_e2e_test_rain
+        device_class: moisture
+        state: "{{ is_state('input_boolean.rain_drv', 'on') }}"
     sensor:
       - name: Test lux
         unique_id: ab_e2e_test_lux
         unit_of_measurement: lx
         device_class: illuminance
         state: "{{ states('input_number.test_lux') }}"
+      - name: Radar target x
+        unique_id: ab_e2e_radar_x
+        unit_of_measurement: mm
+        state: "{{ states('input_number.radar_x') | int }}"
+      - name: Radar target y
+        unique_id: ab_e2e_radar_y
+        unit_of_measurement: mm
+        state: "{{ states('input_number.radar_y') | int }}"
+      - name: Test wind
+        unique_id: ab_e2e_test_wind
+        unit_of_measurement: m/s
+        device_class: wind_speed
+        state: "{{ states('input_number.wind_drv') }}"
+      - name: Outdoor lux
+        unique_id: ab_e2e_outdoor_lux
+        unit_of_measurement: lx
+        device_class: illuminance
+        state: "{{ states('input_number.outdoor_lux_drv') }}"
+    cover:
+      - name: Test awning
+        unique_id: ab_e2e_test_awning
+        device_class: awning
+        position: "{{ states('input_number.awning_pos') | int }}"
+        open_cover:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.awning_pos
+            data:
+              value: 100
+        close_cover:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.awning_pos
+            data:
+              value: 0
+        set_cover_position:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.awning_pos
+            data:
+              value: "{{ position }}"
     light:
       - name: Flaky lamp
         unique_id: ab_e2e_flaky_lamp

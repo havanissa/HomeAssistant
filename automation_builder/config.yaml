@@ -2,12 +2,13 @@
 # Independent of Smart Comfort (slug smart_lighting) and of Smart Occupancy Detection: its own slug, container,
 # /data folder, backups and versions. It needs neither of them.
 name: Automation Builder
-version: "0.2.1"
+version: "0.3.0"
 slug: automation_builder
 description: >-
-  A visual IF / AND-OR / THEN rule editor. Choose a device to control, give it
-  rules, and Automation Builder combines them into one native Home Assistant
-  automation, validated and deployed only when you ask for it.
+  A visual IF / AND-OR / THEN rule editor with graphical designers for lights
+  (mood, presence and light-level matrices) and covers (sun angle, cover modes).
+  Each device becomes one native Home Assistant automation, validated and
+  deployed only when you ask for it.
 url: https://github.com/havanissa/HomeAssistant/tree/main/automation_builder
 arch:
   - aarch64

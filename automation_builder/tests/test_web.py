@@ -135,3 +135,50 @@ async def test_errors_are_json(client):
     big = await client.post("/api/rules/save", data=b'{"x":"' + b"a" * 600_000 + b'"}',
                             headers={**POST, "Content-Type": "application/json"})
     assert big.status == 413
+
+
+async def test_phase03_routes(client):
+    """Designers, presence sources, gallery, simulation and the sun: administrators only, changes with the revision."""
+    core = client.core
+    for name in ("designer.js", "zones.js"):
+        assert (await client.get(f"/assets/{name}")).status == 200, name
+    status, overview = await get(client, "/api/overview")
+    status, created = await post(client, "/api/devices/create", {"name": "Lamp", "targets": [LAMP], "expected_revision": overview["revision"]})
+    device_id = created["device_id"]
+    status, gallery = await get(client, f"/api/gallery/{device_id}")
+    assert status == 200 and gallery["kinds"] == ["lighting"] and all(t["designer"] == "lighting" for t in gallery["templates"])
+    status, made = await post(client, "/api/gallery/apply", {"device_id": device_id, "template": "mood_lighting",
+                                                             "expected_revision": core.store.revision})
+    assert status == 200, made
+    status, page = await get(client, f"/api/designers/{device_id}/{made['designer_id']}")
+    assert status == 200 and page["designer"]["config"]["primary"] == "mood"
+    designer = {**page["designer"]["config"], "lights": [LAMP]}
+    designer["mood"] = {**designer["mood"], "entity_id": "input_select.mood", "values": ["Dagur"],
+                        "cells": {LAMP: {"Dagur": {"kind": "on", "brightness_pct": 30}}}}
+    status, preview = await post(client, "/api/designers/preview", {"device_id": device_id, "designer": designer})
+    assert status == 200 and preview["valid"] and len(preview["designer"]["rules"]) == 1 and "brightness_pct: 30" in preview["yaml"]
+    status, stale = await post(client, "/api/designers/save", {"device_id": device_id, "designer": designer, "expected_revision": "old"})
+    assert status == 409 and stale["error"] == "stale"
+    status, saved = await post(client, "/api/designers/save", {"device_id": device_id, "designer": designer,
+                                                               "expected_revision": core.store.revision})
+    assert status == 200 and saved["blocking"] == 0
+    status, sim_inputs = await get(client, f"/api/simulation/{device_id}")
+    assert status == 200 and any(i["entity_id"] == "input_select.mood" for i in sim_inputs["inputs"])
+    status, result = await post(client, "/api/designers/simulate", {"device_id": device_id, "scenario": {
+        "trigger": sim_inputs["triggers"][0]["key"], "states": {"input_select.mood": {"state": "Dagur"}}}})
+    assert status == 200 and result["outcome"][0]["final"]["data"] == {"brightness_pct": 30}
+    assert core.ha.requests == {} or "POST" not in core.ha.requests          # simulation never writes anything
+    status, sources = await post(client, "/api/presence/save", {"source": {"name": "Sofa", "kind": "zone", "entity_id": None},
+                                                                "expected_revision": core.store.revision})
+    assert status == 200 and (await get(client, "/api/presence"))[1]["sources"][0]["name"] == "Sofa"
+    status, _sun = await get(client, "/api/sun")
+    assert status == 200
+    for path in (f"/api/designers/{device_id}/{made['designer_id']}", "/api/presence", f"/api/gallery/{device_id}", "/api/sun",
+                 f"/api/simulation/{device_id}"):
+        assert (await get(client, path, user=GUEST))[0] == 403, path
+    status, _body = await post(client, "/api/designers/delete", {"device_id": device_id, "designer_id": made["designer_id"],
+                                                                 "expected_revision": core.store.revision}, **{"X-Remote-User-Id": GUEST})
+    assert status == 403
+    status, _body = await post(client, "/api/designers/delete", {"device_id": device_id, "designer_id": made["designer_id"],
+                                                                 "expected_revision": core.store.revision})
+    assert status == 200 and "designers" not in core.store.config["devices"][device_id]

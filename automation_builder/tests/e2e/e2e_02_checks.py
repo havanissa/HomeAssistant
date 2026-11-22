@@ -119,7 +119,7 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
             home.call("automation.turn_on", state["entity_id"])
     status, overview = app.get("api/overview")
     check("20 the App answers and is connected", status == 200 and overview["connection"]["home_assistant"]["connected"], overview.get("connection"))
-    check("20 this is version 0.2.x", overview["app"]["version"].startswith("0.2."), overview["app"])
+    check("20 this is version 0.2 or later", tuple(map(int, overview["app"]["version"].split(".")[:2])) >= (0, 2), overview["app"])
     for helper in ("test_motion", "ab_door", "guest_mode", "drop_commands"):
         home.set(helper, False)
     home.lux(400)

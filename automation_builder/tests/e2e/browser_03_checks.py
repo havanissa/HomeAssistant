@@ -130,6 +130,9 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                     frame.locator('#chosen button[data-act="drop"]').first.click()
                     check("flow: a selection can be removed again", frame.locator("#chosen li").count() == 1 and frame.locator("#entities-list input:checked").count() == 1)
                     frame.locator("#create").click()
+                    # 0.3: a device with lights or covers opens the template gallery; "Write a rule" is the rule editor
+                    frame.locator("h1", has_text="New automation").wait_for()
+                    frame.locator("a.button", has_text="Write a rule").click()
                     frame.locator("h1", has_text="New rule").wait_for()
                     made = next(d for d in overview()["devices"] if d["targets"][0]["entity_id"] == RGBWW and d["rules"] == 0)
                     check("flow: after Add device an empty rule is open, nothing saved or deployed yet", made["status"] == "nothing"
