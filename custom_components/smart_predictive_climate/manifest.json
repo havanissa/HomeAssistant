@@ -1,0 +1,18 @@
+{
+  "domain": "smart_predictive_climate",
+  "name": "Smart Adaptive & Predictive Climate",
+  "codeowners": [
+    "@havanissa"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/havanissa/smart-predictive-climate",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/havanissa/smart-predictive-climate/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}
