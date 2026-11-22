@@ -30,6 +30,7 @@ async def test_duplicate_and_non_string_ids_in_the_file_block_deletion(core, hom
     entries.append({**entries[0], "alias": "duplicate"})
     entries.append({"id": 1234, "alias": "numeric", "triggers": [], "actions": []})
     entries.append({"alias": "no id", "triggers": [], "actions": []})
+    home.path = None  # edited by hand: Home Assistant has not rewritten it
     (ha_folder / "automations.yaml").write_text(yaml.safe_dump(entries))
     by, view = await items(core)
     assert view["file_scan"]["duplicate_ids"] == ["1700000000001"]
@@ -86,3 +87,24 @@ async def test_dependencies_are_reported(core, home: FakeHome):
     refs = by["1700000000002"]["references"]
     assert "script.goodnight" in refs["scripts"] and "scene.evening" in refs["scenes"]
     assert "input_boolean.guest" in refs["helpers"]
+
+
+async def test_listing_reads_automations_yaml_once_not_the_editor_endpoint_per_automation(core, home: FakeHome):
+    """Home Assistant's editor endpoint re-reads the whole file for every id (serialised): ~0.15 s each."""
+    for i in range(50):
+        home.add_ui(automation(f"bulk_{i}", f"Bulk {i}"))
+    home.requests.clear()
+    by, view = await items(core)
+    assert len(by) > 50 and home.requests["GET"] == 0
+    assert by["bulk_7"]["config_origin"] == "automations.yaml" and by["bulk_7"]["deletable"]
+    # an export verifies every exported automation against the editor endpoint itself
+    from conftest import wait_op
+    op = await wait_op(core, await core.start_export({"keys": ["bulk_1", "bulk_2"]}, "user-admin"))
+    assert op["verification"]["ok"] and home.requests["GET"] == 2
+
+
+async def test_without_the_folder_every_configuration_comes_from_the_editor(core, home: FakeHome, tmp_path):
+    core.folder = HaConfigFolder(tmp_path / "missing")
+    home.requests.clear()
+    by, _ = await items(core)
+    assert home.requests["GET"] >= 7 and by["1700000000001"]["source"] == "ui"

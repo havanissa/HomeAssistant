@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .ha import BLUEPRINT_PATH
-from .yamlio import Tagged, load_tolerant
+from .yamlio import Tagged, find_tags, json_compatible, load_tolerant
 
 _LOGGER = logging.getLogger(__name__)
 MAX_BLUEPRINT_BYTES = 1024 * 1024
@@ -37,6 +37,10 @@ class FileScan:
     without_id: int = 0
     non_string_ids: list[str] = field(default_factory=list)
     entries: int = 0
+    #: id -> configuration as written in the file (first occurrence), only for entries that are plain JSON values
+    #: without tags: exactly what Home Assistant's editor endpoint returns for them. Used for listing; every
+    #: export is verified against the editor endpoint itself.
+    configs: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def public(self) -> dict[str, Any]:
         return {"available": self.available, "error": self.error, "entries": self.entries,
@@ -101,6 +105,8 @@ class HaConfigFolder:
             value = entry["id"]
             if isinstance(value, str):
                 scan.ids[value] += 1
+                if value not in scan.configs and json_compatible(entry) and not find_tags(entry):
+                    scan.configs[value] = entry
             else:
                 shown = str(value.value if isinstance(value, Tagged) else value)
                 scan.non_string_ids.append(shown)

@@ -68,11 +68,15 @@ def load(text: str) -> Any:
     """Plain safe loading (for archive files), with the expansion guard."""
     if len(text.encode("utf-8")) > MAX_YAML_BYTES:
         raise ValueError("The YAML file is too large")
-    _check_expansion(yaml.compose(text, Loader=yaml.SafeLoader))
-    return yaml.safe_load(text)
+    _check_expansion(yaml.compose(text, Loader=_SafeBase))
+    return yaml.load(text, Loader=_SafeBase)  # noqa: S506 - a safe loader
 
 
-class _TolerantLoader(yaml.SafeLoader):
+#: libyaml's parser when PyYAML has it (the App's wheels do): a large automations.yaml parses many times faster.
+_SafeBase: type = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+class _TolerantLoader(_SafeBase):  # type: ignore[misc, valid-type]
     pass
 
 

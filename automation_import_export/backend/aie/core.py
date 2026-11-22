@@ -110,12 +110,14 @@ class AppCore:
             raise OperationError("Home Assistant is not connected; try again in a moment.", "not_connected", 503)
         return self.ha, self.api
 
-    async def snapshot(self, *, cached: bool = False) -> Snapshot:
+    async def snapshot(self, *, cached: bool = False, fetch: Any = ()) -> Snapshot:
+        """``fetch``: automation ids whose configuration must come from Home Assistant's editor endpoint itself
+        (what an operation verifies or decides on); everything else is listed from automations.yaml."""
         if cached and self._cache and time.monotonic() - self._cache[0] < SNAPSHOT_CACHE_SECONDS:
             return self._cache[1]
         ha, api = self._require_ha()
         try:
-            snap = await take_snapshot(ha, api, self.folder, now=iso())
+            snap = await take_snapshot(ha, api, self.folder, now=iso(), fetch=[f for f in fetch if f])
         except (HomeAssistantError, ConnectionError, TimeoutError) as err:
             raise OperationError(f"Home Assistant could not be read: {err}", "ha_error", 503) from err
         self._cache = (time.monotonic(), snap)
@@ -227,7 +229,12 @@ class AppCore:
             "warnings": len(manifest["warnings"]), "source_instance": self.identity.instance_id})
         op["archive_id"] = archive_id
         self.journal.log(op, "info", f"Archive {archive_id} stored in the App ({entry['size']} bytes)")
-        live = await self.snapshot() if live_compare else None  # an imported file is not in Home Assistant yet
+        live = None  # an imported file is not in Home Assistant yet
+        if live_compare:
+            ids = [i.config_id for i in items if i.source == "ui"]
+            self.journal.log(op, "info", f"Comparing {len(items)} automation(s) with Home Assistant (each one read "
+                                         "through its automation editor)")
+            live = await self.snapshot(fetch=ids)
         report = verify(data, expected_keys=[i.key for i in items], live=live, deletion_keys=deletion,
                         stored_sha256=entry["sha256"], verified_at=iso())
         self.archives.update(archive_id, verification={"status": report["status"], "at": report["verified_at"],
@@ -491,7 +498,7 @@ class AppCore:
         if op.get("status") != "interrupted":
             raise OperationError("This operation was not interrupted", "not_interrupted", 409)
         async with self.lock:
-            snap = await self.snapshot()
+            snap = await self.snapshot(fetch=list(op.get("items") or {}))
             kind = op.get("kind")
             if kind == "cleanup" and op.get("archive_id") and op.get("preview"):
                 archive = Archive(self.archives.read(op["archive_id"]))
@@ -545,7 +552,7 @@ class AppCore:
             raise OperationError("This deletion cannot be continued", "not_resumable", 409)
         pending = [k for k, e in op["items"].items() if e.get("status") == "pending"]
         archive_bytes = self.archives.read(op["archive_id"])
-        snap = await self.snapshot()
+        snap = await self.snapshot(fetch=pending)
         report = verify(archive_bytes, live=snap, deletion_keys=pending,
                         stored_sha256=self.archives.entries[op["archive_id"]]["sha256"], verified_at=iso())
         op["verification_resume"] = report
@@ -598,7 +605,8 @@ class AppCore:
         raw, archive = self._load(archive_id)
         live = None
         if data.get("live") and self.ha is not None and self.ha.connected:
-            live = await self.snapshot()
+            live = await self.snapshot(fetch=[i.get("config_id") for i in archive.manifest.get("inventory") or []
+                                              if isinstance(i, dict) and i.get("source") == "ui"])
         entry = self.archives.entries[archive_id]
         report = verify(raw, live=live, stored_sha256=entry.get("sha256"), verified_at=iso(),
                         expected_keys=(archive.manifest.get("selection") or {}).get("keys"))

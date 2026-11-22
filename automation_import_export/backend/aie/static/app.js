@@ -204,7 +204,8 @@ export async function route() {
     else if (section === "operation") await renderOperation(parts[1]);
     else view.innerHTML = `<div class="card empty">Not found. <a href="#/">Overview</a></div>`;
   } catch (err) {
-    view.innerHTML = `<div class="notice error">${esc(err.message)}</div>`;
+    const network = err instanceof TypeError;  // fetch failed: no answer at all (not an error reply)
+    view.innerHTML = `<div class="notice error">${network ? "The App did not answer. Check that it is running (Settings → Apps → Automation Import/Export Manager → Log) and reload the page." : esc(err.message)}</div>${network ? `<p class="muted small">${esc(err.message)}</p>` : ""}`;
   }
 }
 
