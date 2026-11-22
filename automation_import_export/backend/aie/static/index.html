@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Automation Import/Export Manager</title>
+  <link rel="icon" href="assets/icon.svg">
+  <link rel="stylesheet" href="assets/app.css?v=__VERSION__">
+  <script type="module" src="assets/app.js?v=__VERSION__"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="assets/icon.svg" alt=""><span>Automation Import/Export</span></div>
+    <nav>
+      <a href="#/" data-nav="overview">Overview</a>
+      <a href="#/export" data-nav="export">Export</a>
+      <a href="#/import" data-nav="import">Import</a>
+      <a href="#/archives" data-nav="archives">Archives</a>
+    </nav>
+    <label class="theme small muted">Theme
+      <select id="theme" aria-label="Theme"><option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select>
+    </label>
+  </header>
+  <div id="banners"></div>
+  <main id="view"><p class="muted">Loading…</p></main>
+  <dialog id="dialog"></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

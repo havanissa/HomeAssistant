@@ -1,0 +1,8 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# Take the container down when the backend fails, so the Supervisor (and its watchdog, when enabled) sees it.
+if [[ "${1}" -ne 0 ]] && [[ "${1}" -ne 256 ]]; then
+  bashio::log.warning "Automation Import/Export Manager stopped (exit code ${1}); halting the App"
+  exec /run/s6/basedir/bin/halt
+fi
+bashio::log.info "Automation Import/Export Manager stopped"

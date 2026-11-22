@@ -1,0 +1,25 @@
+# Changelog
+
+## 0.1.0
+
+First version (Phase 0.1): an independent App for exporting, archiving, cleaning up and restoring Home Assistant
+automations with their metadata.
+
+- Discovery of every automation with its source (automations.yaml, other YAML files, integrations), owner
+  (ordinary, Automation Builder, ambiguous), labels, categories, area, blueprint, state and dependencies; filters,
+  search and grouping by category, area, label or source.
+- Versioned ZIP archives (format version 1): exact native YAML per automation and as one list, registry metadata,
+  label / category / area / floor definitions, dependencies, blueprint files, manifest with inventory, exact
+  associations, Home Assistant version, source installation, warnings, compatibility and SHA-256 checksums.
+- Verification of every archive: readability, checksums, complete configurations and metadata, YAML parsed back
+  and compared exactly, identities, dependencies, no omission, protected automations excluded, and a lossless
+  comparison with Home Assistant.
+- Export & Delete Legacy Automations with a deletion preview, typed confirmation, per-automation change detection
+  right before each deletion, removal verification, protected-automation check, report and a durable journal
+  (interrupted deletions are reconciled and can be continued or restored).
+- Restore from this App's archives and from ordinary automation YAML files: staged plan, collisions (skip /
+  replace after a backup / new), label, category and area mapping or recreation, entity ids, enabled and disabled
+  states, hidden flags, aliases, assistant exposure, missing blueprints installed from the archive, verification
+  of the result (an incomplete restoration is reported as such) and rollback.
+- Ingress-only interface for administrators (Overview, Export, Import, Archives) for desktop, tablet and phone,
+  light and dark theme.

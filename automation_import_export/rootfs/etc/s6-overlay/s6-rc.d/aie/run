@@ -1,0 +1,8 @@
+#!/command/with-contenv bashio
+# shellcheck shell=bash
+# Start the Automation Import/Export Manager backend (web interface on the Ingress port 8099).
+# with-contenv makes SUPERVISOR_TOKEN available.
+bashio::log.info "Starting Automation Import/Export Manager..."
+umask 077
+cd /opt/aie || exit 1
+exec python3 -m aie

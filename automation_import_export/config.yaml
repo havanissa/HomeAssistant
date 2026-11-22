@@ -1,0 +1,47 @@
+# Home Assistant App configuration: Automation Import/Export Manager.
+# Independent of every other App in this repository (Smart Comfort, Smart Occupancy Detection, Automation Builder,
+# Smart Predictive Climate): its own slug, container, /data folder, backups and versions. It needs none of them.
+name: Automation Import/Export Manager
+version: "0.1.0"
+slug: automation_import_export
+description: >-
+  Export, archive, clean up and restore your Home Assistant automations with
+  their labels, categories, areas, entity ids and enabled states. Verified
+  archives, an explicit Export & Delete workflow and staged restoration.
+url: https://github.com/havanissa/HomeAssistant/tree/main/automation_import_export
+arch:
+  - aarch64
+  - amd64
+homeassistant: "2026.10.0"
+startup: application
+boot: auto
+# The base image runs S6 overlay v3 as PID 1.
+init: false
+
+# Ingress only: the interface opens from the Home Assistant sidebar, through Home Assistant's own login.
+# No host port is exposed.
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:archive-arrow-down-outline
+panel_title: Automation Archive
+panel_admin: true
+
+# Home Assistant Core API through the Supervisor proxy (SUPERVISOR_TOKEN). The backend sends only allowlisted
+# websocket commands and writes only for a confirmed operation (backend/aie/ha.py): Home Assistant's automation
+# editor endpoint /config/automation/config/<id> (never for automation_builder_* ids), the entity registry of the
+# automations being restored, automation.turn_on/turn_off/reload of those, and creating a missing label, automation
+# category, area or blueprint. Nothing is ever deleted except automations the user confirmed.
+homeassistant_api: true
+hassio_api: false
+# Read-only: blueprints/automation/** (so archives can include the blueprint files) and automations.yaml (to find
+# duplicate or missing ids). Nothing else is read; nothing can be written.
+map:
+  - type: homeassistant_config
+    read_only: true
+
+# The stored archives live in /data and are part of the App's backups.
+backup: hot
+options:
+  log_level: info
+schema:
+  log_level: list(debug|info|warning|error)

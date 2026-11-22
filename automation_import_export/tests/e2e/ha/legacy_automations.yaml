@@ -1,0 +1,18 @@
+# Automations maintained in a separate YAML file (not automations.yaml): read-only for the App.
+- id: legacy_with_id
+  alias: Legacy file rule
+  triggers:
+    - trigger: time
+      at: "06:30:00"
+  actions:
+    - action: input_boolean.turn_on
+      target:
+        entity_id: input_boolean.aie_light
+- alias: Legacy rule without id
+  triggers:
+    - trigger: homeassistant
+      event: start
+  actions:
+    - action: input_boolean.turn_off
+      target:
+        entity_id: input_boolean.aie_guest

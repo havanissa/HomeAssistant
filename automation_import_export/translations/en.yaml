@@ -1,0 +1,4 @@
+configuration:
+  log_level:
+    name: Log level
+    description: How much the App writes to its log.

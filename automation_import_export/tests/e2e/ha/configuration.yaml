@@ -1,0 +1,23 @@
+# Disposable Home Assistant for the Automation Import/Export Manager end-to-end checks (never a production
+# instance). The test entities are in aie_test_package.yaml; legacy_automations.yaml holds automations that are
+# maintained in another YAML file (read-only for the App).
+default_config:
+homeassistant:
+  name: Heima
+  latitude: 62.0
+  longitude: -6.8
+  elevation: 20
+  unit_system: metric
+  time_zone: Atlantic/Faroe
+  country: FO
+  packages:
+    aie_test: !include aie_test_package.yaml
+http:
+  server_host:
+    - 127.0.0.1
+    - 172.30.32.1
+  server_port: 18123
+logger:
+  default: warning
+automation: !include automations.yaml
+automation legacy: !include legacy_automations.yaml
