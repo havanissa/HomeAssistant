@@ -49,6 +49,7 @@ class FakeHome:
         self.device_automations: dict[str, list[dict[str, Any]]] = {}  # "<kind>:<device id>" -> what HA lists
         self.blueprints: dict[str, str] = {}     # blueprints/automation/<path> -> YAML
         self.configs: dict[str, dict[str, Any]] = {}  # automation entity id -> its configuration (unmanaged ones)
+        self.collections: dict[str, dict[str, dict[str, Any]]] = {"input_boolean": {}, "timer": {}}  # UI helpers
         for entity_id, value, device, attributes in (
             ("light.bed_lamp", "off", "dev-lamp", {"friendly_name": "Bed lamp", "supported_color_modes": ["color_temp"]}),
             ("switch.relay_1", "off", "dev-relay", {"friendly_name": "Relay 1"}),
@@ -99,6 +100,29 @@ class FakeHome:
         if kind == "trace/list" and self.traces is not None:
             return [{k: t.get(k) for k in ("run_id", "timestamp", "state", "script_execution", "trigger", "error")}
                     for t in self.traces.get(params["item_id"], [])]
+        domain, _, verb = kind.partition("/")
+        if domain in self.collections:
+            items = self.collections[domain]
+            if verb == "list":
+                return list(items.values())
+            if verb == "create":
+                item_id = re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", params["name"].lower())).strip("_")
+                while item_id in items:
+                    item_id += "_2"
+                items[item_id] = {"id": item_id, **{k: v for k, v in params.items()}}
+                initial = "idle" if domain == "timer" else "off"
+                self.states[f"{domain}.{item_id}"] = state(f"{domain}.{item_id}", initial, friendly_name=params["name"])
+                self.entity_registry.append({"entity_id": f"{domain}.{item_id}", "device_id": None, "area_id": None,
+                                             "platform": domain, "unique_id": item_id})
+                return items[item_id]
+            if verb == "delete":
+                item_id = params[f"{domain}_id"]
+                if item_id not in items:
+                    raise HomeAssistantError("not_found", "Unable to find")
+                del items[item_id]
+                self.states.pop(f"{domain}.{item_id}", None)
+                self.entity_registry = [e for e in self.entity_registry if e["entity_id"] != f"{domain}.{item_id}"]
+                return None
         if kind.startswith("device_automation/"):
             return self.device_automations.get(f"{kind.split('/')[1]}:{params['device_id']}", [])
         if kind == "blueprint/list":

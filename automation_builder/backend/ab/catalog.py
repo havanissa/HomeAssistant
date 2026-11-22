@@ -133,7 +133,7 @@ IDEMPOTENT_SERVICES = frozenset({
 def effect(action: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
     """The effect of ``domain.service`` with this data on its target entities."""
     domain, _, service = action.partition(".")
-    data = data or {}
+    data = data if isinstance(data, dict) else {}  # a generated rule's data can be one template
     if service in NON_IDEMPOTENT_SERVICES:
         return {"kind": "non_idempotent"}
     if domain in STATE_ON_OFF_DOMAINS and service in ("turn_on", "turn_off"):

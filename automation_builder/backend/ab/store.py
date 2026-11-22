@@ -213,6 +213,7 @@ class DeployStore:
         self.path = data_dir / "deploy" / "state.json"
         self.records: dict[str, dict[str, Any]] = {}
         self.blueprints: dict[str, dict[str, Any]] = {}  # installed blueprint files, by path
+        self.helpers: dict[str, dict[str, Any]] = {}     # helpers this App created in Home Assistant, by entity id
         self.pending: dict[str, Any] | None = None       # a deployment that was started and not finished
         self.problem: str | None = None
 
@@ -225,6 +226,8 @@ class DeployStore:
             self.records = {k: v for k, v in records.items() if isinstance(v, dict) and "hash" in v}
             blueprints = document.get("blueprints")
             self.blueprints = {k: v for k, v in blueprints.items() if isinstance(v, dict)} if isinstance(blueprints, dict) else {}
+            helpers = document.get("helpers")
+            self.helpers = {k: v for k, v in helpers.items() if isinstance(v, dict)} if isinstance(helpers, dict) else {}
             self.pending = document["pending"] if isinstance(document.get("pending"), dict) else None
         except FileNotFoundError:
             self.records = {}
@@ -243,6 +246,8 @@ class DeployStore:
         document: dict[str, Any] = {"schema": SCHEMA, "saved_at": iso(utcnow()), "records": self.records}
         if self.blueprints:
             document["blueprints"] = self.blueprints
+        if self.helpers:
+            document["helpers"] = self.helpers
         if self.pending:
             document["pending"] = self.pending
         _atomic_write(self.path, document)
@@ -263,6 +268,17 @@ class DeployStore:
         self.blueprints[path] = {"hash": digest, "device_id": device_id, "name": name, "installed_at": iso(utcnow()),
                                  "by": by}
         self._write()
+
+    def helper_created(self, entity_id: str, *, domain: str, item_id: str, device_id: str, light: str,
+                       by: str | None) -> None:
+        """A helper this App created: from now on it is its own (and the only kind it ever deletes)."""
+        self.helpers[entity_id] = {"domain": domain, "item_id": item_id, "device_id": device_id, "light": light,
+                                   "created_at": iso(utcnow()), "by": by}
+        self._write()
+
+    def helper_removed(self, entity_id: str) -> None:
+        if self.helpers.pop(entity_id, None) is not None:
+            self._write()
 
     def of_device(self, device_id: str) -> dict[str, dict[str, Any]]:
         return {k: v for k, v in self.records.items() if v.get("device_id") == device_id}

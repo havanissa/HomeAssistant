@@ -300,3 +300,12 @@ svg.zone-canvas .target { fill: #f4b400; stroke: var(--text); }
 #sim-inputs input[type=text] { width: 9em; }
 #sim-inputs input[type=number] { width: 5.5em; }
 .switch.small { font-size: 14px; font-weight: 400; }
+/* ------------------------------------------------------------ Lighting Designer 2 */
+.matrix-card h2 input[type=text], .switch-card h2 input[type=text], .adv h2 input[type=text] { font: inherit; font-size: 18px; font-weight: 600; max-width: 100%; }
+table.mapping th[scope=row] { min-width: 9em; }
+table.mapping td { vertical-align: middle; }
+.simlight { border-top: 1px solid var(--line); padding: 8px 0; }
+.simlight h3 { margin: 4px 0; }
+.result-line { margin: 4px 0; }
+#priority li { gap: 10px; }
+#control td, #control th { min-width: 6em; }

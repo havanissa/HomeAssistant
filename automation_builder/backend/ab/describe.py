@@ -147,7 +147,9 @@ def condition(c: dict[str, Any], names: Names, top: bool = False, triggers: list
     return kind
 
 
-def _data(data: dict[str, Any]) -> str:
+def _data(data: Any) -> str:
+    if isinstance(data, str):  # a generated rule's data: the attributes resolved when it runs
+        return " (with the resolved settings)"
     parts = []
     for key, value in data.items():
         label, unit = DATA_LABELS.get(key, (key.replace("_", " "), ""))
@@ -196,6 +198,8 @@ def action(a: dict[str, Any], names: Names, targets: list[str], triggers: list[d
         return "wait until " + " or ".join(trigger(t, names) for t in a["triggers"]) + _timeout(a)
     if kind == "wait_condition":
         return f"wait until {condition(a['conditions'], names, top=True, triggers=triggers)}" + _timeout(a)
+    if kind == "event":
+        return f"ask for a new evaluation ({a['event_type']})"
     if kind == "repeat":
         inner = _sequence(a["actions"], names, targets, triggers)
         if a["mode"] == "count":

@@ -8,30 +8,6 @@ import copy
 from typing import Any
 
 TEMPLATES: list[dict[str, Any]] = [
-    {"id": "mood_lighting", "category": "Lighting", "designer": "lighting", "name": "Mood Lighting",
-     "description": "Each light gets its own setting per mood. The lights change when the mood changes.",
-     "required": ["A mood selector (a dropdown helper or select)"], "optional": ["Defaults per light or for the matrix"],
-     "set": {"primary": "mood", "mood": {"enabled": True}}},
-    {"id": "presence_lighting", "category": "Lighting", "designer": "lighting", "name": "Presence Lighting",
-     "description": "Lights react to rooms and zones becoming occupied or vacant, with delays you choose.",
-     "required": ["At least one presence source (room, zone, position zone or person)"],
-     "optional": ["Light-level permission", "Mood palette for “Use mood” cells"],
-     "set": {"primary": "presence", "presence": {"enabled": True}}},
-    {"id": "lux_lighting", "category": "Lighting", "designer": "lighting", "name": "Lux-Adaptive Lighting",
-     "description": "Light-level bands you name and limit decide what the lights do.",
-     "required": ["A light-level sensor", "Band names and limits"], "optional": ["Hysteresis and delay"],
-     "set": {"primary": "lux", "lux": {"enabled": True}}},
-    {"id": "combined_lighting", "category": "Lighting", "designer": "lighting", "name": "Combined Mood + Presence + Lux",
-     "description": "Presence decides, the mood supplies the settings (cells “Use mood”), the light level permits.",
-     "required": ["Presence sources", "A mood selector", "A light-level sensor and bands"],
-     "optional": ["“Re-apply when the mood changes”", "“Also act when the light level changes”"],
-     "set": {"primary": "presence", "presence": {"enabled": True}, "mood": {"enabled": True}, "lux": {"enabled": True}}},
-    {"id": "zone_lighting", "category": "Lighting", "designer": "lighting", "name": "Zone-Specific Lighting",
-     "description": "Named zones inside a room (Sofa, Desk …), each with its own cells, and a policy for when "
-                    "several are occupied.",
-     "required": ["Zone sources (zone entities or a position sensor)", "A policy for overlapping zones"],
-     "optional": ["The room's own presence for “Room vacant”"],
-     "set": {"primary": "presence", "presence": {"enabled": True}}},
     {"id": "sun_shading", "category": "Covers", "designer": "cover", "name": "Sun-Angle Shading",
      "description": "Each window's orientation (0° = South) and sector; a fixed position or one that follows the sun.",
      "required": ["Per window: direction, sector, lowest sun elevation, response"],
@@ -54,20 +30,26 @@ TEMPLATES: list[dict[str, Any]] = [
      "set": {"schedule": {"enabled": True}}},
 ]
 
+# The Lighting Designer's templates (version 2) come from its module; version 1 designers get no templates (they are
+# kept and compiled as they are, and can be converted).
+from . import lighting2  # noqa: E402
+
+TEMPLATES = [{"category": "Lighting", "designer": "lighting", **{k: v for k, v in t.items() if k != "add"}}
+             for t in lighting2.TEMPLATES] + TEMPLATES
+
 PLANNED = [
     {"category": "Climate", "text": "Temperature schedules per room"},
     {"category": "Ventilation", "text": "Humidity, CO₂ and temperature control of fans"},
-    {"category": "Buttons/Remotes", "text": "Button-action mapping"},
     {"category": "Fans", "text": "Speed by temperature or humidity"},
-    {"category": "Generic switches", "text": "On/off by time or state"},
 ]
 
 
 def for_kinds(kinds: list[str]) -> dict[str, Any]:
     return {"templates": [t for t in TEMPLATES if t["designer"] in kinds],
             "planned": PLANNED,
-            "note": "Specialised designers for climate, ventilation, buttons, fans and switches are not built yet. "
-                    "Use the rule editor (IF / AND-OR / THEN) for those devices: it supports them fully."}
+            "note": "Specialised designers for climate, ventilation and fans are not built yet. Switches, buttons and "
+                    "remotes are mapped in the Lighting Designer (Switches & Remotes); for anything else the rule "
+                    "editor (IF / AND-OR / THEN) supports them fully."}
 
 
 def apply(template_id: str, designer: dict[str, Any]) -> dict[str, Any]:
@@ -75,6 +57,10 @@ def apply(template_id: str, designer: dict[str, Any]) -> dict[str, Any]:
     template = next((t for t in TEMPLATES if t["id"] == template_id), None)
     if template is None or template["designer"] != designer["kind"]:
         raise KeyError(template_id)
+    if designer["kind"] == "lighting":
+        if designer.get("version") != lighting2.VERSION:
+            raise KeyError(template_id)  # a version 1 designer: convert it first
+        return lighting2.apply_template(template_id, designer)
     out = copy.deepcopy(designer)
     for key, value in template["set"].items():
         if isinstance(value, dict):

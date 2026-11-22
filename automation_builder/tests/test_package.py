@@ -53,7 +53,7 @@ def test_no_dependency_on_the_other_apps_or_an_integration():
     imports = _imports(APP / "backend")
     assert not imports & {"sod", "sod_engine", "occupancy_core", "smart_lighting", "smart_occupancy", "custom_components",
                           "homeassistant"}
-    assert imports <= {"__future__", "aiohttp", "yaml", "asyncio", "collections", "contextlib", "copy", "dataclasses",
+    assert imports <= {"__future__", "aiohttp", "yaml", "asyncio", "collections", "contextlib", "copy", "zoneinfo", "dataclasses",
                        "datetime", "difflib", "hashlib", "ipaddress", "json", "logging", "math", "os", "pathlib", "re",
                        "secrets", "time", "typing", "urllib"}
     # no companion integration: nothing of this App lives in custom_components

@@ -2,13 +2,13 @@
 # Independent of Smart Comfort (slug smart_lighting) and of Smart Occupancy Detection: its own slug, container,
 # /data folder, backups and versions. It needs neither of them.
 name: Automation Builder
-version: "0.3.0"
+version: "0.4.0"
 slug: automation_builder
 description: >-
   A visual IF / AND-OR / THEN rule editor with graphical designers for lights
-  (mood, presence and light-level matrices) and covers (sun angle, cover modes).
-  Each device becomes one native Home Assistant automation, validated and
-  deployed only when you ask for it.
+  (Truth and Brightness Matrices, colour and mood, switches and remotes,
+  explicit priorities) and covers (sun angle, cover modes). Everything becomes
+  native Home Assistant automations, validated and deployed only when you ask.
 url: https://github.com/havanissa/HomeAssistant/tree/main/automation_builder
 arch:
   - aarch64
@@ -28,8 +28,9 @@ panel_title: Automation Builder
 panel_admin: true
 
 # Home Assistant Core API through the Supervisor proxy (SUPERVISOR_TOKEN). The backend sends only allowlisted
-# websocket commands (reads, event subscriptions, validate_config, and blueprint/save for its own folder when the
-# user installs a blueprint) and uses one HTTP endpoint: Home Assistant's automation configuration endpoint, for
+# websocket commands (reads, event subscriptions, validate_config, blueprint/save for its own folder when the
+# user installs a blueprint, and input_boolean/timer create/delete for its own override helpers "AB <device>
+# <light> override" at deployment) and uses one HTTP endpoint: Home Assistant's automation configuration endpoint, for
 # ids that start with "automation_builder_" (backend/ab/ha.py).
 # There is no service call, and no access to Home Assistant's configuration folder (no "map").
 homeassistant_api: true

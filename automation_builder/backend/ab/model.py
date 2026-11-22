@@ -528,7 +528,14 @@ def _action_service(raw: dict[str, Any], path: str, p: Problems, ctx: "_Ctx") ->
             p.add(f"{path}.target", f"{action} cannot control {', '.join(wrong)}: choose the {domain} entities it "
                                     "should control")
     data = raw.get("data") or {}
-    if not isinstance(data, dict) or not _json_size(data) or len(json.dumps(data)) > MAX_DATA_BYTES:
+    if ctx.generated and isinstance(data, str):
+        # Only a designer's generated rule: the whole data as one template that renders a mapping (the Lighting
+        # Designer's apply step sends exactly the attributes that were resolved, no more).
+        if not data.startswith("{{") or len(data) > ctx.limits["data"]:
+            p.add(f"{path}.data", "Internal: generated action data must be one template")
+            data = {}
+        return {"type": "service", "action": action, "target": target, "data": data}
+    if not isinstance(data, dict) or not _json_size(data) or len(json.dumps(data)) > ctx.limits["data"]:
         p.add(f"{path}.data", "The action data must be a small JSON object")
         data = {}
     if "entity_id" in data or "target" in data:
@@ -545,15 +552,24 @@ def _action_delay(raw: dict[str, Any], path: str, p: Problems, _ctx: "_Ctx") -> 
     return {"type": "delay", "seconds": _seconds(raw.get("seconds"), f"{path}.seconds", p, minimum=1)}
 
 
+#: Limits of the actions of a rule; generated rules (designers) evaluate several sources in one rule by nature.
+ACTION_LIMITS = {"actions": MAX_ACTIONS, "total": MAX_ACTIONS_TOTAL, "branches": MAX_BRANCHES, "depth": MAX_ACTION_DEPTH,
+                 "conditions": MAX_CONDITIONS * 2, "condition_depth": MAX_DEPTH, "data": MAX_DATA_BYTES}
+GENERATED_ACTION_LIMITS = {"actions": 80, "total": 600, "branches": 40, "depth": 6, "conditions": 600,
+                           "condition_depth": 6, "data": 24000}
+
+
 class _Ctx:
     """What the validation of a rule's actions needs to know about the rule."""
 
-    def __init__(self, targets: list[str], triggers: int) -> None:
+    def __init__(self, targets: list[str], triggers: int, generated: bool = False) -> None:
         self.targets = targets
         self.triggers = triggers
+        self.generated = generated
+        self.limits = GENERATED_ACTION_LIMITS if generated else ACTION_LIMITS
         self.depth = 0
-        self.budget = [MAX_ACTIONS_TOTAL]
-        self.conditions = [MAX_CONDITIONS * 2]
+        self.budget = [self.limits["total"]]
+        self.conditions = [self.limits["conditions"]]
 
 
 def _other_entity(raw: Any, path: str, p: Problems, domain: str, what: str) -> str:
@@ -588,8 +604,14 @@ def _action_notify(raw: dict[str, Any], path: str, p: Problems, _ctx: _Ctx) -> d
     return {"type": "notify", "action": action, "entity_id": entity_id, "title": title, "message": message.strip()}
 
 
-def _variables(raw: Any, path: str, p: Problems) -> dict[str, Any]:
-    data = _small_json(raw, path, p, "The variables")
+def _variables(raw: Any, path: str, p: Problems, limit: int = MAX_DATA_BYTES, ordered: bool = False) -> dict[str, Any]:
+    data = raw or {}
+    if not isinstance(data, dict) or not _json_size(data) or len(json.dumps(data)) > limit:
+        p.add(path, "The variables must be a small JSON object")
+        data = {}
+    # Generated rules keep their order (Home Assistant renders variables one after the other, so a later one can
+    # use an earlier one); a user's variables are sorted, as they always were.
+    data = {k: data[k] for k in (data if ordered else sorted(data))}
     for name in data:
         if not VARIABLE_NAME.match(name):
             p.add(path, f"“{name}” is not a variable name (lower-case letters, digits and _)")
@@ -611,15 +633,27 @@ def _action_device(raw: dict[str, Any], path: str, p: Problems, _ctx: _Ctx) -> d
     return _device_automation(raw, path, p, "action")
 
 
-def _action_variables(raw: dict[str, Any], path: str, p: Problems, _ctx: _Ctx) -> dict[str, Any]:
-    variables = _variables(raw.get("variables"), f"{path}.variables", p)
+def _action_variables(raw: dict[str, Any], path: str, p: Problems, ctx: _Ctx) -> dict[str, Any]:
+    variables = _variables(raw.get("variables"), f"{path}.variables", p, ctx.limits["data"], ordered=ctx.generated)
     if not variables:
         p.add(f"{path}.variables", "Give at least one variable, for example {\"level\": 40}")
     return {"type": "variables", "variables": variables}
 
 
+def _action_event(raw: dict[str, Any], path: str, p: Problems, ctx: _Ctx) -> dict[str, Any]:
+    """Fire an event (generated rules only: the Lighting Designer asks a light's automation to re-evaluate)."""
+    if not ctx.generated:
+        p.add(path, "Unsupported action type 'event'")
+    event_type = raw.get("event_type")
+    if not isinstance(event_type, str) or not EVENT_TYPE.match(event_type):
+        p.add(f"{path}.event_type", "Enter the event type")
+        event_type = ""
+    return {"type": "event", "event_type": event_type,
+            "event_data": _small_json(raw.get("event_data"), f"{path}.event_data", p, "The event data")}
+
+
 def _conditions_of(raw: Any, path: str, p: Problems, ctx: _Ctx, *, required: bool) -> dict[str, Any]:
-    group = _group(raw, path, p, 1, ctx.conditions, ctx.triggers)
+    group = _group(raw, path, p, 1, ctx.conditions, ctx.triggers, ctx.limits["condition_depth"])
     if required and not group["items"]:
         p.add(path, "Add at least one condition")
     return group
@@ -635,10 +669,10 @@ def _action_choose(raw: dict[str, Any], path: str, p: Problems, ctx: _Ctx) -> di
     raw_branches = raw.get("branches") if isinstance(raw.get("branches"), list) else []
     if not raw_branches:
         p.add(f"{path}.branches", "Add at least one branch")
-    if len(raw_branches) > MAX_BRANCHES:
-        p.add(f"{path}.branches", f"At most {MAX_BRANCHES} branches")
+    if len(raw_branches) > ctx.limits["branches"]:
+        p.add(f"{path}.branches", f"At most {ctx.limits['branches']} branches")
     branches = []
-    for i, branch in enumerate(raw_branches[:MAX_BRANCHES]):
+    for i, branch in enumerate(raw_branches[:ctx.limits["branches"]]):
         branch = branch if isinstance(branch, dict) else {}
         branches.append({
             "conditions": _conditions_of(branch.get("conditions"), f"{path}.branches[{i}].conditions", p, ctx, required=True),
@@ -718,7 +752,7 @@ def _action_repeat(raw: dict[str, Any], path: str, p: Problems, ctx: _Ctx) -> di
 ACTION_TYPES = {"service": _action_service, "delay": _action_delay, "notify": _action_notify, "script": _action_script,
                 "scene": _action_scene, "device": _action_device, "variables": _action_variables, "if": _action_if,
                 "choose": _action_choose, "wait_trigger": _action_wait_trigger,
-                "wait_condition": _action_wait_condition, "repeat": _action_repeat}
+                "wait_condition": _action_wait_condition, "repeat": _action_repeat, "event": _action_event}
 #: The basic actions of Phase 0.1; everything else is offered under "more" in the editor.
 BASIC_ACTIONS = ("service", "delay")
 #: Sub-sequences of an action, by key.
@@ -730,17 +764,17 @@ def _sequence(raw: Any, path: str, p: Problems, ctx: _Ctx, *, required: bool) ->
     raw_actions = raw if isinstance(raw, list) else []
     if required and not raw_actions:
         p.add(path, "Add at least one action" + (" (THEN)" if ctx.depth == 0 else ""))
-    if len(raw_actions) > MAX_ACTIONS:
-        p.add(path, f"At most {MAX_ACTIONS} actions in one list")
-    if ctx.depth >= MAX_ACTION_DEPTH and raw_actions:
+    if len(raw_actions) > ctx.limits["actions"]:
+        p.add(path, f"At most {ctx.limits['actions']} actions in one list")
+    if ctx.depth >= ctx.limits["depth"] and raw_actions:
         p.add(path, "Actions are nested too deeply")
         return []
     ctx.depth += 1
-    for i, action in enumerate(raw_actions[:MAX_ACTIONS]):
+    for i, action in enumerate(raw_actions[:ctx.limits["actions"]]):
         kind = action.get("type") if isinstance(action, dict) else None
         ctx.budget[0] -= 1
         if ctx.budget[0] < 0:
-            p.add(path, f"At most {MAX_ACTIONS_TOTAL} actions per rule")
+            p.add(path, f"At most {ctx.limits['total']} actions per rule")
             break
         if kind not in ACTION_TYPES:
             p.add(f"{path}[{i}]", f"Unsupported action type {kind!r}")
@@ -782,7 +816,7 @@ def _imported_from(raw: Any) -> dict[str, Any] | None:
 
 
 #: Limits of the rules a designer generates (checked like any rule, but they combine several sources by nature).
-GENERATED_LIMITS = {"triggers": 60, "conditions": 120, "depth": 6}
+GENERATED_LIMITS = {"triggers": 100, "conditions": 300, "depth": 6}
 
 
 def validate_rule(raw: Any, path: str, p: Problems, targets: list[str], *, generated: bool = False) -> dict[str, Any]:
@@ -795,7 +829,7 @@ def validate_rule(raw: Any, path: str, p: Problems, targets: list[str], *, gener
         rule_id = ""
     limits = GENERATED_LIMITS if generated else {"triggers": MAX_TRIGGERS, "conditions": MAX_CONDITIONS, "depth": MAX_DEPTH}
     triggers = _triggers(raw.get("triggers"), f"{path}.triggers", p, limit=limits["triggers"])
-    ctx = _Ctx(targets, len(triggers))
+    ctx = _Ctx(targets, len(triggers), generated)
     actions = _sequence(raw.get("actions"), f"{path}.actions", p, ctx, required=True)
     retrigger = raw.get("retrigger", "restart")
     if retrigger not in RETRIGGER_MODES:

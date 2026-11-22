@@ -3,7 +3,8 @@
 // device is deployed. Everything shown as resolved ("DEFAULT: 30%") comes from the backend, which also generates
 // the rules: the interface never decides what a cell means.
 
-import { api, change, enc, entities, entityName, errorText, esc, icon, loadEntities, notes, pickEntity, session, toast, view } from "./ui.js";
+import { api, ask, change, enc, entities, entityName, errorText, esc, icon, loadEntities, notes, pickEntity, session, toast, view } from "./ui.js";
+import { lightingPage } from "./lighting.js";
 
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -45,7 +46,7 @@ const SOURCE_TEXT = { cell: "set in this cell", "row default": "from the row def
 
 // ------------------------------------------------------------------ the matrix editor (shared by every designer)
 // spec: { id, title, rows:[{key,label,sub}], cols:[{key,label,sub}], get(r,c), view(r,c)?, label(cell), rowDefaults?, matrixDefault? }
-function matrixHtml(spec, sel) {
+export function matrixHtml(spec, sel) {
   const chosen = sel.m === spec.id ? sel.keys : new Set();
   const cellButton = (r, c, cell, shown) => {
     const key = `${r}${SEP}${c}`;
@@ -73,7 +74,7 @@ function matrixHtml(spec, sel) {
 }
 
 // ------------------------------------------------------------------ cell editors
-function capsOf(rows, caps) {
+export function capsOf(rows, caps) {
   const known = rows.map((r) => caps[r]).filter((c) => c && !c.unknown);
   const all = (k) => known.length === rows.length && known.every((c) => c[k]);
   return { known: known.length === rows.length, brightness: all("brightness"), color_temp: all("color_temp"), color: all("color"), effect: all("effect"),
@@ -136,6 +137,7 @@ function newCell(kind, family) {
 export async function designerPage(deviceId, designerId, tab, current) {
   let data = await api(`api/designers/${enc(deviceId)}/${enc(designerId)}`);
   if (!current()) return null;
+  if (data.designer.config.kind === "lighting" && data.designer.config.version === 2) return lightingPage(deviceId, designerId, tab, current, data);
   let d = clone(data.designer.config);
   const kind = d.kind;
   const sel = { m: null, keys: new Set(), clip: null };
@@ -280,7 +282,8 @@ export async function designerPage(deviceId, designerId, tab, current) {
             <div class="help">Priority uses the column order of the presence matrix: while a column holds whose cell for a light is set (also through a default) or NO ACTION, the columns to its right do not act on that light; an UNSET cell does not hold them back. “Nothing while ambiguous” acts only when one such column holds. “Both” reports a conflict when two situations want different things.</div></div>
             <div class="field"><label>Occupancy rechecks</label>${toggle("rechecks", d.rechecks, "Correct lost commands", "Only for binary sensors without delays, with the safety rules of the ordinary occupancy rechecks (never a toggle, never against a manual change, not right after a restart, not while the source is stale).")}</div>` : ""}
           ${layerProblems(null)}
-          <p class="muted small">${plural(data.designer.rules.length, "generated rule")} in the device's one automation (${plural(data.own_rules, "ordinary rule")} besides). <a href="#/devices/${enc(deviceId)}">Advanced rules and deployment</a></p></div>`;
+          <p class="muted small">${plural(data.designer.rules.length, "generated rule")} in the device's one automation (${plural(data.own_rules, "ordinary rule")} besides). <a href="#/devices/${enc(deviceId)}">Advanced rules and deployment</a></p></div>
+        ${conversionCard()}`;
     }
     if (tab === "mood") {
       const options = ((entities[d.mood.entity_id] || {}).attributes || {}).options || [];
@@ -330,6 +333,17 @@ export async function designerPage(deviceId, designerId, tab, current) {
     if (tab === "schedule") return scheduleTab();
     if (tab === "override") return overrideTab();
     return null;
+  }
+
+  function conversionCard() {
+    const c = data.conversion;
+    if (!c) return "";
+    return `<div class="card" id="conversion"><h2>The new Lighting Designer</h2>
+      <p class="small">This designer is of version 1 (Phase 0.3). It keeps working exactly as before. Version 2 has Truth and Brightness Matrices, Colour &amp; Mood, Switches &amp; Remotes, Advanced Rules and an explicit priority, and the lights return to the calculated state by themselves when an override ends.</p>
+      ${c.refused.length ? `<div class="notice warning"><strong>Not converted automatically:</strong><ul>${c.refused.map((r) => `<li>${esc(r)}</li>`).join("")}</ul></div>`
+    : `<p class="small"><strong>What changes:</strong></p><ul class="small">${c.changes.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>
+         <div class="actions"><button data-act="convert">Convert to version 2…</button></div>`}
+      <p class="muted small">Nothing reaches Home Assistant before you deploy the device; the automation deployed now keeps running until then. The automatic backups keep this version.</p></div>`;
   }
 
   function scheduleTab() {
@@ -720,6 +734,16 @@ export async function designerPage(deviceId, designerId, tab, current) {
       } catch (err) { toast(errorText(err)); }
     },
     simlive: () => { sim.scenario.states = {}; sim.result = null; draw(); },
+    convert: async () => {
+      const ok = await ask({ title: "Convert to the new Lighting Designer?", ok: "Convert",
+        body: `<ul>${data.conversion.changes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul><p class="small">Saved now; deployed only when you deploy the device.</p>` });
+      if (!ok) return;
+      try {
+        await change("api/designers/convert", { device_id: deviceId, designer_id: designerId, apply: true });
+        toast("Converted. Review it, then deploy the device.");
+        location.hash = `#/design/${enc(deviceId)}/${enc(designerId)}/lights`;
+      } catch (err) { toast(errorText(err)); }
+    },
   };
   function scenario() {
     const states = {};
@@ -826,7 +850,7 @@ export async function galleryPage(deviceId, current) {
         <div class="actions"><button class="primary" data-act="use" data-id="${esc(t.id)}">${data.existing[t.designer] ? "Add to the designer" : "Use this"}</button></div></div>`).join("")}</div>`).join("")}
     <h2>Any device</h2><div class="grid"><div class="card tpl"><h3>Ordinary rule (IF / AND-OR / THEN)</h3><p class="small">The general rule editor: triggers, conditions and actions for anything Home Assistant can control.</p><div class="actions"><a class="button" href="#/rules/${enc(deviceId)}/new">Write a rule</a></div></div>
       ${data.kinds.map((k) => (data.existing[k] ? `<div class="card tpl"><h3>Open the ${k === "lighting" ? "Lighting" : "Cover"} Designer</h3><div class="actions"><a class="button" href="#/design/${enc(deviceId)}/${enc(data.existing[k])}">Open</a></div></div>`
-    : `<div class="card tpl"><h3>Empty ${k === "lighting" ? "Lighting" : "Cover"} Designer</h3><p class="small">Every control off, nothing set.</p><div class="actions"><button data-act="blank" data-kind="${esc(k)}">Create</button></div></div>`)).join("")}</div>
+    : `<div class="card tpl"><h3>Empty ${k === "lighting" ? "Lighting" : "Cover"} Designer</h3><p class="small">${k === "lighting" ? "No matrices, no switches, nothing set." : "Every control off, nothing set."}</p><div class="actions"><button data-act="blank" data-kind="${esc(k)}">Create</button></div></div>`)).join("")}</div>
     <h2>Planned</h2><ul class="plain small">${data.planned.map((p) => `<li><strong>${esc(p.category)}</strong>: ${esc(p.text)}</li>`).join("")}</ul><p class="muted small">${esc(data.note)}</p>`;
   return {
     chg: {},
@@ -834,7 +858,8 @@ export async function galleryPage(deviceId, current) {
       use: async (el) => {
         try {
           const result = await change("api/gallery/apply", { device_id: deviceId, template: el.dataset.id });
-          location.hash = `#/design/${enc(deviceId)}/${enc(result.designer_id)}`;
+          const tpl = data.templates.find((t) => t.id === el.dataset.id) || {};
+          location.hash = `#/design/${enc(deviceId)}/${enc(result.designer_id)}${tpl.tab ? `/${enc(tpl.tab)}` : ""}`;
         } catch (err) { toast(errorText(err)); }
       },
       blank: async (el) => {
@@ -859,7 +884,7 @@ export function designersCard(deviceId, info) {
   }).join("");
   const missing = info.available.filter((k) => !info.items.some((i) => i.kind === k));
   return `<div class="card" id="designers"><div class="row"><h2>Specialised designers</h2><span class="spacer"></span><a class="button" href="#/gallery/${enc(deviceId)}">Templates…</a></div>
-    ${items}${missing.map((k) => `<div class="rule"><div class="row">${icon(k === "lighting" ? "light" : "cover")}<span>${k === "lighting" ? "Lighting Designer: mood, presence and light-level matrices" : "Cover Designer: sun angle, cover modes, mood mapping"}</span><span class="spacer"></span><button data-act="designer-create" data-kind="${esc(k)}">Create</button></div></div>`).join("")}
+    ${items}${missing.map((k) => `<div class="rule"><div class="row">${icon(k === "lighting" ? "light" : "cover")}<span>${k === "lighting" ? "Lighting Designer: Truth and Brightness Matrices, Colour & Mood, switches and remotes, Advanced Rules" : "Cover Designer: sun angle, cover modes, mood mapping"}</span><span class="spacer"></span><button data-act="designer-create" data-kind="${esc(k)}">Create</button></div></div>`).join("")}
     <p class="muted small">A designer generates ordinary rules of this device; they run in its one automation, next to the rules below.</p></div>`;
 }
 

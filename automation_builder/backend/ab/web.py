@@ -249,6 +249,14 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         await require_admin(request)
         return _json(core.simulation_inputs(request.match_info["device_id"]))
 
+    async def switch_sources(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(core.switch_sources(request.query.get("area"), request.query.get("q", "")))
+
+    async def switch_interactions(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(await core.switch_interactions(request.query.get("device_id"), request.query.get("entity_id")))
+
     async def presence_view(request: web.Request) -> web.Response:
         await require_admin(request)
         return _json(core.presence_view())
@@ -317,6 +325,10 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         "/api/designers/delete": lambda d, u: core.delete_designer(d.get("device_id"), d.get("designer_id"), d.get(rev), u),
         "/api/designers/preview": lambda d, u: core.designer_page(d.get("device_id"), (d.get("designer") or {}).get("id"), d.get("designer")),
         "/api/designers/simulate": lambda d, u: core.simulation(d.get("device_id"), d.get("scenario"), d.get("designer")),
+        "/api/designers/convert": lambda d, u: core.convert_designer(d.get("device_id"), d.get("designer_id"),
+                                                                     d.get("apply") is True, d.get(rev), u),
+        "/api/designers/adopt": lambda d, u: core.adopt_rule(d.get("device_id"), d.get("designer_id"), d.get("rule_id"),
+                                                             d.get(rev), u),
         "/api/gallery/apply": lambda d, u: core.apply_template(d.get("device_id"), d.get("template"), d.get(rev), u),
         "/api/presence/save": lambda d, u: core.save_source(d.get("source"), d.get(rev), u),
         "/api/presence/delete": lambda d, u: core.delete_source(d.get("source_id"), d.get(rev), u),
@@ -349,6 +361,8 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
     r.add_get("/api/designers/{device_id}/{designer_id}", designer_page)
     r.add_get("/api/simulation/{device_id}", simulation_inputs)
     r.add_get("/api/presence", presence_view)
+    r.add_get("/api/switch-sources", switch_sources)
+    r.add_get("/api/switch-interactions", switch_interactions)
     r.add_get("/api/gallery/{device_id}", gallery_view)
     r.add_get("/api/sun", sun_view)
     r.add_get("/api/settings", settings_view)
