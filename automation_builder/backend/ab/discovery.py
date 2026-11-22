@@ -24,6 +24,13 @@ DOMAIN_STATES = {
 PURPOSE_DOMAINS = {
     "button": ("event",), "script": ("script",), "scene": ("scene",), "notify": ("notify",),
     "select": ("input_select", "select"),
+    "mood": ("input_select", "select", "sensor", "input_text"),
+    "presence": ("binary_sensor", "input_boolean", "switch"),
+    "person": ("person", "device_tracker"),
+    "weather": ("weather",),
+    "binary": ("binary_sensor", "input_boolean"),
+    "light": ("light",),
+    "cover": ("cover",),
     "helper": ("input_boolean", "input_button", "input_number", "input_select", "input_text", "input_datetime",
                "counter", "timer", "schedule"),
 }

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.0
+
+Specialised graphical designers on the same automation model. A designer is a different way to write the rules of
+a device: what it configures becomes ordinary rules of that device, compiled into its one native automation, which
+needs nothing of this App to run. Devices without a designer generate exactly the automation they did before.
+
+- **Lighting Designer** (lights): a mood matrix (lights × the moods you choose), a presence matrix (lights ×
+  rooms, named zones, position zones, persons) and a light-level matrix (lights × bands you name and limit), a
+  schedule (time windows and timed entries), manual override (a signal, and a pause after a change by hand) and
+  occupancy rechecks where they are safe. Exactly one matrix decides; the mood is the palette for cells that say
+  “Use mood”; light level and presence can permit (“allow ON only when dark”) without ever sending a command by
+  themselves. Capability-aware: brightness, colour temperature, colours and effects only where a light has them.
+- **Cover Designer** (covers): sun shading per window with 0° = South (converted to Home Assistant's 0° = North),
+  sector, elevation range, a fixed position or one that follows the sun's elevation or profile angle, hysteresis,
+  minimum change, minimum interval, light-level / temperature / weather conditions, an explicit fallback for
+  unavailable data, and weather protection for awnings. Cover modes you name (a matrix of covers × modes),
+  driven by a selector or by an optional mapping from household moods, and per mode an explicit choice whether
+  the mode or the sun shading wins. Tilt, positions and open/close only where a cover supports them.
+- **Presence sources** (new page): rooms (with “possibly occupied” where a source has it), named zones with their
+  own entities, position zones drawn on a sensor's coordinates (a native template tests the targets against the
+  shape), and persons at geographic zones. Entry and exit delays, “fresh: false” honoured on request, several
+  zones occupied at once, and an explicit policy when situations overlap (priority, nothing while ambiguous, or
+  both when compatible - different commands are then a conflict to resolve).
+- **Strict unset semantics**: Unset, Use default, No Action, Off/Closed and explicit values are different things,
+  stored and shown differently (“40% · 2700K”, “OFF”, “DEFAULT: 30%”, “NO ACTION”, “UNSET”). Defaults are optional
+  (per light or cover, per matrix) and never created for you; a missing source blocks deployment with the reason.
+- **Matrix editing**: select cells, rows or columns; copy and paste; edit many cells at once; set back to Unset.
+- **Templates**: Mood, Presence, Lux-Adaptive, Combined, Zone-Specific Lighting; Sun-Angle Shading, Privacy
+  Presets, Cover Mood Matrix, Mood-Linked and Scheduled Covers. A template turns controls on and lists what it
+  needs; it chooses no entity and no value. Adding a light or a cover opens the gallery.
+- **Simulation**: choose what just happened and the states (live values or your test values); see which rules
+  run, which conditions fail, what each light or cover receives, conflicts and missing inputs. Nothing is sent.
+- **Blueprints**: designers export like any rule: their entities, sources, thresholds, delays, sun angles, cover
+  positions and cell values can be inputs (one input per setting, wherever it is used).
+- Conflict check: rules that exclude each other by construction (two moods of one selector, a zone and its
+  negation) are recognised as such.
+
 ## 0.2.1
 
 Room-first usability. The automations and how rules are combined are unchanged, except for the optional default.

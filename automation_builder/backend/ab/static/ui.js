@@ -97,7 +97,9 @@ const PURPOSE_TITLE = {
   target: "Choose an entity to control", occupancy: "Choose an occupancy sensor", numeric: "Choose a sensor with a number",
   override: "Choose the manual override signal", any: "Choose an entity", button: "Choose a button or remote (event entity)",
   helper: "Choose a helper", script: "Choose a script", scene: "Choose a scene", notify: "Choose where the notification goes",
-  time: "Choose a date/time helper", select: "Choose a dropdown helper",
+  time: "Choose a date/time helper", select: "Choose a dropdown helper", mood: "Choose the mood selector",
+  presence: "Choose a presence entity (on = occupied)", person: "Choose a person or device tracker", weather: "Choose a weather entity",
+  binary: "Choose a binary sensor", light: "Choose a light", cover: "Choose a cover",
 };
 
 // Small pictures for rooms, devices and the domains of entities (text glyphs: no image files, no inline styles).

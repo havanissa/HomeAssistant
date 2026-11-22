@@ -425,7 +425,7 @@ class Observer:
                 _LOGGER.debug("Could not list the traces of %s: %s", automation_id, err)
                 return
             blocks = blocks_of(record)
-            rules = {r["id"]: r for r in (record.get("device") or {}).get("rules", [])}
+            rules = {r["id"]: r for r in [*(record.get("device") or {}).get("rules", []), *(record.get("generated") or [])]}
             names = self.core.index().name
             running = changed = False
             for item in sorted((t for t in listed if isinstance(t, dict)),

@@ -363,15 +363,15 @@ TRIGGER_TYPES = {"state": _trigger_state, "numeric": _trigger_numeric, "time": _
 WAIT_TRIGGER_TYPES = tuple(t for t in TRIGGER_TYPES if t != "occupancy")
 
 
-def _triggers(raw: Any, path: str, p: Problems, *, allowed: Any = None, what: str = "Add at least one trigger (IF)"
-              ) -> list[dict[str, Any]]:
+def _triggers(raw: Any, path: str, p: Problems, *, allowed: Any = None, what: str = "Add at least one trigger (IF)",
+              limit: int = MAX_TRIGGERS) -> list[dict[str, Any]]:
     triggers: list[dict[str, Any]] = []
     raw_triggers = raw if isinstance(raw, list) else []
     if not raw_triggers:
         p.add(path, what)
-    if len(raw_triggers) > MAX_TRIGGERS:
-        p.add(path, f"At most {MAX_TRIGGERS} triggers")
-    for i, trigger in enumerate(raw_triggers[:MAX_TRIGGERS]):
+    if len(raw_triggers) > limit:
+        p.add(path, f"At most {limit} triggers")
+    for i, trigger in enumerate(raw_triggers[:limit]):
         kind = trigger.get("type") if isinstance(trigger, dict) else None
         if kind not in TRIGGER_TYPES or (allowed is not None and kind not in allowed):
             p.add(f"{path}[{i}]", f"Unsupported trigger type {kind!r}")
@@ -452,7 +452,8 @@ CONDITION_TYPES = {"state": _condition_state, "numeric": _condition_numeric, "ti
 GROUP_TYPES = ("and", "or", "not")
 
 
-def _group(raw: Any, path: str, p: Problems, depth: int, budget: list[int], triggers: int = 0) -> dict[str, Any]:
+def _group(raw: Any, path: str, p: Problems, depth: int, budget: list[int], triggers: int = 0,
+           max_depth: int = MAX_DEPTH) -> dict[str, Any]:
     if raw is None:
         return {"type": "and", "items": []}
     if not isinstance(raw, dict) or raw.get("type") not in GROUP_TYPES or not isinstance(raw.get("items"), list):
@@ -468,10 +469,10 @@ def _group(raw: Any, path: str, p: Problems, depth: int, budget: list[int], trig
         if not isinstance(item, dict):
             p.add(item_path, "Must be a condition")
         elif item.get("type") in GROUP_TYPES:
-            if depth >= MAX_DEPTH:
+            if depth >= max_depth:
                 p.add(item_path, "Groups are nested too deeply")
                 continue
-            group = _group(item, item_path, p, depth + 1, budget, triggers)
+            group = _group(item, item_path, p, depth + 1, budget, triggers, max_depth)
             if not group["items"]:
                 p.add(item_path, "A group needs at least one condition")
             items.append(group)
@@ -780,7 +781,11 @@ def _imported_from(raw: Any) -> dict[str, Any] | None:
             "allow_both": raw.get("allow_both") is True}
 
 
-def validate_rule(raw: Any, path: str, p: Problems, targets: list[str]) -> dict[str, Any]:
+#: Limits of the rules a designer generates (checked like any rule, but they combine several sources by nature).
+GENERATED_LIMITS = {"triggers": 60, "conditions": 120, "depth": 6}
+
+
+def validate_rule(raw: Any, path: str, p: Problems, targets: list[str], *, generated: bool = False) -> dict[str, Any]:
     if not isinstance(raw, dict):
         p.add(path, "Must be a rule")
         raw = {}
@@ -788,7 +793,8 @@ def validate_rule(raw: Any, path: str, p: Problems, targets: list[str]) -> dict[
     if not isinstance(rule_id, str) or not RULE_ID.match(rule_id):
         p.add(f"{path}.id", "Invalid rule id")
         rule_id = ""
-    triggers = _triggers(raw.get("triggers"), f"{path}.triggers", p)
+    limits = GENERATED_LIMITS if generated else {"triggers": MAX_TRIGGERS, "conditions": MAX_CONDITIONS, "depth": MAX_DEPTH}
+    triggers = _triggers(raw.get("triggers"), f"{path}.triggers", p, limit=limits["triggers"])
     ctx = _Ctx(targets, len(triggers))
     actions = _sequence(raw.get("actions"), f"{path}.actions", p, ctx, required=True)
     retrigger = raw.get("retrigger", "restart")
@@ -800,7 +806,8 @@ def validate_rule(raw: Any, path: str, p: Problems, targets: list[str]) -> dict[
         "name": _text(raw.get("name"), f"{path}.name", p, what="a name"),
         "enabled": raw.get("enabled") is not False,
         "triggers": triggers,
-        "conditions": _group(raw.get("conditions"), f"{path}.conditions", p, 1, [MAX_CONDITIONS], len(triggers)),
+        "conditions": _group(raw.get("conditions"), f"{path}.conditions", p, 1, [limits["conditions"]], len(triggers),
+                             limits["depth"]),
         "actions": actions,
         "retrigger": retrigger,
         "recheck": _recheck(raw.get("recheck"), f"{path}.recheck", p),
@@ -893,6 +900,10 @@ def validate_device(device_id: str, raw: Any, path: str, p: Problems) -> dict[st
     default = _default_rule(raw.get("default_rule"), f"{path}.default_rule", p, targets)
     if default:  # only present when the user configured one: every other device keeps its document
         extra["default_rule"] = default
+    from . import designers  # here: the designers build on this module
+    found = designers.validate_all(raw.get("designers"), targets, f"{path}.designers", p)
+    if found:  # only present when the device has a designer (Phase 0.3): every other device keeps its document
+        extra["designers"] = found
     return {
         "id": device_id,
         "name": _text(raw.get("name"), f"{path}.name", p, what="a name"),
@@ -945,6 +956,11 @@ def validate_config(raw: Any) -> dict[str, Any]:
             rule_ids.add(rule["id"])
         devices[device_id] = device
     config = {"settings": validate_settings(raw.get("settings"), p), "devices": devices}
+    from . import designers
+    presence = designers.presence.validate_all(raw.get("presence"), p)
+    if presence:  # shared presence sources of the designers (Phase 0.3); absent unless configured
+        config["presence"] = presence
+    designers.check_references(config, p)
     if p.items:
         raise ConfigError("invalid", "The configuration is not valid", problems=p.items)
     return config

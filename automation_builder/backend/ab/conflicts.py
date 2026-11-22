@@ -46,10 +46,34 @@ def _shared_trigger(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any] | No
     return None
 
 
+def _complement(items: list[dict[str, Any]], others: list[dict[str, Any]]) -> bool:
+    """Does one rule require "none of X" (or "not all of Y") where the other requires X (all of Y)?"""
+    for item in items:
+        if item["type"] != "not":
+            continue
+        if any(inner in others for inner in item["items"]):
+            return True
+        inner = item["items"]
+        if len(inner) == 1 and inner[0]["type"] == "and" and inner[0]["items"] and all(i in others for i in inner[0]["items"]):
+            return True
+    return False
+
+
+def _generated_exclusive(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Two rules of one designer that stand for different values of one thing (two moods of one selector, two
+    light-level bands of one sensor): they exclude each other by construction."""
+    ka, kb = (a.get("generated") or {}).get("exclusive") or {}, (b.get("generated") or {}).get("exclusive") or {}
+    return any(key in kb and kb[key] != value for key, value in ka.items())
+
+
 def _exclusive(a: dict[str, Any], b: dict[str, Any]) -> bool:
     """Do the two rules' conditions provably exclude each other? Only the simple, certain cases count."""
+    if _generated_exclusive(a, b):
+        return True
     if a["conditions"]["type"] != "and" or b["conditions"]["type"] != "and":
         return False
+    if _complement(a["conditions"]["items"], b["conditions"]["items"]) or _complement(b["conditions"]["items"], a["conditions"]["items"]):
+        return True
     for ca in a["conditions"]["items"]:
         for cb in b["conditions"]["items"]:
             if ca["type"] != cb["type"] or ca.get("entity_id") != cb.get("entity_id"):

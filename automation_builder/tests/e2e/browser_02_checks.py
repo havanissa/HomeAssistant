@@ -136,6 +136,9 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                     frame.locator('button.choice[data-act="device"]', has_text="Entrance").click()
                     frame.locator(f'input[data-id="{ENTRANCE}"]').check()
                     frame.locator("#create").click()
+                    # 0.3: a device with lights or covers opens the template gallery; "Write a rule" is the rule editor
+                    frame.locator("h1", has_text="New automation").wait_for()
+                    frame.locator("a.button", has_text="Write a rule").click()
                     frame.locator("h1", has_text="New rule").wait_for()
                     check("flow: a new rule starts with the simple choices (no nested blocks)", frame.locator(".nest").count() == 0)
                     frame.locator("#rule-name").fill("Remote")

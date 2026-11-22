@@ -52,9 +52,9 @@ h1 .button, h1 button { font-size: 15px; font-weight: 500; }
 .notice.warning { background: var(--uncertain-bg); color: var(--text); border-color: var(--uncertain); }
 .notice.error { background: var(--error-bg); border-color: var(--error); }
 .notice.info { background: var(--info-bg); border-color: transparent; }
-ul.plain { list-style: none; padding: 0; margin: 0; }
-ul.plain li { padding: 6px 0; border-top: 1px solid var(--line); }
-ul.plain li:first-child { border-top: 0; }
+ul.plain, ol.plain { list-style: none; padding: 0; margin: 0; }
+ul.plain li, ol.plain li { padding: 6px 0; border-top: 1px solid var(--line); }
+ul.plain li:first-child, ol.plain li:first-child { border-top: 0; }
 .problem { display: flex; gap: 8px; padding: 4px 0; }
 .problem .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 7px; flex: none; }
 .dot.warning { background: var(--uncertain); } .dot.error { background: var(--error); } .dot.info { background: var(--info); }
@@ -223,3 +223,80 @@ button.result .ico { margin-right: 4px; }
 .pick .ico { margin-right: -4px; }
 .problem > span:last-child { overflow-wrap: anywhere; min-width: 0; }
 .notice, .sub, .save-status { overflow-wrap: anywhere; }
+/* ------------------------------------------------------------ Phase 0.3: designers, matrices, zones, sun */
+nav.tabs { display: flex; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--line); margin: 0 0 12px; scrollbar-width: thin; }
+nav.tabs a { white-space: nowrap; text-decoration: none; color: var(--muted); padding: 10px 12px; min-height: 44px; display: inline-flex; align-items: center; border-bottom: 3px solid transparent; }
+nav.tabs a.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.matrix-box { margin-top: 4px; }
+.mtools { margin-bottom: 6px; gap: 4px 10px; }
+table.matrix { border-collapse: separate; border-spacing: 4px; width: auto; min-width: 100%; }
+table.matrix th, table.matrix td { border: 0; padding: 0; vertical-align: middle; }
+table.matrix thead th { text-align: center; font-size: 13px; padding: 2px 4px; }
+table.matrix tbody th { text-align: left; position: sticky; left: 0; background: var(--card); z-index: 1; padding-right: 8px; max-width: 12em; }
+table.matrix td input[type=checkbox] { margin: 10px auto; display: block; }
+.mhead { padding: 2px 4px; min-height: 32px; text-align: inherit; font-weight: 600; color: var(--text); }
+.mcell { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; min-width: 96px; min-height: 48px; padding: 4px 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--card); color: var(--text); font-size: 13px; font-weight: 600; line-height: 1.2; text-align: center; cursor: pointer; }
+.mcell small { font-weight: 400; font-size: 11px; color: var(--muted); }
+.mcell.st-unset { border-style: dashed; color: var(--muted); font-weight: 400; background: transparent; }
+.mcell.st-inherited { background: var(--info-bg); color: var(--info); font-style: italic; }
+.mcell.st-none { background: var(--vacant-bg); color: var(--vacant); }
+.mcell.st-explicit { border-color: var(--accent); }
+.mcell.st-explicit.is-off { background: var(--vacant-bg); }
+.mcell.st-bad { border-color: var(--error); color: var(--error); }
+.mcell.sel { outline: 3px solid var(--accent); outline-offset: 1px; }
+.legend .mcell { min-width: 0; min-height: 0; padding: 0 6px; display: inline-flex; font-size: 11px; cursor: default; }
+.mdefault { margin-top: 8px; gap: 8px; }
+td.rowdef, th.rowdef { padding-left: 10px !important; border-left: 2px dashed var(--line) !important; }
+.editor-box { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; }
+.cell-editor .kinds { display: flex; flex-wrap: wrap; gap: 6px; }
+.cell-editor .kind { border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; min-height: 40px; cursor: pointer; }
+.cell-editor .kind.on { border-color: var(--accent); background: var(--info-bg); font-weight: 600; }
+.cell-editor .kind input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.cell-editor .kind:focus-within { outline: 2px solid var(--accent); }
+.cfields { display: grid; gap: 8px; margin-top: 10px; }
+.cfield { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.cfield .flabel { min-width: 10em; color: var(--muted); }
+.cfield input[type=range] { width: min(14rem, 100%); }
+input[type=color].unchosen { opacity: .45; }
+.roles { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 10px 0; }
+.role { flex: 1 1 12rem; border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.role.decides { border: 2px solid var(--occupied); background: var(--occupied-bg); }
+.role.gate { border-left: 4px solid var(--uncertain); }
+.role.palette { border-left: 4px solid var(--info); }
+.role.off { opacity: .55; }
+.roles .arrow { align-self: center; color: var(--muted); }
+@media (max-width: 640px) { .roles .arrow { display: none; } }
+ol.cols li, ol.plain li.band { gap: 6px; }
+.columns-editor select { min-width: min(18rem, 100%); }
+.sungrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+@media (max-width: 700px) { .sungrid { grid-template-columns: minmax(0, 1fr); } }
+svg.compass, svg.zone-canvas { width: 100%; max-width: 320px; height: auto; cursor: crosshair; touch-action: manipulation; }
+svg.elev, svg.curve { width: 100%; max-width: 240px; height: auto; display: block; }
+svg .ring { fill: none; stroke: var(--line); stroke-width: 1.5; }
+svg .ring.faint { stroke-dasharray: 3 4; }
+svg .wedge { fill: var(--uncertain-bg); stroke: var(--uncertain); stroke-width: 1.5; }
+svg .facing { stroke: var(--accent); stroke-width: 3; }
+svg .facing-dot { fill: var(--accent); }
+svg .path { fill: none; stroke: var(--info); stroke-width: 2; }
+svg .sun { fill: #f4b400; stroke: var(--text); stroke-width: 1; }
+svg .lim { stroke: var(--uncertain); stroke-width: 2; }
+svg .sunray { stroke: #f4b400; stroke-width: 3; }
+svg .cdir { fill: var(--muted); font-size: 12px; text-anchor: middle; font-family: system-ui, sans-serif; }
+svg .cdir.small { font-size: 8px; }
+svg .cdir.end { text-anchor: end; }
+svg.zone-canvas .bg { fill: var(--bg); stroke: var(--line); }
+svg.zone-canvas .zone { fill: var(--occupied-bg); stroke: var(--occupied); stroke-width: 2; }
+svg.zone-canvas .pt { fill: var(--occupied); }
+svg.zone-canvas .sensor { fill: var(--accent); }
+svg.zone-canvas .target { fill: #f4b400; stroke: var(--text); }
+.zone-edit { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); gap: 12px; align-items: start; }
+@media (max-width: 700px) { .zone-edit { grid-template-columns: minmax(0, 1fr); } }
+.preview { margin-top: 8px; padding: 8px 10px; background: var(--bg); border-radius: 8px; }
+.simrule { border-top: 1px solid var(--line); padding: 6px 0; }
+.simrule.runs strong { color: var(--occupied); }
+.tpl h3 { margin-top: 0; }
+.designer-item .name { font-size: 16px; }
+#sim-inputs input[type=text] { width: 9em; }
+#sim-inputs input[type=number] { width: 5.5em; }
+.switch.small { font-size: 14px; font-weight: 400; }

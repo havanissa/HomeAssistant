@@ -134,6 +134,9 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                     check("flow: the name is suggested from the selection", frame.locator("#name").input_value() != "")
                     shot("new-device")
                     frame.locator("#create").click()
+                    # 0.3: a device with lights or covers opens the template gallery; "Write a rule" is the rule editor
+                    frame.locator("h1", has_text="New automation").wait_for()
+                    frame.locator("a.button", has_text="Write a rule").click()
                     frame.locator("h1", has_text="New rule").wait_for()
                     made = next(d for d in overview()["devices"] if d["targets"][0]["entity_id"] == CEILING)
                     check("flow: the new device opens an empty rule; it has no rules yet and nothing is deployed",

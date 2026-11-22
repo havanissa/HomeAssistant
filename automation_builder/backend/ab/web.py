@@ -241,6 +241,26 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         return web.Response(text=view["yaml"], content_type="application/yaml", headers={
             "Content-Disposition": f'attachment; filename="{view["filename"]}"'})
 
+    async def designer_page(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(core.designer_page(request.match_info["device_id"], request.match_info["designer_id"]))
+
+    async def simulation_inputs(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(core.simulation_inputs(request.match_info["device_id"]))
+
+    async def presence_view(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(core.presence_view())
+
+    async def gallery_view(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(core.gallery_view(request.match_info["device_id"]))
+
+    async def sun_view(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(core.sun_view())
+
     async def import_list(request: web.Request) -> web.Response:
         await require_admin(request)
         return _json({**core.import_list(), "revision": core.store.revision})
@@ -292,6 +312,14 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         "/api/blueprint/preview": lambda d, u: core.blueprint_view(d.get("device_id"), d.get("settings") or {}),
         "/api/blueprint/install": lambda d, u: core.blueprint_install(d.get("device_id"), d.get("overwrite") is True, u),
         "/api/import/analyse": lambda d, u: core.import_analyse(d.get("entity_id")),
+        "/api/designers/create": lambda d, u: core.create_designer(d.get("device_id"), d.get("kind"), d.get("template"), d.get(rev), u),
+        "/api/designers/save": lambda d, u: core.save_designer(d.get("device_id"), d.get("designer"), d.get(rev), u),
+        "/api/designers/delete": lambda d, u: core.delete_designer(d.get("device_id"), d.get("designer_id"), d.get(rev), u),
+        "/api/designers/preview": lambda d, u: core.designer_page(d.get("device_id"), (d.get("designer") or {}).get("id"), d.get("designer")),
+        "/api/designers/simulate": lambda d, u: core.simulation(d.get("device_id"), d.get("scenario"), d.get("designer")),
+        "/api/gallery/apply": lambda d, u: core.apply_template(d.get("device_id"), d.get("template"), d.get(rev), u),
+        "/api/presence/save": lambda d, u: core.save_source(d.get("source"), d.get(rev), u),
+        "/api/presence/delete": lambda d, u: core.delete_source(d.get("source_id"), d.get(rev), u),
         "/api/import/convert": lambda d, u: core.import_convert(d.get("entity_id"), d.get("destination"), d.get(rev), u),
     }
     large = {
@@ -318,6 +346,11 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
     r.add_get("/api/blueprint/{device_id}", blueprint_view)
     r.add_get("/api/blueprint/{device_id}/download", blueprint_download)
     r.add_get("/api/automations", import_list)
+    r.add_get("/api/designers/{device_id}/{designer_id}", designer_page)
+    r.add_get("/api/simulation/{device_id}", simulation_inputs)
+    r.add_get("/api/presence", presence_view)
+    r.add_get("/api/gallery/{device_id}", gallery_view)
+    r.add_get("/api/sun", sun_view)
     r.add_get("/api/settings", settings_view)
     r.add_get("/api/export", export)
     r.add_get("/api/diagnostics", diagnostics)

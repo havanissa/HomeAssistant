@@ -268,15 +268,18 @@ class DeployStore:
         return {k: v for k, v in self.records.items() if v.get("device_id") == device_id}
 
     def record(self, automation_id: str, *, device_id: str, config_hash: str, config: dict[str, Any],
-               device: dict[str, Any], by: str | None, blocks: list[dict[str, Any]] | None = None) -> None:
+               device: dict[str, Any], by: str | None, blocks: list[dict[str, Any]] | None = None,
+               generated: list[dict[str, Any]] | None = None) -> None:
         previous = self.records.get(automation_id)
         history = []
         if previous:
-            history = [{k: previous.get(k) for k in ("hash", "config", "deployed_at", "device", "by", "blocks")},
-                       *previous.get("history", [])][:HISTORY]
+            history = [{k: previous.get(k) for k in ("hash", "config", "deployed_at", "device", "by", "blocks", "generated")
+                        if k != "generated" or previous.get(k)}, *previous.get("history", [])][:HISTORY]
         self.records[automation_id] = {"device_id": device_id, "hash": config_hash, "config": config,
                                        "deployed_at": iso(utcnow()), "device": copy.deepcopy(device), "by": by,
                                        "blocks": blocks, "history": history}
+        if generated:  # the rules the device's designers generated (diagnostics read them by id)
+            self.records[automation_id]["generated"] = copy.deepcopy(generated)
         self._write()
 
     def forget(self, automation_id: str) -> None:
