@@ -1,0 +1,22 @@
+blueprint:
+  name: AIE toggle on change
+  description: Toggles the target helper whenever the source helper changes (Automation Import/Export e2e).
+  domain: automation
+  input:
+    source:
+      name: Source
+      selector:
+        entity:
+          domain: input_boolean
+    target:
+      name: Target
+      selector:
+        entity:
+          domain: input_boolean
+triggers:
+  - trigger: state
+    entity_id: !input source
+actions:
+  - action: input_boolean.toggle
+    target:
+      entity_id: !input target

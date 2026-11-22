@@ -1,0 +1,50 @@
+# Test entities of the Automation Import/Export Manager e2e checks.
+input_boolean:
+  aie_motion:
+    name: AIE motion driver
+  aie_light:
+    name: AIE light driver
+  aie_guest:
+    name: AIE guest mode
+  aie_target:
+    name: AIE blueprint target
+template:
+  - binary_sensor:
+      - name: AIE Motion
+        unique_id: aie_motion_sensor
+        device_class: motion
+        state: "{{ is_state('input_boolean.aie_motion', 'on') }}"
+  - light:
+      - name: AIE Lamp
+        unique_id: aie_lamp
+        state: "{{ is_state('input_boolean.aie_light', 'on') }}"
+        turn_on:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.aie_light
+        turn_off:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.aie_light
+script:
+  aie_goodnight:
+    alias: AIE goodnight
+    sequence:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.aie_light
+scene:
+  - name: AIE evening
+    entities:
+      input_boolean.aie_light: "on"
+# An automation maintained in this package (external YAML, with an id): never deleted by the App.
+automation:
+  - id: package_rule
+    alias: Package rule
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.aie_guest
+    actions:
+      - action: input_boolean.toggle
+        target:
+          entity_id: input_boolean.aie_target
