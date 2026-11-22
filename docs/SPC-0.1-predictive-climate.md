@@ -90,7 +90,7 @@ and predicts the following days. MAE in °C with perfect weather knowledge; "no 
 |---|---|
 | `smart_predictive_climate/tests` (thermal learning 49, forecast 13, App in-process end-to-end 8, API 3, package, infrastructure, distribution) | 153 passed, 1 skipped |
 | `tests/spc_companion` (companion in a real Home Assistant test harness) | 71 passed |
-| Regression: harness suites companion 43, engine 1261, sod_companion 38, automation_builder 45; Smart Occupancy Detection App 678; Automation Builder App 160; Smart Comfort package checks | all passed |
+| Regression: harness suites companion 43, engine 1261, sod_companion 38, automation_builder 45; Smart Occupancy Detection App 678; Automation Builder App 160; Smart Comfort App 327 (1 xfailed) | all passed |
 
 **Real Home Assistant 2026.11.1** (disposable instance on port 18123, real App image, fake Supervisor;
 `tests/e2e/`: `prepare.py`, `seed.py`, `stack.sh`, `e2e_checks.py`, `browser_checks.py`). The App's store was
