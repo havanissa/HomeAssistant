@@ -97,7 +97,9 @@ export async function renderRestore(archiveId, params) {
       <div class="card"><p>Archive of ${esc(plan.source.location_name || "?")} · Home Assistant ${esc(plan.source.ha_version || "?")} · created ${esc(plan.source.created_at || "")}</p>
         ${plan.same_installation ? "" : `<div class="notice warning">This archive comes from another Home Assistant installation. Check the label, category and area mapping below: ids differ between installations.</div>`}
         <div class="chips">${Object.entries(c).filter(([a, n]) => n && a !== "not_selected").map(([a, n]) => `<span class="chip">${esc(ACTION_TEXT[a])}: ${esc(n)}</span>`).join("")}</div></div>
-      <div class="card"><h2>Automations</h2><div id="items">${plan.items.map((i) => itemRow(i, decisions)).join("")}</div></div>
+      <div class="card"><h2>Automations</h2>
+        <div class="row" id="sel-bar"><button type="button" id="sel-all" ${plan.selection.length === plan.items.length ? "disabled" : ""}>Select all</button><button type="button" id="sel-none" ${plan.selection.length ? "" : "disabled"}>Deselect all</button><span class="spacer"></span><span class="muted small" id="sel-count">${esc(plan.selection.length)} of ${esc(plan.items.length)} selected</span></div>
+        <div id="items">${plan.items.map((i) => itemRow(i, decisions)).join("")}</div></div>
       ${plan.labels.length + plan.categories.length + plan.areas.length ? `<div class="card"><details open><summary>Labels, categories and areas</summary>
         ${plan.labels.length ? `<h3>Labels</h3>${plan.labels.map((e) => metaRow("labels", e, live.labels)).join("")}` : ""}
         ${plan.categories.length ? `<h3>Categories</h3>${plan.categories.map((e) => metaRow("categories", e, live.categories.filter((x) => x.scope === e.scope))).join("")}` : ""}
@@ -133,6 +135,9 @@ export async function renderRestore(archiveId, params) {
         load();
       };
     });
+    const choose = (keys) => { if (busy) return; decisions.selection = keys; load(); };
+    view.querySelector("#sel-all").onclick = () => choose(plan.items.map((i) => i.key).filter(Boolean));
+    view.querySelector("#sel-none").onclick = () => choose([]);
     view.querySelectorAll("[data-collision]").forEach((sel) => { sel.onchange = () => { decisions.collisions[sel.dataset.collision] = sel.value; load(); }; });
     view.querySelectorAll("[data-map]").forEach((sel) => {
       sel.onchange = () => {
