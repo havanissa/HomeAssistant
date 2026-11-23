@@ -157,6 +157,23 @@ def main(tokens_path: Path, out: Path) -> int:  # noqa: PLR0915 - one linear sce
                       "restore its metadata" in frame.locator("#items").inner_text())
                 check(f"{tag}: restore preview fits the width", not overflow())
                 shot("restore")
+                total = frame.locator("#items [data-include]").count()
+                frame.locator("#sel-none").click()
+                frame.locator("#sel-count", has_text=f"0 of {total} selected").wait_for(timeout=15000)
+                check(f"{tag}: Deselect all clears every automation",
+                      frame.locator("#items [data-include]:checked").count() == 0 and frame.locator("#run").is_disabled()
+                      and frame.locator("#sel-none").is_disabled())
+                frame.locator("#items [data-include]").first.check()
+                frame.locator("#sel-count", has_text=f"1 of {total} selected").wait_for(timeout=15000)
+                check(f"{tag}: one automation ticked after Deselect all is the only one restored",
+                      frame.locator("#items [data-include]:checked").count() == 1
+                      and "Restore 1 automation" in frame.locator("#run").inner_text() and not frame.locator("#run").is_disabled())
+                frame.locator("#sel-all").click()
+                frame.locator("#sel-count", has_text=f"{total} of {total} selected").wait_for(timeout=15000)
+                check(f"{tag}: Select all ticks every automation",
+                      frame.locator("#items [data-include]:checked").count() == total and frame.locator("#sel-all").is_disabled()
+                      and not overflow())
+                shot("restore-select-all")
 
                 if tag == "desktop-light":
                     inner.evaluate("document.getElementById('theme').value = 'dark'; document.getElementById('theme').dispatchEvent(new Event('change'))")

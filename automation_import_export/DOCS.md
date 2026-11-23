@@ -84,7 +84,8 @@ plan:
 - **Automations** – *Create* (missing), *Already there: restore its metadata* (identical configuration),
   *Skip* by default when an automation with the same id exists and differs, with the differences; choose
   *Replace (after a backup)* or *Restore as a new automation* (a new id; Home Assistant assigns a new entity id).
-  Untick automations you do not want.
+  Untick automations you do not want, or use **Deselect all** and tick only the ones you want (**Select all**
+  ticks every automation in the archive again).
 - **Labels, categories, areas** – the same id is used when it exists; otherwise one with the same name (a name is
   never duplicated); otherwise it is recreated (new ids for categories, mapped automatically). You can choose
   another existing one, *Create*, or *Do not restore* (needs an acknowledgement).

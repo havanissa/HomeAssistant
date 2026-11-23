@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+- **Select all / Deselect all** on the restore and import preview: start from nothing and tick only the
+  automations you want, or tick everything at once, instead of unticking each one. A counter shows how many of the
+  archive's automations are selected.
+
 ## 0.1.1
 
 - **Fix: the interface did not load on installations with many automations** ("NetworkError when attempting to
