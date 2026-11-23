@@ -1,6 +1,6 @@
 """Browser checks of App 0.4 through Ingress: the Lighting Designer 2 - template, lights, Truth and Brightness
 Matrices (columns of several kinds, cells, 0 % and its meaning), Colour & Mood, Switches & Remotes (room → device →
-event, discovered interactions, a manual ZHA event, the action matrix, the override policy), Advanced Rules,
+event, discovered interactions, a manual ZHA event, the interaction list (0.5), the override policy), Advanced Rules,
 Priority & Resolution (order, who controls a light now), the simulation and the YAML - at desktop (light and dark),
 tablet and phone widths, without console errors and without sideways scrolling.
 
@@ -207,11 +207,15 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                       and w[0]["interactions"][0]["trigger"] == {"type": "button", "entity_id": BUTTON, "event_types": ["pressed"]}, json.dumps(w)[:300])
                 check(f"{tag}: nothing is assigned to it by itself", w[0]["mappings"] == [])
                 interaction = w[0]["interactions"][0]["id"]
-                frame.locator(f"select[data-chg=maction][data-i='{interaction}']").select_option("toggle")
+                # 0.5: the switch's card is a list of interactions; "+ Add Interaction" = event + action
+                frame.locator(f"[data-act=iadd][data-w='{w[0]['id']}']").click()
+                frame.locator("select[data-chg=xnew][data-key=interaction]").select_option(interaction)
+                frame.locator("select[data-chg=xnew][data-key=kind]").select_option("toggle")
+                frame.locator("[data-act=xcreate]").click()
                 saved()
-                frame.locator(f"tr[data-interaction='{interaction}'] input[data-chg=lightset][value='{BED}']").check()
+                frame.locator(f"li.mapping-row[data-interaction='{interaction}'] input[data-chg=lightset][value='{BED}']").check()
                 saved()
-                frame.locator(f"tr[data-interaction='{interaction}'] input[data-chg=flag]").check()
+                frame.locator(f"li.mapping-row[data-interaction='{interaction}'] input[data-chg=flag][data-path$='/override']").check()
                 saved()
                 check(f"{tag}: a press is mapped to toggle the bed light with an override", designer(device)["switches"][0]["mappings"][0]
                       == {"id": designer(device)["switches"][0]["mappings"][0]["id"], "interaction": interaction, "enabled": True, "lights": [BED],
@@ -222,7 +226,7 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                 check(f"{tag}: with a policy nothing is left to resolve", frame.locator("#d-problems").count() == 0,
                       frame.locator("#d-problems").inner_text() if frame.locator("#d-problems").count() else "")
                 check(f"{tag}: the helpers to be created are listed", "created when you deploy" in frame.locator("#override-policy").inner_text())
-                frame.locator("button[data-act=fmanual]").click()
+                frame.locator("#finder button[data-act=fmanual]").click()
                 fill("input[data-chg=fman][data-key=ieee]", "00:11:22")
                 fill("input[data-chg=fman][data-key=command]", "on")
                 frame.locator("button[data-act=fmanadd]").click()
@@ -231,13 +235,16 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                 check(f"{tag}: a ZHA event is mapped by hand", manual and manual[0]["interactions"][0]["trigger"]["event_data"] ==
                       {"device_ieee": "00:11:22", "command": "on"}, json.dumps(manual)[:300])
                 mi = manual[0]["interactions"][0]["id"]
-                frame.locator(f"select[data-chg=maction][data-i='{mi}']").select_option("none")
+                frame.locator(f"[data-act=iadd][data-w='{manual[0]['id']}']").click()
+                frame.locator("select[data-chg=xnew][data-key=interaction]").select_option(mi)
+                frame.locator("select[data-chg=xnew][data-key=kind]").select_option("none")
+                frame.locator("[data-act=xcreate]").click()
                 saved()
                 check(f"{tag}: NO ACTION is explicit and different from UNSET", [m["action"] for s in designer(device)["switches"]
                       for m in s["mappings"] if m["interaction"] == mi] == [{"kind": "none"}])
-                frame.locator(f"select[data-chg=maction][data-i='{mi}']").select_option("select_mood")
+                frame.locator(f"li.mapping-row[data-interaction='{mi}'] select[data-chg=maction]").select_option("select_mood")
                 inner.wait_for_timeout(500)
-                frame.locator(f"tr[data-interaction='{mi}'] select[aria-label=Mood]").select_option("Hygge")
+                frame.locator(f"li.mapping-row[data-interaction='{mi}'] select[aria-label=Mood]").select_option("Hygge")
                 saved()
                 check(f"{tag}: a press can select a mood", [m["action"] for s in designer(device)["switches"] for m in s["mappings"]
                       if m["interaction"] == mi] == [{"kind": "select_mood", "value": "Hygge"}])

@@ -309,3 +309,21 @@ table.mapping td { vertical-align: middle; }
 .result-line { margin: 4px 0; }
 #priority li { gap: 10px; }
 #control td, #control th { min-width: 6em; }
+/* Switches & Remotes: an interaction list (0.5) */
+ol.mappings li.mapping-row { display: grid; gap: 6px; padding: 10px 0; }
+li.mapping-row.disabled > .row { opacity: .6; }
+li.mapping-row select, .add-mapping select { max-width: 100%; }
+.mapping-more { border-left: 3px solid var(--line); padding: 4px 0 4px 12px; margin-left: 4px; }
+.add-mapping { margin-top: 8px; padding: 8px; border: 1px dashed var(--line); border-radius: 8px; }
+ul.events li { padding: 4px 0; }
+/* Light Level Manager and Heating Designer (0.5): where a value comes from */
+.badge.src-global { background: var(--vacant-bg); color: var(--vacant); }
+.badge.src-room, .badge.src-thermostat { background: var(--occupied-bg); color: var(--occupied); }
+.badge.src-unset { background: transparent; color: var(--muted); border: 1px dashed var(--line); }
+table.levels { border-collapse: collapse; width: 100%; }
+table.levels th, table.levels td { text-align: left; padding: 6px 8px; border-top: 1px solid var(--line); vertical-align: middle; }
+table.levels input[type=number] { width: 6.5em; max-width: 100%; }
+a.card.level-room { display: block; color: inherit; text-decoration: none; }
+a.card.level-room:hover, a.card.level-room:focus-visible { border-color: var(--accent); }
+.heat-now { font-size: 20px; font-weight: 600; }
+.slot-row input[type=time] { min-width: 7em; }

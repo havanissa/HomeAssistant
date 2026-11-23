@@ -188,3 +188,25 @@ async def test_phase03_routes(client):
     status, _body = await post(client, "/api/designers/delete", {"device_id": device_id, "designer_id": made["designer_id"],
                                                                  "expected_revision": core.store.revision})
     assert status == 200 and "designers" not in core.store.config["devices"][device_id]
+
+
+async def test_a_large_body_that_arrives_in_parts_is_read_whole(client):
+    """0.5: the body was read with one stream read, which returns what has arrived so far: an import sent in parts
+    was cut off and refused as "not JSON"."""
+    import asyncio
+    import json
+    exported = client.core.store.export()
+    exported["config"]["devices"] = {f"d_{i:08x}": {"name": f"Lamp {i} " + "x" * 60, "targets": [LAMP], "rules": []}
+                                     for i in range(1, 151)}
+    raw = json.dumps({"document": exported}).encode()
+    assert len(raw) > 4 * 4096          # several parts
+
+    async def parts():
+        for i in range(0, len(raw), 4096):
+            yield raw[i:i + 4096]
+            await asyncio.sleep(0)
+
+    response = await client.post("/api/import/review", data=parts(), headers={**POST, "Content-Type": "application/json"})
+    data = await response.json()
+    assert response.status == 200, data
+    assert data["devices"] == 150

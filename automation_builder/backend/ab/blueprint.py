@@ -40,7 +40,8 @@ MIN_HA_VERSION = "2024.10.0"  # "triggers" / "actions" / "action:" need this rel
 FOLDER = "automation_builder"
 
 GROUP_ORDER = ("Controlled entities", "Trigger entities", "Sensor entities", "Devices", "Thresholds", "Angles", "Time values",
-               "Delays and durations", "Brightness", "Colour temperature", "Cover positions", "Action parameters", "States")
+               "Delays and durations", "Temperatures", "Brightness", "Colour temperature", "Cover positions", "Action parameters",
+               "States")
 DATA_GROUP = {"brightness_pct": "Brightness", "brightness": "Brightness", "color_temp_kelvin": "Colour temperature"}
 DATA_SELECTOR: dict[str, dict[str, Any]] = {
     "brightness_pct": {"number": {"min": 1, "max": 100, "unit_of_measurement": "%", "mode": "slider"}},
@@ -323,18 +324,18 @@ def _by_content(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _automations(device: dict[str, Any], settings: dict[str, Any], presence: dict[str, Any] | None = None,
-                 exposed: dict[str, Input] | None = None) -> tuple[list[dict[str, Any]], Any]:
+                 exposed: dict[str, Input] | None = None, shared: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], Any]:
     """The device's automations, its designers' rules included, and the designers' expansion."""
     from . import designers
-    expansion = designers.expand(device, presence, exposed=exposed)
+    expansion = designers.expand(device, presence, exposed=exposed, shared=shared)
     return compiler.compile_device(designers.effective(device, expansion), settings)["automations"], expansion
 
 
 def candidates(device: dict[str, Any], settings: dict[str, Any], automation_id: str | None = None,
-               names: Any = None, presence: dict[str, Any] | None = None) -> dict[str, Any]:
+               names: Any = None, presence: dict[str, Any] | None = None, shared: dict[str, Any] | None = None) -> dict[str, Any]:
     """Everything of one generated automation that can become a blueprint input, in a stable order."""
     names = names or (lambda entity_id: entity_id)
-    automations, expansion = _automations(device, settings, presence)
+    automations, expansion = _automations(device, settings, presence, shared=shared)
     chosen = next((a for a in automations if a["id"] == automation_id), automations[0] if automations else None)
     if chosen is None:
         return {"automation": None, "automations": [], "inputs": [], "collector": None, "expansion": expansion}
@@ -372,14 +373,14 @@ def file_path(automation_id: str) -> str:
 
 
 def build(device: dict[str, Any], settings: dict[str, Any], *, names: Any = None,
-          presence: dict[str, Any] | None = None) -> dict[str, Any]:
+          presence: dict[str, Any] | None = None, shared: dict[str, Any] | None = None) -> dict[str, Any]:
     """The blueprint of one of a device's automations, from the choices stored in ``device["blueprint"]``.
 
     ``{"yaml", "document", "config" (the automation with every input at its default), "inputs" (all candidates,
     each with "exposed"), "problems" (errors: no export), "warnings", "automation", "automations", "path"}``
     """
     choice = device.get("blueprint") or {}
-    found = candidates(device, settings, choice.get("automation"), names, presence)
+    found = candidates(device, settings, choice.get("automation"), names, presence, shared)
     automation, problems, warnings = found["automation"], [], []
     if automation is None:
         return {"yaml": "", "document": None, "config": None, "inputs": [], "automation": None, "automations": [],
@@ -404,7 +405,7 @@ def build(device: dict[str, Any], settings: dict[str, Any], *, names: Any = None
             for path in item["paths"]:
                 _set(work, path, ref)
             exposed.append(item)
-    automations, expansion = _automations(work, settings, presence, exposed=refs)
+    automations, expansion = _automations(work, settings, presence, exposed=refs, shared=shared)
     compiled = next(a for a in automations if a["id"] == automation["id"])
     config = compiled["config"]
     used = {name: ref for name, ref in expansion.refs.variables.items() if name in compiler.canonical(config)}
@@ -487,13 +488,13 @@ def _designer_warnings(device: dict[str, Any], automation: dict[str, Any], expan
     return out
 
 
-def inputs_of(device: dict[str, Any], presence: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def inputs_of(device: dict[str, Any], presence: dict[str, Any] | None = None, shared: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Kept from Phase 0.1 (the count shown on the device page): every candidate input of the device's rules."""
     collector = _Collector(device, [r["id"] for r in device["rules"]], lambda entity_id: entity_id)
     items = {item["key"]: item for item in collector.items.values()}
     if device.get("designers"):
         from . import designers
-        for key, param in designers.expand(device, presence).params.items():
+        for key, param in designers.expand(device, presence, shared=shared).params.items():
             items.setdefault(key, param)
     return [{"path": item["key"], "kind": item["kind"], "value": item["value"], "label": item["name"]}
             for item in items.values()]

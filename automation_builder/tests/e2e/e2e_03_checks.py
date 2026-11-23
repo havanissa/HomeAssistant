@@ -15,7 +15,7 @@ from pathlib import Path
 import sys
 import time
 
-from e2e_checks import App, Home, brightness_pct, call, check, summary, t_state
+from e2e_checks import skip, App, Home, brightness_pct, call, check, summary, t_state
 
 LAMP = "light.living_room_rgbww_lights"
 FAN = "fan.living_room_fan"
@@ -42,18 +42,27 @@ def main() -> int:  # noqa: PLR0915 - one linear scenario
     rooms = {r["name"]: r for r in found["rooms"]}
     check("40 Home Assistant's areas are the rooms, with an Unassigned entry last", {"Kitchen", "Bedroom", "Living Room", "Office", "Hall"} <= set(rooms)
           and found["rooms"][-1]["name"] == "Unassigned" and found["rooms"][-1]["area_id"] is None, list(rooms))
-    check("40 a room shows how much there is to control", rooms["Living Room"]["devices"] == 3 and rooms["Living Room"]["entities"] >= 3, rooms["Living Room"])
+    # The demo's Sonos device ("Living Room", 9 entities) exists only in Home Assistant instances whose registry
+    # predates 2026.11 (the current demo creates its media players without a device): its checks are then SKIPPED.
+    _, probe = app.get(f"api/room-devices?area={rooms['Living Room']['area_id']}")
+    has_sonos = any(d["name"] == "Living Room" for d in probe["devices"])
+    check("40 a room shows how much there is to control", rooms["Living Room"]["devices"] == (3 if has_sonos else 2)
+          and rooms["Living Room"]["entities"] >= 3, rooms["Living Room"])
     _, searched = app.get("api/rooms?q=liv")
     check("40 rooms can be searched", [r["name"] for r in searched["rooms"]] == ["Living Room"], searched)
     living = rooms["Living Room"]["area_id"]
     _, listed = app.get(f"api/room-devices?area={living}")
     names = [d["name"] for d in listed["devices"]]
     check("40 only the devices of the chosen room are listed, entities without a device as one entry at the end",
-          names == ["Ceiling Lights", "Living Room", "Living Room RGBWW Lights", "Entities without a device"], names)
-    sonos = next(d for d in listed["devices"] if d["name"] == "Living Room")
-    check("40 a physical device with several entities brings all its controllable ones, with names and domains",
-          len(sonos["entities"]) == 9 and sonos["domains"] == ["media_player", "number", "switch"] and sonos["model"] == "Sonos Play:5"
-          and all(e["name"] and e["domain_label"] for e in sonos["entities"]), sonos["domains"])
+          names == ["Ceiling Lights", *(["Living Room"] if has_sonos else []), "Living Room RGBWW Lights", "Entities without a device"], names)
+    sonos = next((d for d in listed["devices"] if d["name"] == "Living Room"), None)
+    if sonos is None:
+        skip("40 a physical device with several entities brings all its controllable ones, with names and domains",
+             "the demo's Sonos device does not exist in this Home Assistant (2026.11 demo media players have no device)")
+    else:
+        check("40 a physical device with several entities brings all its controllable ones, with names and domains",
+              len(sonos["entities"]) == 9 and sonos["domains"] == ["media_player", "number", "switch"] and sonos["model"] == "Sonos Play:5"
+              and all(e["name"] and e["domain_label"] for e in sonos["entities"]), sonos["domains"])
     check("40 an entity that has a room but no device is offered in that room", [e["entity_id"] for e in listed["devices"][-1]["entities"]] == [FAN]
           and listed["devices"][-1]["device_id"] is None, listed["devices"][-1])
     _, kitchen = app.get(f"api/room-devices?area={rooms['Kitchen']['area_id']}")

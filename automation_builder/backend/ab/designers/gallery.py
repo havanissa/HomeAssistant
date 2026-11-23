@@ -38,7 +38,6 @@ TEMPLATES = [{"category": "Lighting", "designer": "lighting", **{k: v for k, v i
              for t in lighting2.TEMPLATES] + TEMPLATES
 
 PLANNED = [
-    {"category": "Climate", "text": "Temperature schedules per room"},
     {"category": "Ventilation", "text": "Humidity, CO₂ and temperature control of fans"},
     {"category": "Fans", "text": "Speed by temperature or humidity"},
 ]
@@ -47,7 +46,8 @@ PLANNED = [
 def for_kinds(kinds: list[str]) -> dict[str, Any]:
     return {"templates": [t for t in TEMPLATES if t["designer"] in kinds],
             "planned": PLANNED,
-            "note": "Specialised designers for climate, ventilation and fans are not built yet. Switches, buttons and "
+            "note": "Specialised designers for ventilation and fans are not built yet (thermostats have the Heating "
+                    "Designer; its templates are on its own page). Switches, buttons and "
                     "remotes are mapped in the Lighting Designer (Switches & Remotes); for anything else the rule "
                     "editor (IF / AND-OR / THEN) supports them fully."}
 

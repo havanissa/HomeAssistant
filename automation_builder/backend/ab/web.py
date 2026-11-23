@@ -118,7 +118,14 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
             raise ConfigError("forbidden", "Only Home Assistant administrators can use Automation Builder", 403)
         if request.content_length is not None and request.content_length > limit:
             raise ConfigError("too_large", "The request is too large", 413)
-        raw = await request.content.read(limit + 1)
+        # read() of the stream returns what has arrived so far: read until the end (a large import arrives in parts)
+        raw = bytearray()
+        while len(raw) <= limit:
+            chunk = await request.content.read(limit + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+        raw = bytes(raw)
         if len(raw) > limit:
             raise ConfigError("too_large", "The request is too large", 413)
         try:
@@ -261,6 +268,18 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         await require_admin(request)
         return _json(core.presence_view())
 
+    async def levels_view(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(await core.levels_view())
+
+    async def level_sensors(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(core.level_sensors(request.query.get("area"), request.query.get("all") == "1", request.query.get("q", "")))
+
+    async def heating_view(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(core.heating_view())
+
     async def gallery_view(request: web.Request) -> web.Response:
         await require_admin(request)
         return _json(core.gallery_view(request.match_info["device_id"]))
@@ -333,6 +352,21 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         "/api/presence/save": lambda d, u: core.save_source(d.get("source"), d.get(rev), u),
         "/api/presence/delete": lambda d, u: core.delete_source(d.get("source_id"), d.get(rev), u),
         "/api/import/convert": lambda d, u: core.import_convert(d.get("entity_id"), d.get("destination"), d.get(rev), u),
+        "/api/light-levels/template/save": lambda d, u: core.save_level_template(d.get("template"), d.get(rev), u),
+        "/api/light-levels/template/preset": lambda d, u: core.add_level_preset(d.get(rev), u),
+        "/api/light-levels/template/duplicate": lambda d, u: core.duplicate_level_template(d.get("template_id"), d.get(rev), u),
+        "/api/light-levels/template/delete": lambda d, u: core.delete_level_template(d.get("template_id"), d.get(rev), u),
+        "/api/light-levels/matrix/save": lambda d, u: core.save_level_matrix(d.get("matrix"), d.get(rev), u),
+        "/api/light-levels/matrix/delete": lambda d, u: core.delete_level_matrix(d.get("matrix_id"), d.get(rev), u),
+        "/api/light-levels/defaults": lambda d, u: core.save_level_defaults(d.get("defaults"), d.get(rev), u),
+        "/api/light-levels/room/save": lambda d, u: core.save_level_room(d.get("room"), d.get(rev), u),
+        "/api/light-levels/room/delete": lambda d, u: core.delete_level_room(d.get("area_id"), d.get(rev), d.get("overwrite") is True, u),
+        "/api/light-levels/observations/clear": lambda d, u: core.clear_observations(d.get("area_id"), d.get("light")),
+        "/api/heating/template/save": lambda d, u: core.save_heating_template(d.get("template"), d.get(rev), u),
+        "/api/heating/template/delete": lambda d, u: core.delete_heating_template(d.get("template_id"), d.get(rev), u),
+        "/api/heating/room/save": lambda d, u: core.save_heating_room(d.get("room"), d.get(rev), u),
+        "/api/heating/room/delete": lambda d, u: core.delete_heating_room(d.get("area_id"), d.get(rev), u),
+        "/api/heating/quick": lambda d, u: core.heating_quick(d.get("device_id"), d.get("designer_id"), d.get("kind"), d.get(rev), u),
     }
     large = {
         "/api/import/review": lambda d, u: core.review_import(d.get("document")),
@@ -364,6 +398,9 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
     r.add_get("/api/switch-sources", switch_sources)
     r.add_get("/api/switch-interactions", switch_interactions)
     r.add_get("/api/gallery/{device_id}", gallery_view)
+    r.add_get("/api/light-levels", levels_view)
+    r.add_get("/api/light-levels/sensors", level_sensors)
+    r.add_get("/api/heating", heating_view)
     r.add_get("/api/sun", sun_view)
     r.add_get("/api/settings", settings_view)
     r.add_get("/api/export", export)

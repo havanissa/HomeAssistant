@@ -33,6 +33,10 @@ PURPOSE_DOMAINS = {
     "cover": ("cover",),
     "helper": ("input_boolean", "input_button", "input_number", "input_select", "input_text", "input_datetime",
                "counter", "timer", "schedule"),
+    "home": ("person", "device_tracker", "group", "zone", "input_boolean", "binary_sensor"),
+    "mode": ("input_select", "select", "input_boolean", "binary_sensor", "sensor", "schedule"),
+    "window": ("binary_sensor", "input_boolean"),
+    "climate": ("climate",),
 }
 SEARCH_PURPOSES = ("any", "target", "occupancy", "numeric", "override", "time", *PURPOSE_DOMAINS)
 

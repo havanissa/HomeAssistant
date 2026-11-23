@@ -2,7 +2,7 @@
 # The base image is named explicitly (Supervisor 2026.04+) and pinned for reproducible builds.
 FROM ghcr.io/home-assistant/base-python:3.14-alpine3.24-2026.11.0
 
-ARG BUILD_VERSION=0.4.0
+ARG BUILD_VERSION=0.5.0
 ARG BUILD_ARCH=amd64
 
 ENV PYTHONUNBUFFERED=1 \

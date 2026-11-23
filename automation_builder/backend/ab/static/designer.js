@@ -5,6 +5,7 @@
 
 import { api, ask, change, enc, entities, entityName, errorText, esc, icon, loadEntities, notes, pickEntity, session, toast, view } from "./ui.js";
 import { lightingPage } from "./lighting.js";
+import { heatingPage } from "./heating.js";
 
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -138,6 +139,8 @@ export async function designerPage(deviceId, designerId, tab, current) {
   let data = await api(`api/designers/${enc(deviceId)}/${enc(designerId)}`);
   if (!current()) return null;
   if (data.designer.config.kind === "lighting" && data.designer.config.version === 2) return lightingPage(deviceId, designerId, tab, current, data);
+  if (data.designer.config.kind === "heating") return heatingPage(deviceId, designerId, tab, current, data);
+  if (data.designer.config.kind === "light_level") { location.hash = `#/light-level/rooms/${enc(data.designer.config.room)}`; return null; }
   let d = clone(data.designer.config);
   const kind = d.kind;
   const sel = { m: null, keys: new Set(), clip: null };
@@ -873,18 +876,26 @@ export async function galleryPage(deviceId, current) {
 }
 
 // ------------------------------------------------------------------ the device page's designer card
+const DESIGNER_ICON = { lighting: "light", cover: "cover", heating: "climate", light_level: "light" };
+const DESIGNER_TEXT = { lighting: "Lighting Designer: Truth and Brightness Matrices, Colour & Mood, switches and remotes, Advanced Rules",
+  cover: "Cover Designer: sun angle, cover modes, mood mapping",
+  heating: "Heating Designer: schedules, day/night, presence, windows, away/home and manual override (no prediction, no other App needed)" };
 export function designersCard(deviceId, info) {
   if (!info || (!info.available.length && !info.items.length)) return "";
   const items = info.items.map((i) => {
     const blocking = i.problems.filter((p) => p.level === "blocking").length;
-    return `<div class="rule designer-item" data-designer="${esc(i.id)}"><div class="row">${icon(i.kind === "lighting" ? "light" : "cover")}<a class="name" href="#/design/${enc(deviceId)}/${enc(i.id)}">${esc(i.name || i.kind)}</a>
+    if (i.kind === "light_level") {
+      return `<div class="rule designer-item" data-designer="${esc(i.id)}"><div class="row">${icon("light")}<a class="name" href="#/light-level/rooms/${enc(i.config.room)}">The light level of this room</a><span class="spacer"></span><a class="button" href="#/light-level/rooms/${enc(i.config.room)}">Open on the Light Level page</a></div>
+        <div class="sub">${plural(i.rules.length, "generated rule")}${blocking ? ` · <span class="status bad">${plural(blocking, "thing")} to resolve</span>` : ""} · configured on the Light Level page; deploy it here</div></div>`;
+    }
+    return `<div class="rule designer-item" data-designer="${esc(i.id)}"><div class="row">${icon(DESIGNER_ICON[i.kind] || "device")}<a class="name" href="#/design/${enc(deviceId)}/${enc(i.id)}">${esc(i.name || i.kind)}</a>
         ${i.supported ? "" : `<span class="badge warn">made by another version</span>`}${i.enabled ? "" : `<span class="badge">disabled</span>`}<span class="spacer"></span><a class="button" href="#/design/${enc(deviceId)}/${enc(i.id)}">Open</a>
         <button class="link danger-text" data-act="designer-delete" data-id="${esc(i.id)}">Delete</button></div>
       <div class="sub">${plural(i.rules.length, "generated rule")}${blocking ? ` · <span class="status bad">${plural(blocking, "thing")} to resolve</span>` : ""}</div></div>`;
   }).join("");
   const missing = info.available.filter((k) => !info.items.some((i) => i.kind === k));
-  return `<div class="card" id="designers"><div class="row"><h2>Specialised designers</h2><span class="spacer"></span><a class="button" href="#/gallery/${enc(deviceId)}">Templates…</a></div>
-    ${items}${missing.map((k) => `<div class="rule"><div class="row">${icon(k === "lighting" ? "light" : "cover")}<span>${k === "lighting" ? "Lighting Designer: Truth and Brightness Matrices, Colour & Mood, switches and remotes, Advanced Rules" : "Cover Designer: sun angle, cover modes, mood mapping"}</span><span class="spacer"></span><button data-act="designer-create" data-kind="${esc(k)}">Create</button></div></div>`).join("")}
+  return `<div class="card" id="designers"><div class="row"><h2>Specialised designers</h2><span class="spacer"></span>${info.items.some((i) => i.kind === "light_level") ? "" : `<a class="button" href="#/gallery/${enc(deviceId)}">Templates…</a>`}</div>
+    ${items}${missing.map((k) => `<div class="rule"><div class="row">${icon(DESIGNER_ICON[k] || "device")}<span>${esc(DESIGNER_TEXT[k] || k)}</span><span class="spacer"></span><button data-act="designer-create" data-kind="${esc(k)}">Create</button></div></div>`).join("")}
     <p class="muted small">A designer generates ordinary rules of this device; they run in its one automation, next to the rules below.</p></div>`;
 }
 

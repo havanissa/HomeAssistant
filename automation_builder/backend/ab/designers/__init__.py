@@ -26,14 +26,15 @@ from typing import Any
 from .. import model
 from ..compiler import Input, plain
 from ..model import Problems
-from . import common as C, cover, lighting2, presence
+from . import common as C, cover, heating, levels, lighting2, presence
 
 #: The Lighting Designer module handles both versions: 1 (Phase 0.3, kept and compiled exactly as before) and 2.
-REGISTRY = {lighting2.KIND: lighting2, cover.KIND: cover}
+#: ``light_level`` is the designer of a room's light level device (created by the Light Level Manager, never by hand).
+REGISTRY = {lighting2.KIND: lighting2, cover.KIND: cover, levels.KIND: levels, heating.KIND: heating}
 #: Which designers suit an entity of a domain. Every other domain keeps the ordinary rule editor.
-APPLICABLE = {"light": ["lighting"], "cover": ["cover"]}
+APPLICABLE = {"light": ["lighting"], "cover": ["cover"], "climate": ["heating"]}
 #: Kinds that are planned but have no designer yet (the gallery says so; there is no editor for them).
-PLANNED = ("climate", "ventilation", "fan")
+PLANNED = ("ventilation", "fan")
 MAX_DESIGNERS = 4
 MAX_DOCUMENT = 120_000
 
@@ -105,13 +106,16 @@ def referenced_sources(designers: list[dict[str, Any]] | None) -> set[str]:
 
 
 def check_references(config: dict[str, Any], p: Problems) -> None:
-    """Every presence source a designer names must exist (a source in use cannot be deleted)."""
+    """Every presence source a designer names must exist (a source in use cannot be deleted); the light levels of
+    rooms and the heating profiles are checked by their modules."""
     known = set(((config.get("presence") or {}).get("sources") or {}))
     for device_id, device in config["devices"].items():
         missing = referenced_sources(device.get("designers")) - known
         if missing:
             p.add(f"devices.{device_id}.designers", "A designer refers to a presence source that does not exist: "
                   + ", ".join(sorted(missing)))
+    levels.check_references(config, p)
+    heating.check_references(config, p)
 
 
 # ------------------------------------------------------------------ expansion
@@ -133,8 +137,10 @@ class Expansion:
     """
 
     def __init__(self, device: dict[str, Any], presence_config: dict[str, Any] | None, *,
-                 exposed: dict[str, Input] | None = None) -> None:
+                 exposed: dict[str, Input] | None = None, shared: dict[str, Any] | None = None) -> None:
         self.device = device
+        self.levels = copy.deepcopy((shared or {}).get("light_levels"))    # the Light Level Manager (0.5)
+        self.heating = copy.deepcopy((shared or {}).get("heating"))        # the heating profiles (0.5)
         self.targets = device["targets"]
         self.sources = copy.deepcopy((presence_config or {}).get("sources") or {})
         self.refs = C.Refs()
@@ -197,7 +203,8 @@ class Expansion:
         if isinstance(entity_id, Input):
             return entity_id
         domain, object_id = entity_id.split(".", 1)
-        controlled = entity_id in self.targets
+        # in a blueprint export the device's targets are inputs already: compare their values
+        controlled = entity_id in [plain(t) for t in self.targets]
         key = f"controlled_{C.slug(object_id)}" if controlled else f"{domain}_{C.slug(object_id)}"
         return self.v(key, entity_id, kind="entity", group="Controlled entities" if controlled else group,
                       name=name or entity_id, description=f"{'Controlled entity' if controlled else use}. In the "
@@ -224,9 +231,10 @@ class Expansion:
 
 
 def expand(device: dict[str, Any], presence_config: dict[str, Any] | None, *, index: Any = None,
-           exposed: dict[str, Input] | None = None) -> Expansion:
-    """The rules, problems and conflicts of a device's designers (nothing is saved or sent)."""
-    x = Expansion(device, presence_config, exposed=exposed)
+           exposed: dict[str, Input] | None = None, shared: dict[str, Any] | None = None) -> Expansion:
+    """The rules, problems and conflicts of a device's designers (nothing is saved or sent). ``shared`` is the
+    configuration (its ``light_levels`` and ``heating`` sections)."""
+    x = Expansion(device, presence_config, exposed=exposed, shared=shared)
     for d in device.get("designers") or []:
         if not supported(d):
             x.problem("blocking", "unsupported", f"A designer of the kind “{d.get('kind')}” (version {d.get('version')}) "
@@ -239,19 +247,26 @@ def expand(device: dict[str, Any], presence_config: dict[str, Any] | None, *, in
             continue
         x.views[d["id"]] = module.expand(d, x)
         if index is not None and d["enabled"]:
-            module.capability_problems(d, capabilities(index, d.get("lights") or d.get("covers") or []), x)
+            module.capability_problems(d, capabilities(index, rows_of(d)), x)
             if hasattr(module, "index_problems"):
                 module.index_problems(d, index, x)
     for d in device.get("designers") or []:
         if supported(d) and d["enabled"]:
             others = sorted({e for r in device["rules"] if r["enabled"] for a in model.walk_actions(r["actions"])
                              for e in model.action_entities(a, device["targets"])}
-                            & set(d.get("lights") or d.get("covers") or []))
+                            & set(rows_of(d)))
             if others:
                 x.problem("warning", "designer_overlap", f"“{d['name']}” and ordinary rules of this device both control "
                           f"{', '.join(others)}. Both act; when they can act at the same moment the conflict check "
                           "below asks you to decide. Neither has priority by itself.", d["id"])
     return x
+
+
+def rows_of(designer: dict[str, Any]) -> list[str]:
+    """The entities a designer controls (its rows): lights, covers or thermostats."""
+    module = REGISTRY.get(designer.get("kind"))
+    rows = designer.get(module.ROWS) if module is not None else None
+    return [r for r in rows if isinstance(r, str)] if isinstance(rows, list) else []
 
 
 def effective(device: dict[str, Any], expansion: Expansion) -> dict[str, Any]:
@@ -297,6 +312,19 @@ def capability(index: Any, entity_id: str) -> dict[str, Any]:
                 "reports_position": "current_position" in attributes,
                 "reports_tilt": "current_tilt_position" in attributes,
                 "weather_sensitive": attributes.get("device_class") == "awning"}
+    if domain == "climate":
+        features = attributes.get("supported_features")
+        modes = attributes.get("hvac_modes")
+        if not isinstance(features, int) or not isinstance(modes, list):
+            return {**base, "unknown": True}
+        return {**base, "unknown": False, "features": features, "hvac_modes": modes,
+                "heating_modes": [m for m in modes if m in ("heat", "heat_cool", "auto")],
+                "can_cool": any(m in ("cool", "heat_cool") for m in modes),
+                "target": bool(features & 1), "range": bool(features & 2), "presets": bool(features & 16),
+                "preset_modes": attributes.get("preset_modes") if isinstance(attributes.get("preset_modes"), list) else [],
+                "min_temp": attributes.get("min_temp"), "max_temp": attributes.get("max_temp"),
+                "step": attributes.get("target_temp_step"), "unit": attributes.get("temperature_unit"),
+                "measures": "current_temperature" in attributes, "reports_action": "hvac_action" in attributes}
     return {**base, "unknown": False}
 
 

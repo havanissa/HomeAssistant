@@ -100,6 +100,8 @@ const PURPOSE_TITLE = {
   time: "Choose a date/time helper", select: "Choose a dropdown helper", mood: "Choose the mood selector",
   presence: "Choose a presence entity (on = occupied)", person: "Choose a person or device tracker", weather: "Choose a weather entity",
   binary: "Choose a binary sensor", light: "Choose a light", cover: "Choose a cover",
+  home: "Choose who is home (a person, tracker, group or helper)", mode: "Choose the helper whose state names the mode",
+  window: "Choose a window or door sensor", climate: "Choose a thermostat", lux: "Choose a light sensor (lux)",
 };
 
 // Small pictures for rooms, devices and the domains of entities (text glyphs: no image files, no inline styles).
@@ -146,6 +148,49 @@ export function pickEntity(purpose = "any", options = {}) {
     input.oninput = () => { clearTimeout(timer); timer = setTimeout(search, 200); };
     const toggle = dialog.querySelector("#pick-room");
     if (toggle) toggle.onchange = () => { only = toggle.checked; if (options.onToggle) options.onToggle(only); search(); };
+    dialog.onclick = (e) => {
+      const result = e.target.closest("[data-i]");
+      if (result) return done(found[Number(result.dataset.i)]);
+      if (e.target.closest("[data-d]")) done(null);
+    };
+    dialog.oncancel = (e) => { e.preventDefault(); done(null); };
+    search();
+    input.focus();
+  });
+}
+
+// A light sensor for a room's light level: the room's illuminance sensors first; every room only when asked.
+// A room never gets another room's sensor by itself: sharing one is a deliberate choice here.
+export function pickLux(area, areaName) {
+  return new Promise((resolve) => {
+    let everywhere = false;
+    openDialog(`<h2>Choose the light sensor of ${esc(areaName || "the room")}</h2>
+      <label class="pick-room"><input type="checkbox" id="lux-all"> Show the light sensors of every room (to share one on purpose)</label>
+      <input type="search" id="pick-q" placeholder="Search by name or entity id" autocomplete="off">
+      <div class="results" id="pick-results"><div class="muted">Searching…</div></div>
+      <div class="actions"><button data-d="cancel">Cancel</button></div>`, true);
+    const input = dialog.querySelector("#pick-q");
+    const box = dialog.querySelector("#pick-results");
+    let found = [];
+    let seq = 0;
+    const done = (value) => { dialog.onclick = null; dialog.oncancel = null; input.oninput = null; dialog.close(); resolve(value); };
+    const search = async () => {
+      const mine = ++seq;
+      try {
+        const data = await api(`api/light-levels/sensors?area=${enc(area || "")}&all=${everywhere ? "1" : "0"}&q=${enc(input.value)}`);
+        if (mine !== seq) return;
+        found = data.sensors;
+        box.innerHTML = found.length ? found.map((e, i) => `<button class="result" data-i="${i}">${icon("sensor")}
+            <span><strong>${esc(e.name)}</strong> <span class="muted small">${esc([e.area || "no room", e.kind === "template" ? "derived (template/filter)" : ""].filter(Boolean).join(" · "))}</span><br><span class="mono">${esc(e.entity_id)}</span></span>
+            <span class="spacer"></span><span class="badge">${esc(e.state ?? "?")}${e.unit ? " " + esc(e.unit) : ""}</span></button>`).join("")
+          : `<div class="muted">${everywhere ? "No light sensor found." : "No light sensor in this room. Tick the box above to see the sensors of every room."}</div>`;
+      } catch (err) {
+        if (mine === seq) box.innerHTML = `<div class="notice error">${esc(err.message)}</div>`;
+      }
+    };
+    let timer = null;
+    input.oninput = () => { clearTimeout(timer); timer = setTimeout(search, 200); };
+    dialog.querySelector("#lux-all").onchange = (e) => { everywhere = e.target.checked; search(); };
     dialog.onclick = (e) => {
       const result = e.target.closest("[data-i]");
       if (result) return done(found[Number(result.dataset.i)]);

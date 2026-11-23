@@ -21,6 +21,10 @@ from .model import action_entities, sub_sequences, waits, walk_actions
 
 def _together(a: dict[str, Any], b: dict[str, Any]) -> bool:
     """Can these two triggers fire at the same moment?"""
+    if a["type"] == "button" and b["type"] == "button" and a["entity_id"] == b["entity_id"]:
+        # One event entity, one native trigger, told apart by the event type: a single press and a double press of
+        # the same button never happen at once (each event has one type). No list = any event of the entity.
+        return not a["event_types"] or not b["event_types"] or bool(set(a["event_types"]) & set(b["event_types"]))
     if canonical(_trigger(a)[1]) == canonical(_trigger(b)[1]):
         if a["type"] == "time" and a["weekdays"] and b["weekdays"]:
             return bool(set(a["weekdays"]) & set(b["weekdays"]))

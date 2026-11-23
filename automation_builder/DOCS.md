@@ -26,6 +26,9 @@ Home Assistant must load `automations.yaml`, which it does by default (`automati
   optional default, the review and deployment, and **Export as blueprint**.
 - **Rule Editor**: every rule, per device; create and edit rules.
 - **Presence**: the presence sources the designers use (rooms, named zones, position zones, persons).
+- **Light Level**: light-level templates, default Truth/Brightness Matrices and the light level of each room (its
+  sensor, inherited limits with the room's own overrides, an optional ambient estimate), with diagnostics.
+- **Heating**: heating templates (modes with temperatures) and room heating profiles (the rooms × modes matrix).
 - **Import**: the automations that already exist in Home Assistant, to analyse and copy.
 - **Settings**: occupancy recheck defaults, backup and restore, how deployment works, diagnostics.
 
@@ -305,7 +308,14 @@ minutes (it changes nothing that is already right).
   Assistant does not list (a `zha_event` command, an MQTT payload) can be mapped by hand (*Manual event*). For each
   interaction you choose the action - toggle, on, off, set or change brightness, apply a mood, start a manual
   override, resume automatic control, run a one-shot Advanced Rule, dim while held (until the release), or a light
-  action with data - and the lights it acts on. Nothing is assigned for you. Without *start a manual override* an
+  action with data - and the lights it acts on. The switch's card is a list of **interactions** (event → action →
+  lights): press **+ Add Interaction** as often as needed. The same event and the same light can appear in any
+  number of lines (single press → Light1 ON, double press → Light1 OFF, long press → dim, release → stop, triple
+  press → resume); each line can be switched off, moved, deleted on its own, and given *only when …* conditions.
+  *Find more events of this device* adds further buttons or presses to an existing switch. Two lines that
+  contradict each other on the very same event (ON and OFF on one press) are a conflict to resolve; different
+  presses never are. A latched switch can *ignore changes made by an automation* (when it follows the light).
+  Nothing is assigned for you. Without *start a manual override* an
   action is **one-shot**: it happens once, and the next evaluation applies the matrices again (a switch gets no
   priority just because it is physical).
   **Manual override**: while it lasts, the layers below it in the priority change nothing for that light. It lasts
@@ -415,6 +425,65 @@ the active Advanced Rules, whether an override is active and when it ends, the w
 and the command (or why nothing is sent). *What just happened* can be a press of a switch or remote - an event,
 kept apart from the states: you see what the mapping does (and that a one-shot action lasts only until the next
 evaluation, or that an override starts).
+
+### Light Level Manager
+
+Light levels are configured once and shared: **Light Level** in the top bar.
+
+- **Global Templates**: named light levels (for example Very dark, Dark, Dim, Bright) from dark to bright, each but
+  the brightest with an upper limit in lux - no gaps, no overlaps; a **hysteresis** (the reading must be past a
+  limit by this much), **stabilisation** delays for darker and for brighter (it must stay there that long), and
+  what happens without a reading (after a time the level is *no reading* and the lights are left as they are; unset
+  keeps the last level). A level keeps its id when renamed. Templates can be added, duplicated, edited and deleted
+  (not while a room uses them); each change raises the template's version.
+- **Matrix Defaults**: Truth and Brightness Matrices over a template's levels. They are starting values a room
+  adopts on purpose - never commands to every light.
+- **Room Light Levels**: one per room (Home Assistant area). Choose the room's **light sensor** (its own sensors
+  are offered first; another room's sensor only when you ask, to share it deliberately), its template and default
+  matrices. Every inherited value shows where it comes from (*80 lx — Global*, *95 lx — Room override*); clear a
+  room value or press *reset* to inherit again. A template change never replaces a room's own values; the room
+  shows *changes not deployed* and its review shows exactly what changes.
+- In Home Assistant each room's level is one helper, `input_text.ab_<device>_<room>_light_level` (its state is the
+  level's id), kept by one automation of the room's light level device - deploy it from the room (*Review &
+  deploy*). Lights use it through **Light Level matrices** in their Lighting Designer (Truth or Brightness Matrix
+  tab → *Add a Light Level matrix*): the columns are the room's levels and each cell is inherited (global default
+  matrix → room → the light's own value) until the light sets its own. All lights of a room read the same level.
+- **Ambient estimate** (optional) against lamps lighting their own sensor: *a reference sensor* the lamps do not
+  reach (× a factor); *sampled while the lights are off* (a number helper `input_number.ab_<device>_<room>_ambient_lux`
+  holds the last sample taken after the chosen lights were off for the settle time; it is valid for a set time,
+  then the level has no reading); or *reading minus the lamps' calibrated contribution* (lux at full brightness per
+  light, entered or taken over from observations: the App notes how much the reading moved when a light changed by
+  itself - it never switches a light to calibrate). Estimates are labelled *estimated*, with their freshness or
+  calibration; a normal sensor cannot tell daylight from lamplight, and without data the level is *no reading*.
+- **Ambient Lux Sources** and **Diagnostics** list every room's source, reading, last update, measured or
+  estimated, the level now and the level the reading calls for, and warnings such as a light that lifts the reading
+  by more than the hysteresis (the level could switch back and forth).
+
+### Heating Designer
+
+For thermostats (climate entities): ordinary heating automation, without Smart Adaptive & Predictive Climate and
+without any prediction. **Heating** in the top bar holds the **heating templates** (modes such as Comfort,
+Setback, Night, Away with a temperature, and a frost-protection temperature) and the **room profiles**: the rooms ×
+modes matrix (Custom Heating Matrix) where a room sets its own values. A thermostat's designer chooses a room
+profile and may override single values (a temperature, *NO ACTION*, or one of the device's presets): global → room
+→ thermostat, and unset stays unset (that mode then decides nothing).
+
+Tabs: **Thermostats** (rows with their discovered capabilities, the room profile, what happens to a thermostat that
+is OFF, an optional room temperature sensor shown in the preview, built-in templates: basic schedule, day/night,
+presence, window, away/home, manual override), **Schedule & modes** (a weekly schedule - one for every day or
+weekdays and weekend; an entry sets a mode or a temperature - or a helper whose state names the mode),
+**Presence** (vacant for N minutes → a mode), **Windows & doors** (open for N seconds → a mode, frost protection,
+OFF or nothing; an explicit choice for unavailable sensors), **Away / Home** (nobody home for N minutes → Away; an
+optional return mode for a while after coming home), **Manual override** (a setpoint changed by hand - not by an
+automation, as Home Assistant's context tells - suspends the automatic setpoint until the next scheduled change, a
+time, *resume* or an event), **Priority** (default: windows, override, away, presence, schedule), **Preview** (what
+each thermostat's rules decide now or in a simulated situation, and the next scheduled change - a rule preview, not
+a thermal prediction) and **YAML**.
+
+Each thermostat gets one automation that is evaluated whenever an input can change; it sends one command only when
+something differs, clamped to the device's minimum/maximum and rounded to its step, and only the HVAC modes the
+device offers are used. When a window closes or an override ends, the setpoint is what applies *now*. Manual
+override state lives in the same kind of helpers as the Lighting Designer's.
 
 ## Occupancy (optional)
 
@@ -626,7 +695,8 @@ fixed allowlist enforced in the App before anything is sent (`backend/ab/ha.py`)
 | Websocket `trace/list`, `trace/get` | the runs of the App's **own** automations (ids that start with `automation_builder_`), for the rule diagnostics |
 | Websocket `device_automation/{trigger,condition,action}/list`, `get_services` | what Home Assistant offers for a device; the notify actions |
 | Websocket `blueprint/list`, `blueprint/save` | install an exported blueprint, only as `automation_builder/<name>.yaml` among the automation blueprints, only when you press Install |
-| Websocket `input_boolean/{list,create,delete}`, `timer/{list,create,delete}` | the manual-override helpers of the Lighting Designer, only named `AB <device> <light> override` (ids `ab_<device>_<light>_override`), created at deployment; only helpers the App created and recorded are ever deleted |
+| Websocket `input_boolean/{list,create,delete}`, `timer/{list,create,delete}` | the manual-override helpers of the Lighting and Heating Designers, only named `AB <device> <light or thermostat> override` (ids `ab_<device>_<entity>_override`), created at deployment; only helpers the App created and recorded are ever deleted |
+| Websocket `input_text/{list,create,delete}`, `input_number/{list,create,delete}` | a room's light level (`AB <device> <room> light level`) and its sampled ambient light (`AB <device> <room> ambient lux`), the same rules |
 | HTTP `GET/POST/DELETE /api/config/automation/config/<id>` | read, save and delete **one automation**, only for ids that start with `automation_builder_` |
 
 The App cannot call a service, set a state, fire an event, change a registry or turn an automation on or off,

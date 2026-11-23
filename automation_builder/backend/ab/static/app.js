@@ -6,6 +6,8 @@ import { editorPage } from "./editor.js";
 import { blueprintPage, importListPage, importPage, moodPage } from "./pages.js";
 import { designerPage, designersCard, galleryPage } from "./designer.js";
 import { presencePage } from "./zones.js";
+import { levelsPage } from "./levels.js";
+import { heatingProfilesPage } from "./heating.js";
 
 let navToken = 0;
 let page = { act: {}, chg: {} };  // the current page's handlers for [data-act] clicks and [data-chg] changes
@@ -626,6 +628,8 @@ async function route() {
     else if (section === "design" && parts[1] && parts[2]) { await loadShell(); if (current()) page = await designerPage(parts[1], parts[2], parts[3] || null, current) || page; }
     else if (section === "gallery" && parts[1]) { await loadShell(); if (current()) page = await galleryPage(parts[1], current) || page; }
     else if (section === "presence") { await loadShell(); if (current()) page = await presencePage(current) || page; }
+    else if (section === "light-level") { await loadShell(); if (current()) page = await levelsPage(parts[1] || "rooms", parts[2] || null, current) || page; }
+    else if (section === "heating") { await loadShell(); if (current()) page = await heatingProfilesPage(parts[1] || null, parts[1] === "templates" ? parts[2] || null : null, current) || page; }
     else if (section === "settings") await settingsPage(token);
     else location.hash = "#/";
   } catch (err) {

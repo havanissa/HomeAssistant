@@ -60,9 +60,15 @@ def from_device_triggers(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for item in items:
         config = item.get("config") or {}
-        out.append({"kind": classify(config.get("type"), config.get("subtype")), "label": item.get("label") or "",
-                    "source": f"device trigger ({config.get('domain')})",
-                    "trigger": {"type": "device", "config": config, "label": item.get("label") or ""}})
+        found = {"kind": classify(config.get("type"), config.get("subtype")), "label": item.get("label") or "",
+                 "source": f"device trigger ({config.get('domain')})",
+                 "trigger": {"type": "device", "config": config, "label": item.get("label") or ""}}
+        subtype = config.get("subtype")
+        # the button or channel, as the integration names it (ZHA "button_1"/"turn_on", Hue "1"); a Zigbee2MQTT
+        # action ("on_press") names the action itself, not a button
+        if subtype not in (None, "") and config.get("domain") != "mqtt":
+            found["button"] = (f"button {subtype}" if isinstance(subtype, int) or str(subtype).isdigit() else str(subtype))[:40]
+        out.append(found)
     return out
 
 

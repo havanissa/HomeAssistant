@@ -994,6 +994,12 @@ def validate_config(raw: Any) -> dict[str, Any]:
     presence = designers.presence.validate_all(raw.get("presence"), p)
     if presence:  # shared presence sources of the designers (Phase 0.3); absent unless configured
         config["presence"] = presence
+    light_levels = designers.levels.validate_all(raw.get("light_levels"), p)
+    if light_levels:  # the Light Level Manager (0.5); absent unless configured
+        config["light_levels"] = light_levels
+    heating = designers.heating.validate_all(raw.get("heating"), p)
+    if heating:  # heating templates and room heating profiles (0.5); absent unless configured
+        config["heating"] = heating
     designers.check_references(config, p)
     if p.items:
         raise ConfigError("invalid", "The configuration is not valid", problems=p.items)

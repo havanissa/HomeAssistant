@@ -55,7 +55,7 @@ def test_no_dependency_on_the_other_apps_or_an_integration():
                           "homeassistant"}
     assert imports <= {"__future__", "aiohttp", "yaml", "asyncio", "collections", "contextlib", "copy", "zoneinfo", "dataclasses",
                        "datetime", "difflib", "hashlib", "ipaddress", "json", "logging", "math", "os", "pathlib", "re",
-                       "secrets", "time", "typing", "urllib"}
+                       "secrets", "statistics", "time", "typing", "urllib"}
     # no companion integration: nothing of this App lives in custom_components
     assert not (REPO / "custom_components" / "automation_builder").exists()
     for path in (APP / "backend").rglob("*.py"):

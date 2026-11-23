@@ -100,17 +100,25 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                 frame.locator('button.choice[data-act="room"]').first.click()
                 frame.locator("#devices-list").wait_for()
                 devices = frame.locator('button.choice[data-act="device"]').all_text_contents()
+                # the demo's Sonos device exists only in registries older than 2026.11 (see e2e_03_checks.py)
+                has_sonos = any("Sonos" in d for d in devices)
                 check(f"{tag}: step 2 lists only the devices of that room, still no entities to tick",
-                      len(devices) == 4 and all("Kitchen" not in d for d in devices) and frame.locator("input[type=checkbox]").count() == 0, str(devices))
+                      len(devices) == (4 if has_sonos else 3) and all("Kitchen" not in d for d in devices)
+                      and frame.locator("input[type=checkbox]").count() == 0, str(devices))
                 check(f"{tag}: the selection path shows where you are", "Living Room" in (frame.locator(".crumbs").text_content() or ""))
                 check(f"{tag}: step 2 fits", not overflow())
                 shot("step2-devices")
-                frame.locator('button.choice[data-act="device"]', has_text="Sonos").click()
-                frame.locator("#entities-list").wait_for()
-                check(f"{tag}: step 3 lists that device's controllable entities (a device with several), none ticked",
-                      frame.locator("#entities-list input[type=checkbox]").count() == 9
-                      and frame.locator("#entities-list input:checked").count() == 0 and frame.locator("#create").is_disabled()
-                      and "media_player.living_room_living_room" in (frame.locator("#entities-list").text_content() or ""))
+                if has_sonos:
+                    frame.locator('button.choice[data-act="device"]', has_text="Sonos").click()
+                    frame.locator("#entities-list").wait_for()
+                    check(f"{tag}: step 3 lists that device's controllable entities (a device with several), none ticked",
+                          frame.locator("#entities-list input[type=checkbox]").count() == 9
+                          and frame.locator("#entities-list input:checked").count() == 0 and frame.locator("#create").is_disabled()
+                          and "media_player.living_room_living_room" in (frame.locator("#entities-list").text_content() or ""))
+                else:
+                    print(f"SKIP {tag}: step 3 with a device of several entities  [no demo Sonos device in this Home Assistant]", flush=True)
+                    frame.locator('button.choice[data-act="device"]', has_text="Ceiling Lights").click()
+                    frame.locator("#entities-list").wait_for()
                 check(f"{tag}: step 3 fits", not overflow())
                 shot("step3-entities")
                 frame.locator('#wizard button[data-act="to-devices"]').click()
@@ -151,7 +159,8 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                     frame.locator('button[data-act="add-condition"]').first.click()
                     frame.locator('select[data-f="condition-type"]').select_option("numeric")
                     frame.locator(".block.and button.entity.unset").click()
-                    frame.locator("button.result").first.wait_for()
+                    # results, or "Nothing found in Living Room" (without the old demo's Sonos numbers there is none)
+                    frame.locator("#pick-results button.result, #pick-results div.muted").first.wait_for()
                     check("flow: nothing of the kitchen is offered while the filter is on", "sensor.test_lux" not in frame.locator("button.result .mono").all_text_contents())
                     frame.locator("#pick-room").uncheck()
                     frame.locator("#pick-q").fill("lux")
@@ -210,7 +219,7 @@ def main(out: Path) -> int:  # noqa: PLR0915 - one linear scenario
                     frame.locator("#devices-list").wait_for()
                     check("flow: “+ Add device” in a room opens the device step with that room chosen",
                           frame.locator("#wizard").get_attribute("data-step") == "2" and "Living Room" in (frame.locator(".crumbs").text_content() or "")
-                          and frame.locator('button.choice[data-act="device"]').count() == 4)
+                          and frame.locator('button.choice[data-act="device"]').count() == (4 if has_sonos else 3))
                     frame.locator('.crumbs button[data-act="to-rooms"]').click()
                     frame.locator("#rooms-list").wait_for()
                     check("flow: the room can still be changed from there", frame.locator('button.choice[data-act="room"]').count() >= 6)
