@@ -26,6 +26,8 @@ from .ha import AutomationConfigApi, ConfigApiError, HomeAssistantClient, HomeAs
 from .haconfig import HaConfigFolder
 from .inventory import Item, Snapshot, _owner, registry_digest, registry_view, summary, take_snapshot
 from .logbuffer import BufferHandler
+from .regarchive import REGISTRY_FORMAT, RegistryArchive, archive_format, verify_registry
+from .regops import RegistryOps
 from .restore import ACTIONS_WRITING, PlanError, RestoreRunner, build_plan
 from .settings import Settings
 from .store import ArchiveStore, InstanceIdentity, OperationJournal, iso, new_id
@@ -44,7 +46,7 @@ class OperationError(Exception):
         self.extra = extra
 
 
-class AppCore:
+class AppCore(RegistryOps):
     def __init__(self, settings: Settings, buffer: BufferHandler | None = None) -> None:
         self.settings = settings
         self.buffer = buffer
@@ -175,6 +177,7 @@ class AppCore:
                 self.journal.log(op, "error", f"Failed unexpectedly: {type(err).__name__}: {err}")
             finally:
                 self._cache = None
+                self._reg_cache = None
                 self.journal.save(op)
 
         task = asyncio.get_running_loop().create_task(runner(), name=f"operation-{op['id']}")
@@ -497,6 +500,12 @@ class AppCore:
         op = self.operation(str(data.get("operation_id")))
         if op.get("status") != "interrupted":
             raise OperationError("This operation was not interrupted", "not_interrupted", 409)
+        if str(op.get("kind")).startswith("registry_"):
+            async with self.lock:
+                await self.reconcile_registry(op)
+                self.journal.save(op)
+            self._reg_cache = None
+            return op
         async with self.lock:
             snap = await self.snapshot(fetch=list(op.get("items") or {}))
             kind = op.get("kind")
@@ -587,6 +596,8 @@ class AppCore:
         entry = self.archives.entries.get(archive_id)
         if entry is None:
             raise OperationError("Unknown archive", "unknown_archive", 404)
+        if entry.get("kind") == "registry":
+            return self.registry_archive_view(archive_id, entry)
         try:
             data, archive = self._load(archive_id)
         except OperationError as err:
@@ -602,6 +613,17 @@ class AppCore:
 
     async def verify_archive(self, data: dict[str, Any], by: str | None) -> dict[str, Any]:
         archive_id = data.get("archive_id")
+        entry = self.archives.entries.get(archive_id) if isinstance(archive_id, str) else None
+        if entry and entry.get("kind") == "registry":
+            raw, archive = self._load_registry(archive_id)
+            live = None
+            if data.get("live") and self.ha is not None and self.ha.connected:
+                live = await self.registry_snapshot(usage=False)
+            report = verify_registry(raw, live=live, stored_sha256=entry.get("sha256"), verified_at=iso(),
+                                     expected_keys=(archive.manifest.get("selection") or {}).get("keys"))
+            self.archives.update(archive_id, verification={"status": report["status"], "at": report["verified_at"],
+                                                           "ok": report["ok"], "live": live is not None})
+            return report
         raw, archive = self._load(archive_id)
         live = None
         if data.get("live") and self.ha is not None and self.ha.connected:
@@ -615,6 +637,10 @@ class AppCore:
         return report
 
     def archive_file(self, archive_id: str) -> tuple[bytes, str]:
+        if (self.archives.entries.get(archive_id) or {}).get("kind") == "registry":
+            raw, reg = self._load_registry(archive_id)
+            created = re.sub(r"[^0-9T]", "", str(reg.manifest.get("created_at") or "")[:19])
+            return raw, f"helpers-labels-categories-{created or archive_id}-{reg.manifest['counts']['items']}.zip"
         raw, archive = self._load(archive_id)
         created = re.sub(r"[^0-9T]", "", str(archive.manifest.get("created_at") or "")[:19])
         count = (archive.manifest.get("counts") or {}).get("automations")
@@ -637,6 +663,8 @@ class AppCore:
         return {"deleted": archive_id, "operation": op["id"]}
 
     async def upload(self, raw: bytes, filename: str, by: str | None) -> dict[str, Any]:
+        if archive_format(raw) == REGISTRY_FORMAT:
+            return self._upload_registry(raw, filename, by)
         try:
             archive = Archive(raw)
         except ArchiveError as err:
@@ -663,6 +691,36 @@ class AppCore:
             "verification": {"status": report["status"], "at": report["verified_at"], "ok": report["ok"]}})
         self.journal.create("upload", by, title="Archive uploaded", status="completed", archive_id=archive_id,
                             summary=f"Uploaded {filename or 'an archive'}: verification {report['status']}")
+        return {"archive": entry, "verification": report, "duplicate": False}
+
+    def _upload_registry(self, raw: bytes, filename: str, by: str | None) -> dict[str, Any]:
+        try:
+            archive = RegistryArchive(raw)
+        except ArchiveError as err:
+            raise OperationError(str(err), err.code, 422) from err
+        report = verify_registry(raw, verified_at=iso())
+        if report["status"] == "failed":
+            failed = [c for c in report["checks"] if not c["ok"]]
+            raise OperationError("The archive failed verification: " + "; ".join(
+                d for c in failed for d in c["details"][:3]), "verification_failed", 422, report=report)
+        sha = sha256_bytes(raw)
+        existing = next((e for e in self.archives.entries.values() if e.get("sha256") == sha), None)
+        if existing:
+            return {"archive": existing, "verification": report, "duplicate": True}
+        m = archive.manifest
+        archive_id = new_id("aie")
+        entry = self.archives.add(archive_id, raw, {
+            "kind": "registry", "created_at": m.get("created_at"), "uploaded_at": iso(), "purpose": "uploaded",
+            "original_purpose": m.get("purpose"), "source_archive_id": m.get("archive_id"),
+            "label": str(filename or "")[:120], "count": (m.get("counts") or {}).get("items"),
+            "counts": m.get("counts"), "sha256": sha,
+            "ha_version": (m.get("home_assistant") or {}).get("version"),
+            "location_name": (m.get("home_assistant") or {}).get("location_name"), "complete": True,
+            "source_instance": (m.get("source_installation") or {}).get("app_instance_id"),
+            "verification": {"status": report["status"], "at": report["verified_at"], "ok": report["ok"]}})
+        self.journal.create("upload", by, title="Archive uploaded", status="completed", archive_id=archive_id,
+                            summary=f"Uploaded {filename or 'an archive'} (helpers, labels and categories): "
+                                    f"verification {report['status']}")
         return {"archive": entry, "verification": report, "duplicate": False}
 
     async def import_yaml(self, data: dict[str, Any], by: str | None) -> dict[str, Any]:

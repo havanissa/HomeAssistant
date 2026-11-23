@@ -3,7 +3,7 @@
     python e2e_checks.py <tokens.json> <data dir> <stack dir> <ha config dir> [phase ...]
 
 Phases (default: all, in this order): setup roundtrip crossinstall blueprint changes collisions corrupt yaml
-duplicates interrupt_export interrupt_delete interrupt_restore failed_write restart security builder.
+duplicates interrupt_export interrupt_delete interrupt_restore failed_write restart security registry builder.
 
 Every phase starts from the seeded fixtures (prepare.py seed) and leaves them as they were. Home Assistant is
 read and changed for test purposes only with the test's own administrator token; the App acts through the fake
@@ -680,6 +680,223 @@ async def phase_security(app: App, ha: HA, ctx: dict[str, Any]) -> None:
         check("security: strict Content-Security-Policy", "default-src 'self'" in csp and "script-src 'self'" in csp, csp)
 
 
+# ------------------------------------------------------------------ helpers, labels & categories (0.2)
+REG_HELPERS = {  # domain -> create parameters (the name gives the id)
+    "input_number": {"name": "AIE Target temp", "min": 15, "max": 25, "step": 0.5, "mode": "slider",
+                     "unit_of_measurement": "°C", "icon": "mdi:thermometer"},
+    "input_select": {"name": "AIE House mode", "options": ["Home", "Away", "Night"]},
+    "input_text": {"name": "AIE Note", "max": 120},
+    "counter": {"name": "AIE Visits", "step": 2, "initial": 0},
+    "timer": {"name": "AIE Old timer", "duration": "0:05:00"},
+}
+
+
+async def reg_items(ha: HA, domain: str) -> dict[str, Any]:
+    return {i["id"]: i for i in await ha.cmd(f"{domain}/list")}
+
+
+async def reg_entry(ha: HA, entity_id: str) -> dict[str, Any] | None:
+    return (await ha.cmd("config/entity_registry/get_entries", entity_ids=[entity_id])).get(entity_id)
+
+
+async def reg_seed(ha: HA, ctx: dict[str, Any]) -> dict[str, Any]:
+    """Helpers with different uses, a label and a category on entities, a device and an area."""
+    for domain, params in REG_HELPERS.items():
+        if params["name"].lower().replace(" ", "_") not in await reg_items(ha, domain):
+            await ha.cmd(f"{domain}/create", **params)
+    labels = {x["name"]: x["label_id"] for x in await ha.cmd("config/label_registry/list")}
+    for name, extra in (("AIE Reg Night", {"color": "indigo", "icon": "mdi:weather-night", "description": "night"}),
+                        ("AIE Unused label", {})):
+        if name not in labels:
+            labels[name] = (await ha.cmd("config/label_registry/create", name=name, **extra))["label_id"]
+    cats = {x["name"]: x["category_id"] for x in await ha.cmd("config/category_registry/list", scope="helpers")}
+    if "AIE Climate" not in cats:
+        cats["AIE Climate"] = (await ha.cmd("config/category_registry/create", scope="helpers", name="AIE Climate",
+                                            icon="mdi:sun-thermometer"))["category_id"]
+    autocats = {x["name"]: x["category_id"] for x in await ha.cmd("config/category_registry/list", scope="automation")}
+    if "AIE Empty" not in autocats:
+        await ha.cmd("config/category_registry/create", scope="automation", name="AIE Empty")
+    areas = {x["name"]: x["area_id"] for x in await ha.cmd("config/area_registry/list")}
+    night = labels["AIE Reg Night"]
+    for _ in range(40):
+        if await reg_entry(ha, "input_number.aie_target_temp"):
+            break
+        await asyncio.sleep(0.25)
+    await ha.cmd("config/entity_registry/update", entity_id="input_number.aie_target_temp", labels=[night],
+                 categories={"helpers": cats["AIE Climate"]}, area_id=areas["AIE Kitchen"],
+                 name="AIE Target temperature", aliases=["warmth"])
+    await ha.cmd("homeassistant/expose_entity", assistants=["conversation"], entity_ids=["input_number.aie_target_temp"],
+                 should_expose=True)
+    await ha.cmd("config/entity_registry/update", entity_id="light.aie_lamp", labels=[night])
+    devices = await ha.cmd("config/device_registry/list")
+    device = sorted(devices, key=lambda d: d["id"])[0]
+    await ha.cmd("config/device_registry/update", device_id=device["id"], labels=[night])
+    await ha.cmd("config/area_registry/update", area_id=areas["AIE Kitchen"], labels=[night])
+    # uses: a UI script (template), a dashboard, a template helper, a YAML file
+    await ha.rest("POST", "config/script/config/aie_heat", {"alias": "AIE heat", "sequence": [
+        {"action": "climate.set_temperature", "data": {"temperature": "{{ states('input_number.aie_target_temp') }}"},
+         "target": {"area_id": areas["AIE Kitchen"]}}]})
+    dashboards = {d["url_path"] for d in await ha.cmd("lovelace/dashboards/list")}
+    if "aie-dash" not in dashboards:
+        await ha.cmd("lovelace/dashboards/create", url_path="aie-dash", title="AIE Dash", mode="storage",
+                     show_in_sidebar=False, require_admin=False)
+    await ha.cmd("lovelace/config/save", url_path="aie-dash", config={"views": [{"title": "Home", "cards": [
+        {"type": "entities", "entities": ["input_select.aie_house_mode"]}]}]})
+    entries = [e for e in await ha.cmd("config_entries/get", type_filter=["helper"]) if e["title"] == "AIE template"]
+    if not entries:
+        status, flow = await ha.rest("POST", "config/config_entries/flow", {"handler": "template"})
+        status, flow = await ha.rest("POST", f"config/config_entries/flow/{flow['flow_id']}", {"next_step_id": "sensor"})
+        status, flow = await ha.rest("POST", f"config/config_entries/flow/{flow['flow_id']}", {
+            "name": "AIE template", "state": "{{ states('input_text.aie_note') | length }}"})
+        check("registry: template helper created for the test", status == 200 and flow.get("type") == "create_entry",
+              flow)
+    folder = Path(ctx["ha_config"])
+    (folder / "aie_notes").mkdir(exist_ok=True)
+    (folder / "aie_notes" / "visits.yaml").write_text("# counts visits\nvisits: counter.aie_visits\n")
+    (folder / "secrets.yaml").write_text("never_read: timer.aie_old_timer\n")
+    await asyncio.sleep(3)  # Home Assistant writes new config entries and scripts to its files shortly after
+    return {"night": night, "unused_label": labels["AIE Unused label"], "climate": cats["AIE Climate"],
+            "kitchen": areas["AIE Kitchen"], "device": device["id"]}
+
+
+async def phase_registry(app: App, ha: HA, ctx: dict[str, Any]) -> None:
+    ids = await reg_seed(ha, ctx)
+    night, climate = ids["night"], ids["climate"]
+    status, view = await app.get("api/registry")
+    check("registry: the overview is read", status == 200, view)
+    if status != 200:
+        return
+    items = {x["key"]: x for x in [*view["helpers"], *view["labels"], *view["categories"]]}
+    usage = lambda key: items.get(key, {}).get("usage") or {}  # noqa: E731
+    check("registry: a helper used in a script template is found",
+          [x["id"] for x in usage("helper:input_number:aie_target_temp").get("scripts", [])] == ["script.aie_heat"],
+          usage("helper:input_number:aie_target_temp"))
+    check("registry: a helper on a dashboard is found",
+          [x["name"] for x in usage("helper:input_select:aie_house_mode").get("dashboards", [])] == ["AIE Dash"],
+          usage("helper:input_select:aie_house_mode"))
+    check("registry: a helper used by a template helper is found",
+          [x["name"] for x in usage("helper:input_text:aie_note").get("helpers", [])] == ["AIE template"],
+          usage("helper:input_text:aie_note"))
+    check("registry: a helper in a YAML file is found",
+          [x["id"] for x in usage("helper:counter:aie_visits").get("yaml", [])] == ["aie_notes/visits.yaml"],
+          usage("helper:counter:aie_visits"))
+    check("registry: an unused helper is not used (secrets.yaml is never read)",
+          items.get("helper:timer:aie_old_timer", {}).get("count") == 0, items.get("helper:timer:aie_old_timer"))
+    lamp = items.get("yaml:input_boolean.aie_light") or {}
+    check("registry: a YAML helper is listed read-only with its uses (scene, script, template light)",
+          lamp.get("kind") == "yaml" and not lamp.get("deletable") and {"scenes", "scripts"} <= set(lamp.get("usage", {})),
+          lamp)
+    n = usage(f"label:{night}")
+    check("registry: a label's assignments (entities, device, area) are counted",
+          {x["id"] for x in n.get("entities", [])} == {"input_number.aie_target_temp", "light.aie_lamp"}
+          and [x["id"] for x in n.get("devices", [])] == [ids["device"]] and [x["id"] for x in n.get("areas", [])] ==
+          [ids["kitchen"]], n)
+    check("registry: unused label and category", items.get(f"label:{ids['unused_label']}", {}).get("count") == 0
+          and any(x["name"] == "AIE Empty" and x["count"] == 0 for x in view["categories"]), view["summary"])
+    check("registry: the helper category is counted", items.get(f"category:helpers:{climate}", {}).get("count") == 1,
+          items.get(f"category:helpers:{climate}"))
+    template = next((h for h in view["helpers"] if h["kind"] == "entry" and h["name"] == "AIE template"), None)
+    check("registry: integration helpers are listed read-only", template is not None and not template["deletable"],
+          template)
+
+    # backup of everything
+    status, op = await app.post("api/registry/backup", {"mode": "all"})
+    op = await app.op(op["id"]) if status == 200 else op
+    check("registry: backup of everything verified", op.get("status") == "completed"
+          and op["verification"]["status"] == "verified", op.get("verification") or op)
+    status, raw = await app.get(f"api/archives/{op['archive_id']}/download")
+    status2, up = await app.upload(raw, "registry.zip")
+    check("registry: the downloaded archive is recognised on upload", status2 == 200 and up.get("duplicate")
+          and up["archive"]["kind"] == "registry", up)
+
+    # back up & delete
+    before = await reg_entry(ha, "input_number.aie_target_temp")
+    config_before = (await reg_items(ha, "input_number"))["aie_target_temp"]
+    keys = [f"label:{night}", f"label:{ids['unused_label']}", f"category:helpers:{climate}",
+            "helper:input_number:aie_target_temp", "helper:timer:aie_old_timer"]
+    status, op = await app.post("api/registry/cleanup/start", {"keys": keys})
+    op = await app.op(op["id"])
+    check("registry: back up & delete waits for the confirmation", op["status"] == "awaiting_confirmation"
+          and sorted(op["in_use"]) == sorted([f"label:{night}", f"category:helpers:{climate}",
+                                              "helper:input_number:aie_target_temp"]), op.get("summary"))
+    body = {"operation_id": op["id"], "plan_hash": op["plan_hash"], "confirm_count": 5, "archive_ack": True}
+    status, refused = await app.post("api/registry/cleanup/confirm", body)
+    check("registry: items in use need the explicit acknowledgement", status == 400 and refused.get("error") ==
+          "not_confirmed", refused)
+    check("registry: nothing deleted before the confirmation", "aie_target_temp" in await reg_items(ha, "input_number"))
+    status, _ = await app.post("api/registry/cleanup/confirm", {**body, "in_use_ack": True})
+    op = await app.op(op["id"])
+    check("registry: deleted after the confirmation", op["status"] == "completed", op.get("summary"))
+    labels_now = {x["label_id"] for x in await ha.cmd("config/label_registry/list")}
+    lamp_entry = await reg_entry(ha, "light.aie_lamp")
+    check("registry: gone from Home Assistant (helpers, label, category; the label is off every entity)",
+          "aie_target_temp" not in await reg_items(ha, "input_number")
+          and "aie_old_timer" not in await reg_items(ha, "timer") and night not in labels_now
+          and climate not in {x["category_id"] for x in await ha.cmd("config/category_registry/list", scope="helpers")}
+          and night not in lamp_entry["labels"], lamp_entry)
+
+    # restore from the deletion archive
+    archive_id = op["archive_id"]
+    status, plan = await app.post("api/registry/restore/plan", {"archive_id": archive_id, "decisions": {}})
+    check("registry: restore plan creates every item", status == 200 and {i["action"] for i in plan["items"]} ==
+          {"create"} and plan["assignments_total"] == 3, (plan.get("assignments_total"), [(i["key"], i["action"]) for i in plan.get("items", [])]))
+    status, rop = await app.post("api/registry/restore/execute", {"archive_id": archive_id, "decisions": {},
+                                                                  "plan_hash": plan["plan_hash"], "confirm": True})
+    rop = await app.op(rop["id"]) if status == 200 else rop
+    check("registry: restore completed and verified", rop.get("status") == "completed",
+          [m["message"] for m in rop.get("log", [])][-8:] if isinstance(rop, dict) else rop)
+    restored = (await reg_items(ha, "input_number")).get("aie_target_temp")
+    check("registry: the helper is back with its id and exact configuration", restored == config_before,
+          (restored, config_before))
+    after = await reg_entry(ha, "input_number.aie_target_temp") or {}
+    new_climate = {x["name"]: x["category_id"] for x in await ha.cmd("config/category_registry/list",
+                                                                     scope="helpers")}.get("AIE Climate")
+    check("registry: its entity id, name, area, aliases, label, category and exposure are back",
+          (after.get("name"), after.get("area_id"), after.get("aliases"), after.get("labels"),
+           after.get("categories"), (after.get("options", {}).get("conversation") or {}).get("should_expose")) ==
+          (before["name"], before["area_id"], before["aliases"], [night], {"helpers": new_climate}, True), after)
+    lamp_entry = await reg_entry(ha, "light.aie_lamp")
+    device = next(d for d in await ha.cmd("config/device_registry/list") if d["id"] == ids["device"])
+    area = next(a for a in await ha.cmd("config/area_registry/list") if a["area_id"] == ids["kitchen"])
+    check("registry: the label is back on the other entity, the device and the area",
+          night in lamp_entry["labels"] and night in device["labels"] and night in area["labels"],
+          (lamp_entry["labels"], device["labels"], area["labels"]))
+    label = next(x for x in await ha.cmd("config/label_registry/list") if x["label_id"] == night)
+    check("registry: the label definition is back", (label["name"], label["color"], label["icon"],
+                                                      label["description"]) ==
+          ("AIE Reg Night", "indigo", "mdi:weather-night", "night"), label)
+    timer = (await reg_items(ha, "timer")).get("aie_old_timer")
+    check("registry: the unused helper is back too", timer is not None and timer["duration"] == "0:05:00", timer)
+    status, plan2 = await app.post("api/registry/restore/plan", {"archive_id": archive_id, "decisions": {}})
+    check("registry: a second restore has nothing to do", status == 200 and not plan2["ready"],
+          [(i["key"], i["action"], i.get("diff")) for i in plan2.get("items", [])])
+
+    # collision: changed meanwhile -> skip by default, update on request (after a backup)
+    await ha.cmd("config/label_registry/update", label_id=night, color="red")
+    status, plan3 = await app.post("api/registry/restore/plan", {"archive_id": archive_id, "decisions": {}})
+    item = next(i for i in plan3["items"] if i["key"] == f"label:{night}")
+    check("registry: a changed label is a collision, skipped by default", item["action"] == "skip"
+          and item["choices"] == ["skip", "update"], item)
+    decisions = {"selection": [f"label:{night}"], "collisions": {f"label:{night}": "update"}, "assignments": False}
+    status, plan4 = await app.post("api/registry/restore/plan", {"archive_id": archive_id, "decisions": decisions})
+    status, rop = await app.post("api/registry/restore/execute", {"archive_id": archive_id, "decisions": decisions,
+                                                                  "plan_hash": plan4["plan_hash"], "confirm": True})
+    rop = await app.op(rop["id"])
+    label = next(x for x in await ha.cmd("config/label_registry/list") if x["label_id"] == night)
+    check("registry: update on request, after a backup", rop["status"] == "completed" and label["color"] == "indigo"
+          and rop.get("pre_restore_archive"), (rop.get("summary"), label))
+    rec = await app.recorded()
+    kinds = [c["type"] for c in rec["commands"]]
+    check("registry: deletes only for the confirmed items", (kinds.count("config/label_registry/delete"),
+                                                             kinds.count("config/category_registry/delete"),
+                                                             kinds.count("input_number/delete"),
+                                                             kinds.count("timer/delete"),
+                                                             kinds.count("input_select/delete") +
+                                                             kinds.count("counter/delete") +
+                                                             kinds.count("input_text/delete")) == (2, 1, 1, 1, 0),
+          sorted({k for k in kinds if k.endswith("delete")}))
+
+
 async def phase_builder(app: App, ha: HA, ctx: dict[str, Any]) -> None:
     initial = ctx.get("baseline")
     now = await baseline(ha)
@@ -700,11 +917,19 @@ async def phase_builder(app: App, ha: HA, ctx: dict[str, Any]) -> None:
         "config/area_registry/list", "config/floor_registry/list", "config/device_registry/list", "automation/config",
         "blueprint/list", "validate_config", "config/entity_registry/update", "config/label_registry/create",
         "config/category_registry/create", "config/area_registry/create", "blueprint/save", "call_service",
-        "homeassistant/expose_entity"}, kinds)
+        "homeassistant/expose_entity",
+        # 0.2: helpers, labels and categories
+        "script/config", "lovelace/dashboards/list", "lovelace/config", "config_entries/get",
+        "config/label_registry/update", "config/label_registry/delete", "config/category_registry/update",
+        "config/category_registry/delete", "config/device_registry/update", "config/area_registry/update",
+        *(f"{d}/{v}" for d in ("input_boolean", "input_number", "input_text", "input_select", "input_datetime",
+                               "input_button", "counter", "timer", "schedule")
+          for v in ("list", "create", "update", "delete"))}, kinds)
 
 
 PHASES = ["setup", "roundtrip", "crossinstall", "blueprint", "changes", "collisions", "corrupt", "yaml", "duplicates",
-          "interrupt_export", "interrupt_delete", "interrupt_restore", "failed_write", "restart", "security", "builder"]
+          "interrupt_export", "interrupt_delete", "interrupt_restore", "failed_write", "restart", "security", "registry",
+          "builder"]
 
 
 async def main() -> None:

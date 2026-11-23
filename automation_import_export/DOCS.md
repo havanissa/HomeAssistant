@@ -28,6 +28,8 @@ works, more slowly, and says what it cannot know.
   labels, source, blueprint, owner and whether it can be deleted. Search, filter by area / category / label /
   state / kind, group by category / area / label / source, select and **Export selected**, **Export & Delete
   selected…** or **Back up everything**. *Details* shows what an automation refers to and every finding.
+- **Helpers & Labels** – every helper, label and category with what uses it (see below): back them up, delete
+  unused ones after a verified backup, restore them.
 - **Import** – upload an archive of this App or an ordinary automation YAML file; both lead to the restore preview.
 - **Archives** – stored archives with date, kind, number of automations, Home Assistant version, verification
   and size: **Download**, **Inspect** (contents, warnings, files, verify again with a live comparison),
@@ -139,6 +141,64 @@ Uploaded archives are checked before anything is read: at most 64 MB, 5000 files
 total, no suspicious compression ratio, no absolute paths, `..`, backslashes, links, duplicate or encrypted
 entries; unknown format versions are refused.
 
+## Helpers, labels & categories
+
+The **Helpers & Labels** page lists, in three tabs:
+
+- **Helpers** – the helpers created in *Settings → Helpers* (toggle, number, text, dropdown, date/time, button,
+  counter, timer, schedule): these can be backed up, deleted and restored. Helpers defined in YAML and integration
+  helpers (template, group, utility meter …) are listed read-only: edit or remove them in Home Assistant.
+- **Labels** – with the entities, devices and areas that carry them.
+- **Categories** – per scope (automations, scripts, helpers), with the entities that carry them.
+
+**Used by** counts what refers to an item; *Where it is used* lists it:
+
+| Item | Counted as a use |
+| --- | --- |
+| Helper | an automation, script, scene, dashboard, integration helper (template, group …) or YAML file that mentions its entity id (also inside templates), or an automation that uses its entity registry id (device triggers and conditions) |
+| Label | an entity, device or area that carries it; an automation or script that targets it (`label_id`) |
+| Category | an entity that carries it |
+
+YAML files are read from Home Assistant's configuration folder (never `secrets.yaml`, `.storage`,
+`custom_components`, `www`, backups …); the options of integration helpers come from Home Assistant's
+`.storage/core.config_entries` (only the entries Home Assistant lists as helpers; nothing else of that file is
+used). Both are read-only and searched in memory; nothing of them is stored or archived.
+
+**Not searched:** Node-RED, AppDaemon and other Apps, ESPHome devices configured outside the configuration folder,
+voice assistants and external services. *Not used* is therefore a strong hint, not a guarantee – which is why every
+deletion is backed up first.
+
+Select items (or **Select all shown** with a filter such as *Not used*) and choose:
+
+- **Back up selected** / **Back up everything** – a verified archive (see below).
+- **Back up & delete selected…** – the selected items are archived and the archive verified (including a lossless
+  comparison with Home Assistant). Then the final list shows every item with its uses. Confirm that the archive is
+  kept, confirm separately when items are still in use, and type the number of items. Each item is compared with
+  the archive again right before it is deleted; one that changed meanwhile is skipped. Deleting a label removes it
+  from every entity, device and area; deleting a category removes it from every entity; deleting a helper removes
+  its entity – the archive records all of that so a restore puts it back.
+
+### Restoring helpers, labels and categories
+
+Open the archive (Archives → Restore…, or *Restore from this archive…* after a deletion):
+
+- **Labels and categories** – the same id: *Already there*, or – when its name, icon, colour or description
+  differ – *Skip* (default) or *Update it*; otherwise one with the same name is used; otherwise it is created
+  (Home Assistant gives a category a new random id; the App maps it).
+- **Helpers** – missing ones are created **with their original id** and configuration, then their entity gets its
+  entity id, name, icon, area, labels, categories, voice aliases, hidden/disabled setting and assistant exposure
+  back. One that exists with another configuration is skipped unless you choose *Replace it*; one whose
+  configuration is identical but whose entity settings differ gets its settings back.
+- **Assignments** (on by default) – labels go back on every entity, device and area of the archive that exists;
+  categories on every entity that has no other category in that scope (one with another category keeps it).
+- Items that are updated or replaced are backed up first. Afterwards everything is compared with the archive and
+  any difference is reported.
+
+The archive (`helpers-labels-categories-<date>-<n>.zip`) contains `manifest.json` (items, fingerprints,
+checksums), `data/labels.json`, `data/categories.json`, `data/helpers.json` and `helpers/<type>.yaml` with the
+configurations in Home Assistant's format. The value a helper has (a counter's count, a toggle's state) is not
+restored: a restored helper starts with its configured initial value.
+
 ## What the App may do in Home Assistant
 
 The App talks to Home Assistant only through the Supervisor's API proxy, and the backend enforces an allowlist
@@ -152,9 +212,17 @@ before sending anything (`backend/aie/ha.py`):
   `automation.turn_on` / `turn_off` / `reload` of those automations, `homeassistant/expose_entity` for them,
   and creating a missing label, automation category, area or blueprint that the plan lists. Ids in Automation
   Builder's namespace are refused for every write.
+- **Helpers, labels and categories, only within a confirmed restore or Back up & delete and only for its items**:
+  `<helper type>/create`, `update`, `delete`, `config/label_registry/create|update|delete`,
+  `config/category_registry/create|update|delete`, `config/entity_registry/update` of the helpers' entities, and –
+  to put labels and categories back – of other entities (labels and categories only),
+  `config/device_registry/update` and `config/area_registry/update` (labels only).
+- **Reads for the usage overview**: `<helper type>/list`, `script/config`, `lovelace/dashboards/list`,
+  `lovelace/config`, `config_entries/get` (helpers only).
 
-There is no way through this App to call any other service, change other entities, or delete a label, category,
-area, blueprint, script, scene or helper. `.storage` is never read or written.
+There is no way through this App to call any other service, change anything else on other entities, devices or
+areas, or delete an area, blueprint, script or scene. `.storage` is never written; of it only
+`core.config_entries` is read, for the options of helper entries.
 
 ### Home Assistant interfaces used, and their limits
 
@@ -180,6 +248,12 @@ area, blueprint, script, scene or helper. `.storage` is never read or written.
 - Registry options other than assistant exposure are archived but not restored.
 - Archives from another installation map labels, categories and areas by name; entities, devices and scripts the
   automations refer to are only reported when missing.
+- Integration helpers (template, group …) and helpers defined in YAML cannot be backed up, deleted or restored by
+  the App; they are listed with their uses.
+- A helper's current value (counter, toggle, number …) is not restored; a restore of labels and categories on
+  another installation puts them back only on entities, devices and areas with the same ids.
+- A restore of helpers, labels and categories has no rollback; the backup taken before updating or replacing
+  items can be restored instead.
 
 ## Backup
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 APP_NAME: Final = "Automation Import/Export Manager"
-APP_VERSION: Final = "0.1.2"  # must match config.yaml, the Dockerfile and CHANGELOG.md (checked by the tests)
+APP_VERSION: Final = "0.2.0"  # must match config.yaml, the Dockerfile and CHANGELOG.md (checked by the tests)
 
 DEFAULT_PORT: Final = 8099
 # Every Ingress request reaches the App from the Supervisor at this address.

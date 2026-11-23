@@ -65,8 +65,12 @@ def test_the_app_never_writes_into_home_assistants_configuration_folder():
         text = path.read_text(encoding="utf-8")
         if path.name == "haconfig.py":  # the only module that touches /homeassistant: reads only
             assert not re.search(r"write_text|write_bytes|open\(|os\.replace|unlink|mkdir|rmtree", text)
-        assert ".storage" not in text, path.name
-        for pattern in ('"/api/services', "/api/states/", "fire_event", "config/label_registry/delete"):
+            # the only file of .storage it reads: the helper entries' options (usage search)
+            assert set(re.findall(r'"\.storage" / "([a-z_.]+)"', text)) == {"core.config_entries"}
+            assert '"secrets.yaml"' in text  # never read (SKIP_FILES)
+        else:
+            assert ".storage" not in text, path.name
+        for pattern in ('"/api/services', "/api/states/", "fire_event"):
             assert pattern not in text, f"{path.name}: {pattern}"
 
 
@@ -82,7 +86,7 @@ def test_container_files():
     assert all("==" in line for line in requirements.splitlines() if line and not line.startswith("#"))
 
 
-SCRIPTS = ("app.js", "ui.js", "export.js", "restore.js")
+SCRIPTS = ("app.js", "ui.js", "export.js", "restore.js", "registry.js")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")

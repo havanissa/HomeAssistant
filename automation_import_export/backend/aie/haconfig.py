@@ -1,17 +1,23 @@
-"""Read-only access to two things in Home Assistant's configuration folder (mapped read-only at /homeassistant).
+"""Read-only access to Home Assistant's configuration folder (mapped read-only at /homeassistant).
 
 * ``blueprints/automation/<path>.yaml`` - the blueprint files that archived automations use, so that an archive
   carries the definitions it needs (Home Assistant has no API that returns a blueprint file).
 * ``automations.yaml`` - parsed with every custom tag kept as a marker, **only** to find what the editor
   endpoint cannot show: automations without an id, ids that occur more than once, ids that are not strings.
+* For the usage overview of helpers (searched as text, in memory, never stored or archived):
+  the YAML files of the configuration (:meth:`HaConfigFolder.yaml_texts`; never ``secrets.yaml``), and the
+  options of the config-entry helpers (templates, groups, ...) from ``.storage/core.config_entries``
+  (:meth:`HaConfigFolder.helper_entry_options`) - only the entries Home Assistant lists as helpers; every other
+  config entry (integration credentials) is skipped.
 
-Nothing else in the folder is read, nothing is ever written (the mapping is read-only as well), and when the
-folder is not mapped the App works without it and says what is then not known.
+Nothing is ever written (the mapping is read-only as well), and when the folder is not mapped the App works
+without it and says what is then not known.
 """
 
 from __future__ import annotations
 
 from collections import Counter
+import json
 from dataclasses import dataclass, field
 import logging
 from pathlib import Path
@@ -22,6 +28,14 @@ from .yamlio import Tagged, find_tags, json_compatible, load_tolerant
 
 _LOGGER = logging.getLogger(__name__)
 MAX_BLUEPRINT_BYTES = 1024 * 1024
+MAX_YAML_FILES = 1000
+MAX_YAML_BYTES = 2 * 1024 * 1024
+MAX_ENTRIES_BYTES = 32 * 1024 * 1024
+#: Folders whose files are not Home Assistant configuration (or are searched another way).
+SKIP_DIRS = {".storage", "blueprints", "custom_components", "deps", "www", "tts", "backups", ".cloud", ".git",
+             "node_modules", "image", "media", "__pycache__", ".esphome", "share", "ssl"}
+#: Covered by the App's own readers (automations, scripts, scenes) or never read (secrets).
+SKIP_FILES = {"secrets.yaml", "automations.yaml", "scripts.yaml", "scenes.yaml"}
 
 
 def readable_blueprint_path(relative: Any) -> bool:
@@ -112,3 +126,59 @@ class HaConfigFolder:
                 scan.non_string_ids.append(shown)
                 scan.ids[shown] += 1
         return scan
+
+    def yaml_texts(self) -> list[tuple[str, str]]:
+        """The text of every YAML file of the configuration (relative path, text): read-only, for the usage
+        search. ``secrets.yaml`` and the folders in :data:`SKIP_DIRS` are never read; symbolic links are not
+        followed."""
+        if not self.root.is_dir():
+            return []
+        out: list[tuple[str, str]] = []
+        stack = [self.root]
+        while stack and len(out) < MAX_YAML_FILES:
+            folder = stack.pop()
+            try:
+                children = sorted(folder.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                if child.is_symlink():
+                    continue
+                if child.is_dir():
+                    if child.name not in SKIP_DIRS and not child.name.startswith("."):
+                        stack.append(child)
+                    continue
+                if child.suffix not in (".yaml", ".yml") or child.name in SKIP_FILES:
+                    continue
+                if folder == self.root and child.name in SKIP_FILES:
+                    continue
+                try:
+                    if child.stat().st_size > MAX_YAML_BYTES:
+                        continue
+                    text = child.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                out.append((str(child.relative_to(self.root)), text))
+                if len(out) >= MAX_YAML_FILES:
+                    break
+        return out
+
+    def helper_entry_options(self, entry_ids: set[str]) -> dict[str, Any]:
+        """The options (and data) of the given config entries - Home Assistant's helpers such as templates and
+        groups - for the usage search. Every other entry of the file is skipped unread."""
+        path = self.root / ".storage" / "core.config_entries"
+        if not entry_ids or not path.is_file() or path.is_symlink():
+            return {}
+        try:
+            if path.stat().st_size > MAX_ENTRIES_BYTES:
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError) as err:
+            _LOGGER.warning("The helper options could not be read: %s", err)
+            return {}
+        entries = ((data or {}).get("data") or {}).get("entries") if isinstance(data, dict) else None
+        out: dict[str, Any] = {}
+        for entry in entries or []:
+            if isinstance(entry, dict) and entry.get("entry_id") in entry_ids:
+                out[entry["entry_id"]] = {"options": entry.get("options") or {}, "data": entry.get("data") or {}}
+        return out

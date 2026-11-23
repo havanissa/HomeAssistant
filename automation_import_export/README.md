@@ -17,8 +17,12 @@ flags, assistant exposure and on/off states.
   handling (skip, replace after a backup, restore as new), label / category / area mapping, blueprint
   installation, explicit acknowledgement of every deviation, verification against the archive and rollback.
 
-No companion integration; it needs none of the other Apps in this repository and changes none of them. It never
-deletes labels, categories, areas, scripts, scenes or helpers, never touches Automation Builder's automations, and
-never uploads anything anywhere.
+- **Helpers, labels & categories**: see which helpers, labels and categories are used – and by what (automations,
+  scripts, scenes, dashboards, template helpers, YAML files, entities, devices, areas) – back them up, delete the
+  unused ones after a verified backup, and restore them with their ids, settings and assignments.
+
+No companion integration; it needs none of the other Apps in this repository and changes none of them. It deletes
+helpers, labels and categories only in a confirmed Back up & delete, never areas, scripts or scenes, never touches
+Automation Builder's automations, and never uploads anything anywhere.
 
 See [DOCS.md](DOCS.md) for installation and use.

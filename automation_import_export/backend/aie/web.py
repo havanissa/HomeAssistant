@@ -172,6 +172,10 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         await require_admin(request)
         return _json(await core.inventory_view())
 
+    async def registry(request: web.Request) -> web.Response:
+        await require_admin(request)
+        return _json(await core.registry_view())
+
     async def operations(request: web.Request) -> web.Response:
         await require_admin(request)
         return _json({"operations": core.journal.listing(100)})
@@ -224,6 +228,11 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
         "/api/restore/plan": lambda d, u: core.restore_plan(d),
         "/api/restore/execute": core.restore_execute,
         "/api/restore/rollback": core.rollback,
+        "/api/registry/backup": core.start_registry_backup,
+        "/api/registry/cleanup/start": core.start_registry_cleanup,
+        "/api/registry/cleanup/confirm": core.confirm_registry_cleanup,
+        "/api/registry/restore/plan": lambda d, u: core.registry_restore_plan(d),
+        "/api/registry/restore/execute": core.registry_restore_execute,
     }
 
     r = app.router
@@ -233,6 +242,7 @@ def build_app(settings: Settings, core: AppCore) -> web.Application:
     r.add_get("/api/health", health)
     r.add_get("/api/overview", overview)
     r.add_get("/api/inventory", inventory)
+    r.add_get("/api/registry", registry)
     r.add_get("/api/operations", operations)
     r.add_get("/api/operations/{op_id}", operation)
     r.add_get("/api/archives", archives)
