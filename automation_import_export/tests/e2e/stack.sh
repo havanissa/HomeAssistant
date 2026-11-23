@@ -31,7 +31,7 @@ case "${1:-}" in
   up)
     : "${HA_URL:?set HA_URL}" "${HA_TOKEN:?set HA_TOKEN}" "${DATA_DIR:?set DATA_DIR}"
     docker rm -f aie-test-app aie-test-supervisor >/dev/null 2>&1 || true
-    docker build -q --build-arg BUILD_VERSION=0.1.2 --build-arg BUILD_ARCH=amd64 -t "$IMAGE" "$APP_DIR" >/dev/null
+    docker build -q --build-arg BUILD_VERSION=0.2.0 --build-arg BUILD_ARCH=amd64 -t "$IMAGE" "$APP_DIR" >/dev/null
     docker network inspect "$NET" >/dev/null 2>&1 \
       || docker network create --driver bridge --subnet 172.30.32.0/23 --gateway 172.30.32.1 "$NET" >/dev/null
     docker run -d --name aie-test-supervisor --network "$NET" --ip 172.30.33.249 --network-alias aie-supervisor \

@@ -5,7 +5,7 @@ import { checksList } from "./app.js";
 export async function renderImport() {
   view.innerHTML = `<h1>Import</h1>
     <div class="grid">
-      <div class="card"><h2>Archive from this App</h2><p>A <code>.zip</code> archive exported by the Automation Import/Export Manager (from this or another Home Assistant). It is checked completely before anything else happens.</p>
+      <div class="card"><h2>Archive from this App</h2><p>A <code>.zip</code> archive exported by the Automation Import/Export Manager (from this or another Home Assistant): automations, or helpers, labels &amp; categories. It is checked completely before anything else happens.</p>
         <div class="dropzone" id="zip-drop"><p>Drop the archive here or</p><label class="button primary">Choose a .zip file<input type="file" id="zip" class="vh" accept=".zip,application/zip"></label></div><div id="zip-result"></div></div>
       <div class="card"><h2>Home Assistant automation YAML</h2><p>An ordinary <code>automations.yaml</code> (or a file with one automation). Only the configurations are imported: such files have no labels, categories or areas. Entries with <code>!secret</code> or <code>!include</code> are refused.</p>
         <div class="dropzone" id="yaml-drop"><p>Drop the file here or</p><label class="button">Choose a .yaml file<input type="file" id="yaml" class="vh" accept=".yaml,.yml,text/yaml"></label></div><div id="yaml-result"></div></div>
@@ -16,7 +16,7 @@ export async function renderImport() {
     zipResult.innerHTML = `<p class="muted">Checking ${esc(file.name)}…</p>`;
     try {
       const res = await upload("api/archives/upload", file);
-      zipResult.innerHTML = `<div class="notice ${res.verification.ok ? "ok" : "warning"}">${res.duplicate ? "This archive is already stored." : "Stored."} Verification: <strong>${esc(res.verification.status)}</strong>.</div>${checksList(res.verification)}<div class="actions"><a class="button primary" href="#/restore/${enc(res.archive.archive_id)}">Preview the restoration…</a><a class="button" href="#/archive/${enc(res.archive.archive_id)}">Inspect</a></div>`;
+      zipResult.innerHTML = `<div class="notice ${res.verification.ok ? "ok" : "warning"}">${res.duplicate ? "This archive is already stored." : "Stored."} Verification: <strong>${esc(res.verification.status)}</strong>.</div>${checksList(res.verification)}<div class="actions"><a class="button primary" href="#/${res.archive.kind === "registry" ? "regrestore" : "restore"}/${enc(res.archive.archive_id)}">Preview the restoration…</a><a class="button" href="#/archive/${enc(res.archive.archive_id)}">Inspect</a></div>`;
     } catch (err) {
       zipResult.innerHTML = `<div class="notice error" id="upload-error"><strong>Refused:</strong> ${esc(err.message)}</div>${err.data && err.data.report ? checksList(err.data.report) : ""}`;
     }

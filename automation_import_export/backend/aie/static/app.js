@@ -2,17 +2,19 @@
 import { api, ask, bytes, chip, clock, enc, esc, initTheme, problems, renderBanners, RUNNING, toast, view } from "./ui.js";
 import { renderExport, renderCleanup } from "./export.js";
 import { renderImport, renderRestore } from "./restore.js";
+import { forgetRegistry, renderRegArchive, renderRegCleanup, renderRegistry, renderRegRestore } from "./registry.js";
 
 let pollTimer = null;
 export function stopPolling() { clearTimeout(pollTimer); pollTimer = null; }
 export function poll(fn, ms = 1000) { stopPolling(); pollTimer = setTimeout(fn, ms); }
 
-const PURPOSE = { export: "Export", backup: "Full backup", export_delete: "Export & Delete", pre_restore: "Before a restore", uploaded: "Uploaded", yaml_import: "YAML file" };
+const PURPOSE = { export: "Export", backup: "Full backup", export_delete: "Export & Delete", pre_restore: "Before a restore", uploaded: "Uploaded", yaml_import: "YAML file", registry_backup: "Backup", registry_cleanup: "Back up & Delete" };
 export const purposeText = (p) => PURPOSE[p] || p || "Archive";
-const KIND = { export: "Export", cleanup: "Export & Delete", restore: "Restore", rollback: "Rollback", yaml_import: "YAML import", upload: "Upload", archive_delete: "Archive deleted" };
+const KIND = { export: "Export", cleanup: "Export & Delete", restore: "Restore", rollback: "Rollback", yaml_import: "YAML import", upload: "Upload", archive_delete: "Archive deleted", registry_backup: "Backup of helpers, labels and categories", registry_cleanup: "Back up & delete helpers, labels and categories", registry_restore: "Restore of helpers, labels and categories" };
+const isRegistry = (a) => a && a.kind === "registry";
 
 export function opLink(op) {
-  const target = op.kind === "cleanup" ? `#/cleanup/${enc(op.id)}` : `#/operation/${enc(op.id)}`;
+  const target = op.kind === "cleanup" ? `#/cleanup/${enc(op.id)}` : op.kind === "registry_cleanup" ? `#/regcleanup/${enc(op.id)}` : `#/operation/${enc(op.id)}`;
   return `<a href="${target}">${esc(op.title || KIND[op.kind] || op.kind)}</a>`;
 }
 
@@ -59,6 +61,9 @@ async function renderOverview() {
         <a class="button" href="#/export">Export only</a>
         <button id="backup-all">Back up all automations (including protected)</button></div>
     </div>
+    <div class="card"><h2>Helpers, labels &amp; categories</h2>
+      <p>See which helpers, labels and categories are used – and by what – and clean up the ones nothing uses. Back them up, delete them after a verified backup, or restore them with their assignments.</p>
+      <div class="actions"><a class="button primary" href="#/registry" id="open-registry">Open the overview</a></div></div>
     ${data.awaiting.length ? `<div class="card"><h2>Waiting for your confirmation</h2><ul class="checks">${data.awaiting.map((o) => `<li>${opLink(o)} <span class="muted small">${esc(clock(o.created_at))} · ${esc(o.summary || "")}</span></li>`).join("")}</ul></div>` : ""}
     <div class="card"><h2>Recent operations</h2>${data.operations.length ? `<ul class="checks">${data.operations.map((o) => `<li><div class="row">${chip(o.status)} ${opLink(o)} <span class="muted small">${esc(clock(o.created_at))}</span></div>${o.summary ? `<div class="small muted">${esc(o.summary)}</div>` : ""}</li>`).join("")}</ul>` : `<p class="muted">Nothing yet.</p>`}</div>`;
   view.querySelector("#backup-all").onclick = async () => {
@@ -74,12 +79,12 @@ async function renderArchives() {
   const data = await api("api/archives");
   view.innerHTML = `<h1>Archives</h1>
     <p class="muted">Archives are stored in this App (and in Home Assistant's backups of it). They can contain private data from your automations: keep downloaded copies safe. Nothing is ever uploaded anywhere.</p>
-    ${data.archives.length ? `<div class="card tscroll"><table id="archives"><thead><tr><th>Created</th><th>Kind</th><th>Automations</th><th>Home Assistant</th><th>Verification</th><th>Size</th><th></th></tr></thead><tbody>
+    ${data.archives.length ? `<div class="card tscroll"><table id="archives"><thead><tr><th>Created</th><th>Kind</th><th>Contents</th><th>Home Assistant</th><th>Verification</th><th>Size</th><th></th></tr></thead><tbody>
     ${data.archives.map((a) => `<tr data-id="${esc(a.archive_id)}"><td>${esc(clock(a.created_at || a.uploaded_at))}<div class="mono">${esc(a.archive_id)}</div>${a.label ? `<div class="small">${esc(a.label)}</div>` : ""}</td>
-      <td>${esc(purposeText(a.purpose))}${a.missing ? `<div>${chip("failed", "File missing")}</div>` : ""}</td><td>${esc(a.count ?? "?")}</td>
+      <td>${esc(purposeText(a.purpose))}${isRegistry(a) ? `<div class="small muted">Helpers, labels &amp; categories</div>` : ""}${a.missing ? `<div>${chip("failed", "File missing")}</div>` : ""}</td><td>${isRegistry(a) && a.counts ? `${esc(a.counts.helpers)} helper(s), ${esc(a.counts.labels)} label(s), ${esc(a.counts.categories)} categor${a.counts.categories === 1 ? "y" : "ies"}` : `${esc(a.count ?? "?")} automation(s)`}</td>
       <td>${esc(a.ha_version || "")}<div class="small muted">${esc(a.location_name || "")}</div></td>
       <td>${verificationChip(a.verification)}${a.complete === false ? `<div class="small muted">not every automation is complete</div>` : ""}</td><td>${esc(bytes(a.size))}</td>
-      <td><div class="actions"><a class="button" href="api/archives/${enc(a.archive_id)}/download" download>Download</a><a class="button" href="#/archive/${enc(a.archive_id)}">Inspect</a><a class="button" href="#/restore/${enc(a.archive_id)}">Restore…</a><button class="danger" data-delete="${esc(a.archive_id)}">Delete</button></div></td></tr>`).join("")}
+      <td><div class="actions"><a class="button" href="api/archives/${enc(a.archive_id)}/download" download>Download</a><a class="button" href="#/archive/${enc(a.archive_id)}">Inspect</a><a class="button" href="#/${isRegistry(a) ? "regrestore" : "restore"}/${enc(a.archive_id)}">Restore…</a><button class="danger" data-delete="${esc(a.archive_id)}">Delete</button></div></td></tr>`).join("")}
     </tbody></table></div>` : `<div class="card empty"><p>No archives yet.</p><a class="button primary" href="#/export">Export automations</a></div>`}`;
   view.querySelectorAll("[data-delete]").forEach((b) => { b.onclick = () => deleteArchive(b.dataset.delete); });
 }
@@ -97,6 +102,7 @@ async function deleteArchive(id) {
 async function renderArchive(id) {
   const data = await api(`api/archives/${enc(id)}`);
   if (data.error) { view.innerHTML = `<h1>Archive</h1><div class="notice error">${esc(data.error)}</div>`; return; }
+  if (data.kind === "registry") return renderRegArchive(id, data, verificationChip);
   const s = data.summary;
   const labels = data.labels || {};
   const cats = data.categories || {};
@@ -146,6 +152,8 @@ const ITEM_TEXT = { pending: "Pending", deleting: "Deleting", deleted: "Deleted"
 export async function renderOperation(id) {
   const op = await api(`api/operations/${enc(id)}`);
   if (op.kind === "cleanup") return renderCleanup(id, op);
+  if (op.kind === "registry_cleanup") return renderRegCleanup(id, op);
+  if (op.kind && op.kind.startsWith("registry_")) forgetRegistry();
   const items = Object.entries(op.items || {});
   const result = op.result || {};
   const running = RUNNING.includes(op.status);
@@ -159,11 +167,12 @@ export async function renderOperation(id) {
     ${op.kind === "restore" && ["completed", "incomplete", "failed", "partial"].includes(op.status) && !op.rolled_back_by ? `<div class="actions"><button class="danger" id="rollback">Roll back this restore…</button></div>` : ""}
     ${op.rolled_back_by ? `<p>Rolled back by <a href="#/operation/${enc(op.rolled_back_by)}">${esc(op.rolled_back_by)}</a>.</p>` : ""}
     ${op.kind === "restore" && op.status === "incomplete" ? `<div class="notice warning">The restoration is <strong>incomplete</strong>: something differs from the archive (see below). Run the restore again to finish it, roll it back, or fix it in Home Assistant.</div>` : ""}
-    ${op.kind === "export" && op.verification ? `<h3>Verification ${verificationChip(op.verification)}</h3>${checksList(op.verification)}` : ""}
+    ${op.kind === "registry_backup" && op.archive_id && op.status === "completed" ? `<div class="actions"><a class="button" href="#/regrestore/${enc(op.archive_id)}">Restore from this archive…</a><a class="button" href="#/registry">Back to helpers, labels &amp; categories</a></div>` : ""}
+    ${["export", "registry_backup"].includes(op.kind) && op.verification ? `<h3>Verification ${verificationChip(op.verification)}</h3>${checksList(op.verification)}` : ""}
     ${op.kind === "yaml_import" && op.archive_id ? `<div class="actions"><a class="button primary" href="#/restore/${enc(op.archive_id)}">Preview the import…</a></div>` : ""}
     ${(op.refused || []).length ? `<h3>Not imported</h3>${op.refused.map((r) => `<div class="problem"><span class="dot warning"></span><span>Entry ${esc(r.index)}${r.alias ? ` (${esc(r.alias)})` : ""}: ${esc(r.reason)}</span></div>`).join("")}` : ""}
     </div>
-    ${items.length ? `<div class="card"><h2>Automations</h2><div class="tscroll"><table id="op-items"><thead><tr><th>Automation</th><th>Status</th><th>Details</th></tr></thead><tbody>${items.map(([key, it]) => {
+    ${items.length ? `<div class="card"><h2>${op.kind && op.kind.startsWith("registry_") ? "Items" : "Automations"}</h2><div class="tscroll"><table id="op-items"><thead><tr><th>Automation</th><th>Status</th><th>Details</th></tr></thead><tbody>${items.map(([key, it]) => {
       const r = (result.results || {})[key] || {};
       const disc = it.discrepancies || r.discrepancies || [];
       return `<tr data-key="${esc(key)}"><td>${esc(it.alias || key)}<div class="mono">${esc(it.entity_id || r.entity_id || it.target_id || key)}</div></td><td>${chip(it.status, ITEM_TEXT[it.status])}</td><td class="small">${esc(it.message || "")}${disc.length ? `<ul>${disc.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}</td></tr>`;
@@ -191,7 +200,7 @@ export async function route() {
   const [path, query] = hash.slice(1).split("?");
   const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
   const section = parts[0] || "overview";
-  const nav = { overview: "overview", export: "export", cleanup: "export", import: "import", restore: "import", archives: "archives", archive: "archives", operation: "overview" }[section];
+  const nav = { overview: "overview", export: "export", cleanup: "export", import: "import", restore: "import", archives: "archives", archive: "archives", operation: "overview", registry: "registry", regcleanup: "registry", regrestore: "import" }[section];
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.nav === nav));
   try {
     if (section === "overview") await renderOverview();
@@ -202,6 +211,9 @@ export async function route() {
     else if (section === "archives") await renderArchives();
     else if (section === "archive") await renderArchive(parts[1]);
     else if (section === "operation") await renderOperation(parts[1]);
+    else if (section === "registry") await renderRegistry(new URLSearchParams(query || ""));
+    else if (section === "regcleanup") await renderRegCleanup(parts[1]);
+    else if (section === "regrestore") await renderRegRestore(parts[1]);
     else view.innerHTML = `<div class="card empty">Not found. <a href="#/">Overview</a></div>`;
   } catch (err) {
     const network = err instanceof TypeError;  // fetch failed: no answer at all (not an error reply)

@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from aie.core import AppCore
-from aie.ha import ConfigApiError, HomeAssistantError, NotAllowed, WriteScope, check_params, is_builder_id
+from aie.ha import HELPER_DOMAINS, ConfigApiError, HomeAssistantError, NotAllowed, WriteScope, check_params, is_builder_id
 from aie.settings import load_settings
 
 ADMIN = "user-admin"
@@ -68,6 +68,18 @@ class FakeHome:
         self.other_entities = {"binary_sensor.motion", "light.kitchen", "light.hall", "script.goodnight",
                                "scene.evening", "input_boolean.guest"}
         self.fail_post: dict[str, str] = {}             # id -> message (the POST is refused)
+        # helpers, labels and categories (0.2)
+        self.extra: dict[str, dict[str, Any]] = {}      # entity id -> registry entry of non-automation entities
+        self.extra_deleted: dict[tuple[str, str], dict[str, Any]] = {}
+        self.collections: dict[str, dict[str, dict[str, Any]]] = {}
+        self.devices: dict[str, dict[str, Any]] = {"dev-1": {"id": "dev-1", "name": "Lamp", "name_by_user": None,
+                                                             "labels": [], "area_id": None}}
+        self.scripts: dict[str, dict[str, Any]] = {}    # entity id -> config
+        self.dashboards: dict[str | None, Any] = {}     # url path (None: the default) -> config
+        self.dashboard_titles: dict[str, str] = {}
+        self.config_entries: list[dict[str, Any]] = []  # helper config entries
+        self.categories.setdefault("script", {})
+        self.categories.setdefault("helpers", {})
         self.unavailable_on_load: set[str] = set()      # ids that load as unavailable
         for name in ("Lighting", "Security", "Night"):
             self.add_label(name)
@@ -94,11 +106,79 @@ class FakeHome:
                                  "created_at": 0.0, "modified_at": 0.0}
         return label_id
 
-    def add_category(self, name: str, icon: str | None = None) -> str:
+    def add_category(self, name: str, icon: str | None = None, scope: str = "automation") -> str:
         category_id = secrets.token_hex(13).upper()
-        self.categories["automation"][category_id] = {"category_id": category_id, "name": name, "icon": icon,
-                                                      "created_at": 0.0, "modified_at": 0.0}
+        self.categories.setdefault(scope, {})[category_id] = {"category_id": category_id, "name": name, "icon": icon,
+                                                              "created_at": 0.0, "modified_at": 0.0}
         return category_id
+
+    def extra_entry(self, entity_id: str) -> dict[str, Any]:
+        """The registry entry of a non-automation entity (created on first use, like a fresh integration's)."""
+        if entity_id not in self.extra:
+            domain = entity_id.split(".")[0]
+            self.extra[entity_id] = {"entity_id": entity_id, "platform": domain, "unique_id": entity_id,
+                                     "id": secrets.token_hex(16), "name": None, "icon": None, "area_id": None,
+                                     "labels": [], "categories": {}, "aliases": [], "disabled_by": None,
+                                     "hidden_by": None, "options": {}, "original_name": None, "config_entry_id": None,
+                                     "device_id": None}
+        return self.extra[entity_id]
+
+    def add_helper(self, domain: str, name: str, **config: Any) -> str:
+        """A helper created in Settings -> Helpers (storage collection, with its entity)."""
+        item = self.ws_collection(domain, "create", {"name": name, **config})
+        return f"{domain}.{item['id']}"
+
+    def helper_entity(self, domain: str, item_id: str) -> str | None:
+        return next((e for e, r in self.extra.items() if r["platform"] == domain and r["unique_id"] == item_id), None)
+
+    def ws_collection(self, domain: str, verb: str, params: dict[str, Any]) -> Any:
+        items = self.collections.setdefault(domain, {})
+        if verb == "list":
+            return copy.deepcopy(list(items.values()))
+        if verb == "create":
+            self.writes.append(("helper_create", domain, params.get("name")))
+            base = slug(params["name"])
+            item_id, n = base, 2
+            while item_id in items:
+                item_id = f"{base}_{n}"
+                n += 1
+            if domain == "input_number" and ("min" not in params or "max" not in params):
+                raise HomeAssistantError("invalid_format", "required key not provided @ data['min']")
+            items[item_id] = {"id": item_id, **copy.deepcopy(params)}
+            deleted = self.extra_deleted.pop((domain, item_id), None)
+            entity_id = f"{domain}.{item_id}"
+            if deleted is not None and deleted["entity_id"] not in self.extra and deleted["entity_id"] not in self.states:
+                entry = deleted
+            else:
+                candidate, n = entity_id, 2
+                while candidate in self.extra or candidate in self.states:
+                    candidate = f"{entity_id}_{n}"
+                    n += 1
+                entry = {**self.extra_entry(candidate), "platform": domain, "unique_id": item_id}
+            self.extra[entry["entity_id"]] = entry
+            self.states[entry["entity_id"]] = {"entity_id": entry["entity_id"], "state": "off" if domain == "input_boolean" else "unknown",
+                                               "attributes": {"friendly_name": params["name"]}}
+            return copy.deepcopy(items[item_id])
+        item_id = params.get(f"{domain}_id")
+        if item_id not in items:
+            raise HomeAssistantError("not_found", f"Unable to find {domain}_id {item_id}")
+        if verb == "update":
+            self.writes.append(("helper_update", domain, item_id))
+            data = {k: v for k, v in params.items() if k != f"{domain}_id"}
+            items[item_id] = {"id": item_id, **copy.deepcopy(data)}
+            entity_id = self.helper_entity(domain, item_id)
+            if entity_id in self.states:
+                self.states[entity_id]["attributes"]["friendly_name"] = data.get("name")
+            return copy.deepcopy(items[item_id])
+        if verb == "delete":
+            self.writes.append(("helper_delete", domain, item_id))
+            items.pop(item_id)
+            entity_id = self.helper_entity(domain, item_id)
+            if entity_id:
+                self.extra_deleted[(domain, item_id)] = self.extra.pop(entity_id)
+                self.states.pop(entity_id, None)
+            return None
+        raise HomeAssistantError("unknown_command", f"{domain}/{verb}")
 
     def add_area(self, name: str, **extra: Any) -> str:
         area_id = slug(name)
@@ -187,6 +267,9 @@ class FakeHome:
         if not self.connected:
             raise ConnectionError("Not connected to Home Assistant")
         self.commands_sent[kind] += 1
+        domain, _, verb = kind.partition("/")
+        if domain in HELPER_DOMAINS:
+            return self.ws_collection(domain, verb, params)
         handler = getattr(self, "ws_" + kind.replace("/", "_"), None)
         if handler is None:
             raise HomeAssistantError("unknown_command", kind)
@@ -200,7 +283,8 @@ class FakeHome:
                 "language": "en", "state": "RUNNING"}
 
     def ws_get_states(self) -> list[dict[str, Any]]:
-        others = [{"entity_id": e, "state": "off", "attributes": {}} for e in sorted(self.other_entities)]
+        others = [{"entity_id": e, "state": "off", "attributes": {}} for e in sorted(self.other_entities)
+                  if e not in self.states]
         return copy.deepcopy(list(self.states.values())) + others
 
     def ws_config_auth_list(self) -> list[dict[str, Any]]:
@@ -210,12 +294,13 @@ class FakeHome:
         out = [{k: v for k, v in e.items() if k not in ("aliases", "capabilities", "device_class",
                                                          "original_device_class", "original_icon")}
                for e in self.registry.values()]
-        out += [{"entity_id": e, "platform": e.split(".")[0], "unique_id": e, "labels": [], "categories": {}}
-                for e in sorted(self.other_entities)]
+        for entity_id in sorted(self.other_entities):
+            self.extra_entry(entity_id)
+        out += [{k: v for k, v in e.items() if k != "aliases"} for e in self.extra.values()]
         return copy.deepcopy(out)
 
     def ws_config_entity_registry_get_entries(self, entity_ids: list[str]) -> dict[str, Any]:
-        return {e: copy.deepcopy(self.registry.get(e)) for e in entity_ids}
+        return {e: copy.deepcopy(self.registry.get(e) or self.extra.get(e)) for e in entity_ids}
 
     def ws_config_label_registry_list(self) -> list[dict[str, Any]]:
         return copy.deepcopy(list(self.labels.values()))
@@ -230,7 +315,61 @@ class FakeHome:
         return copy.deepcopy(list(self.floors.values()))
 
     def ws_config_device_registry_list(self) -> list[dict[str, Any]]:
-        return [{"id": "dev-1", "name": "Lamp"}]
+        return copy.deepcopy(list(self.devices.values()))
+
+    def ws_script_config(self, entity_id: str) -> dict[str, Any]:
+        if entity_id not in self.scripts:
+            raise HomeAssistantError("not_found", "Entity not found")
+        return {"config": copy.deepcopy(self.scripts[entity_id])}
+
+    def ws_lovelace_dashboards_list(self) -> list[dict[str, Any]]:
+        return [{"url_path": k, "title": self.dashboard_titles.get(k, k), "mode": "storage"} for k in self.dashboards if k]
+
+    def ws_lovelace_config(self, url_path: str | None) -> Any:
+        if url_path not in self.dashboards:
+            raise HomeAssistantError("config_not_found", "No config found.")
+        return copy.deepcopy(self.dashboards[url_path])
+
+    def ws_config_entries_get(self, type_filter: list[str]) -> list[dict[str, Any]]:
+        return [{k: v for k, v in e.items() if k not in ("options", "data")} for e in self.config_entries]
+
+    def ws_config_label_registry_update(self, label_id: str, **changes: Any) -> dict[str, Any]:
+        self.writes.append(("label_update", label_id))
+        self.labels[label_id].update(changes)
+        return copy.deepcopy(self.labels[label_id])
+
+    def ws_config_label_registry_delete(self, label_id: str) -> None:
+        self.writes.append(("label_delete", label_id))
+        if label_id not in self.labels:
+            raise HomeAssistantError("invalid_info", "Label ID doesn't exist")
+        del self.labels[label_id]
+        for entry in [*self.registry.values(), *self.extra.values(), *self.devices.values(), *self.areas.values()]:
+            if label_id in (entry.get("labels") or []):
+                entry["labels"] = [x for x in entry["labels"] if x != label_id]
+
+    def ws_config_category_registry_update(self, scope: str, category_id: str, **changes: Any) -> dict[str, Any]:
+        self.writes.append(("category_update", category_id))
+        self.categories[scope][category_id].update(changes)
+        return copy.deepcopy(self.categories[scope][category_id])
+
+    def ws_config_category_registry_delete(self, scope: str, category_id: str) -> None:
+        self.writes.append(("category_delete", category_id))
+        if category_id not in self.categories.get(scope, {}):
+            raise HomeAssistantError("invalid_info", "Category ID doesn't exist")
+        del self.categories[scope][category_id]
+        for entry in [*self.registry.values(), *self.extra.values()]:
+            if (entry.get("categories") or {}).get(scope) == category_id:
+                entry["categories"] = {k: v for k, v in entry["categories"].items() if k != scope}
+
+    def ws_config_device_registry_update(self, device_id: str, labels: list[str]) -> dict[str, Any]:
+        self.writes.append(("device_update", device_id))
+        self.devices[device_id]["labels"] = sorted(set(labels) & set(self.labels))
+        return copy.deepcopy(self.devices[device_id])
+
+    def ws_config_area_registry_update(self, area_id: str, labels: list[str]) -> dict[str, Any]:
+        self.writes.append(("area_update", area_id))
+        self.areas[area_id]["labels"] = sorted(set(labels) & set(self.labels))
+        return copy.deepcopy(self.areas[area_id])
 
     def ws_blueprint_list(self, domain: str) -> dict[str, Any]:
         return copy.deepcopy(self.blueprints)
@@ -253,6 +392,8 @@ class FakeHome:
 
     # writes
     def ws_config_entity_registry_update(self, entity_id: str, **changes: Any) -> dict[str, Any]:
+        if entity_id not in self.registry and entity_id in self.extra:
+            return self._update_extra(entity_id, changes)
         entry = self.registry.get(entity_id)
         if entry is None:
             raise HomeAssistantError("not_found", "Entity not found")
@@ -286,13 +427,39 @@ class FakeHome:
             self.states[entity_id]["attributes"]["friendly_name"] = changes["name"] or (self.ui_config(uid) or {}).get("alias")
         return {"entity_entry": copy.deepcopy(entry)}
 
+    def _update_extra(self, entity_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        entry = self.extra[entity_id]
+        self.writes.append(("registry", {"entity_id": entity_id, **changes}))
+        if "labels" in changes:
+            changes["labels"] = sorted(set(changes["labels"]) & set(self.labels))
+        if "categories" in changes:
+            categories = dict(entry["categories"])
+            for scope, value in changes["categories"].items():
+                if value is None:
+                    categories.pop(scope, None)
+                else:
+                    categories[scope] = value
+            changes["categories"] = categories
+        new = changes.pop("new_entity_id", None)
+        entry.update(changes)
+        if new and new != entity_id:
+            if new in self.extra or new in self.states:
+                raise HomeAssistantError("invalid_info", "Entity with this ID is already registered")
+            entry["entity_id"] = new
+            self.extra[new] = self.extra.pop(entity_id)
+            if entity_id in self.states:
+                st = self.states.pop(entity_id)
+                st["entity_id"] = new
+                self.states[new] = st
+        return {"entity_entry": copy.deepcopy(entry)}
+
     def ws_config_label_registry_create(self, name: str, **extra: Any) -> dict[str, Any]:
         self.writes.append(("label_create", name))
         return copy.deepcopy(self.labels[self.add_label(name, **extra)])
 
     def ws_config_category_registry_create(self, scope: str, name: str, icon: str | None = None) -> dict[str, Any]:
         self.writes.append(("category_create", name))
-        return copy.deepcopy(self.categories[scope][self.add_category(name, icon)])
+        return copy.deepcopy(self.categories[scope][self.add_category(name, icon, scope)])
 
     def ws_config_area_registry_create(self, name: str, **extra: Any) -> dict[str, Any]:
         self.writes.append(("area_create", name))
@@ -321,7 +488,7 @@ class FakeHome:
         self.writes.append(("expose", assistants, entity_ids, should_expose))
         for entity_id in entity_ids:
             for assistant in assistants:
-                self.registry[entity_id]["options"].setdefault(assistant, {})["should_expose"] = should_expose
+                (self.registry.get(entity_id) or self.extra[entity_id])["options"].setdefault(assistant, {})["should_expose"] = should_expose
 
 
 class FakeApi:

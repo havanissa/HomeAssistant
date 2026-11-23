@@ -21,14 +21,82 @@ def refused(command: str, s: WriteScope | None = None, **params) -> None:
         check_params(command, params, s or WriteScope())
 
 
-def test_no_command_can_control_a_device_or_delete_metadata():
-    forbidden = {"execute_script", "fire_event", "config/label_registry/delete", "config/category_registry/delete",
-                 "config/area_registry/delete", "config/entity_registry/remove", "config/device_registry/update",
-                 "blueprint/delete", "render_template", "subscribe_trigger", "config/label_registry/update",
-                 "config/category_registry/update", "config/area_registry/update", "conversation/process"}
+def test_no_command_can_control_a_device_or_delete_areas():
+    forbidden = {"execute_script", "fire_event", "config/area_registry/delete", "config/entity_registry/remove",
+                 "blueprint/delete", "render_template", "subscribe_trigger", "conversation/process",
+                 "config/floor_registry/delete", "config/device_registry/remove_config_entry", "zone/delete",
+                 "person/delete", "lovelace/config/save", "lovelace/config/delete", "script/delete"}
     assert not forbidden & ALLOWED_COMMANDS
     for command in forbidden:
         refused(command)
+
+
+def test_registry_writes_only_inside_a_confirmed_scope():
+    """Labels, categories and helpers are updated or deleted only when they are in the operation's scope."""
+    for command, params in (("config/label_registry/delete", {"label_id": "night"}),
+                            ("config/label_registry/update", {"label_id": "night", "name": "Nights"}),
+                            ("config/category_registry/delete", {"scope": "automation", "category_id": "C1"}),
+                            ("config/category_registry/update", {"scope": "automation", "category_id": "C1", "name": "x"}),
+                            ("input_boolean/delete", {"input_boolean_id": "guest"}),
+                            ("input_boolean/update", {"input_boolean_id": "guest", "name": "Guest"}),
+                            ("input_boolean/create", {"name": "Guest"}),
+                            ("config/device_registry/update", {"device_id": "d1", "labels": ["night"]}),
+                            ("config/area_registry/update", {"area_id": "kitchen", "labels": ["night"]})):
+        refused(command, WriteScope(), **params)
+    s = WriteScope()
+    s.registry_deletions |= {"label:night", "category:automation:C1", "helper:input_boolean:guest"}
+    s.registry_updates |= {"label:night", "helper:counter:visits"}
+    check_params("config/label_registry/delete", {"label_id": "night"}, s)
+    refused("config/label_registry/delete", s, label_id="security")
+    check_params("config/category_registry/delete", {"scope": "automation", "category_id": "C1"}, s)
+    refused("config/category_registry/delete", s, scope="script", category_id="C1")
+    check_params("input_boolean/delete", {"input_boolean_id": "guest"}, s)
+    refused("input_number/delete", s, input_number_id="guest")
+    refused("input_boolean/delete", s, input_boolean_id="other")
+    check_params("config/label_registry/update", {"label_id": "night", "name": "Nights", "color": "red"}, s)
+    refused("config/label_registry/update", s, label_id="night", label_id_new="x")
+    check_params("counter/update", {"counter_id": "visits", "name": "Visits", "step": 1}, s)
+    refused("counter/update", s, counter_id="other", name="x")
+    s.helper_create |= {"counter"}
+    check_params("counter/create", {"name": "visits"}, s)
+    refused("timer/create", s, name="x")
+    s.devices |= {"d1"}
+    s.areas |= {"kitchen"}
+    check_params("config/device_registry/update", {"device_id": "d1", "labels": ["night"]}, s)
+    refused("config/device_registry/update", s, device_id="d1", labels=[], name_by_user="x")
+    refused("config/device_registry/update", s, device_id="d1", labels=[], disabled_by="user")
+    refused("config/device_registry/update", s, device_id="d2", labels=["night"])
+    check_params("config/area_registry/update", {"area_id": "kitchen", "labels": ["night"]}, s)
+    refused("config/area_registry/update", s, area_id="kitchen", labels=[], name="x")
+
+
+def test_entity_registry_updates_of_other_entities_only_touch_labels_and_categories():
+    s = WriteScope()
+    s.assign_entities |= {"light.kitchen"}
+    s.helper_entities |= {"input_boolean.guest"}
+    check_params("config/entity_registry/update", {"entity_id": "light.kitchen", "labels": ["night"],
+                                                   "categories": {"helpers": "C1"}}, s)
+    for field, value in (("name", "x"), ("disabled_by", "user"), ("area_id", "kitchen"), ("new_entity_id", "light.x"),
+                         ("hidden_by", "user"), ("icon", "mdi:x")):
+        refused("config/entity_registry/update", s, entity_id="light.kitchen", **{field: value})
+    refused("config/entity_registry/update", s, entity_id="light.hall", labels=["night"])
+    check_params("config/entity_registry/update", {"entity_id": "input_boolean.guest", "name": "Guest",
+                                                   "new_entity_id": "input_boolean.guest_mode", "area_id": "hall"}, s)
+    refused("config/entity_registry/update", s, entity_id="input_boolean.guest", new_entity_id="light.guest")
+    refused("config/entity_registry/update", s, entity_id="input_boolean.other", name="x")
+
+
+def test_reads_of_the_usage_overview_are_limited():
+    check_params("lovelace/config", {"url_path": None}, WriteScope())
+    check_params("lovelace/config", {"url_path": "energy"}, WriteScope())
+    refused("lovelace/config", url_path=None, force=True)
+    check_params("script/config", {"entity_id": "script.goodnight"}, WriteScope())
+    refused("script/config", entity_id="automation.x")
+    check_params("config_entries/get", {"type_filter": ["helper"]}, WriteScope())
+    refused("config_entries/get")
+    refused("config_entries/get", type_filter=["device"])
+    check_params("config/entity_registry/get_entries", {"entity_ids": ["input_number.x", "automation.y"]}, WriteScope())
+    refused("config/entity_registry/get_entries", entity_ids=["light.kitchen"])
 
 
 def test_service_calls_only_for_automations_of_the_running_restore():

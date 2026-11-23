@@ -47,6 +47,13 @@ _LOGGER = logging.getLogger(__name__)
 #: Ids this App can address through the editor endpoint. Anything else is reported as "not addressable".
 AUTOMATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]{0,254}")
 ENTITY_ID = re.compile(r"automation\.[a-z0-9_]{1,250}")
+#: The helpers Home Assistant keeps in its own storage collections (created in Settings -> Helpers): the only ones
+#: this App can back up, delete and re-create (YAML helpers and config-entry helpers are listed read-only).
+HELPER_DOMAINS: tuple[str, ...] = ("input_boolean", "input_number", "input_text", "input_select", "input_datetime",
+                                   "input_button", "counter", "timer", "schedule")
+HELPER_ENTITY = re.compile(r"(" + "|".join(HELPER_DOMAINS) + r")\.[a-z0-9_]{1,250}")
+ANY_ENTITY = re.compile(r"[a-z0-9_]{1,64}\.[a-z0-9_]{1,250}")
+ITEM_ID = re.compile(r"[A-Za-z0-9_\-]{1,255}")
 
 READ_COMMANDS: frozenset[str] = frozenset({
     "ping",
@@ -63,6 +70,12 @@ READ_COMMANDS: frozenset[str] = frozenset({
     "automation/config",
     "blueprint/list",
     "validate_config",
+    # helpers, labels and categories (usage overview, backups)
+    "script/config",
+    "lovelace/dashboards/list",
+    "lovelace/config",
+    "config_entries/get",
+    *(f"{d}/list" for d in HELPER_DOMAINS),
 })
 WRITE_COMMANDS: frozenset[str] = frozenset({
     "config/entity_registry/update",
@@ -72,6 +85,14 @@ WRITE_COMMANDS: frozenset[str] = frozenset({
     "blueprint/save",
     "call_service",
     "homeassistant/expose_entity",
+    # helpers, labels and categories: only the items of a confirmed restore or deletion (WriteScope)
+    "config/label_registry/update",
+    "config/label_registry/delete",
+    "config/category_registry/update",
+    "config/category_registry/delete",
+    "config/device_registry/update",
+    "config/area_registry/update",
+    *(f"{d}/{verb}" for d in HELPER_DOMAINS for verb in ("create", "update", "delete")),
 })
 ALLOWED_COMMANDS: frozenset[str] = READ_COMMANDS | WRITE_COMMANDS
 
@@ -83,6 +104,10 @@ REGISTRY_UPDATE_FIELDS = frozenset({
 ASSISTANTS = frozenset({"conversation", "cloud.alexa", "cloud.google_assistant"})
 LABEL_CREATE_FIELDS = frozenset({"name", "icon", "color", "description"})
 CATEGORY_CREATE_FIELDS = frozenset({"scope", "name", "icon"})
+LABEL_UPDATE_FIELDS = frozenset({"label_id", "name", "icon", "color", "description"})
+CATEGORY_UPDATE_FIELDS = frozenset({"scope", "category_id", "name", "icon"})
+#: What a restore of labels and categories may change on any other entity, device or area: only these.
+ASSIGNMENT_FIELDS = frozenset({"entity_id", "labels", "categories"})
 AREA_CREATE_FIELDS = frozenset({"name", "icon", "aliases"})
 BLUEPRINT_PATH = re.compile(r"[A-Za-z0-9_\-]+(/[A-Za-z0-9_.\-]+)*\.yaml")
 
@@ -124,6 +149,12 @@ def blueprint_path_ok(path: Any) -> bool:
             and ".." not in path.split("/") and not path.startswith(BUILDER_PREFIX.rstrip("_")))
 
 
+def registry_key(kind: str, *parts: str) -> str:
+    """The key of a helper, label or category in archives, plans and write scopes:
+    ``label:<id>``, ``category:<scope>:<id>``, ``helper:<domain>:<id>``."""
+    return ":".join((kind, *parts))
+
+
 @dataclass
 class WriteScope:
     """What the running operation may change. Empty (the default) means: nothing."""
@@ -132,11 +163,20 @@ class WriteScope:
     deletions: set[str] = field(default_factory=set)     # automation ids that may be DELETEd
     entities: set[str] = field(default_factory=set)      # automation entity ids whose registry/state may change
     metadata: bool = False                               # labels / categories / areas / blueprints may be created
+    # helpers, labels and categories (0.2)
+    helper_entities: set[str] = field(default_factory=set)   # helper entities whose registry entry may change
+    assign_entities: set[str] = field(default_factory=set)   # other entities: only their labels / categories
+    devices: set[str] = field(default_factory=set)           # devices: only their labels
+    areas: set[str] = field(default_factory=set)             # areas: only their labels
+    category_scopes: set[str] = field(default_factory=set)   # scopes (besides automation) a category may be created in
+    helper_create: set[str] = field(default_factory=set)     # helper domains in which items may be created
+    registry_updates: set[str] = field(default_factory=set)  # registry_key()s that may be updated
+    registry_deletions: set[str] = field(default_factory=set)  # registry_key()s that may be deleted
 
     def clear(self) -> None:
-        self.configs.clear()
-        self.deletions.clear()
-        self.entities.clear()
+        for name in ("configs", "deletions", "entities", "helper_entities", "assign_entities", "devices", "areas",
+                     "category_scopes", "helper_create", "registry_updates", "registry_deletions"):
+            getattr(self, name).clear()
         self.metadata = False
 
 
@@ -155,12 +195,19 @@ def check_params(command_type: str, params: dict[str, Any], scope: WriteScope) -
     if command_type == "automation/config" and not ENTITY_ID.fullmatch(str(params.get("entity_id"))):
         raise NotAllowed("automation/config is only sent for automation entities")
     if command_type == "config/entity_registry/get_entries":
-        if not all(ENTITY_ID.fullmatch(e) for e in _entity_ids(params.get("entity_ids"))):
-            raise NotAllowed("Only automation entities are read one by one")
+        if not all(ENTITY_ID.fullmatch(e) or HELPER_ENTITY.fullmatch(e) for e in _entity_ids(params.get("entity_ids"))):
+            raise NotAllowed("Only automation and helper entities are read one by one")
     if command_type == "config/category_registry/list" and not isinstance(params.get("scope"), str):
         raise NotAllowed("A category scope is required")
     if command_type == "blueprint/list" and params.get("domain") != "automation":
         raise NotAllowed("Only automation blueprints are listed")
+    if command_type == "script/config" and not re.fullmatch(r"script\.[a-z0-9_]{1,250}", str(params.get("entity_id"))):
+        raise NotAllowed("script/config is only sent for script entities")
+    if command_type == "lovelace/config" and (set(params) - {"url_path", "force"} or params.get("force")
+                                              or not isinstance(params.get("url_path"), (str, type(None)))):
+        raise NotAllowed("Dashboards are only read")
+    if command_type == "config_entries/get" and params != {"type_filter": ["helper"]}:
+        raise NotAllowed("Only helper config entries are listed")
     if command_type not in WRITE_COMMANDS:
         return
     # ---------------------------------------------------------------- writes
@@ -168,14 +215,68 @@ def check_params(command_type: str, params: dict[str, Any], scope: WriteScope) -
         if set(params) - REGISTRY_UPDATE_FIELDS:
             raise NotAllowed(f"Registry fields {sorted(set(params) - REGISTRY_UPDATE_FIELDS)} are not changed")
         entity_id = params.get("entity_id")
-        if not isinstance(entity_id, str) or entity_id not in scope.entities or not ENTITY_ID.fullmatch(entity_id):
-            raise NotAllowed(f"{entity_id!r} is not an automation of the running restore")
+        if not isinstance(entity_id, str):
+            raise NotAllowed("An entity id is required")
         new = params.get("new_entity_id")
-        if new is not None and (not isinstance(new, str) or not ENTITY_ID.fullmatch(new)):
-            raise NotAllowed("The new entity id must be an automation entity id")
+        if entity_id in scope.entities and ENTITY_ID.fullmatch(entity_id):
+            pattern = ENTITY_ID
+        elif entity_id in scope.helper_entities and HELPER_ENTITY.fullmatch(entity_id):
+            pattern = HELPER_ENTITY
+            if new is not None and isinstance(new, str) and new.split(".")[0] != entity_id.split(".")[0]:
+                raise NotAllowed("A helper keeps its domain")
+        elif entity_id in scope.assign_entities and ANY_ENTITY.fullmatch(entity_id):
+            if set(params) - ASSIGNMENT_FIELDS:
+                raise NotAllowed("Only the labels and categories of this entity are restored")
+            pattern = ANY_ENTITY
+        else:
+            raise NotAllowed(f"{entity_id!r} is not part of the running restore")
+        if new is not None and (not isinstance(new, str) or not pattern.fullmatch(new)):
+            raise NotAllowed("The new entity id is not allowed")
         for key in ("disabled_by", "hidden_by"):
             if key in params and params[key] not in (None, "user"):
                 raise NotAllowed(f"{key} can only be set by the user")
+        return
+    if command_type == "config/device_registry/update":
+        if set(params) != {"device_id", "labels"} or params["device_id"] not in scope.devices:
+            raise NotAllowed("Only the labels of the devices of the running restore are set")
+        return
+    if command_type == "config/area_registry/update":
+        if set(params) != {"area_id", "labels"} or params["area_id"] not in scope.areas:
+            raise NotAllowed("Only the labels of the areas of the running restore are set")
+        return
+    if command_type == "config/label_registry/update":
+        if set(params) - LABEL_UPDATE_FIELDS or registry_key("label", str(params.get("label_id"))) \
+                not in scope.registry_updates:
+            raise NotAllowed("Only the labels of the running restore are updated")
+        return
+    if command_type == "config/label_registry/delete":
+        if set(params) != {"label_id"} or registry_key("label", str(params["label_id"])) not in scope.registry_deletions:
+            raise NotAllowed("Only labels of a confirmed deletion are deleted")
+        return
+    if command_type == "config/category_registry/update":
+        if set(params) - CATEGORY_UPDATE_FIELDS or registry_key(
+                "category", str(params.get("scope")), str(params.get("category_id"))) not in scope.registry_updates:
+            raise NotAllowed("Only the categories of the running restore are updated")
+        return
+    if command_type == "config/category_registry/delete":
+        if set(params) != {"scope", "category_id"} or registry_key(
+                "category", str(params["scope"]), str(params["category_id"])) not in scope.registry_deletions:
+            raise NotAllowed("Only categories of a confirmed deletion are deleted")
+        return
+    domain, _, verb = command_type.partition("/")
+    if domain in HELPER_DOMAINS:
+        if verb == "create":
+            if domain not in scope.helper_create or not isinstance(params.get("name"), str):
+                raise NotAllowed(f"No {domain} helper is created by the running operation")
+            return
+        item_id = params.get(f"{domain}_id")
+        if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id):
+            raise NotAllowed("A helper id is required")
+        allowed = scope.registry_updates if verb == "update" else scope.registry_deletions
+        if registry_key("helper", domain, item_id) not in allowed:
+            raise NotAllowed(f"The helper {domain}.{item_id} is not part of the confirmed operation")
+        if verb == "delete" and set(params) != {f"{domain}_id"}:
+            raise NotAllowed("Unexpected fields")
         return
     if command_type == "call_service":
         if params.get("domain") != "automation" or params.get("service") not in ("turn_on", "turn_off", "reload"):
@@ -200,7 +301,8 @@ def check_params(command_type: str, params: dict[str, Any], scope: WriteScope) -
     if command_type == "homeassistant/expose_entity":
         ids = _entity_ids(params.get("entity_ids"))
         assistants = params.get("assistants")
-        if (not ids or any(e not in scope.entities or not ENTITY_ID.fullmatch(e) for e in ids)
+        if (not ids or any(not ((e in scope.entities and ENTITY_ID.fullmatch(e))
+                                or (e in scope.helper_entities and HELPER_ENTITY.fullmatch(e))) for e in ids)
                 or not isinstance(assistants, list) or not set(assistants) <= ASSISTANTS
                 or not isinstance(params.get("should_expose"), bool)):
             raise NotAllowed("Only the assistant exposure of automations of the running restore is set")
@@ -211,9 +313,9 @@ def check_params(command_type: str, params: dict[str, Any], scope: WriteScope) -
             set(params) - LABEL_CREATE_FIELDS or not isinstance(params.get("name"), str)):
         raise NotAllowed("Unexpected label fields")
     if command_type == "config/category_registry/create" and (
-            set(params) - CATEGORY_CREATE_FIELDS or params.get("scope") != "automation"
+            set(params) - CATEGORY_CREATE_FIELDS or params.get("scope") not in {"automation", *scope.category_scopes}
             or not isinstance(params.get("name"), str)):
-        raise NotAllowed("Only automation categories are created")
+        raise NotAllowed("Only categories of the running restore are created")
     if command_type == "config/area_registry/create" and (
             set(params) - AREA_CREATE_FIELDS or not isinstance(params.get("name"), str)):
         raise NotAllowed("Unexpected area fields")
@@ -280,12 +382,18 @@ class HomeAssistantClient:
 
     @contextlib.contextmanager
     def scoped(self, *, configs: Iterable[str] = (), deletions: Iterable[str] = (), entities: Iterable[str] = (),
-               metadata: bool = False) -> Iterator[WriteScope]:
-        """Allow the writes of one confirmed operation; everything is refused again afterwards."""
+               metadata: bool = False, **registry: Iterable[str]) -> Iterator[WriteScope]:
+        """Allow the writes of one confirmed operation; everything is refused again afterwards. ``registry``:
+        the helper / label / category fields of :class:`WriteScope` (helper_entities, assign_entities, ...)."""
         self.scope.configs |= set(configs)
         self.scope.deletions |= set(deletions)
         self.scope.entities |= set(entities)
         self.scope.metadata = metadata
+        for name, values in registry.items():
+            target = getattr(self.scope, name)
+            if not isinstance(target, set):
+                raise NotAllowed(f"Unknown write scope {name}")
+            target |= set(values)
         try:
             yield self.scope
         finally:

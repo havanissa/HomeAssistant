@@ -2,12 +2,13 @@
 # Independent of every other App in this repository (Smart Comfort, Smart Occupancy Detection, Automation Builder,
 # Smart Predictive Climate): its own slug, container, /data folder, backups and versions. It needs none of them.
 name: Automation Import/Export Manager
-version: "0.1.2"
+version: "0.2.0"
 slug: automation_import_export
 description: >-
   Export, archive, clean up and restore your Home Assistant automations with
-  their labels, categories, areas, entity ids and enabled states. Verified
-  archives, an explicit Export & Delete workflow and staged restoration.
+  their labels, categories, areas, entity ids and enabled states, and your
+  helpers, labels and categories with where they are used. Verified archives,
+  explicit Export & Delete workflows and staged restoration.
 url: https://github.com/havanissa/HomeAssistant/tree/main/automation_import_export
 arch:
   - aarch64
@@ -30,11 +31,15 @@ panel_admin: true
 # websocket commands and writes only for a confirmed operation (backend/aie/ha.py): Home Assistant's automation
 # editor endpoint /config/automation/config/<id> (never for automation_builder_* ids), the entity registry of the
 # automations being restored, automation.turn_on/turn_off/reload of those, and creating a missing label, automation
-# category, area or blueprint. Nothing is ever deleted except automations the user confirmed.
+# category, area or blueprint. Helpers (Settings -> Helpers), labels and categories are created, updated or deleted
+# only within a confirmed restore or Back up & delete, and only the items of that operation; other entities,
+# devices and areas only get labels and categories put back. Nothing is ever deleted that the user did not confirm.
 homeassistant_api: true
 hassio_api: false
-# Read-only: blueprints/automation/** (so archives can include the blueprint files) and automations.yaml (to find
-# duplicate or missing ids). Nothing else is read; nothing can be written.
+# Read-only: blueprints/automation/** (so archives can include the blueprint files), automations.yaml (to find
+# duplicate or missing ids), and - for the usage overview of helpers, searched in memory and never stored - the
+# YAML files of the configuration (never secrets.yaml) and the options of helper config entries (templates,
+# groups) in .storage/core.config_entries. Nothing can be written.
 map:
   - type: homeassistant_config
     read_only: true

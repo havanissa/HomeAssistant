@@ -21,3 +21,4 @@ logger:
   default: warning
 automation: !include automations.yaml
 automation legacy: !include legacy_automations.yaml
+script ui: !include scripts.yaml

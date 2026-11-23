@@ -65,7 +65,7 @@ def main(tokens_path: Path, out: Path) -> int:  # noqa: PLR0915 - one linear sce
 
     with sync_playwright() as p:
         browser = p.chromium.launch(executable_path=chromium())
-        archive_id = api("archives")["archives"][0]["archive_id"]
+        archive_id = next(a for a in api("archives")["archives"] if a.get("kind") != "registry")["archive_id"]
         for label, (width, height) in SIZES.items():
             for scheme in (("light", "dark") if label == "desktop" else ("light",)):
                 tag = f"{label}-{scheme}"
@@ -132,6 +132,72 @@ def main(tokens_path: Path, out: Path) -> int:  # noqa: PLR0915 - one linear sce
                         .filter(r => r.height < 43.5).length""")
                     check(f"{tag}: touch targets are at least 44 px", small == 0, str(small))
                 shot("export")
+
+                # ---- helpers, labels & categories (0.2)
+                go("#/registry?tab=helpers&refresh=1", "#list .auto")
+                reg = api("registry")
+                check(f"{tag}: registry lists every helper", frame.locator("#list .auto").count() == len(reg["helpers"]),
+                      f"{frame.locator('#list .auto').count()} vs {len(reg['helpers'])}")
+                check(f"{tag}: registry shows used and unused", frame.locator('#list [data-status="unused"]').count() >= 1
+                      and frame.locator('#list [data-status="used"]').count() >= 1)
+                check(f"{tag}: registry fits the width", not overflow())
+                frame.locator('#list [data-row="helper:input_number:aie_target_temp"] summary').click()
+                check(f"{tag}: where a helper is used", "AIE heat" in frame.locator(
+                    '#list [data-row="helper:input_number:aie_target_temp"]').inner_text())
+                shot("registry-helpers")
+                frame.locator('nav.tabs [data-tab="labels"]').click()
+                frame.locator('#list [data-row^="label:"]').first.wait_for(timeout=15000)
+                check(f"{tag}: labels tab", frame.locator("#list .auto").count() == len(reg["labels"]))
+                frame.locator("#f-show").select_option("unused")
+                unused = sum(1 for x in reg["labels"] if not x["count"])
+                check(f"{tag}: filter: not used", frame.locator("#list .auto").count() == unused, str(unused))
+                frame.locator("#sel-shown").click()
+                check(f"{tag}: select all shown", f"{unused} selected" in frame.locator("#sel-count").inner_text(),
+                      frame.locator("#sel-count").inner_text())
+                frame.locator("#sel-none").click()
+                check(f"{tag}: deselect all", frame.locator("#sel-count").inner_text().startswith("0 selected")
+                      and frame.locator("#cleanup").is_disabled())
+                frame.locator("#f-show").select_option("all")
+                frame.locator('nav.tabs [data-tab="categories"]').click()
+                frame.locator('#list [data-row^="category:"]').first.wait_for(timeout=15000)
+                check(f"{tag}: categories tab with scopes", "Helpers" in frame.locator("#list").inner_text()
+                      and not overflow())
+                shot("registry-categories")
+                if label == "phone":
+                    small = inner.evaluate("""[...document.querySelectorAll('button, .button, nav a, select')]
+                        .filter(e => e.offsetParent).map(e => e.getBoundingClientRect())
+                        .filter(r => r.height < 43.5).length""")
+                    check(f"{tag}: registry touch targets are at least 44 px", small == 0, str(small))
+                if tag == "desktop-light":
+                    # the whole Back up & delete -> restore flow in the interface, for an unused label
+                    frame.locator('nav.tabs [data-tab="labels"]').click()
+                    frame.locator('#list input[data-key="label:aie_unused_label"]').check()
+                    frame.locator("#cleanup").click()
+                    frame.locator("dialog [data-d=ok]").click()
+                    frame.locator("#delete").wait_for(timeout=60000)
+                    check(f"{tag}: registry deletion preview with archive", frame.locator("#download").is_visible()
+                          and "AIE Unused label" in frame.locator("#del-list").inner_text()
+                          and frame.locator("#delete").is_disabled())
+                    shot("registry-cleanup-preview")
+                    frame.locator("#ack").check()
+                    frame.locator("#count").fill("1")
+                    frame.locator("#delete").click()
+                    frame.locator('h1 [data-status="completed"]').wait_for(timeout=60000)
+                    check(f"{tag}: registry label deleted from the interface",
+                          not any(x["id"] == "aie_unused_label" for x in api("registry")["labels"]))
+                    frame.locator("text=Restore from this archive…").click()
+                    frame.locator("#run").wait_for(timeout=30000)
+                    check(f"{tag}: registry restore preview", "Create" in frame.locator("#items").inner_text())
+                    shot("registry-restore")
+                    frame.locator("#run").click()
+                    frame.locator("dialog [data-d=ok]").click()
+                    for _ in range(120):
+                        if inner.evaluate("location.hash").startswith("#/operation/"):
+                            break
+                        time.sleep(0.25)
+                    frame.locator('h1 [data-status="completed"]').wait_for(timeout=60000)
+                    check(f"{tag}: registry label restored from the interface",
+                          any(x["id"] == "aie_unused_label" for x in api("registry")["labels"]))
 
                 go("#/archives", "#archives")
                 check(f"{tag}: archives listed", frame.locator("#archives tbody tr").count() >= 1)
