@@ -29,7 +29,7 @@ from typing import Any
 import aiohttp
 
 from . import blueprint, catalog, compiler, conflicts as conflict_check, describe, designers, importer, model, simulate
-from .designers import gallery, lighting2, presence as presence_sources, solar, switches
+from .designers import gallery, heating, levels, lighting2, presence as presence_sources, solar, switches
 from .const import APP_NAME, APP_VERSION
 from .diagnostics import Observer
 from .discovery import Index
@@ -75,6 +75,7 @@ class AppCore:
         self._deploy_lock = asyncio.Lock()
         self.last_results: dict[str, dict[str, Any]] = {}  # device id -> the last deployment attempt
         self.observer = Observer(self)
+        self.light_observations = levels.Observations(settings.data_dir)
         self._recovering: asyncio.Task[Any] | None = None
 
     async def start(self) -> None:
@@ -88,6 +89,11 @@ class AppCore:
     def _on_ha(self, kind: str, payload: Any) -> None:
         if kind == "state":
             self.observer.on_state(*payload)
+            if self.store.config.get("light_levels") and self.ha is not None:
+                try:
+                    self.light_observations.on_state(self.store.config["light_levels"], self.ha.states, *payload)
+                except Exception:  # noqa: BLE001 - an observation must never disturb the connection
+                    _LOGGER.exception("Light observation failed")
         elif kind == "status" and isinstance(payload, dict) and payload.get("connected") and self.deploys.pending \
                 and (self._recovering is None or self._recovering.done()):
             self._recovering = asyncio.get_running_loop().create_task(self.recover())
@@ -189,7 +195,7 @@ class AppCore:
         """
         index = index or self.index()
         connected = bool(self.ha and self.ha.connected)
-        expansion = designers.expand(device, self.presence, index=index if connected else None)
+        expansion = designers.expand(device, self.presence, index=index if connected else None, shared=self.store.config)
         effective = designers.effective(device, expansion)
         compiled = compiler.compile_device(effective, self.store.config["settings"])
         found = conflict_check.analyse(effective, index.name) + expansion.conflicts
@@ -385,7 +391,7 @@ class AppCore:
                         + (1 if live["turned_off"] else 0))
             devices.append({
                 "id": device["id"], "name": device["name"], "enabled": device["enabled"],
-                "room": index.room_of(device["targets"]),
+                "room": self._room_of(device, index),
                 "default": bool(model.active_default(device)),
                 "designers": [{"id": g.get("id"), "kind": g.get("kind"), "name": g.get("name")} for g in device.get("designers") or []],
                 "targets": self._targets_view(device, index),
@@ -400,6 +406,16 @@ class AppCore:
                 "totals": {"devices": len(devices), "rules": sum(d["rules"] for d in devices),
                            "automations": sum(d["automations"] for d in devices),
                            "warnings": sum(d["warnings"] for d in devices)}}
+
+    @staticmethod
+    def _room_of(device: dict[str, Any], index: Index) -> dict[str, Any]:
+        """Where a device is listed. A room's light level device belongs to its room (its entities are the App's
+        helpers, which have no area)."""
+        for d in device.get("designers") or []:
+            if d.get("kind") == levels.KIND and isinstance(d.get("room"), str):
+                name = index.areas.get(d["room"]) or d["room"]
+                return {"kind": "room", "area_id": d["room"], "name": name, "areas": [{"area_id": d["room"], "name": name}]}
+        return index.room_of(device["targets"])
 
     @staticmethod
     def _room_groups(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -431,7 +447,7 @@ class AppCore:
                 await self.observer.refresh(item["id"])
         return {
             "rule_diagnostics": self._rule_views(device, analysis, live, index),
-            "room": index.room_of(device["targets"]),
+            "room": self._room_of(device, index),
             "default_summary": (describe.default_rule(device["default_rule"], index.name, device["targets"])
                                 if device.get("default_rule") else None),
             "originals": self._originals(device, index),
@@ -443,7 +459,7 @@ class AppCore:
             "live": live, "mismatches": self._mismatches(analysis["effective"], index),
             "related": await self._related_automations(device, index),
             "last_result": self.last_results.get(device["id"]),
-            "blueprint_inputs": len(blueprint.inputs_of(device, self.presence)),
+            "blueprint_inputs": len(blueprint.inputs_of(device, self.presence, self.store.config)),
             "designers": self._designers_view(device, analysis, index),
             "presence": self._sources_view(index),
         }
@@ -477,7 +493,7 @@ class AppCore:
         clean = model.validate_config(new_config)
         generated: set[str] = set()
         for device in clean["devices"].values():  # a confirmation belongs to a conflict that still exists
-            expansion = designers.expand(device, clean.get("presence"))
+            expansion = designers.expand(device, clean.get("presence"), shared=clean)
             keys = {c["key"] for c in conflict_check.analyse(designers.effective(device, expansion))}
             keys |= {c["key"] for c in expansion.conflicts}
             device["acknowledged"] = [k for k in device["acknowledged"] if k in keys]
@@ -670,6 +686,10 @@ class AppCore:
             changes.append({"type": "settings", "name": "Settings", "rules": 0})
         if self.store.config.get("presence") != new.get("presence"):
             changes.append({"type": "settings", "name": "Presence sources", "rules": 0})
+        if self.store.config.get("light_levels") != new.get("light_levels"):
+            changes.append({"type": "settings", "name": "Light levels (templates, default matrices, rooms)", "rules": 0})
+        if self.store.config.get("heating") != new.get("heating"):
+            changes.append({"type": "settings", "name": "Heating templates and room profiles", "rules": 0})
         return {"valid": True, "changes": changes, "devices": len(after), "revision": self.store.revision,
                 "note": "Nothing in Home Assistant changes: deployed automations stay as they are until you deploy "
                         "each device again. Automations of devices that disappear are listed on the Overview."}
@@ -757,6 +777,7 @@ class AppCore:
         params: dict[str, Any] = {"name": helper["name"], "icon": "mdi:hand-back-right"}
         if helper["domain"] == "timer":
             params.update(duration="00:00:00", restore=True)
+        params.update(helper.get("params") or {})  # input_text / input_number: their range and mode
         try:
             created = await ha.command(f"{helper['domain']}/create", **params) or {}
         except HomeAssistantError as err:
@@ -1044,6 +1065,8 @@ class AppCore:
         """Remove a device with its rules and, first, its automations in Home Assistant."""
         async with self._deploy_lock:
             device = self._device(device_id)
+            if any(d.get("kind") == levels.KIND for d in device.get("designers") or []):
+                raise ConfigError("in_use", "This is a room's light level: remove it on the Light Level page.", 409)
             self.store.check_revision(expected_revision)
             records = self.deploys.of_device(device["id"])
             if records:
@@ -1128,7 +1151,8 @@ class AppCore:
             device = model.validate_device(device["id"], {**device, "blueprint": draft}, "device", problems)
             if problems.items:
                 raise ConfigError("invalid", problems.items[0]["message"], problems=problems.items)
-        built = blueprint.build(device, self.store.config["settings"], names=index.name, presence=self.presence)
+        built = blueprint.build(device, self.store.config["settings"], names=index.name, presence=self.presence,
+                                shared=self.store.config)
         validation: list[dict[str, str]] = [{"level": "error", "message": p} for p in built["problems"]]
         if built["config"] is not None and not built["problems"]:
             if self.ha is not None and self.ha.connected:
@@ -1438,7 +1462,8 @@ class AppCore:
 
     def delete_designer(self, device_id: Any, designer_id: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
         device = self._device(device_id)
-        self._designer(device, designer_id)
+        if self._designer(device, designer_id).get("kind") == levels.KIND:
+            raise ConfigError("in_use", "This is a room's light level: remove it on the Light Level page.", 409)
         new = copy.deepcopy(self.store.config)
         rest = [d for d in device.get("designers") or [] if d.get("id") != designer_id]
         target = new["devices"][device["id"]]
@@ -1477,10 +1502,19 @@ class AppCore:
                                      "rules": len(a["rule_ids"]), "group": a.get("group")} for a in mine]
             extra["adoptable"] = [{k: v for k, v in item.items() if k != "trigger"} | {"trigger": describe.trigger(item["trigger"], index.name)}
                                   for item in lighting2.adoptable(device, config)]
+        elif config.get("kind") == heating.KIND and item["supported"]:
+            extra["live"] = self._heating_live(analysis, config, index)
+            extra["helpers"] = self._helpers_view(analysis["expansion"], config["id"], index)
+            extra["automations"] = [{"id": a["id"], "alias": a["alias"], "mode": a["mode"], "role": a["role"],
+                                     "rules": len(a["rule_ids"]), "group": a.get("group")} for a in mine]
+            extra["profiles"] = self.heating_view(index)
+            extra["quick"] = [{"id": k, "name": v} for k, v in heating.QUICK.items()]
         elif config.get("kind") == "lighting" and config.get("version") == 1:
             extra["conversion"] = {k: v for k, v in lighting2.convert(config, (self.presence or {}).get("sources") or {}).items()
                                    if k != "designer"}
-        if mine and config.get("version") == 2:
+        if config.get("kind") == "lighting" and config.get("version") == 2:
+            extra["levels"] = self._level_rooms_brief(index)
+        if mine and (config.get("version") == 2 or config.get("kind") == heating.KIND):
             text = "".join(compiler.to_yaml(compiler.with_id(a)) for a in mine)
         else:
             text = compiler.to_yaml(compiler.with_id(shared)) if shared else ""
@@ -1508,13 +1542,17 @@ class AppCore:
         effective = analysis["effective"]
         scenario = scenario if isinstance(scenario, dict) else {}
         result = simulate.run(effective, scenario, analysis["expansion"].refs.evaluators, index.name)
-        lighting = {}
+        lighting, heat = {}, {}
         for designer_id, gen in analysis["expansion"].generators.items():
             ev = simulate.Evaluator(scenario.get("states") or {}, {"time": scenario.get("time") or "12:00:00",
                                                                   "weekday": scenario.get("weekday") or "mon"},
                                     analysis["expansion"].refs.evaluators, index.name)
-            lighting[designer_id] = {**lighting2.simulate(gen, ev, scenario, index.name), "missing": sorted(ev.missing)}
+            if gen.d.get("kind") == heating.KIND:
+                heat[designer_id] = {**heating.simulate(gen, ev, scenario, index.name), "missing": sorted(ev.missing)}
+            elif gen.d.get("kind") == "lighting":
+                lighting[designer_id] = {**lighting2.simulate(gen, ev, scenario, index.name), "missing": sorted(ev.missing)}
         result["lighting"] = lighting
+        result["heating"] = heat
         return {**result, "triggers": simulate.triggers_of(effective, index.name),
                 "problems": [p for p in analysis["notes"] if p.get("level") == "blocking"],
                 "conflicts": [c for c in analysis["conflicts"] if c["level"] == "blocking" and not c["acknowledged"]]}
@@ -1558,6 +1596,15 @@ class AppCore:
         ev = simulate.Evaluator(lighting2.live_states(index, now), local, analysis["expansion"].refs.evaluators, index.name)
         return {"available": True, "at": now.isoformat(timespec="seconds"),
                 **lighting2.simulate(gen, ev, {}, index.name)}
+
+    def _heating_live(self, analysis: dict[str, Any], config: dict[str, Any], index: Index) -> dict[str, Any]:
+        """What each thermostat's automation would decide now (the Python twin with Home Assistant's states)."""
+        gen = analysis["expansion"].generators.get(config["id"])
+        if gen is None or not (self.ha and self.ha.connected):
+            return {"available": False, "thermostats": []}
+        now, local = self._now()
+        ev = simulate.Evaluator(lighting2.live_states(index, now), local, analysis["expansion"].refs.evaluators, index.name)
+        return {"available": True, "at": now.isoformat(timespec="seconds"), **heating.simulate(gen, ev, {}, index.name)}
 
     def _helpers_view(self, expansion: Any, designer_id: str, index: Index) -> list[dict[str, Any]]:
         out = []
@@ -1661,6 +1708,400 @@ class AppCore:
         if not new["presence"]["sources"]:
             del new["presence"]
         return self._save(new, expected_revision, f"presence source removed: {source_id}", by)
+
+    # ------------------------------------------------------------ the Light Level Manager (0.5)
+    @staticmethod
+    def _blank_levels() -> dict[str, Any]:
+        return {"templates": {}, "matrices": {}, "default_template": None,
+                "default_matrices": {"truth": None, "brightness": None}, "rooms": {}}
+
+    def _levels_users(self, area_id: str) -> list[dict[str, Any]]:
+        """The Lighting Designers (and their light-level matrices) that read a room's light level."""
+        out = []
+        for device in self.store.config["devices"].values():
+            for d in device.get("designers") or []:
+                if area_id in levels.referenced_rooms(d):
+                    matrices = [m for layer in levels.LAYERS for m in d[layer]["matrices"] if (m.get("level") or {}).get("room") == area_id]
+                    out.append({"device_id": device["id"], "device": device["name"], "designer_id": d["id"], "designer": d["name"],
+                                "lights": d["lights"], "matrices": [{"id": m["id"], "name": m["name"],
+                                                                     "layer": "truth" if m in d["truth"]["matrices"] else "brightness"} for m in matrices]})
+        return out
+
+    def _level_rooms_brief(self, index: Index) -> list[dict[str, Any]]:
+        """For the Lighting Designer: the rooms with a light level, their bands and helper."""
+        lv = self.store.config.get("light_levels") or {}
+        out = []
+        for area_id, room in (lv.get("rooms") or {}).items():
+            template = (lv.get("templates") or {}).get(room["template"] or "")
+            eff = levels.effective(room, template)
+            helper = levels.helper_ids(room["device_id"], area_id)["band"]
+            out.append({"area_id": area_id, "name": index.areas.get(area_id) or area_id, "template": template["name"] if template else None,
+                        "bands": [{"id": b["id"], "name": b["name"]} for b in eff["bands"]], "helper": helper,
+                        "band": (index.states.get(helper) or {}).get("state"), "device_id": room["device_id"],
+                        "matrices": {layer: room["matrices"][layer] for layer in levels.LAYERS}})
+        return sorted(out, key=lambda r: str(r["name"]).casefold())
+
+    async def levels_view(self) -> dict[str, Any]:
+        """Everything the Light Level page shows: templates, default matrices, rooms with their live readings."""
+        index = self.index()
+        lv = self.store.config.get("light_levels") or self._blank_levels()
+        now = datetime.now(UTC)
+        rooms = []
+        for area_id, room in sorted(lv["rooms"].items(), key=lambda r: str(index.areas.get(r[0]) or r[0]).casefold()):
+            template = lv["templates"].get(room["template"] or "")
+            eff = levels.effective(room, template)
+            ids = levels.helper_ids(room["device_id"], area_id)
+            band_state = (index.states.get(ids["band"]) or {}).get("state")
+            read = levels.reading(room, index.states, now)
+            band_ids = [b["id"] for b in eff["bands"]]
+            current = band_ids.index(band_state) if band_state in band_ids else -1
+            computed = None
+            if eff["bands"]:
+                found = levels.band_index(read["value"], [b["below"] for b in eff["bands"][:-1]],
+                                          eff["settings"]["hysteresis"]["value"] or 0, current)
+                computed = band_ids[found] if found >= 0 else None
+            watched = room["ambient"]["reference"] if room["ambient"]["method"] == "reference" else room["source"]
+            src_state = index.states.get((watched or {}).get("entity_id") or "") if watched else None
+            device = self.store.config["devices"].get(room["device_id"])
+            status, problems = None, []
+            if device is not None:
+                analysis = self.analysis(device, index)
+                live = await self._live(device, analysis)
+                status = {"status": live["status"], "text": live["status_text"], "last_sync": live["last_sync"]}
+                problems = [p for p in analysis["notes"] if p.get("level") in ("blocking", "warning")] + analysis["entity_problems"]
+            users = self._levels_users(area_id)
+            using = {u["designer_id"] for u in users}
+            candidates = [{"device_id": dev["id"], "device": dev["name"], "designer_id": g["id"], "designer": g["name"], "lights": g["lights"]}
+                          for dev in self.store.config["devices"].values() if self._room_of(dev, index).get("area_id") == area_id
+                          for g in dev.get("designers") or [] if g.get("kind") == "lighting" and g.get("version") == 2 and g["id"] not in using]
+            loop = []
+            if room["ambient"]["method"] == "none" and users and not eff["settings"]["hysteresis"]["value"]:
+                loop.append("The lights that follow this level can light the sensor themselves, and there is no hysteresis: "
+                            "the level (and the lights) can switch back and forth. Add a hysteresis larger than the lamps' "
+                            "contribution, a stabilisation delay, or an ambient estimate.")
+            observed = {light: self.light_observations.summary(area_id, light) for light in room["ambient"]["lights"]}
+            for light, obs in observed.items():
+                h = eff["settings"]["hysteresis"]["value"] or 0
+                if obs and room["ambient"]["method"] == "none" and obs["median"] >= h and users:
+                    loop.append(f"{index.name(light)} lifts the reading by about {obs['median']:g} lx at full brightness "
+                                f"({obs['count']} observations); the hysteresis is {h:g} lx.")
+            rooms.append({**room, "name": index.areas.get(area_id) or area_id, "area_exists": area_id in index.areas,
+                          "effective": eff, "helpers": ids, "band": band_state,
+                          "band_name": next((b["name"] for b in eff["bands"] if b["id"] == band_state), None),
+                          "computed": computed, "reading": read,
+                          "source_state": {"entity_id": watched.get("entity_id") if watched else None,
+                                           "state": (src_state or {}).get("state"), "unit": ((src_state or {}).get("attributes") or {}).get("unit_of_measurement"),
+                                           "available": bool(src_state) and (src_state or {}).get("state") not in ("unavailable", "unknown"),
+                                           "last_updated": (src_state or {}).get("last_updated"),
+                                           "last_reported": (src_state or {}).get("last_reported"),
+                                           "name": index.name(watched["entity_id"]) if watched and watched.get("entity_id") else None},
+                          "status": status, "problems": problems, "used_by": users, "candidates": candidates, "loop": loop, "observed": observed,
+                          "light_names": {light: index.name(light) for light in room["ambient"]["lights"]}})
+        templates = []
+        for tid, t in lv["templates"].items():
+            using = [{"area_id": a, "name": index.areas.get(a) or a, "bands": {b: o["below"] for b, o in r["overrides"]["bands"].items()},
+                      "settings": [k for k in levels.SETTINGS if k in r["overrides"]],
+                      "deployed": bool(self.deploys.of_device(r["device_id"]))}
+                     for a, r in lv["rooms"].items() if r["template"] == tid]
+            templates.append({**t, "used_by": using, "matrices": [m["id"] for m in lv["matrices"].values() if m["template"] == tid],
+                              "default": lv["default_template"] == tid})
+        matrices = [{**m, "used_by": [index.areas.get(a) or a for a, r in lv["rooms"].items() if r["matrices"][m["layer"]] == mid],
+                     "default": lv["default_matrices"][m["layer"]] == mid} for mid, m in lv["matrices"].items()]
+        configured = set(lv["rooms"])
+        return {"templates": sorted(templates, key=lambda t: t["name"].casefold()), "matrices": sorted(matrices, key=lambda m: m["name"].casefold()),
+                "default_template": lv["default_template"], "default_matrices": lv["default_matrices"], "rooms": rooms,
+                "areas": [{"area_id": a, "name": n, "configured": a in configured} for a, n in sorted(index.areas.items(), key=lambda a: str(a[1]).casefold())],
+                "methods": [{"id": k, "name": v} for k, v in levels.METHOD_NAMES.items()],
+                "settings": [{"id": k, "name": v} for k, v in levels.SETTING_NAMES.items()],
+                "revision": self.store.revision, "connected": bool(self.ha and self.ha.connected)}
+
+    def _levels_copy(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        new = copy.deepcopy(self.store.config)
+        new["light_levels"] = new.get("light_levels") or self._blank_levels()
+        return new, new["light_levels"]
+
+    @staticmethod
+    def _bumped(old: dict[str, Any] | None, candidate: dict[str, Any], validate: Any, ident: str) -> dict[str, Any]:
+        """The candidate with its version: unchanged content keeps the version, a change raises it by one."""
+        p = model.Problems()
+        clean = validate(ident, candidate, "item", p)
+        if p.items:
+            raise ConfigError("invalid", p.items[0]["message"], problems=p.items)
+        if old is None:
+            return {**clean, "version": 1}
+        same = {k: v for k, v in clean.items() if k != "version"} == {k: v for k, v in old.items() if k != "version"}
+        return {**clean, "version": old["version"] if same else old["version"] + 1}
+
+    def save_level_template(self, template: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        if not isinstance(template, dict):
+            raise ConfigError("invalid", "Not a light-level template")
+        import secrets
+        new, lv = self._levels_copy()
+        tid = template.get("id") or f"t_{secrets.token_hex(4)}"
+        if template.get("id") and tid not in lv["templates"]:
+            raise ConfigError("unknown_template", "This template does not exist (anymore).", 404)
+        lv["templates"][tid] = self._bumped(lv["templates"].get(tid), template, levels.validate_template, tid)
+        saved = self._save(new, expected_revision, f"light-level template saved: {tid}", by)
+        return {**saved, "template_id": tid}
+
+    def add_level_preset(self, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        import secrets
+        new, lv = self._levels_copy()
+        tid = f"t_{secrets.token_hex(4)}"
+        lv["templates"][tid] = levels.preset_template(tid)
+        if lv["default_template"] is None:
+            lv["default_template"] = tid
+        return {**self._save(new, expected_revision, f"light-level template added: {tid}", by), "template_id": tid}
+
+    def duplicate_level_template(self, template_id: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        import secrets
+        new, lv = self._levels_copy()
+        if template_id not in lv["templates"]:
+            raise ConfigError("unknown_template", "This template does not exist (anymore).", 404)
+        tid = f"t_{secrets.token_hex(4)}"
+        lv["templates"][tid] = {**copy.deepcopy(lv["templates"][template_id]), "id": tid, "version": 1,
+                                "name": f"Copy of {lv['templates'][template_id]['name']}"[:60]}
+        return {**self._save(new, expected_revision, f"light-level template duplicated: {tid}", by), "template_id": tid}
+
+    def delete_level_template(self, template_id: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        new, lv = self._levels_copy()
+        if template_id not in lv["templates"]:
+            raise ConfigError("unknown_template", "This template does not exist (anymore).", 404)
+        users = [a for a, r in lv["rooms"].items() if r["template"] == template_id]
+        matrices = [m["name"] for m in lv["matrices"].values() if m["template"] == template_id]
+        if users or matrices:
+            raise ConfigError("in_use", "This template is used by " + ", ".join(
+                [*(f"the room {self.index().areas.get(a) or a}" for a in users), *(f"the matrix “{m}”" for m in matrices)])
+                + ". Choose another template there first.", 409)
+        del lv["templates"][template_id]
+        if lv["default_template"] == template_id:
+            lv["default_template"] = None
+        return self._save(new, expected_revision, f"light-level template removed: {template_id}", by)
+
+    def save_level_matrix(self, matrix: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        if not isinstance(matrix, dict):
+            raise ConfigError("invalid", "Not a matrix")
+        import secrets
+        new, lv = self._levels_copy()
+        mid = matrix.get("id") or f"x_{secrets.token_hex(4)}"
+        old = lv["matrices"].get(mid)
+        if matrix.get("id") and old is None:
+            raise ConfigError("unknown_matrix", "This matrix does not exist (anymore).", 404)
+        if old and matrix.get("layer") != old["layer"]:
+            raise ConfigError("invalid", "A matrix keeps its kind (Truth or Brightness).")
+        lv["matrices"][mid] = self._bumped(old, matrix, levels.validate_matrix, mid)
+        saved = self._save(new, expected_revision, f"default matrix saved: {mid}", by)
+        return {**saved, "matrix_id": mid}
+
+    def delete_level_matrix(self, matrix_id: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        new, lv = self._levels_copy()
+        if matrix_id not in lv["matrices"]:
+            raise ConfigError("unknown_matrix", "This matrix does not exist (anymore).", 404)
+        users = [a for a, r in lv["rooms"].items() if matrix_id in r["matrices"].values()]
+        if users:
+            raise ConfigError("in_use", "Rooms use this matrix: " + ", ".join(self.index().areas.get(a) or a for a in users)
+                              + ". Choose another one there first.", 409)
+        del lv["matrices"][matrix_id]
+        for layer in levels.LAYERS:
+            if lv["default_matrices"][layer] == matrix_id:
+                lv["default_matrices"][layer] = None
+        return self._save(new, expected_revision, f"default matrix removed: {matrix_id}", by)
+
+    def save_level_defaults(self, defaults: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        defaults = defaults if isinstance(defaults, dict) else {}
+        new, lv = self._levels_copy()
+        if "default_template" in defaults:
+            lv["default_template"] = defaults["default_template"] or None
+        for layer in levels.LAYERS:
+            if layer in (defaults.get("default_matrices") or {}):
+                lv["default_matrices"][layer] = defaults["default_matrices"][layer] or None
+        return self._save(new, expected_revision, "light-level defaults changed", by)
+
+    def save_level_room(self, room: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        """Save a room's light level; the first save adds the room and its light level device (nothing is deployed)."""
+        if not isinstance(room, dict) or not isinstance(room.get("area_id"), str) or not levels.AREA_ID.match(room["area_id"]):
+            raise ConfigError("invalid", "Choose the room")
+        area_id = room["area_id"]
+        index = self.index()
+        new, lv = self._levels_copy()
+        old = lv["rooms"].get(area_id)
+        if old is None:
+            if room.get("create") is not True:
+                raise ConfigError("unknown_room", "This room has no light level (anymore).", 404)
+            device_id = model.new_device_id()
+            while device_id in new["devices"]:
+                device_id = model.new_device_id()
+            candidate = levels.blank_room(area_id, device_id, lv)
+            candidate.update({k: v for k, v in room.items() if k in ("template", "source", "matrices", "ambient")})
+        else:
+            candidate = {**copy.deepcopy(old), **{k: v for k, v in room.items() if k in (
+                "template", "source", "overrides", "matrices", "matrix_overrides", "ambient")}}
+            candidate["device_id"] = old["device_id"]
+        clean = self._bumped(old, candidate, levels.validate_room, area_id)
+        lv["rooms"][area_id] = clean
+        name = f"Light Level · {index.areas.get(area_id) or area_id}"[: model.MAX_NAME]
+        device = new["devices"].get(clean["device_id"]) or {
+            "name": name, "enabled": True, "rules": [], "acknowledged": [], "ha_device_id": None,
+            "designers": [{"id": designers.new_designer_id(), "kind": levels.KIND, "version": levels.VERSION,
+                           "name": "Light Level", "enabled": True, "room": area_id}]}
+        device["targets"] = levels.device_targets(clean)
+        new["devices"][clean["device_id"]] = device
+        saved = self._save(new, expected_revision, f"room light level {'added' if old is None else 'changed'}: {area_id}", by)
+        return {**saved, "area_id": area_id, "device_id": clean["device_id"]}
+
+    async def delete_level_room(self, area_id: Any, expected_revision: Any, overwrite: bool, by: str | None) -> dict[str, Any]:
+        """Remove a room's light level: its automation and helpers from Home Assistant first, then the configuration."""
+        lv = self.store.config.get("light_levels") or {}
+        room = (lv.get("rooms") or {}).get(area_id)
+        if room is None:
+            raise ConfigError("unknown_room", "This room has no light level (anymore).", 404)
+        users = self._levels_users(area_id)
+        if users:
+            raise ConfigError("in_use", "Lighting Designers use this room's light level: " + ", ".join(
+                f"{u['device']}: {u['designer']}" for u in users) + ". Remove their light-level matrices first.", 409)
+        async with self._deploy_lock:
+            self.store.check_revision(expected_revision)
+            device_id = room["device_id"]
+            records = self.deploys.of_device(device_id)
+            if records:
+                self._require_ha()
+                for automation_id in records:
+                    await self._remove_automation(automation_id, overwrite)
+            for entity_id in [e for e, r in self.deploys.helpers.items() if r.get("device_id") == device_id]:
+                try:
+                    await self._delete_helper(entity_id)
+                except DeployError as err:
+                    raise ConfigError("deploy_failed", f"{err} The room's light level was kept.", 502) from err
+            new, nlv = self._levels_copy()
+            del nlv["rooms"][area_id]
+            new["devices"].pop(device_id, None)
+            self.last_results.pop(device_id, None)
+            self.light_observations.clear(area_id)
+            return {**self._save(new, expected_revision, f"room light level removed: {area_id}", by),
+                    "removed_automations": len(records)}
+
+    def level_sensors(self, area: Any, everywhere: bool, query: Any = "") -> dict[str, Any]:
+        """Candidate light sensors (illuminance, lux): those of the room, or of every room on request."""
+        index = self.index()
+        tokens = [t for t in str(query or "").casefold().split() if t]
+        out = []
+        for entity_id, state in index.states.items():
+            domain = entity_id.split(".", 1)[0]
+            attrs = state.get("attributes") or {}
+            lux = attrs.get("device_class") == "illuminance" or str(attrs.get("unit_of_measurement") or "").lower() in ("lx", "lux")
+            if domain not in levels.SOURCE_DOMAINS or not lux or index.hidden(entity_id):
+                continue
+            if not everywhere and index.area_of(entity_id) != area:
+                continue
+            choice = index.entity_choice(entity_id)
+            if tokens and not all(t in f"{entity_id} {choice['name']}".casefold() for t in tokens):
+                continue
+            out.append({**choice, "state": state.get("state"), "unit": attrs.get("unit_of_measurement"),
+                        "kind": "template" if (index.registry.get(entity_id) or {}).get("platform") in ("template", "filter", "statistics", "min_max")
+                        else "sensor"})
+        return {"area": area, "everywhere": everywhere, "sensors": sorted(out, key=lambda e: str(e["name"]).casefold())}
+
+    def clear_observations(self, area_id: Any, light: Any) -> dict[str, Any]:
+        if isinstance(area_id, str):
+            self.light_observations.clear(area_id, light if isinstance(light, str) else None)
+        return {"cleared": True}
+
+    # ------------------------------------------------------------ heating templates and room profiles (0.5)
+    def heating_view(self, index: Index | None = None) -> dict[str, Any]:
+        index = index or self.index()
+        hp = self.store.config.get("heating") or {"templates": {}, "default_template": None, "rooms": {}}
+        users: dict[str, list[str]] = {}
+        for device in self.store.config["devices"].values():
+            for d in device.get("designers") or []:
+                if d.get("kind") == heating.KIND and d["profile"]["room"]:
+                    users.setdefault(d["profile"]["room"], []).append(f"{device['name']}: {', '.join(d['thermostats']) or '…'}")
+        rooms = []
+        for area_id, room in sorted(hp["rooms"].items(), key=lambda r: str(index.areas.get(r[0]) or r[0]).casefold()):
+            template = hp["templates"].get(room["template"] or "")
+            modes = (template or {}).get("modes") or []
+            rooms.append({**room, "name": index.areas.get(area_id) or area_id, "template_name": (template or {}).get("name"),
+                          "cells": {m["id"]: heating.resolve(hp, area_id, None, m["id"]) for m in modes},
+                          "used_by": users.get(area_id, [])})
+        templates = [{**t, "used_by": [index.areas.get(a) or a for a, r in hp["rooms"].items() if r["template"] == tid],
+                      "default": hp["default_template"] == tid} for tid, t in hp["templates"].items()]
+        return {"templates": sorted(templates, key=lambda t: t["name"].casefold()), "rooms": rooms,
+                "default_template": hp["default_template"],
+                "areas": [{"area_id": a, "name": n, "configured": a in hp["rooms"]} for a, n in sorted(index.areas.items(), key=lambda a: str(a[1]).casefold())],
+                "revision": self.store.revision}
+
+    def _heating_copy(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        new = copy.deepcopy(self.store.config)
+        new["heating"] = new.get("heating") or {"templates": {}, "default_template": None, "rooms": {}}
+        return new, new["heating"]
+
+    def save_heating_template(self, template: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        import secrets
+        if template == "preset":
+            new, hp = self._heating_copy()
+            tid = f"h_{secrets.token_hex(4)}"
+            hp["templates"][tid] = heating.preset_template(tid)
+            if hp["default_template"] is None:
+                hp["default_template"] = tid
+            return {**self._save(new, expected_revision, f"heating template added: {tid}", by), "template_id": tid}
+        if not isinstance(template, dict):
+            raise ConfigError("invalid", "Not a heating template")
+        new, hp = self._heating_copy()
+        tid = template.get("id") or f"h_{secrets.token_hex(4)}"
+        if template.get("id") and tid not in hp["templates"]:
+            raise ConfigError("unknown_template", "This template does not exist (anymore).", 404)
+        hp["templates"][tid] = self._bumped(hp["templates"].get(tid), template, heating.validate_template, tid)
+        if template.get("make_default") is True:
+            hp["default_template"] = tid
+        return {**self._save(new, expected_revision, f"heating template saved: {tid}", by), "template_id": tid}
+
+    def delete_heating_template(self, template_id: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        new, hp = self._heating_copy()
+        if template_id not in hp["templates"]:
+            raise ConfigError("unknown_template", "This template does not exist (anymore).", 404)
+        users = [self.index().areas.get(a) or a for a, r in hp["rooms"].items() if r["template"] == template_id]
+        if users:
+            raise ConfigError("in_use", "Room profiles use this template: " + ", ".join(users) + ".", 409)
+        del hp["templates"][template_id]
+        if hp["default_template"] == template_id:
+            hp["default_template"] = None
+        return self._save(new, expected_revision, f"heating template removed: {template_id}", by)
+
+    def save_heating_room(self, room: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        if not isinstance(room, dict) or not isinstance(room.get("area_id"), str) or not heating.AREA_ID.match(room["area_id"]):
+            raise ConfigError("invalid", "Choose the room")
+        area_id = room["area_id"]
+        new, hp = self._heating_copy()
+        old = hp["rooms"].get(area_id)
+        candidate = {"template": room.get("template", (old or {}).get("template") or hp["default_template"]),
+                     "overrides": room.get("overrides", (old or {}).get("overrides") or {})}
+        hp["rooms"][area_id] = {**self._bumped(old, candidate, heating.validate_room, area_id)}
+        return {**self._save(new, expected_revision, f"room heating profile saved: {area_id}", by), "area_id": area_id}
+
+    def delete_heating_room(self, area_id: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        new, hp = self._heating_copy()
+        if area_id not in hp["rooms"]:
+            raise ConfigError("unknown_room", "This room has no heating profile (anymore).", 404)
+        users = [f"{d['name']}" for d in self.store.config["devices"].values() for g in d.get("designers") or []
+                 if g.get("kind") == heating.KIND and g["profile"]["room"] == area_id]
+        if users:
+            raise ConfigError("in_use", "Heating Designers use this profile: " + ", ".join(users) + ".", 409)
+        del hp["rooms"][area_id]
+        return self._save(new, expected_revision, f"room heating profile removed: {area_id}", by)
+
+    def heating_quick(self, device_id: Any, designer_id: Any, kind: Any, expected_revision: Any, by: str | None) -> dict[str, Any]:
+        """Fill in one of the built-in heating templates (illustrative times; no source is chosen)."""
+        device = self._device(device_id)
+        designer = self._designer(device, designer_id)
+        if designer.get("kind") != heating.KIND or kind not in heating.QUICK:
+            raise ConfigError("invalid", "Unknown heating template")
+        _room, template = heating.modes_of(self.store.config.get("heating"), designer["profile"]["room"])
+        modes = [m["id"] for m in (template or {}).get("modes") or []]
+        if kind in ("schedule", "day_night", "presence", "away") and not modes:
+            raise ConfigError("invalid", "Choose the room heating profile first: the template's modes are used.")
+        new = copy.deepcopy(self.store.config)
+        new["devices"][device["id"]] = self._with_designer(device, heating.quick_start(kind, designer, modes))
+        saved = self._save(new, expected_revision, f"heating template applied: {kind}", by)
+        return {**saved, **self.designer_page(device["id"], designer_id)}
 
     # ------------------------------------------------------------ templates and the sun
     def gallery_view(self, device_id: Any) -> dict[str, Any]:

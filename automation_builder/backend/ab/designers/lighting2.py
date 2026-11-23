@@ -92,7 +92,7 @@ MAX_COLUMNS = 12
 MAX_VALUES = 30
 MAX_SWITCHES = 12
 MAX_INTERACTIONS = 16
-MAX_MAPPINGS = 24
+MAX_MAPPINGS = 40
 MAX_ADVANCED = 16
 MAX_RELEASE = 6
 DIM_STEPS = 40
@@ -226,8 +226,39 @@ def _column(raw: Any, path: str, p: Problems, seen: set[str]) -> dict[str, Any]:
     return out
 
 
+def _level_cells(raw: Any, path: str, p: Problems, lights: list[str], cell: Any, kinds: tuple[str, ...]) -> dict[str, Any]:
+    """The cells of a light-level matrix: per light, per band id (the bands come from the room's light level)."""
+    from . import levels as LV
+    out: dict[str, dict[str, Any]] = {}
+    for row, cells in (raw if isinstance(raw, dict) else {}).items():
+        if not isinstance(cells, dict) or not cells:
+            continue
+        if row not in lights:
+            p.add(f"{path}.{row}", f"{row} is not one of this designer's rows: remove its cells first")
+            continue
+        kept = {band: cell(value, f"{path}.{row}.{band}", p, kinds) for band, value in sorted(cells.items())
+                if isinstance(band, str) and LV.BAND_ID.match(band) and value is not None}
+        if kept:
+            out[row] = kept
+    return {row: out[row] for row in lights if row in out}
+
+
 def _matrix(raw: Any, path: str, p: Problems, lights: list[str], layer: str, seen: set[str]) -> dict[str, Any]:
     raw = raw if isinstance(raw, dict) else {}
+    if isinstance(raw.get("level"), dict):
+        from . import levels as LV
+        room = raw["level"].get("room")
+        if not isinstance(room, str) or not LV.AREA_ID.match(room):
+            p.add(f"{path}.level.room", "Choose the room whose light level this matrix uses")
+            room = None
+        cell, kinds = (truth_cell, TRUTH_KINDS) if layer == "truth" else (bright_cell, BRIGHT_KINDS)
+        return {"id": _id(raw.get("id"), "m", f"{path}.id", p, seen),
+                "name": C.text(raw.get("name"), f"{path}.name", p, limit=40) or "Light level",
+                "enabled": raw.get("enabled") is not False, "level": {"room": room}, "columns": [],
+                "cells": _level_cells(raw.get("cells"), f"{path}.cells", p, lights, cell, kinds),
+                "row_defaults": C.row_defaults(raw.get("row_defaults"), f"{path}.row_defaults", p, lights, cell, kinds),
+                "default": C.default_cell(raw.get("default"), f"{path}.default", p, cell, kinds),
+                "policy": None, "ranks": []}
     cseen: set[str] = set()
     columns = [_column(c, f"{path}.columns[{i}]", p, cseen)
                for i, c in enumerate((raw.get("columns") if isinstance(raw.get("columns"), list) else [])[:MAX_COLUMNS])]
@@ -351,9 +382,13 @@ def _switch(raw: Any, path: str, p: Problems, lights: list[str], seen: set[str])
                                      "events, MQTT or an event entity). Choose one Home Assistant offers.")
         if trigger is not None and kind == "latched" and trigger["for_seconds"]:
             p.add(f"{here}.trigger", "A switch interaction is the moment it changes, without “for …”")
-        interactions.append({"id": _id(item.get("id"), "i", f"{here}.id", p, iseen),
-                             "kind": item.get("kind") if item.get("kind") in INTERACTIONS else "other",
-                             "label": C.text(item.get("label"), f"{here}.label", p, limit=60), "trigger": trigger})
+        entry = {"id": _id(item.get("id"), "i", f"{here}.id", p, iseen),
+                 "kind": item.get("kind") if item.get("kind") in INTERACTIONS else "other",
+                 "label": C.text(item.get("label"), f"{here}.label", p, limit=60), "trigger": trigger}
+        button = C.text(item.get("button"), f"{here}.button", p, limit=40)
+        if button:  # the button or channel of a remote, as Home Assistant names it (only present when known)
+            entry["button"] = button
+        interactions.append(entry)
     ids = [i["id"] for i in interactions]
     mseen: set[str] = set()
     mappings = []
@@ -363,17 +398,23 @@ def _switch(raw: Any, path: str, p: Problems, lights: list[str], seen: set[str])
         interaction = item.get("interaction")
         if interaction not in ids:
             p.add(f"{here}.interaction", "Choose one of this control's interactions")
-        mappings.append({"id": _id(item.get("id"), "p", f"{here}.id", p, mseen), "interaction": interaction if interaction in ids else None,
-                         "enabled": item.get("enabled") is not False,
-                         "lights": _lights_of(item.get("lights"), f"{here}.lights", p, lights),
-                         "action": _action(item.get("action"), f"{here}.action", p, lights, ACTIONS),
-                         "override": C.flag(item.get("override"))})
+        entry = {"id": _id(item.get("id"), "p", f"{here}.id", p, mseen), "interaction": interaction if interaction in ids else None,
+                 "enabled": item.get("enabled") is not False,
+                 "lights": _lights_of(item.get("lights"), f"{here}.lights", p, lights),
+                 "action": _action(item.get("action"), f"{here}.action", p, lights, ACTIONS),
+                 "override": C.flag(item.get("override"))}
+        # "only when …": optional conditions of this one mapping (absent unless configured: 0.4 documents unchanged)
+        conditions = model._group(item.get("conditions"), f"{here}.conditions", p, 1, [model.MAX_CONDITIONS], 0)  # noqa: SLF001
+        if conditions["items"]:
+            entry["conditions"] = conditions
+        mappings.append(entry)
     return {"id": _id(raw.get("id"), "w", f"{path}.id", p, seen), "name": C.text(raw.get("name"), f"{path}.name", p, limit=60) or "Switch",
             "kind": kind, "entity_id": C.entity(raw.get("entity_id"), f"{path}.entity_id", p),
             "ha_device_id": raw.get("ha_device_id") if isinstance(raw.get("ha_device_id"), str) and 0 < len(raw["ha_device_id"]) <= 64 else None,
             "interactions": interactions, "mappings": mappings,
-            # where it came from, when that matters to the interface: events mapped by hand, or ordinary rules moved here
-            **{flag: True for flag in ("manual", "adopted") if raw.get(flag) is True}}
+            # where it came from, when that matters to the interface: events mapped by hand, or ordinary rules moved here;
+            # ignore_automations (latched switches): a change of the switch made by an automation is not a press
+            **{flag: True for flag in ("manual", "adopted", "ignore_automations") if raw.get(flag) is True}}
 
 
 def _advanced(raw: Any, path: str, p: Problems, lights: list[str], seen: set[str]) -> dict[str, Any]:
@@ -886,6 +927,53 @@ class _Gen:
             return bool(span(a) & span(b))
         return True
 
+    # ------------------------------------------------------------ light-level matrices
+    def level_room(self, m: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        from . import levels as LV
+        lv = self.x.levels or {}
+        room = (lv.get("rooms") or {}).get((m.get("level") or {}).get("room") or "")
+        template = (lv.get("templates") or {}).get(room["template"] or "") if room else None
+        return room, (LV.effective(room, template) if room and template else None)
+
+    def columns_of(self, m: dict[str, Any]) -> list[dict[str, Any]]:
+        """A matrix's columns; a light-level matrix has one per band of its room (its light level helper's states)."""
+        if not m.get("level"):
+            return m["columns"]
+        from . import levels as LV
+        room, eff = self.level_room(m)
+        if room is None or eff is None:
+            return []
+        helper = LV.helper_ids(room["device_id"], room["area_id"])["band"]
+        return [{"id": b["id"], "kind": "state", "label": b["name"], "entity_id": helper, "state": b["id"], "attribute": None,
+                 "for_seconds": 0, "level": True} for b in eff["bands"]]
+
+    def cell_of(self, m: dict[str, Any], light: str, column: str, layer: str) -> tuple[dict[str, Any] | None, str | None]:
+        """``(cell, where it comes from)``: the light's own cell ("light"), else (light-level matrices) the room's
+        override ("room") or the global default matrix the room adopted ("global")."""
+        own = (m["cells"].get(light) or {}).get(column)
+        if own is not None or not m.get("level"):
+            return own, ("light" if own is not None else None)
+        from . import levels as LV
+        return LV.inherited_cell(self.x.levels or {}, m["level"]["room"], layer, column)
+
+    def level_check(self, m: dict[str, Any], layer: str) -> bool:
+        if not m.get("level"):
+            return True
+        room, eff = self.level_room(m)
+        name = (m["level"] or {}).get("room")
+        if room is None:
+            self.block("missing_room", f"“{self.d['name']}”: “{m['name']}” uses the light level of a room that has none "
+                       f"({name}). Configure it under Light Level, or remove the matrix.", layer)
+            return False
+        if eff is None:
+            self.block("no_template", f"“{self.d['name']}”: the room of “{m['name']}” has no light-level template yet "
+                       "(Light Level → the room).", layer)
+            return False
+        if eff["problems"]:
+            self.block("bad_limits", f"“{self.d['name']}”: the light level of “{m['name']}”: {eff['problems'][0]}", layer)
+            return False
+        return True
+
     # ------------------------------------------------------------ values
     def value(self, layer: str, res: dict[str, Any], where: str) -> Any:
         """A resolved cell as the evaluation carries it: 'on'/'off'/'keep' or a percentage/'off'/'keep'; None: unset."""
@@ -914,9 +1002,11 @@ class _Gen:
     def matrix_plan(self, m: dict[str, Any], layer: str, light: str) -> dict[str, Any] | None:
         """The branches of one matrix for one light (first matching branch wins), or None when it decides nothing."""
         tag = "Truth" if layer == "truth" else "Brightness"
+        if not self.level_check(m, layer):
+            return None
         decided = []
-        for col in m["columns"]:
-            res = C.resolve((m["cells"].get(light) or {}).get(col["id"]), m["row_defaults"].get(light), m["default"])
+        for col in self.columns_of(m):
+            res = C.resolve(self.cell_of(m, light, col["id"], layer)[0], m["row_defaults"].get(light), m["default"])
             v = self.value(layer, res, f"{light} / {m['name']} / {self.col_label(col)}")
             if v is not None:
                 decided.append((col, v))
@@ -1330,7 +1420,19 @@ class _Gen:
                         self.info("no_action", f"“{where}”: NO ACTION - this interaction is explicitly ignored.", "switches")
                     continue
                 self.add("switch", lights[0] if lights else None, f"{where} → {ACTION_WORDS[kind]}", [interaction["trigger"]],
-                         steps, key=f"{switch['id']}:{m['id']}")
+                         steps, conditions=self.mapping_conditions(switch, m, interaction), key=f"{switch['id']}:{m['id']}")
+
+    @staticmethod
+    def mapping_conditions(switch: dict[str, Any], m: dict[str, Any], interaction: dict[str, Any]) -> list[dict[str, Any]]:
+        """The conditions of one mapping: its own "only when …" and, for a latched switch that ignores automations,
+        that the change was not made by an automation (so a command of this designer is never read as a press)."""
+        out: list[dict[str, Any]] = []
+        own = m.get("conditions")
+        if own and own["items"]:
+            out += own["items"] if own["type"] == "and" else [own]
+        if switch.get("ignore_automations") and interaction["trigger"] and interaction["trigger"]["type"] == "state":
+            out.append(_template("{{ trigger.to_state is none or trigger.to_state.context.parent_id is none }}"))
+        return out
 
     def dim_rule(self, switch: dict[str, Any], m: dict[str, Any], interaction: dict[str, Any], where: str) -> None:
         a = m["action"]
@@ -1352,7 +1454,7 @@ class _Gen:
                                   {"type": "wait_trigger", "triggers": [wait_trigger], "timeout_seconds": a["interval"],
                                    "on_timeout": "continue"}]})
         self.add("switch", m["lights"][0], f"{where} → dim {a['direction']} while held", [interaction["trigger"]], steps,
-                 key=f"{switch['id']}:{m['id']}")
+                 conditions=self.mapping_conditions(switch, m, interaction), key=f"{switch['id']}:{m['id']}")
 
     def overrides(self) -> None:
         d = self.d
@@ -1638,6 +1740,14 @@ def simulate(gen: "_Gen", ev: Any, scenario: dict[str, Any], names: Any) -> dict
         for m in event["mappings"]:
             kind = m["action"]["kind"]
             text = f"{ACTION_WORDS[kind]} for {', '.join(names(light) for light in m['lights']) or '…'}"
+            own = m.get("conditions")
+            holds = ev.condition(own, set()) if own and own["items"] else True
+            if holds is False:
+                happened.append({"mapping": m["id"], "text": text + ": not now (its “only when …” does not hold)",
+                                 "lights": m["lights"], "skipped": True})
+                continue
+            if holds is None:
+                text += " (only if its “only when …” holds: it cannot be evaluated offline)"
             if m["override"] or kind == "override":
                 for light in m["lights"]:
                     if light in gen.overridable():
@@ -1668,7 +1778,7 @@ def simulate(gen: "_Gen", ev: Any, scenario: dict[str, Any], names: Any) -> dict
             for m in d[layer]["matrices"]:
                 holding[m["id"]] = [{"id": c["id"], "label": gen.col_label(c),
                                      "holds": ev.condition(_group(gen.col_items(c)), set()) if not gen.col_missing(c) else None}
-                                    for c in m["columns"]]
+                                    for c in gen.columns_of(m)]
         lights.append({**entry, "controlled": True, **found, "columns": holding,
                        "helper": plan["override"], "override_ends": override_text(d, names) if plan["override"] else None})
     return {"event": ({"switch": event["switch"]["name"], "interaction": event["interaction"]["label"]
@@ -1682,12 +1792,28 @@ def resolved_views(d: dict[str, Any], x: Any) -> dict[str, Any]:
         from . import lighting
         return lighting.resolved_views(d, x)
     out: dict[str, Any] = {}
+    gen = _Gen(d, x)
     for layer, label_fn in (("truth", truth_label), ("brightness", bright_label)):
         for m in d[layer]["matrices"]:
-            out[m["id"]] = {light: {c["id"]: _cell_view(C.resolve((m["cells"].get(light) or {}).get(c["id"]),
-                                                                  m["row_defaults"].get(light), m["default"]),
-                                                        (m["cells"].get(light) or {}).get(c["id"]), label_fn)
-                                    for c in m["columns"]} for light in d["lights"]}
+            views = {}
+            for light in d["lights"]:
+                row = {}
+                for c in gen.columns_of(m):
+                    cell, where = gen.cell_of(m, light, c["id"], layer)
+                    found = _cell_view(C.resolve(cell, m["row_defaults"].get(light), m["default"]),
+                                       (m["cells"].get(light) or {}).get(c["id"]), label_fn)
+                    if m.get("level"):
+                        found["inherited_from"] = where if where in ("room", "global") else None
+                        if where in ("room", "global") and cell is not None and cell["kind"] not in ("default", "none"):
+                            found.update(state="default", label=label_fn(cell),
+                                         source="room light level" if where == "room" else "global default matrix")
+                        elif where in ("room", "global") and cell is not None and cell["kind"] == "none":
+                            found.update(source="room light level" if where == "room" else "global default matrix")
+                    row[c["id"]] = found
+                views[light] = row
+            out[m["id"]] = views
+            if m.get("level"):
+                out[m["id"]]["__columns"] = [{"id": c["id"], "label": c["label"]} for c in gen.columns_of(m)]
     mood = d["mood"]
     out["mood"] = {light: {v: _cell_view(C.resolve((mood["cells"].get(light) or {}).get(v), mood["row_defaults"].get(light),
                                                    mood["default"]), (mood["cells"].get(light) or {}).get(v), mood_label)
@@ -1727,6 +1853,12 @@ def capability_problems(d: dict[str, Any], caps: dict[str, dict[str, Any]], x: A
         effects: set[str] = set()
         for m in d["brightness"]["matrices"]:
             cells = [*((m["cells"].get(light) or {}).values()), m["row_defaults"].get(light), m["default"]]
+            if m.get("level"):
+                room = ((x.levels or {}).get("rooms") or {}).get(m["level"]["room"] or "")
+                if room:
+                    mid = room["matrices"]["brightness"]
+                    cells += [*room["matrix_overrides"]["brightness"].values(),
+                              *(((x.levels or {}).get("matrices") or {}).get(mid or "", {}).get("cells") or {}).values()]
             if any(c and c["kind"] == "set" and c["pct"] not in (None, 0) for c in cells):
                 wanted.add("brightness")
         mood = d["mood"]
@@ -1797,8 +1929,9 @@ def clashes(gen: "_Gen") -> dict[str, list[dict[str, Any]]]:
     for layer in ("truth", "brightness"):
         for m in gen.d[layer]["matrices"]:
             pairs = []
-            for i, a in enumerate(m["columns"]):
-                for b in m["columns"][i + 1:]:
+            columns = gen.columns_of(m)
+            for i, a in enumerate(columns):
+                for b in columns[i + 1:]:
                     if gen.overlaps(a, b):
                         pairs.append({"a": a["id"], "b": b["id"]})
             out[m["id"]] = pairs

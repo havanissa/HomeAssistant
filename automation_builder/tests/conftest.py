@@ -49,7 +49,8 @@ class FakeHome:
         self.device_automations: dict[str, list[dict[str, Any]]] = {}  # "<kind>:<device id>" -> what HA lists
         self.blueprints: dict[str, str] = {}     # blueprints/automation/<path> -> YAML
         self.configs: dict[str, dict[str, Any]] = {}  # automation entity id -> its configuration (unmanaged ones)
-        self.collections: dict[str, dict[str, dict[str, Any]]] = {"input_boolean": {}, "timer": {}}  # UI helpers
+        self.collections: dict[str, dict[str, dict[str, Any]]] = {  # UI helpers
+            "input_boolean": {}, "timer": {}, "input_text": {}, "input_number": {}}
         for entity_id, value, device, attributes in (
             ("light.bed_lamp", "off", "dev-lamp", {"friendly_name": "Bed lamp", "supported_color_modes": ["color_temp"]}),
             ("switch.relay_1", "off", "dev-relay", {"friendly_name": "Relay 1"}),
@@ -110,7 +111,7 @@ class FakeHome:
                 while item_id in items:
                     item_id += "_2"
                 items[item_id] = {"id": item_id, **{k: v for k, v in params.items()}}
-                initial = "idle" if domain == "timer" else "off"
+                initial = {"timer": "idle", "input_text": "", "input_number": str(float(params.get("min", 0)))}.get(domain, "off")
                 self.states[f"{domain}.{item_id}"] = state(f"{domain}.{item_id}", initial, friendly_name=params["name"])
                 self.entity_registry.append({"entity_id": f"{domain}.{item_id}", "device_id": None, "area_id": None,
                                              "platform": domain, "unique_id": item_id})

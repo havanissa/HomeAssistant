@@ -58,7 +58,9 @@ async def onboard(session) -> dict:
 ROOMS = {
     "Kitchen": (["Kitchen Lights", "Kitchen Window"], ["sensor.test_lux", "binary_sensor.test_motion"]),
     "Bedroom": (["Bed Light"], []),
-    "Living Room": (["Ceiling Lights", "Living Room RGBWW Lights"], ["fan.living_room_fan"]),  # + the demo's Sonos device
+    # the demo's Sonos device ("Living Room") only gets the area by itself when the area exists before the demo
+    # creates it (not on a freshly onboarded instance): placed here explicitly
+    "Living Room": (["Ceiling Lights", "Living Room RGBWW Lights", "Living Room"], ["fan.living_room_fan"]),
     "Office": (["Office RGBW Lights"], []),
     "Hall": (["Entrance Color + White Lights"], ["binary_sensor.test_door"]),
 }

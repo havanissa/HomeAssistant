@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.5.0
+
+Three additions to the device-first design (room → device → designer → native automation), with no new runtime
+engine and no companion integration: every part compiles into ordinary Home Assistant automations that keep working
+while the App is stopped.
+
+- **Switches & Remotes: any number of interactions per switch and light (major fix).** One switch can turn the same
+  light ON with a single press and OFF with a double press (and toggle, dim while held, stop at release, resume …):
+  the editor is now a list of interactions (event → action → lights), each with its own id, enabled/disabled,
+  reorderable, deletable on its own, with optional *only when …* conditions. More events of a device can be added to
+  an existing switch. Two root causes were fixed: the editor held one action per interaction (choosing another action
+  replaced the first), and the conflict check treated different presses of one event entity (single, double, long …)
+  as one trigger, so ON on one press and OFF on another was a blocking "contradiction" that prevented deployment.
+  Latched switches can ignore changes made by automations (no feedback from a switch that follows its light).
+  Existing configurations compile byte-identically.
+- **Light Level Manager** (new top-level page): light-level templates (named bands with stable ids, ordered limits
+  without gaps or overlaps, hysteresis, separate stabilisation delays for darker and brighter, what happens without
+  a reading), default Truth and Brightness Matrices, and a light level per room with an explicitly chosen sensor
+  (the room's own first; sharing one is deliberate). Inheritance template → room → light with visible sources
+  ("80 lx — Global", "95 lx — Room override"); overrides are never replaced by a template change; versions per
+  template and room. Each room's level lives in a helper the App creates at deployment and every light of the room
+  reads, so all agree. Optional ambient estimate: a reference sensor, a sample taken while the chosen lights are off,
+  or the reading minus calibrated lamp contributions (entered, or taken over from passive observations; the App never
+  switches a light to calibrate). Lighting Designer: *Light Level matrices* whose columns are a room's bands.
+- **Heating Designer** for climate entities, independent of Smart Adaptive & Predictive Climate: basic weekly
+  schedule (weekdays and weekend), day/night, a mode helper, presence-based setback, window-aware heating (a mode,
+  frost protection, OFF or nothing; explicit fallback for unavailable sensors), away/home with an optional return
+  mode, manual thermostat override detected by Home Assistant's context (until the next scheduled change, a time,
+  resumed or an event), explicit priority, and heating templates with room profiles (the Custom Heating Matrix on the
+  new Heating page: global → room → thermostat). One automation per thermostat sends only what changes, within the
+  device's range and step, never a stale earlier target. Preview (rule simulation, no thermal prediction) and
+  blueprint export.
+- Fixed: a large request (an import) that arrived in several parts was read only partly and refused as "not JSON".
+- Fixed: in a blueprint export, a designer's references to a controlled entity now follow that entity's input.
+- Navigation: **Light Level** and **Heating** in the top bar. Design and test results:
+  `docs/AB-0.5-light-level-switches-heating.md`.
+
 ## 0.4.0
 
 The Lighting Designer, redesigned (version 2): a light's normal behaviour comes from Truth and Brightness

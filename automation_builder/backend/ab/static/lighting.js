@@ -56,7 +56,9 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
   const sel = { m: null, keys: new Set(), clip: null };
   let chain = Promise.resolve();
   let sim = { inputs: null, result: null, scenario: { states: {}, event: null, time: null, weekday: null } };
-  let finder = { rooms: null, area: "", devices: null, chosen: null, found: null, manual: null };
+  let finder = { rooms: null, area: "", devices: null, chosen: null, found: null, manual: null, target: null };
+  const expanded = new Set();   // mapping ids whose "only when …" is open
+  const adding = {};            // switch id -> the "+ Add Interaction" form ({interaction, kind})
   const tabs = [["lights", "Lights"], ["truth", "Truth Matrix"], ["brightness", "Brightness Matrix"], ["mood", "Colour & Mood"], ["switches", "Switches & Remotes"],
     ["advanced", "Advanced Rules"], ["priority", "Priority & Resolution"], ["simulate", "Simulate"], ["yaml", "YAML"]];
   tab = tabs.some(([k]) => k === tab) ? tab : "lights";
@@ -72,7 +74,7 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
   // ------------------------------------------------------------ saving
   function incomplete() {
     if (d.brightness.matrices.some((m) => Object.values(m.cells).some((row) => Object.values(row).some((c) => c.kind === "set" && c.pct == null)))) return "Type a brightness (0–100 %) to save";
-    const open = d.advanced.flatMap((r) => r.conditions.items).find((c) => (c.type === "state" && !c.state) || (c.type === "numeric" && c.above == null && c.below == null)
+    const open = [...d.advanced.flatMap((r) => r.conditions.items), ...d.switches.flatMap((w) => w.mappings.flatMap((m) => (m.conditions || { items: [] }).items))].find((c) => (c.type === "state" && !c.state) || (c.type === "numeric" && c.above == null && c.below == null)
       || (c.type === "time" && !c.after && !c.before && !(c.weekdays || []).length));
     if (open) return "Complete the new condition (a state, a limit or a time) to save";
     const actions = [...d.switches.flatMap((w) => w.mappings.map((m) => m.action)), ...d.advanced.flatMap((r) => r.actions)];
@@ -119,6 +121,21 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
     return "Always";
   }
 
+  // ------------------------------------------------------------ light-level matrices
+  const levelRoom = (m) => (data.levels || []).find((r) => r.area_id === (m.level || {}).room) || null;
+  function levelCols(m) {
+    const fromView = ((((data.designer.view || {}).resolved || {})[m.id]) || {}).__columns;
+    if (fromView) return fromView;
+    const room = levelRoom(m);
+    return room ? room.bands.map((b) => ({ id: b.id, label: b.name })) : [];
+  }
+  function levelColumns(m) {
+    const room = levelRoom(m);
+    if (!room) return `<div class="notice error">This matrix uses the light level of a room that has none anymore (${esc((m.level || {}).room || "?")}). Delete the matrix, or configure the room under <a href="#/light-level">Light Level</a>.</div>`;
+    return `<p class="small">Columns: the light levels of <a href="#/light-level/rooms/${enc(room.area_id)}">${esc(room.name)}</a>${room.template ? ` (template “${esc(room.template)}”)` : ""} · now: <strong>${esc((room.bands.find((b) => b.id === room.band) || {}).name || room.band || "no level yet")}</strong>
+      <br><span class="muted">A cell without its own value shows the room's value (<em>room light level</em>) or the global default matrix's (<em>global default matrix</em>). Setting a cell here overrides it for this light only; “Set to Unset” returns it to the inherited value.</span></p>`;
+  }
+
   // ------------------------------------------------------------ matrices
   function matrixSpec(id) {
     const rows = d.lights.map((r) => ({ key: r, label: entityName(r), sub: r }));
@@ -136,7 +153,8 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
     if (!m) return null;
     return { id, kind: layer, title: `${m.name}: ${layer === "truth" ? "ON or OFF in each situation" : "the brightness in each situation"}`, rows,
       label: layer === "truth" ? truthLabel : brightLabel, view: resolvedOf(mid),
-      cols: m.columns.map((c) => ({ key: c.id, label: columnLabel(c), sub: { presence: "presence", state: "state", numeric: "range", time: "time", always: "" }[c.kind] })),
+      cols: m.level ? levelCols(m).map((c) => ({ key: c.id, label: c.label, sub: "light level" }))
+        : m.columns.map((c) => ({ key: c.id, label: columnLabel(c), sub: { presence: "presence", state: "state", numeric: "range", time: "time", always: "" }[c.kind] })),
       get: (r, c) => ((m.cells[r] || {})[c]) || null,
       set: (r, c, cell) => { m.cells[r] = m.cells[r] || {}; if (cell) m.cells[r][c] = cell; else delete m.cells[r][c]; if (!Object.keys(m.cells[r]).length) delete m.cells[r]; },
       rowDefaults: { get: (r) => m.row_defaults[r] || null, set: (r, cell) => { if (cell) m.row_defaults[r] = cell; else delete m.row_defaults[r]; } },
@@ -219,16 +237,21 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
       return `<div class="card matrix-card" data-matrix-card="${esc(m.id)}"><div class="row"><h2>${txt(`${base}/name`, m.name, 'maxlength="40" aria-label="Matrix name"')}</h2>
           <label class="switch"><input type="checkbox" data-chg="flag" data-path="${base}/enabled" ${m.enabled ? "checked" : ""}> On</label><span class="spacer"></span>
           <button type="button" class="link danger-text" data-act="mdrop" data-layer="${layer}" data-i="${i}">Delete the matrix</button></div>
-        <h3>Columns (situations)</h3>${columnsEditor(layer, m)}
-        ${m.columns.length > 1 && overlap ? `<div class="field"><label for="pol-${esc(m.id)}">When columns hold at the same time</label><select id="pol-${esc(m.id)}" data-chg="text" data-path="${base}/policy"><option value="">Choose… (needed when they want different things)</option>${opt(POLICY[layer], m.policy)}</select>
+        ${m.level ? levelColumns(m) : `<h3>Columns (situations)</h3>${columnsEditor(layer, m)}`}
+        ${!m.level && m.columns.length > 1 && overlap ? `<div class="field"><label for="pol-${esc(m.id)}">When columns hold at the same time</label><select id="pol-${esc(m.id)}" data-chg="text" data-path="${base}/policy"><option value="">Choose… (needed when they want different things)</option>${opt(POLICY[layer], m.policy)}</select>
           <div class="help">${plural(overlap, "pair")} of columns can hold together (for example two zones occupied at once). The order of the columns decides nothing.${m.policy === "priority" ? " Rank them under Priority & Resolution." : ""}</div></div>` : ""}
-        ${m.columns.length && d.lights.length ? matrixBlock(`${layer}:${m.id}`) : `<p class="muted">Choose lights and add columns to get the matrix.</p>`}</div>`;
+        ${(m.level ? levelCols(m).length : m.columns.length) && d.lights.length ? matrixBlock(`${layer}:${m.id}`) : `<p class="muted">${m.level ? "The room's light level has no template yet." : "Choose lights and add columns to get the matrix."}</p>`}</div>`;
     }).join("");
+    const rooms = data.levels || [];
+    const levelAdd = `<div class="row"><select id="lvl-room-${layer}" aria-label="Room of the light level"><option value="">A room's light level…</option>${opt(rooms.map((r) => [r.area_id, `${r.name}${r.template ? ` (${r.template})` : " (no template yet)"}`]), "")}</select>
+        <button type="button" data-act="ladd" data-layer="${layer}" ${rooms.length && L.matrices.length < 4 ? "" : "disabled"}>Add a Light Level matrix</button>
+        ${rooms.length ? "" : `<span class="muted small">No room has a light level yet: <a href="#/light-level">Light Level</a>.</span>`}</div>`;
     const intro = layer === "truth"
       ? "A Truth Matrix decides whether a light is normally ON or OFF. Cells: ON, OFF, NO ACTION (leave it), USE DEFAULT, or UNSET (this matrix does not decide)."
       : "A Brightness Matrix gives the brightness while the light may be on. It never switches a light on by itself, and never overrides an OFF.";
     return `<div class="card"><p class="small">${intro}</p>${problemsOf(layer)}
         <div class="actions"><button type="button" data-act="madd" data-layer="${layer}" ${L.matrices.length < 4 ? "" : "disabled"}>Add a ${layer === "truth" ? "Truth" : "Brightness"} Matrix</button></div>
+        ${levelAdd}<p class="muted small">A Light Level matrix uses the light levels of a room (Light Level page): its columns are the room's levels, and its cells come from the room (or the global default matrix the room adopted) until you set a light's own value here.</p>
         ${layer === "brightness" ? `<div class="field"><label for="zero">0 % means</label><select id="zero" data-chg="text" data-path="brightness/zero"><option value="">Choose… (needed when a cell is 0 %)</option>${opt([["off", "Switch the light off"], ["minimum", "The lowest brightness (1 %)"], ["unchanged", "Leave the brightness as it is"]], d.brightness.zero)}</select></div>` : ""}</div>${cards}`;
   }
 
@@ -264,33 +287,56 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
   function switchesTab() {
     const o = d.override;
     const cards = d.switches.map((w, wi) => {
-      const rows = w.interactions.map((i, ii) => {
-        const m = w.mappings.find((x) => x.interaction === i.id);
-        const mi = m ? w.mappings.indexOf(m) : -1;
+      const evName = (i) => `${i.label || INTERACTION[i.kind]}${i.button && !(i.label || "").includes(i.button) ? ` · ${i.button}` : ""}`;
+      const uses = (i) => w.mappings.filter((m) => m.interaction === i.id).length;
+      const events = w.interactions.map((i, ii) => `<li class="row" data-interaction="${esc(i.id)}"><span>${esc(evName(i))} <span class="badge">${esc(INTERACTION[i.kind])}</span> <span class="muted small">${esc(i.trigger ? i.trigger.type : "?")}${uses(i) ? ` · ${plural(uses(i), "action")}` : " · nothing assigned"}</span></span><span class="spacer"></span>
+          <button type="button" class="link small danger-text" data-act="idrop" data-w="${wi}" data-ii="${ii}" aria-label="Remove the event ${esc(evName(i))}">remove</button></li>`).join("");
+      const rows = w.mappings.map((m, mi) => {
         const p = `switches/${wi}/mappings/${mi}`;
-        const a = m ? m.action : null;
+        const a = m.action;
+        const i = w.interactions.find((x) => x.id === m.interaction);
         let params = "";
-        if (m && a.kind === "brightness") params = num(`${p}/action/pct`, a.pct, 'min="1" max="100" aria-label="Brightness"', "%");
-        if (m && a.kind === "step") params = num(`${p}/action/pct`, a.pct, 'min="-100" max="100" aria-label="Change"', "% (negative = darker)");
-        if (m && (a.kind === "mood" || a.kind === "select_mood")) params = `<select data-chg="text" data-path="${p}/action/value" aria-label="Mood"><option value="">mood…</option>${opt([...new Set([...d.mood.values, ...(((entities[d.mood.entity_id] || {}).attributes || {}).options || [])])].map((v) => [v, v]), a.value)}</select>`;
-        if (m && a.kind === "advanced") params = `<select data-chg="text" data-path="${p}/action/rule" aria-label="Advanced Rule"><option value="">rule…</option>${opt(d.advanced.filter((r) => r.kind === "when").map((r) => [r.id, r.name]), a.rule)}</select>`;
-        if (m && a.kind === "dim") params = `<select data-chg="text" data-path="${p}/action/direction" aria-label="Direction"><option value="">direction…</option>${opt([["up", "brighter"], ["down", "darker"]], a.direction)}</select>
+        if (a.kind === "brightness") params = num(`${p}/action/pct`, a.pct, 'min="1" max="100" aria-label="Brightness"', "%");
+        if (a.kind === "step") params = num(`${p}/action/pct`, a.pct, 'min="-100" max="100" aria-label="Change"', "% (negative = darker)");
+        if (a.kind === "mood" || a.kind === "select_mood") params = `<select data-chg="text" data-path="${p}/action/value" aria-label="Mood"><option value="">mood…</option>${opt([...new Set([...d.mood.values, ...(((entities[d.mood.entity_id] || {}).attributes || {}).options || [])])].map((v) => [v, v]), a.value)}</select>`;
+        if (a.kind === "advanced") params = `<select data-chg="text" data-path="${p}/action/rule" aria-label="Advanced Rule"><option value="">rule…</option>${opt(d.advanced.filter((r) => r.kind === "when").map((r) => [r.id, r.name]), a.rule)}</select>`;
+        if (a.kind === "dim") params = `<select data-chg="text" data-path="${p}/action/direction" aria-label="Direction"><option value="">direction…</option>${opt([["up", "brighter"], ["down", "darker"]], a.direction)}</select>
           ${num(`${p}/action/step`, a.step, 'min="1" max="50" aria-label="Step"', "% every")} ${num(`${p}/action/interval`, a.interval, 'min="1" max="5" aria-label="Interval"', "s until")}
-          <select data-chg="text" data-path="${p}/action/release" aria-label="Release"><option value="">the release…</option>${opt(w.interactions.filter((x) => x.id !== i.id).map((x) => [x.id, x.label || INTERACTION[x.kind]]), a.release)}</select>`;
-        if (m && a.kind === "native") params = `<select data-chg="text" data-path="${p}/action/action" aria-label="Light action">${opt([["light.turn_on", "light.turn_on"], ["light.turn_off", "light.turn_off"], ["light.toggle", "light.toggle"]], a.action)}</select>
+          <select data-chg="text" data-path="${p}/action/release" aria-label="Release"><option value="">the release…</option>${opt(w.interactions.filter((x) => x.id !== m.interaction).map((x) => [x.id, evName(x)]), a.release)}</select>`;
+        if (a.kind === "native") params = `<select data-chg="text" data-path="${p}/action/action" aria-label="Light action">${opt([["light.turn_on", "light.turn_on"], ["light.turn_off", "light.turn_off"], ["light.toggle", "light.toggle"]], a.action)}</select>
           <input type="text" data-chg="json" data-path="${p}/action/data" value="${esc(JSON.stringify(a.data || {}))}" aria-label="Data (JSON)">`;
-        return `<tr data-interaction="${esc(i.id)}"><th scope="row">${esc(i.label || INTERACTION[i.kind])}<br><span class="muted small">${esc(INTERACTION[i.kind])} · ${esc(i.trigger ? i.trigger.type : "?")}</span></th>
-          <td><select data-chg="maction" data-w="${wi}" data-i="${esc(i.id)}" aria-label="Action for ${esc(i.label || INTERACTION[i.kind])}">${opt(ACTIONS, a ? a.kind : "")}</select> ${params}</td>
-          <td>${m && !["none", "select_mood"].includes(a.kind) ? lightBoxes(`${p}/lights`, m.lights) : ""}</td>
-          <td>${m && !["override", "resume", "dim", "none", "select_mood"].includes(a.kind) ? `<label class="small"><input type="checkbox" data-chg="flag" data-path="${p}/override" ${m.override ? "checked" : ""}> and start a manual override</label>` : m && a.kind === "override" ? `<span class="small">starts an override</span>` : ""}</td>
-          <td><button type="button" class="link danger-text" data-act="idrop" data-w="${wi}" data-ii="${ii}" aria-label="Remove this interaction">✕</button></td></tr>`;
+        const conds = (m.conditions || { items: [] }).items;
+        const open = expanded.has(m.id) || conds.length > 0 && expanded.has(`${m.id}:c`);
+        const condRows = conds.map((c, j) => `<li class="row">${condEdit(c, `${p}/conditions/items/${j}`)}<span class="spacer"></span><button type="button" class="link small danger-text" data-act="xcdrop" data-w="${wi}" data-mi="${mi}" data-j="${j}">remove</button></li>`).join("");
+        const more = open ? `<div class="mapping-more"><div class="field"><label>Only when</label><span><select data-chg="xctype" data-w="${wi}" data-mi="${mi}" aria-label="Combine">${opt([["and", "all of these hold"], ["or", "any of these holds"]], (m.conditions || {}).type || "and")}</select></span></div>
+            <ul class="plain">${condRows || `<li class="muted small">No condition: it acts whenever the event happens.</li>`}</ul>
+            <div class="row"><select id="mcnew-${wi}-${mi}" aria-label="Condition to add"><option value="">Add a condition…</option><option value="state">An entity is in a state</option><option value="numeric">A number is above / below</option><option value="time">A time of day</option></select><button type="button" data-act="xcadd" data-w="${wi}" data-mi="${mi}">Add</button></div></div>` : "";
+        return `<li class="mapping-row${m.enabled ? "" : " disabled"}" data-mapping="${esc(m.id)}" data-interaction="${esc(m.interaction || "")}">
+          <div class="row wrap"><span class="badge">${mi + 1}</span><label class="small"><input type="checkbox" data-chg="flag" data-path="${p}/enabled" ${m.enabled ? "checked" : ""} aria-label="Enabled"> on</label>
+            <select data-chg="xint" data-w="${wi}" data-mi="${mi}" aria-label="Event">${i ? "" : `<option value="">event…</option>`}${opt(w.interactions.map((x) => [x.id, evName(x)]), m.interaction)}</select> →
+            <select data-chg="maction" data-w="${wi}" data-mi="${mi}" aria-label="Action">${opt(ACTIONS.filter(([k]) => k !== ""), a.kind)}</select> ${params}</div>
+          <div class="row wrap">${!["none", "select_mood"].includes(a.kind) ? `<span class="small muted">Lights:</span> ${lightBoxes(`${p}/lights`, m.lights)}` : ""}
+            ${!["override", "resume", "dim", "none", "select_mood"].includes(a.kind) ? `<label class="small"><input type="checkbox" data-chg="flag" data-path="${p}/override" ${m.override ? "checked" : ""}> and start a manual override</label>` : a.kind === "override" ? `<span class="small">starts an override</span>` : ""}
+            <span class="spacer"></span>
+            <button type="button" class="link small" data-act="xmore" data-id="${esc(m.id)}" aria-expanded="${open}">Only when${conds.length ? ` (${conds.length})` : ""}…</button>
+            <button type="button" class="link" data-act="xmove" data-w="${wi}" data-mi="${mi}" data-dir="-1" ${mi ? "" : "disabled"} aria-label="Move up">↑</button><button type="button" class="link" data-act="xmove" data-w="${wi}" data-mi="${mi}" data-dir="1" ${mi < w.mappings.length - 1 ? "" : "disabled"} aria-label="Move down">↓</button>
+            <button type="button" class="link danger-text" data-act="xdrop" data-w="${wi}" data-mi="${mi}" aria-label="Delete this interaction">✕</button></div>${more}</li>`;
       }).join("");
+      const form = adding[w.id];
+      const addForm = form ? `<div class="row wrap add-mapping"><select data-chg="xnew" data-w="${esc(w.id)}" data-key="interaction" aria-label="Event of the new interaction"><option value="">event…</option>${opt(w.interactions.map((x) => [x.id, evName(x)]), form.interaction)}</select> →
+          <select data-chg="xnew" data-w="${esc(w.id)}" data-key="kind" aria-label="Action of the new interaction"><option value="">action…</option>${opt(ACTIONS.filter(([k]) => k !== ""), form.kind)}</select>
+          <button type="button" class="primary" data-act="xcreate" data-w="${wi}" ${form.interaction && form.kind ? "" : "disabled"}>Add</button><button type="button" class="link" data-act="xcancel" data-w="${esc(w.id)}">Cancel</button></div>` : "";
       return `<div class="card switch-card" data-switch="${esc(w.id)}"><div class="row"><h2>${icon(w.kind === "latched" ? "switch" : "event")} ${txt(`switches/${wi}/name`, w.name, 'maxlength="60" aria-label="Name"')}</h2>
           <span class="badge">${w.kind === "latched" ? "latched switch (stays on/off)" : "momentary button or remote"}</span><span class="spacer"></span>
           <button type="button" class="link danger-text" data-act="wdrop" data-w="${wi}">Remove</button></div>
         <p class="muted small">${w.entity_id ? esc(w.entity_id) : ""}${w.kind === "latched" && w.entity_id ? ` · also usable as a matrix source: add a column “${esc(entityName(w.entity_id))} is on”` : ""}</p>
-        <div class="tscroll"><table class="mapping"><thead><tr><th>Interaction</th><th>Action</th><th>Lights</th><th>Override</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="5" class="muted">No interactions.</td></tr>`}</tbody></table></div>
-        <p class="muted small">Nothing is assigned for you: an interaction without an action does nothing. Without “start a manual override” an action is one-shot: the next evaluation applies the matrices again.</p></div>`;
+        ${w.kind === "latched" ? `<div class="field"><label>Feedback</label>${toggle(`switches/${wi}/ignore_automations`, w.ignore_automations, "Ignore changes of this switch made by an automation", "When the switch follows the light (or another automation sets it), that change is not a press. A change by hand, in the app or on the device still counts.")}</div>` : ""}
+        <h3>Events of this control</h3><ul class="plain events">${events || `<li class="muted">No events yet.</li>`}</ul>
+        <div class="row">${w.ha_device_id || w.entity_id ? `<button type="button" data-act="fmore" data-w="${wi}">Find more events of this device…</button>` : ""}<button type="button" data-act="fmanual" data-w="${wi}">Add an event by hand…</button></div>
+        <h3>Interactions</h3><p class="muted small">Each line is one interaction: an event, what it does, and to which lights. The same event and the same light can be used in as many lines as you need (for example a single press turns Light1 on and a double press turns it off). Lines run in this order.</p>
+        <ol class="plain mappings">${rows || `<li class="muted">No interactions: nothing is assigned for you.</li>`}</ol>${addForm}
+        <div class="actions"><button type="button" data-act="iadd" data-w="${esc(w.id)}" ${w.interactions.length ? "" : "disabled"}>+ Add Interaction</button></div>
+        <p class="muted small">Without “start a manual override” an action is one-shot: the next evaluation applies the matrices again.</p></div>`;
     }).join("");
     const overridden = d.switches.some((w) => w.mappings.some((m) => m.override || m.action.kind === "override")) || o.manual;
     const policy = `<div class="card" id="override-policy"><h2>Manual override</h2>
@@ -319,16 +365,18 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
     const rooms = f.rooms ? `<select data-chg="froom" aria-label="Room"><option value="">Room…</option>${opt([...f.rooms.map((r) => [r.area_id ?? "__none", r.name]), ["*", "Every room"]], f.area)}</select>` : `<button type="button" data-act="frooms">Add a switch or remote…</button>`;
     const devices = f.devices ? `<ul class="plain">${f.devices.map((dv, i) => `<li class="row"><strong>${esc(dv.name)}</strong> <span class="muted small">${esc([dv.area, dv.model].filter(Boolean).join(" · "))}</span><span class="spacer"></span>
         ${dv.device_id ? `<button type="button" data-act="fpick" data-i="${i}">Its device triggers</button>` : ""}${dv.entities.map((e) => `<button type="button" data-act="fpick" data-i="${i}" data-entity="${esc(e.entity_id)}">${esc(e.name)} <span class="mono">${esc(e.entity_id)}</span></button>`).join("")}</li>`).join("") || `<li class="muted">Nothing here.</li>`}</ul>` : "";
+    const into = f.target != null ? d.switches[f.target] : null;
+    const known = (i) => Boolean(into && into.interactions.some((x) => JSON.stringify(x.trigger) === JSON.stringify(i.trigger)));
     const found = f.found ? `<div class="notice info"><strong>${esc(f.chosen.label)}</strong> · ${esc(f.found.kind === "latched" ? "a latched switch" : f.found.kind ? "a momentary button or remote" : "nothing discovered")}
-        ${f.found.interactions.map((i, n) => `<label class="pick"><input type="checkbox" data-chg="fint" data-n="${n}" ${i.take ? "checked" : ""}><span>${esc(i.label)} <span class="badge">${esc(INTERACTION[i.kind])}</span> <span class="muted small">${esc(i.source)}</span></span></label>`).join("")}
+        ${f.found.interactions.map((i, n) => `<label class="pick"><input type="checkbox" data-chg="fint" data-n="${n}" ${i.take ? "checked" : ""} ${known(i) ? "disabled" : ""}><span>${esc(i.label)} <span class="badge">${esc(INTERACTION[i.kind])}</span> <span class="muted small">${esc(i.source)}${i.button ? ` · ${esc(i.button)}` : ""}${known(i) ? " · added already" : ""}</span></span></label>`).join("")}
         ${f.found.notes.map((n) => `<p class="small">${esc(n)}</p>`).join("")}
-        <div class="actions"><button class="primary" data-act="fadd" ${f.found.interactions.some((i) => i.take) ? "" : "disabled"}>Add with the ticked interactions</button></div></div>` : "";
+        <div class="actions"><button class="primary" data-act="fadd" ${f.found.interactions.some((i) => i.take) ? "" : "disabled"}>${into ? `Add the ticked events to “${esc(into.name)}”` : "Add with the ticked events"}</button>${into ? `<button type="button" class="link" data-act="fclose">Cancel</button>` : ""}</div></div>` : "";
     const manual = f.manual ? `<div class="cfields"><select data-chg="fman" data-key="type" aria-label="Kind">${opt([["zha", "ZHA event (zha_event)"], ["mqtt", "Zigbee2MQTT / MQTT message"], ["event", "Another event"]], f.manual.type)}</select>
         ${f.manual.type === "zha" ? `<input type="text" data-chg="fman" data-key="ieee" value="${esc(f.manual.ieee || "")}" placeholder="device IEEE (00:11:…)" aria-label="Device IEEE"> <input type="text" data-chg="fman" data-key="command" value="${esc(f.manual.command || "")}" placeholder="command (on, toggle …)" aria-label="Command">` : ""}
         ${f.manual.type === "mqtt" ? `<input type="text" data-chg="fman" data-key="topic" value="${esc(f.manual.topic || "")}" placeholder="zigbee2mqtt/<name>/action" aria-label="Topic"> <input type="text" data-chg="fman" data-key="payload" value="${esc(f.manual.payload || "")}" placeholder="payload (single, double …)" aria-label="Payload">` : ""}
         ${f.manual.type === "event" ? `<input type="text" data-chg="fman" data-key="event_type" value="${esc(f.manual.event_type || "")}" placeholder="event type" aria-label="Event type"> <input type="text" data-chg="fman" data-key="data" value="${esc(f.manual.data || "{}")}" placeholder='{"key": "value"}' aria-label="Event data">` : ""}
         <select data-chg="fman" data-key="kind" aria-label="Interaction">${opt(Object.entries(INTERACTION), f.manual.kind)}</select>
-        <button type="button" data-act="fmanadd">Add this interaction</button></div>` : "";
+        <button type="button" data-act="fmanadd">${f.manual.target != null && d.switches[f.manual.target] ? `Add this event to “${esc(d.switches[f.manual.target].name)}”` : "Add this event"}</button><button type="button" class="link" data-act="fclose">Cancel</button></div>` : "";
     return `<div class="card" id="finder"><h2>Switches &amp; Remotes</h2><p class="small">Room → device → entity or event. Only what Home Assistant offers for it is listed; anything else can be mapped by hand.</p>
       <div class="row">${rooms}${f.rooms ? `<button type="button" data-act="fmanual">Manual event…</button>` : ""}</div>${devices}${found}${manual}</div>`;
   }
@@ -336,14 +384,7 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
   function advancedTab() {
     const rules = d.advanced.map((r, i) => {
       const p = `advanced/${i}`;
-      const conds = r.conditions.items.map((c, j) => {
-        const cp = `${p}/conditions/items/${j}`;
-        let edit = esc(condText(c));
-        if (c.type === "state") edit = `${entityBtn(`${cp}/entity_id`, c.entity_id, "any")} <label class="small"><input type="checkbox" data-chg="flag" data-path="${cp}/negate" ${c.negate ? "checked" : ""}> is not</label> ${txt(`${cp}/state`, c.state, 'placeholder="state" aria-label="State" list="sugg-state"')} ${live(c.entity_id)}`;
-        if (c.type === "numeric") edit = `${entityBtn(`${cp}/entity_id`, c.entity_id, "numeric")} above ${num(`${cp}/above`, c.above, 'aria-label="Above"')} below ${num(`${cp}/below`, c.below, 'aria-label="Below"')} ${live(c.entity_id)}`;
-        if (c.type === "time") edit = `time from <input type="time" data-chg="time" data-path="${cp}/after" value="${esc((c.after || "").slice(0, 5))}" aria-label="From"> until <input type="time" data-chg="time" data-path="${cp}/before" value="${esc((c.before || "").slice(0, 5))}" aria-label="Until">`;
-        return `<li class="row">${edit}<span class="spacer"></span><button type="button" class="link small danger-text" data-act="cdrop" data-r="${i}" data-j="${j}">remove</button></li>`;
-      }).join("");
+      const conds = r.conditions.items.map((c, j) => `<li class="row">${condEdit(c, `${p}/conditions/items/${j}`)}<span class="spacer"></span><button type="button" class="link small danger-text" data-act="cdrop" data-r="${i}" data-j="${j}">remove</button></li>`).join("");
       const body = r.kind === "while"
         ? `<div class="field"><label>On/off</label><select data-chg="truthset" data-r="${i}" aria-label="On or off">${opt([["", "UNSET"], ["on", "ON"], ["off", "OFF"], ["keep", "NO ACTION (keep)"]], r.set.truth)}</select></div>
            <div class="cfields">${attrsFields(r.set, capsOf(r.lights.length ? r.lights : d.lights, caps()), `${p}/set`, true)}</div>`
@@ -368,6 +409,12 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
         <div class="actions"><button type="button" data-act="radd" data-kind="while">Add a “while …” rule</button><button type="button" data-act="radd" data-kind="when">Add a “when …” rule</button></div>${problemsOf("advanced")}</div>${rules}
       <div class="card"><h2>Ordinary rules of this device (IF / AND-OR / THEN)</h2><p class="muted small">The generic rule editor, for anything the designer does not cover. Ordinary rules act on their own; they are outside this priority (the conflict check reports when both can act at once).</p>
         <ul class="plain">${ordinary || `<li class="muted">None.</li>`}</ul><div class="actions"><a class="button" href="#/rules/${enc(deviceId)}/new">Write an ordinary rule</a></div></div>`;
+  }
+  function condEdit(c, cp) {
+    if (c.type === "state") return `${entityBtn(`${cp}/entity_id`, c.entity_id, "any")} <label class="small"><input type="checkbox" data-chg="flag" data-path="${cp}/negate" ${c.negate ? "checked" : ""}> is not</label> ${txt(`${cp}/state`, c.state, 'placeholder="state" aria-label="State" list="sugg-state"')} ${live(c.entity_id)}`;
+    if (c.type === "numeric") return `${entityBtn(`${cp}/entity_id`, c.entity_id, "numeric")} above ${num(`${cp}/above`, c.above, 'aria-label="Above"')} below ${num(`${cp}/below`, c.below, 'aria-label="Below"')} ${live(c.entity_id)}`;
+    if (c.type === "time") return `time from <input type="time" data-chg="time" data-path="${cp}/after" value="${esc((c.after || "").slice(0, 5))}" aria-label="From"> until <input type="time" data-chg="time" data-path="${cp}/before" value="${esc((c.before || "").slice(0, 5))}" aria-label="Until">`;
+    return esc(condText(c));
   }
   function condText(c) {
     if (c.type === "state") return `${entityName(c.entity_id)}${c.attribute ? `.${c.attribute}` : ""} is ${c.negate ? "not " : ""}${c.state}${c.for_seconds ? ` for ${c.for_seconds} s` : ""}`;
@@ -480,6 +527,13 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
     mclear: () => applyToSelection(() => null),
     cunset: (el) => applyToSelection((cell) => (cell ? { ...cell, [el.dataset.key]: null } : cell)),
     aunset: (el) => { const a = get(el.dataset.path); a[el.dataset.key] = null; save(); draw(); },
+    ladd: (el) => {
+      const area = (view.querySelector(`#lvl-room-${el.dataset.layer}`) || {}).value;
+      const room = (data.levels || []).find((r) => r.area_id === area);
+      if (!room) { toast("Choose the room first."); return; }
+      d[el.dataset.layer].matrices.push({ id: newId("m"), name: `Light level · ${room.name}`.slice(0, 40), enabled: true, level: { room: area }, columns: [], cells: {}, row_defaults: {}, default: null, policy: null, ranks: [] });
+      save(); draw();
+    },
     madd: (el) => { const L = d[el.dataset.layer]; L.matrices.push({ id: newId("m"), name: el.dataset.layer === "truth" ? "Truth" : "Brightness", enabled: true, columns: [], cells: {}, row_defaults: {}, default: null, policy: null, ranks: [] }); save(); draw(); },
     mdrop: async (el) => { const L = d[el.dataset.layer]; const m = L.matrices[Number(el.dataset.i)];
       if (!(await ask({ title: `Delete the matrix “${m.name}”?`, body: "Its columns and cells go with it (the automatic backups keep the previous configuration).", ok: "Delete", danger: true }))) return;
@@ -519,13 +573,59 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
     },
     fadd: () => {
       const f = finder.found;
-      const taken = f.interactions.filter((i) => i.take);
-      d.switches.push({ id: newId("w"), name: finder.chosen.device.name || "Switch", kind: f.kind || "momentary", entity_id: finder.chosen.entity, ha_device_id: finder.chosen.device.device_id,
-        interactions: taken.map((i) => ({ id: newId("i"), kind: i.kind, label: i.label, trigger: i.trigger })), mappings: [] });
-      finder = { rooms: finder.rooms, area: finder.area, devices: null, chosen: null, found: null, manual: null };
+      const taken = f.interactions.filter((i) => i.take).map((i) => ({ id: newId("i"), kind: i.kind, label: i.label, trigger: i.trigger, ...(i.button ? { button: i.button } : {}) }));
+      const into = finder.target != null ? d.switches[finder.target] : null;
+      if (into) {
+        taken.forEach((i) => { if (!into.interactions.some((x) => JSON.stringify(x.trigger) === JSON.stringify(i.trigger))) into.interactions.push(i); });
+      } else {
+        const kind = f.kind || "momentary";
+        d.switches.push({ id: newId("w"), name: finder.chosen.device.name || "Switch", kind, entity_id: finder.chosen.entity, ha_device_id: finder.chosen.device.device_id,
+          interactions: taken, mappings: [], ...(kind === "latched" ? { ignore_automations: true } : {}) });
+      }
+      finder = { rooms: finder.rooms, area: finder.area, devices: null, chosen: null, found: null, manual: null, target: null };
       save(); draw();
     },
-    fmanual: () => { finder.manual = { type: "zha", kind: "single" }; draw(); },
+    fclose: () => { finder = { ...finder, chosen: null, found: null, manual: null, target: null }; draw(); },
+    fmore: async (el) => {
+      const w = d.switches[Number(el.dataset.w)];
+      try {
+        const found = await api(`api/switch-interactions?${w.ha_device_id ? `device_id=${enc(w.ha_device_id)}` : ""}${w.entity_id ? `${w.ha_device_id ? "&" : ""}entity_id=${enc(w.entity_id)}` : ""}`);
+        finder.target = Number(el.dataset.w);
+        finder.chosen = { device: { name: w.name, device_id: w.ha_device_id }, entity: w.entity_id, label: w.name };
+        finder.found = { ...found, interactions: found.interactions.map((i) => ({ ...i, take: false })) };
+        draw();
+        const card = view.querySelector("#finder"); if (card) card.scrollIntoView({ block: "nearest" });
+      } catch (err) { toast(errorText(err)); }
+    },
+    fmanual: (el) => { finder.manual = { type: "zha", kind: "single", target: el && el.dataset.w != null ? Number(el.dataset.w) : null }; draw(); },
+    iadd: (el) => { const w = d.switches.find((x) => x.id === el.dataset.w); const unused = w.interactions.find((i) => !w.mappings.some((m) => m.interaction === i.id)); adding[w.id] = { interaction: (unused || w.interactions[0] || {}).id || "", kind: "" }; draw(); },
+    xcancel: (el) => { delete adding[el.dataset.w]; draw(); },
+    xcreate: (el) => {
+      const w = d.switches[Number(el.dataset.w)];
+      const form = adding[w.id];
+      if (!form || !form.interaction || !form.kind) return;
+      w.mappings.push({ id: newId("p"), interaction: form.interaction, enabled: true, lights: d.lights.length === 1 ? [d.lights[0]] : [], action: newAction(form.kind), override: false });
+      delete adding[w.id];
+      save(); draw();
+    },
+    xdrop: (el) => { d.switches[Number(el.dataset.w)].mappings.splice(Number(el.dataset.mi), 1); save(); draw(); },
+    xmove: (el) => { const list = d.switches[Number(el.dataset.w)].mappings; const i = Number(el.dataset.mi); const j = i + Number(el.dataset.dir); [list[i], list[j]] = [list[j], list[i]]; save(); draw(); },
+    xmore: (el) => { const id = el.dataset.id; if (expanded.has(id)) { expanded.delete(id); expanded.delete(`${id}:c`); } else expanded.add(id); draw(); },
+    xcadd: async (el) => {
+      const m = d.switches[Number(el.dataset.w)].mappings[Number(el.dataset.mi)];
+      const kind = (view.querySelector(`#mcnew-${el.dataset.w}-${el.dataset.mi}`) || {}).value;
+      if (!kind) return;
+      m.conditions = m.conditions || { type: "and", items: [] };
+      expanded.add(m.id); expanded.add(`${m.id}:c`);
+      if (kind === "time") { m.conditions.items.push({ type: "time", after: null, before: null, weekdays: [] }); draw(); return; }
+      const chosen = await pickEntity(kind === "numeric" ? "numeric" : "any");
+      if (!chosen || !current()) return;
+      await loadEntities([chosen.entity_id]);
+      m.conditions.items.push(kind === "state" ? { type: "state", entity_id: chosen.entity_id, state: null, negate: false, for_seconds: 0, attribute: null }
+        : { type: "numeric", entity_id: chosen.entity_id, above: null, below: null, attribute: null });
+      draw();  // saved once the state or a limit is given
+    },
+    xcdrop: (el) => { const m = d.switches[Number(el.dataset.w)].mappings[Number(el.dataset.mi)]; m.conditions.items.splice(Number(el.dataset.j), 1); if (!m.conditions.items.length) delete m.conditions; save(); draw(); },
     fmanadd: () => {
       const m = finder.manual;
       let trigger = null;
@@ -533,13 +633,22 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
       if (m.type === "mqtt" && m.topic) trigger = { type: "mqtt", topic: m.topic, payload: m.payload || null };
       if (m.type === "event" && m.event_type) { let dataObj = {}; try { dataObj = JSON.parse(m.data || "{}"); } catch { toast("The event data is not JSON."); return; } trigger = { type: "event", event_type: m.event_type, event_data: dataObj }; }
       if (!trigger) { toast("Fill in the event first."); return; }
-      let w = d.switches.find((x) => x.manual);
+      let w = m.target != null && d.switches[m.target] && d.switches[m.target].kind === "momentary" ? d.switches[m.target] : d.switches.find((x) => x.manual);
       if (!w) { w = { id: newId("w"), name: "Remote (manual events)", kind: "momentary", entity_id: null, ha_device_id: null, interactions: [], mappings: [], manual: true }; d.switches.push(w); }
       w.interactions.push({ id: newId("i"), kind: m.kind, label: `${INTERACTION[m.kind]} (${m.type === "zha" ? m.command : m.type === "mqtt" ? m.payload || m.topic : m.event_type})`, trigger });
       finder.manual = null; save(); draw();
     },
     wdrop: async (el) => { const w = d.switches[Number(el.dataset.w)]; if (!(await ask({ title: `Remove “${w.name}”?`, body: "Its interactions and actions go with it.", ok: "Remove", danger: true }))) return; d.switches.splice(Number(el.dataset.w), 1); save(); draw(); },
-    idrop: (el) => { const w = d.switches[Number(el.dataset.w)]; const [gone] = w.interactions.splice(Number(el.dataset.ii), 1); w.mappings = w.mappings.filter((m) => m.interaction !== gone.id); save(); draw(); },
+    idrop: async (el) => {
+      const w = d.switches[Number(el.dataset.w)];
+      const i = w.interactions[Number(el.dataset.ii)];
+      const used = w.mappings.filter((m) => m.interaction === i.id).length;
+      if (used && !(await ask({ title: `Remove the event “${i.label || INTERACTION[i.kind]}”?`, body: `${plural(used, "interaction")} of this switch use it and go with it. The other interactions stay.`, ok: "Remove", danger: true }))) return;
+      w.interactions.splice(w.interactions.indexOf(i), 1);
+      w.mappings = w.mappings.filter((m) => m.interaction !== i.id);
+      w.mappings.forEach((m) => { if (m.action.kind === "dim" && m.action.release === i.id) m.action.release = null; });
+      save(); draw();
+    },
     reladd: () => { const at = (view.querySelector("#rel-at") || {}).value; if (!at) return; d.override.release.push({ type: "time", at: `${at}:00`, weekdays: [] }); save(); draw(); },
     reldrop: (el) => { d.override.release.splice(Number(el.dataset.i), 1); save(); draw(); },
     relint: () => { const id = (view.querySelector("#rel-int") || {}).value; const i = d.switches.flatMap((w) => w.interactions).find((x) => x.id === id); if (!i) return; d.override.release.push(clone(i.trigger)); save(); draw(); },
@@ -582,9 +691,7 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
     return { states, event: sim.scenario.event, time: sim.scenario.time, weekday: sim.scenario.weekday };
   }
   const testState = (id) => (sim.scenario.states[id] = sim.scenario.states[id] || { origin: "test", attributes: {} });
-  function setMapping(w, interaction, kind) {
-    const i = w.mappings.findIndex((m) => m.interaction === interaction);
-    if (!kind) { if (i >= 0) w.mappings.splice(i, 1); return; }
+  function newAction(kind) {
     const action = { kind };
     if (kind === "brightness") action.pct = 100;
     if (kind === "step") action.pct = 10;
@@ -592,8 +699,7 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
     if (kind === "native") Object.assign(action, { action: "light.turn_on", data: {} });
     if (kind === "mood" || kind === "select_mood") action.value = null;
     if (kind === "advanced") action.rule = null;
-    if (i >= 0) w.mappings[i].action = action;
-    else w.mappings.push({ id: newId("p"), interaction, enabled: true, lights: [], action, override: false });
+    return action;
   }
   const chg = {
     flag: (el) => { set(el.dataset.path, el.checked); save(); draw(); },
@@ -646,7 +752,10 @@ export async function lightingPage(deviceId, designerId, tab, current, first) {
     truthset: (el) => { d.advanced[Number(el.dataset.r)].set.truth = el.value || null; save(); draw(); },
     ctype: (el) => { d.advanced[Number(el.dataset.r)].conditions.type = el.value; save(); },
     wact: (el) => { const r = d.advanced[Number(el.dataset.r)]; r.actions = el.value ? [{ kind: el.value, ...(el.value === "brightness" ? { pct: 100 } : el.value === "step" ? { pct: 10 } : el.value === "mood" ? { value: null } : {}) }] : []; save(); draw(); },
-    maction: (el) => { setMapping(d.switches[Number(el.dataset.w)], el.dataset.i, el.value); save(); draw(); },
+    maction: (el) => { const m = d.switches[Number(el.dataset.w)].mappings[Number(el.dataset.mi)]; m.action = newAction(el.value); if (["none", "select_mood", "override", "resume", "dim"].includes(el.value)) m.override = false; save(); draw(); },
+    xint: (el) => { const m = d.switches[Number(el.dataset.w)].mappings[Number(el.dataset.mi)]; m.interaction = el.value || null; save(); draw(); },
+    xctype: (el) => { const m = d.switches[Number(el.dataset.w)].mappings[Number(el.dataset.mi)]; m.conditions = m.conditions || { type: "and", items: [] }; m.conditions.type = el.value; if (m.conditions.items.length) save(); },
+    xnew: (el) => { adding[el.dataset.w][el.dataset.key] = el.value; draw(); },
     froom: async (el) => {
       finder.area = el.value;
       finder.devices = null; finder.found = null;

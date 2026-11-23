@@ -7,6 +7,8 @@
 # Smart Occupancy Detection use its own entities instead (sod_checks.py).
 demo:
 input_boolean:
+  e2e_window:
+    name: Window (test driver)
   test_motion:
     name: Motion (test driver)
   occ_kamar:
@@ -74,7 +76,12 @@ input_number:
 input_button:
   wall_switch:
     name: Wall switch
+  heat_resume:
+    name: Resume heating
 input_select:
+  heat_mode:
+    name: Heating mode
+    options: [Day, Night, Away]
   mood:
     name: Mood
     options: [Dagur, Hygge, Nátt]

@@ -17,6 +17,13 @@ form **IF** something happens **AND/OR** conditions hold **THEN** do this.
   entities, switches; one-shot actions or a manual override held in native helpers), Advanced Rules and an
   explicit, property-specific priority. One native automation per light that always applies the *currently*
   calculated state - so a light returns to it by itself when an override or a rule ends.
+- **Switches & Remotes** as a list of interactions: one switch can turn the same light ON with one press and OFF
+  with another, toggle, dim while held, resume - any number of lines per switch and light.
+- **Light Level Manager**: light-level templates with hysteresis and stabilisation, default matrices and one light
+  level per room (its own sensor, inherited values with visible room overrides, optional ambient estimate), shared
+  by every light of the room through a native helper.
+- **Heating Designer** for thermostats: schedules, day/night, presence, windows, away/home and manual override with
+  an explicit priority, from heating templates and room profiles - no prediction and no other App needed.
 - **Cover Designer** (sun angle with 0° = South, cover modes, mapping from household moods), presence sources
   (rooms, named zones, position zones drawn on a sensor's coordinates, persons), templates and a simulation. Unset
   stays unset, and nothing is chosen for you.
